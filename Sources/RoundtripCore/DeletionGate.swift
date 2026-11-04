@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Decides whether the app may ask iOS to delete an original. Deletion is allowed only
 /// when the server's stored copy matches the device original byte-for-byte (SHA-256)
 /// and every compact resource was imported and verified. Re-evaluate at deletion time.

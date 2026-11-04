@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// The parts of `ffprobe` output the pipeline needs.
@@ -8,11 +9,13 @@ public struct VideoProbe: Equatable, Sendable {
     public var containerDuration: Double?
     public var audioStreams: [Int]
 
+    #if os(Linux) || os(macOS)
     public static func read(_ url: URL) throws -> VideoProbe {
         let data = try ProcessRunner.run(["ffprobe", "-v", "error", "-show_streams", "-show_format",
                                           "-of", "json", url.path])
         return try parse(data)
     }
+    #endif
 
     static func parse(_ data: Data) throws -> VideoProbe {
         struct Stream: Decodable {

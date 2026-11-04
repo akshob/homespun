@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Testing
 @testable import RoundtripMedia
@@ -31,6 +32,7 @@ import Testing
     #expect(FFmpegVideoCompressor.durationsMatch(nil, 3))
 }
 
+#if os(Linux) || os(macOS)
 @Test(.enabled(if: ProcessRunner.available("ffmpeg")))
 func compressesSyntheticVideoEndToEnd() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -47,3 +49,4 @@ func compressesSyntheticVideoEndToEnd() throws {
     #expect(probe.width == 1280 && probe.height == 720 && probe.audioStreams.count == 1)
     #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() == ["in.mp4", "out.mp4"])
 }
+#endif

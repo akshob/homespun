@@ -1,0 +1,33 @@
+# Generate the Xcode project on a Mac:  brew install xcodegen && xcodegen generate
+name: Roundtrip
+options:
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  RoundtripPackage:
+    path: ../..
+targets:
+  Roundtrip:
+    type: application
+    platform: iOS
+    sources: [Roundtrip]
+    dependencies:
+      - package: RoundtripPackage
+        product: RoundtripCore
+      - package: RoundtripPackage
+        product: RoundtripMedia
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: photos.roundtrip.app
+        PRODUCT_NAME: Roundtrip
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Roundtrip
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Roundtrip reads the photos and videos you choose so it can store the originals on your server and make compact copies."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Roundtrip saves compact copies of your photos and videos to your library."
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Roundtrip connects to your Roundtrip or Immich server on your home network."

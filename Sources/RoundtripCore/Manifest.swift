@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// What the server tells the app to download for one asset. The app verifies every

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Target sizes for compact copies. Defaults match PhotoRelay's validated profile:
 /// photos at most 2048 px on the long edge, videos within 1280x720 as HEVC CRF 28.
 public struct CompressionProfile: Codable, Equatable, Sendable {

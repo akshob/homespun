@@ -1,4 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
+
+#if os(Linux) || os(macOS)
 
 struct ProcessFailure: Error, CustomStringConvertible {
     let command: [String]
@@ -32,3 +35,4 @@ enum ProcessRunner {
         (try? run(["which", tool])) != nil
     }
 }
+#endif

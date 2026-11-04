@@ -24,7 +24,7 @@ from the iPhone only after the server proves it has an identical copy.
 | `RoundtripCore` | iOS, macOS, Linux | Compression profile, SHA-256 fingerprints, download manifest, deletion gate |
 | `RoundtripMedia` | iOS, macOS, Linux | Media backends. Linux: x265 via the `ffmpeg` tool. Apple (planned): ImageIO, AVFoundation |
 | `roundtrip-server` | Linux, macOS | Hummingbird HTTP API (`GET /api/v1/health` so far) |
-| iOS app | iOS | Planned: SwiftUI + PhotoKit (needs Xcode on a Mac) |
+| `Apps/Roundtrip` | iOS | SwiftUI app (bundle ID `photos.roundtrip.app`), uses Core and Media from this package |
 
 Live Photo motion is compressed only with AVFoundation (on the phone or a Mac).
 FFmpeg breaks the links between the still and its motion, so iOS no longer treats
@@ -59,6 +59,18 @@ override it for the command only:
 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all swift build
 ```
 
+## iOS app
+
+On a Mac with Xcode:
+
+```bash
+brew install xcodegen
+cd Apps/Roundtrip && xcodegen generate && open Roundtrip.xcodeproj
+```
+
+The Xcode project is generated from `project.yml` and not committed. Signing settings
+(your development team) are chosen in Xcode and stay out of the repository.
+
 ## Roadmap
 
 1. Linux photo backend (libheif + libvips + exiv2), matching PhotoRelay's 2048 px output.
@@ -66,3 +78,13 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 3. iOS app: pick, upload, on-phone compression (ImageIO/AVFoundation), PhotoKit import
    with date/location/favorite/albums, gated deletion.
 4. Immich add-on, Docker image, demo mode, then TestFlight and the App Store.
+
+## License
+
+- `RoundtripCore`, `RoundtripMedia`, the iOS app, and tests: [Apache-2.0](LICENSE).
+- `roundtrip-server` (`Sources/RoundtripServer`): [AGPL-3.0-only](Sources/RoundtripServer/LICENSE).
+  If you run a modified server for others over a network, you must offer them its source.
+
+Each source file carries an SPDX license identifier. The names "Roundtrip" and
+"Roundtrip Photos" and the app icon are not licensed under either license; forks
+must use a different name and icon.

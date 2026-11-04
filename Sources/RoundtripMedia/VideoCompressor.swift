@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 import RoundtripCore
 
@@ -45,6 +46,7 @@ public struct FFmpegVideoCompressor: Sendable {
         return abs(source - output) <= max(0.5, 0.01 * source)
     }
 
+    #if os(Linux) || os(macOS)
     public func compress(input: URL, output: URL) throws -> VideoCompressionResult {
         let probe = try VideoProbe.read(input)
         let partial = output.deletingLastPathComponent()
@@ -89,4 +91,5 @@ public struct FFmpegVideoCompressor: Sendable {
     private func size(of url: URL) throws -> Int {
         (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
     }
+    #endif
 }
