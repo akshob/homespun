@@ -24,7 +24,7 @@ from the iPhone only after the server proves it has an identical copy.
 | Target | Platforms | Purpose |
 |---|---|---|
 | `HomespunCore` | iOS, macOS, Linux | Compression profile, SHA-256 fingerprints, download manifest, deletion gate |
-| `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: x265 via the `ffmpeg` tool. Apple (planned): ImageIO, AVFoundation |
+| `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: x265 via the `ffmpeg` tool. Apple: ImageIO photos, AVFoundation video and Live Photo motion, `PHLivePhoto` pair validation |
 | `homespun-server` | Linux, macOS | Hummingbird HTTP API (`GET /api/v1/health` so far) |
 | `Apps/Homespun` | iOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package |
 
@@ -46,12 +46,21 @@ the pair as a Live Photo.
 
 ## Build and test
 
-Requires Swift 6. On Linux the media tests need `ffmpeg` with libx265.
+Requires Swift 6. On Linux the media tests need `ffmpeg` with libx265. On a Mac,
+`swift test` also runs the Apple backend tests (ImageIO, AVFoundation, `PHLivePhoto`)
+on synthetic media.
 
 ```bash
 swift build
 swift test
 HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=8787 swift run homespun-server
+```
+
+To run the media tests on an iOS simulator:
+
+```bash
+xcodebuild test -scheme Homespun-Package -only-testing:HomespunMediaTests \
+  -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO
 ```
 
 If git refuses SwiftPM's dependency cache (`safe.bareRepository is 'explicit'`),
@@ -77,8 +86,8 @@ The Xcode project is generated from `project.yml` and not committed. Signing set
 
 1. Linux photo backend (libheif + libvips + exiv2), matching PhotoRelay's 2048 px output.
 2. Server catalog (SQLite), resumable verified uploads, job queue, download manifests.
-3. iOS app: pick, upload, on-phone compression (ImageIO/AVFoundation), PhotoKit import
-   with date/location/favorite/albums, gated deletion.
+3. iOS app: pick, upload, on-phone compression (using the Apple backend), PhotoKit
+   import with date/location/favorite/albums, gated deletion.
 4. Immich add-on, Docker image, demo mode, then TestFlight and the App Store.
 
 ## License
