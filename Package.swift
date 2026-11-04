@@ -3,25 +3,25 @@
 import PackageDescription
 
 let package = Package(
-    name: "Roundtrip",
+    name: "Homespun",
     platforms: [.macOS(.v14), .iOS(.v17)],
     products: [
-        .library(name: "RoundtripCore", targets: ["RoundtripCore"]),
-        .library(name: "RoundtripMedia", targets: ["RoundtripMedia"]),
-        .executable(name: "roundtrip-server", targets: ["RoundtripServer"]),
+        .library(name: "HomespunCore", targets: ["HomespunCore"]),
+        .library(name: "HomespunMedia", targets: ["HomespunMedia"]),
+        .executable(name: "homespun-server", targets: ["HomespunServer"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     ],
     targets: [
-        .target(name: "RoundtripCore", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
-        .target(name: "RoundtripMedia", dependencies: ["RoundtripCore"]),
+        .target(name: "HomespunCore", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
+        .target(name: "HomespunMedia", dependencies: ["HomespunCore"]),
         .executableTarget(
-            name: "RoundtripServer",
-            dependencies: ["RoundtripCore", "RoundtripMedia", .product(name: "Hummingbird", package: "hummingbird")],
+            name: "HomespunServer",
+            dependencies: ["HomespunCore", "HomespunMedia", .product(name: "Hummingbird", package: "hummingbird")],
             exclude: ["LICENSE"]),
-        .testTarget(name: "RoundtripCoreTests", dependencies: ["RoundtripCore"]),
-        .testTarget(name: "RoundtripMediaTests", dependencies: ["RoundtripMedia"]),
+        .testTarget(name: "HomespunCoreTests", dependencies: ["HomespunCore"]),
+        .testTarget(name: "HomespunMediaTests", dependencies: ["HomespunMedia"]),
     ]
 )

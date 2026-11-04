@@ -1,0 +1,33 @@
+# Generate the Xcode project on a Mac:  brew install xcodegen && xcodegen generate
+name: Homespun
+options:
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  HomespunPackage:
+    path: ../..
+targets:
+  Homespun:
+    type: application
+    platform: iOS
+    sources: [Homespun]
+    dependencies:
+      - package: HomespunPackage
+        product: HomespunCore
+      - package: HomespunPackage
+        product: HomespunMedia
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: photos.homespun.app
+        PRODUCT_NAME: Homespun
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Homespun
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Homespun reads the photos and videos you choose so it can store the originals on your server and make compact copies."
+        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Homespun saves compact copies of your photos and videos to your library."
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Homespun connects to your Homespun or Immich server on your home network."

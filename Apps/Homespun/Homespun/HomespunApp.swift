@@ -2,7 +2,7 @@
 import SwiftUI
 
 @main
-struct RoundtripApp: App {
+struct HomespunApp: App {
     var body: some Scene {
         WindowGroup { ContentView() }
     }

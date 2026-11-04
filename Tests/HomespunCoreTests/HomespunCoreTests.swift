@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Testing
-@testable import RoundtripCore
+@testable import HomespunCore
 
 @Test func photoSizeFitsLongEdgeWithoutUpscaling() {
     let profile = CompressionProfile.standard

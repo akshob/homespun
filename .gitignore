@@ -2,4 +2,4 @@
 .swiftpm/
 *.xcodeproj/xcuserdata/
 DerivedData/
-Apps/Roundtrip/*.xcodeproj/
+Apps/Homespun/*.xcodeproj/

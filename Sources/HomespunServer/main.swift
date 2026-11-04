@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 import Hummingbird
-import RoundtripCore
+import HomespunCore
 
 struct Health: ResponseEncodable {
     let status: String
@@ -10,8 +10,8 @@ struct Health: ResponseEncodable {
 }
 
 let environment = ProcessInfo.processInfo.environment
-let host = environment["ROUNDTRIP_HOST"] ?? "127.0.0.1"
-let port = Int(environment["ROUNDTRIP_PORT"] ?? "") ?? 8787
+let host = environment["HOMESPUN_HOST"] ?? "127.0.0.1"
+let port = Int(environment["HOMESPUN_PORT"] ?? "") ?? 8787
 
 let router = Router()
 router.get("/api/v1/health") { _, _ in
@@ -19,5 +19,5 @@ router.get("/api/v1/health") { _, _ in
 }
 
 let app = Application(router: router, configuration: .init(address: .hostname(host, port: port),
-                                                           serverName: "roundtrip"))
+                                                           serverName: "homespun"))
 try await app.runService()

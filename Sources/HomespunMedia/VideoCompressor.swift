@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
-import RoundtripCore
+import HomespunCore
 
 public enum VideoCompressionError: Error, Equatable {
     case noVideoStream

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Testing
-@testable import RoundtripMedia
+@testable import HomespunMedia
 
 @Test func probeKeepsOnlyDecodableAudio() throws {
     let json = """

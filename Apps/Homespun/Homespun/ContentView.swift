@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import RoundtripCore
+import HomespunCore
 import SwiftUI
 
 struct ContentView: View {
@@ -13,7 +13,7 @@ struct ContentView: View {
                     LabeledContent("Videos", value: "\(profile.videoShortEdge)p HEVC")
                 }
             }
-            .navigationTitle("Roundtrip")
+            .navigationTitle("Homespun")
         }
     }
 }
