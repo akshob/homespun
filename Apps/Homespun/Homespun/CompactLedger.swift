@@ -9,6 +9,8 @@ actor CompactLedger {
         var originalBytes: Int
         var compactBytes: Int
         var savedAt: Date
+        /// Set when the original is on a Homespun Server (server modes); needed before removing it.
+        var serverAssetID: String?
     }
 
     private let url: URL
@@ -27,9 +29,16 @@ actor CompactLedger {
         entries[original]?.compactIdentifier
     }
 
-    func record(original: String, compact: String, originalBytes: Int, compactBytes: Int) throws {
+    /// Originals whose server copy is known, with their entries.
+    func serverBacked() -> [(original: String, entry: Entry)] {
+        entries.compactMap { key, value in value.serverAssetID == nil ? nil : (key, value) }
+            .sorted { $0.entry.savedAt < $1.entry.savedAt }
+    }
+
+    func record(original: String, compact: String, originalBytes: Int, compactBytes: Int,
+                serverAssetID: String? = nil) throws {
         entries[original] = Entry(compactIdentifier: compact, originalBytes: originalBytes,
-                                  compactBytes: compactBytes, savedAt: Date())
+                                  compactBytes: compactBytes, savedAt: Date(), serverAssetID: serverAssetID)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

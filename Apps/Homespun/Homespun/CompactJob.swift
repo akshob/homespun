@@ -24,10 +24,12 @@ final class CompactJob {
 
     private(set) var items: [Item] = []
     private(set) var isRunning = false
-    private let compactor: OnDeviceCompactor
+    let settings: AppSettings
+    let ledger: CompactLedger
 
-    init(compactor: OnDeviceCompactor = OnDeviceCompactor(ledger: CompactLedger())) {
-        self.compactor = compactor
+    init(settings: AppSettings, ledger: CompactLedger = CompactLedger()) {
+        self.settings = settings
+        self.ledger = ledger
     }
 
     var savedOriginalBytes: Int { items.reduce(0) { if case .saved(let o, _) = $1.state { $0 + o } else { $0 } } }
@@ -35,10 +37,10 @@ final class CompactJob {
 
     func enqueue(_ assetIdentifiers: [String]) {
         for identifier in assetIdentifiers {
-            let description = OnDeviceCompactor.describe(identifier)
+            let description = PhotoLibrary.describe(identifier)
             items.append(Item(assetIdentifier: identifier, name: description?.name ?? "Item",
                               symbol: description?.kind.symbol ?? "questionmark.square",
-                              state: description == nil ? .failed(OnDeviceCompactor.Failure.notFound
+                              state: description == nil ? .failed(PhotoLibrary.Failure.notFound
                                   .localizedDescription) : .waiting))
         }
         if !isRunning { Task { await run() } }
@@ -61,11 +63,13 @@ final class CompactJob {
             isRunning = false
             UIApplication.shared.isIdleTimerDisabled = false
         }
+        if settings.usesServer { await settings.refreshServerInfo() }
         while let index = items.firstIndex(where: { $0.state == .waiting }) {
             let id = items[index].id
             items[index].state = .working("Starting")
             let state: State
             do {
+                let compactor = settings.compactor(ledger: ledger)
                 let outcome = try await compactor.compact(items[index].assetIdentifier) { [weak self] message in
                     Task { @MainActor in self?.report(message, for: id) }
                 }

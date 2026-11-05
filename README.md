@@ -23,10 +23,10 @@ from the iPhone only after the server proves it has an identical copy.
 
 | Target | Platforms | Purpose |
 |---|---|---|
-| `HomespunCore` | iOS, macOS, Linux | Compression profile, SHA-256 fingerprints, download manifest, deletion gate |
+| `HomespunCore` | iOS, macOS, Linux | Compression profile, SHA-256/SHA-1 fingerprints, server API types, deletion gate |
 | `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: libvips photos (EXIF copied byte for byte, so Live Photo identifiers survive) and x265 via the `ffmpeg` tool. Apple: ImageIO photos, AVFoundation video and Live Photo motion, `PHLivePhoto` pair validation |
 | `HomespunTestSupport` | iOS, macOS | Synthetic photos, Live Photos, and videos for tests (not product code) |
-| `homespun-server` | Linux, macOS | Hummingbird HTTP API (`GET /api/v1/health` so far) |
+| `HomespunServerKit`, `homespun-server` | Linux, macOS | Hummingbird server: SQLite catalog, pairing, verified uploads, compression jobs, Immich originals |
 | `Apps/Homespun` | iOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package |
 
 Live Photo motion is compressed only with AVFoundation (on the phone or a Mac).
@@ -146,6 +146,49 @@ xcodebuild test -project Homespun.xcodeproj -scheme Homespun -destination "id=$S
 xcrun simctl delete "$SIM"
 ```
 
+## Homespun Server
+
+Homespun Server keeps originals and makes the compact copies (x265 for video, libvips or
+ImageIO for photos). Live Photo motion is still compressed on the iPhone, because only
+AVFoundation keeps the still and its motion paired.
+
+On Linux, install `libvips-dev`, `libsqlite3-dev`, and `ffmpeg` (with libx265), then:
+
+```bash
+swift build -c release --product homespun-server
+export HOMESPUN_DATA=/srv/homespun          # catalog, originals, compact copies
+export HOMESPUN_HOST=0.0.0.0                # listen on the home network (default 127.0.0.1)
+.build/release/homespun-server serve        # port 8787 (HOMESPUN_PORT)
+.build/release/homespun-server pair         # one-time code for the app, valid 10 minutes
+.build/release/homespun-server devices      # list paired devices; `revoke <id>` to remove one
+```
+
+In the app, open Settings, enter the server's address (for example `192.168.1.20:8787`) and
+the code. The app keeps its token in the Keychain. For now the app talks plain HTTP, and only
+to servers on the home network (IP addresses and `.local` names); HTTPS comes later.
+
+The server stores originals read-only under `originals/YYYY/MM/` (by capture month), checks
+each upload's SHA-256 before accepting it, and lets the app remove an original only after
+checking its copy again at that moment (`POST /api/v1/assets/{id}/verify`).
+
+### Immich mode
+
+If you already run [Immich](https://immich.app) and back up your iPhone with its app, Homespun
+Server can use the originals Immich holds instead of storing its own:
+
+```bash
+export HOMESPUN_IMMICH_URL=http://immich.local:2283
+export HOMESPUN_IMMICH_API_KEY_FILE=/etc/homespun/immich.key   # a file holding only the key
+```
+
+Create the API key in Immich with only the `asset.read` and `asset.download` permissions.
+Homespun finds each original by its checksum, downloads it, and checks it byte for byte
+against the iPhone's file before making a compact copy. It never uploads to, changes, or
+deletes anything in Immich. Items Immich does not have yet show "Not in Immich yet"; pick
+them again after the Immich app has backed them up. Edited items are not supported in
+Immich mode yet. In the Immich app, exclude the "Homespun" album from backup so compact
+copies are not uploaded.
+
 ## Website
 
 `site/` holds the static site for [homespun.photos](https://homespun.photos): plain HTML
@@ -158,10 +201,9 @@ npx wrangler@4 pages deploy site --project-name homespun --branch main
 
 ## Roadmap
 
-1. Server catalog (SQLite), resumable verified uploads, job queue, download manifests.
-2. iOS app: pairing, upload, server-mode import, copying album membership, gated
-   deletion. (On-phone compression and import are in place.)
-3. Immich add-on, Docker image, demo mode, then TestFlight and the App Store.
+1. Background uploads and downloads (URLSession background sessions), album membership.
+2. HTTPS for the server (certificate for a homespun.photos name), Docker image.
+3. Demo mode, TestFlight, then the App Store.
 
 ## License
 

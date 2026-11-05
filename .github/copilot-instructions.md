@@ -12,7 +12,10 @@ and may not exist in other checkouts.
   - `HomespunCore`: shared by the app and server. No platform media APIs here.
   - `HomespunMedia`: media backends. Linux uses open-source tools and libraries;
     Apple platforms use ImageIO and AVFoundation.
-  - `homespun-server`: Hummingbird 2.
+  - `HomespunServerKit` (AGPL, library) and `homespun-server` (thin CLI): Hummingbird 2,
+    system SQLite through `CSQLite`, AsyncHTTPClient for Immich. API types shared with the
+    app live in `HomespunCore/ServerAPI.swift` (snake_case JSON; use `ServerAPI.encoder`).
+    Coding keys with acronyms must survive snake_case both ways (`videoCrf`, `assetId`).
 - iOS app: `Apps/Homespun`, generated with XcodeGen (`project.yml`). Do not commit
   the generated `.xcodeproj` or signing settings. Bundle ID: `photos.homespun.app`
   (Release); Debug uses `photos.homespun.app.dev` so free Personal Teams never register
@@ -28,7 +31,11 @@ and may not exist in other checkouts.
   `#if canImport(AVFoundation)`, `ImageIO`, or `Photos` so Linux builds skip them.
   Shared result types and publish helpers (`MediaFiles`) are cross-platform.
 - Every source file starts with an SPDX identifier: `Apache-2.0` everywhere except
-  `Sources/HomespunServer`, which is `AGPL-3.0-only`.
+  `Sources/HomespunServer`, `Sources/HomespunServerKit`, `Sources/CSQLite`, and the server
+  tests, which are `AGPL-3.0-only`.
+- libvips is called through the small C shim `CHomespunVips` (its API is variadic). libvips
+  drops Apple maker notes, so the Linux backend copies the source EXIF block verbatim and
+  patches only Orientation and pixel size (`ExifEditor`).
 - The name "Homespun" and the app icon are reserved and not covered by the licenses.
 
 ## Media rules (learned from a 37,000-item real library)
@@ -72,8 +79,12 @@ and may not exist in other checkouts.
   and restart-safe.
 - The server stores originals only in configured roots. Validate paths and never
   accept arbitrary paths or commands from clients.
-- Immich add-on: never modify or delete Immich assets. Compact copies go to a
+- Immich add-on: never modify or delete Immich assets. The API key needs only `asset.read`
+  and `asset.download` (no upload). Originals found in Immich are downloaded and checked
+  byte for byte (SHA-256 and size) before they are trusted. Compact copies go to a
   "Homespun" album that the user excludes from Immich backup.
+- The server writes only under its data directory. Client file names pass through
+  `Storage.sanitized`; catalog paths are resolved with `Storage.resolve`.
 
 ## Build and test
 
@@ -92,6 +103,11 @@ cd Apps/Homespun && xcodegen generate   # macOS only
   `xcrun simctl privacy <id> grant photos photos.homespun.app.dev`, then delete it.
   Do not reuse other simulators on the machine. Test code cannot delete assets
   (iOS asks for confirmation).
+- `ServerModeUITests` pairs with a running server and is skipped unless `xcodebuild test` gets
+  `TEST_RUNNER_HOMESPUN_SERVER` and `TEST_RUNNER_HOMESPUN_PAIRING_CODE` (optionally
+  `TEST_RUNNER_HOMESPUN_PICK`, `TEST_RUNNER_HOMESPUN_REMOVE=1`). Use a fresh simulator whose
+  library holds only synthetic media, and a server with a test data directory.
+- Feed each AVAssetWriter input from its own task; one loop over several inputs can deadlock.
 - `HomespunUITests` drives the system photo picker (grid cells are images with identifier
   `PXGGridLayout-Info`; confirm with "Done") and reads item states from the
   `status.<state>` accessibility identifiers in `ContentView`. It picks the newest

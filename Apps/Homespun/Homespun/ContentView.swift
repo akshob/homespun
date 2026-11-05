@@ -5,7 +5,19 @@ import PhotosUI
 import SwiftUI
 
 struct ContentView: View {
-    @State private var job = CompactJob()
+    @State private var settings: AppSettings
+    @State private var job: CompactJob
+    @State private var showSettings = false
+    @State private var removable = 0
+    @State private var removing: String?
+    @State private var removal: OriginalRemover.Report?
+
+    init() {
+        let settings = AppSettings()
+        _settings = State(initialValue: settings)
+        _job = State(initialValue: CompactJob(settings: settings))
+    }
+
     @State private var selection: [PhotosPickerItem] = []
     @State private var access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @Environment(\.openURL) private var openURL
@@ -25,10 +37,13 @@ struct ContentView: View {
                         accessPrompt
                     }
                 } header: {
-                    Text("On this iPhone")
+                    Text(settings.usesServer ? "With \(settings.server?.name ?? "your server")" : "On this iPhone")
                 } footer: {
-                    Text("Compact copies are saved to the \(OnDeviceCompactor.albumTitle) album. "
-                         + "Originals are not changed or deleted. Keep Homespun open while it works.")
+                    Text(settings.usesServer
+                         ? "Originals go to your server (or are found in Immich); compact copies are saved to the "
+                           + "\(PhotoLibrary.albumTitle) album. Keep Homespun open while it works."
+                         : "Compact copies are saved to the \(PhotoLibrary.albumTitle) album. "
+                           + "Originals are not changed or deleted. Keep Homespun open while it works.")
                 }
 
                 if !job.items.isEmpty {
@@ -52,6 +67,27 @@ struct ContentView: View {
                     }
                 }
 
+                if settings.isPaired, removable > 0 || removal != nil {
+                    Section {
+                        if removable > 0 {
+                            Button {
+                                Task { await removeOriginals() }
+                            } label: {
+                                Label(removing ?? "Remove \(removable) original\(removable == 1 ? "" : "s") from this iPhone",
+                                      systemImage: "trash")
+                            }
+                            .disabled(removing != nil || job.isRunning)
+                            .accessibilityIdentifier("remove.originals")
+                        }
+                        if let removal { Text(summary(removal)).font(.callout).accessibilityIdentifier("remove.summary") }
+                    } header: {
+                        Text("Free up space")
+                    } footer: {
+                        Text("Each original is checked again against your server and its compact copy first. "
+                             + "iOS asks you to confirm, and removed items stay in Recently Deleted.")
+                    }
+                }
+
                 Section("Compact copies") {
                     LabeledContent("Photos", value: "JPEG, up to \(profile.photoMaxEdge) px")
                     LabeledContent("Videos", value: "HEVC, up to \(profile.videoShortEdge)p")
@@ -59,6 +95,19 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Homespun")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                        .accessibilityLabel("Settings")
+                        .accessibilityIdentifier("settings")
+                }
+            }
+            .sheet(isPresented: $showSettings, onDismiss: { Task { await refreshRemovable() } }) {
+                SettingsView(settings: settings)
+            }
+            .onChange(of: job.isRunning) { _, running in
+                if !running { Task { await refreshRemovable() } }
+            }
             .onChange(of: selection) { _, items in
                 let identifiers = items.compactMap(\.itemIdentifier)
                 selection = []
@@ -72,8 +121,37 @@ struct ContentView: View {
                 if access == .notDetermined {
                     access = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
                 }
+                await refreshRemovable()
             }
         }
+    }
+
+    private func refreshRemovable() async {
+        removable = await settings.remover(ledger: job.ledger)?.candidates().count ?? 0
+    }
+
+    private func removeOriginals() async {
+        guard let remover = settings.remover(ledger: job.ledger) else { return }
+        removing = "Checking"
+        defer { removing = nil }
+        do {
+            removal = try await remover.removeEligible { message in
+                Task { @MainActor in removing = message }
+            }
+        } catch {
+            removal = OriginalRemover.Report(blocked: [error.localizedDescription])
+        }
+        await refreshRemovable()
+    }
+
+    private func summary(_ report: OriginalRemover.Report) -> String {
+        var lines: [String] = []
+        if report.cancelled { lines.append("Nothing was removed.") }
+        if !report.removed.isEmpty {
+            lines.append("Removed \(report.removed.count), freeing \(bytes(report.freedBytes)). They stay in Recently Deleted.")
+        }
+        lines += report.blocked.map { "Kept \($0)" }
+        return lines.isEmpty ? "Nothing to remove." : lines.joined(separator: "\n")
     }
 
     @ViewBuilder private var accessPrompt: some View {

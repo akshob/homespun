@@ -31,7 +31,8 @@ public struct HomespunServer: Sendable {
     }
 
     public func application(logger: Logger = Logger(label: "homespun")) -> some ApplicationProtocol {
-        Application(router: router(),
+        // The idle timeout closes uploads that stall (a phone leaving Wi-Fi), releasing their lock.
+        Application(router: router(), server: .http1(configuration: .init(idleTimeout: .seconds(60))),
                     configuration: .init(address: .hostname(configuration.host, port: configuration.port),
                                          serverName: "homespun"),
                     services: [runner], logger: logger)

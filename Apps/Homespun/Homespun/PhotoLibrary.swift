@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: Apache-2.0
+import CoreLocation
+import Foundation
+import HomespunCore
+import Photos
+
+/// What happened to one picked item.
+enum CompactOutcome: Equatable, Sendable {
+    case saved(compactIdentifier: String, originalBytes: Int, compactBytes: Int)
+    /// Nothing was saved; the reason is shown to the user.
+    case unchanged(String)
+}
+
+/// Makes and saves a compact copy of one library item.
+protocol Compacting: Sendable {
+    func compact(_ localIdentifier: String, progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome
+}
+
+/// PhotoKit work shared by on-phone and server modes.
+enum PhotoLibrary {
+    static let albumTitle = "Homespun"
+
+    enum Failure: LocalizedError {
+        case notFound
+        case unsupported(String)
+        case missingResource(String)
+        case livePhotoInvalid(String)
+        case importFailed(String)
+        case verificationFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .notFound: "The item is no longer in the library, or Homespun has limited access."
+            case .unsupported(let reason): reason
+            case .missingResource(let name): "The \(name) could not be found."
+            case .livePhotoInvalid(let reason): "The compact Live Photo did not validate (\(reason))."
+            case .importFailed(let reason): "Saving to Photos failed (\(reason))."
+            case .verificationFailed(let reason): "A downloaded file did not match (\(reason))."
+            }
+        }
+    }
+
+    enum Kind: Sendable {
+        case photo, livePhoto, video
+
+        var symbol: String {
+            switch self {
+            case .photo: "photo"
+            case .livePhoto: "livephoto"
+            case .video: "video"
+            }
+        }
+
+        var api: ServerAPI.AssetKind {
+            switch self {
+            case .photo: .photo
+            case .livePhoto: .livePhoto
+            case .video: .video
+            }
+        }
+    }
+
+    static func asset(_ localIdentifier: String) -> PHAsset? {
+        PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
+    }
+
+    static func kind(of asset: PHAsset) -> Kind? {
+        switch asset.mediaType {
+        case .image: asset.mediaSubtypes.contains(.photoLive) ? .livePhoto : .photo
+        case .video: .video
+        default: nil
+        }
+    }
+
+    /// File name and kind for display, or nil if the item cannot be fetched.
+    static func describe(_ localIdentifier: String) -> (name: String, kind: Kind)? {
+        guard let asset = asset(localIdentifier), let kind = kind(of: asset) else { return nil }
+        let resources = PHAssetResource.assetResources(for: asset)
+        let name = resources.first { [.photo, .video].contains($0.type) }?.originalFilename
+            ?? resources.first?.originalFilename ?? "Item"
+        return (name, kind)
+    }
+
+    static func baseName(_ resources: [PHAssetResource]) -> String {
+        ((resources.first { [.photo, .video].contains($0.type) }?.originalFilename ?? "Homespun") as NSString)
+            .deletingPathExtension
+    }
+
+    /// The current version of a resource: the edited render when there is one.
+    static func current(_ resources: [PHAssetResource], _ edited: PHAssetResourceType,
+                        _ original: PHAssetResourceType) -> PHAssetResource? {
+        resources.first { $0.type == edited } ?? resources.first { $0.type == original }
+    }
+
+    static func role(of type: PHAssetResourceType) -> ServerAPI.ResourceRole {
+        switch type {
+        case .photo: .photo
+        case .video: .video
+        case .audio: .audio
+        case .alternatePhoto: .alternatePhoto
+        case .fullSizePhoto: .fullSizePhoto
+        case .fullSizeVideo: .fullSizeVideo
+        case .pairedVideo: .pairedVideo
+        case .fullSizePairedVideo: .fullSizePairedVideo
+        case .adjustmentData: .adjustmentData
+        case .adjustmentBasePhoto: .adjustmentBasePhoto
+        case .adjustmentBaseVideo: .adjustmentBaseVideo
+        case .adjustmentBasePairedVideo: .adjustmentBasePairedVideo
+        case .photoProxy: .photoProxy
+        default: .other
+        }
+    }
+
+    /// Copies one resource's bytes out of the library (downloading from iCloud if needed).
+    static func export(_ resource: PHAssetResource, to directory: URL, name: String? = nil,
+                       progress: @escaping @Sendable (String) -> Void) async throws -> URL {
+        let url = directory.appendingPathComponent(name ?? resource.originalFilename)
+        try? FileManager.default.removeItem(at: url)
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+        options.progressHandler = { fraction in progress("Downloading from iCloud \(Int(fraction * 100))%") }
+        try await PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options)
+        return url
+    }
+
+    static func size(of url: URL) throws -> Int {
+        (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+    }
+
+    /// A per-item work folder in the app's temporary directory.
+    static func workDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Homespun/\(UUID().uuidString)",
+                                                                                isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    // MARK: Saving
+
+    /// What to create, captured up front because PhotoKit change blocks must be Sendable.
+    struct ImportPlan: @unchecked Sendable {
+        var resources: [(PHAssetResourceType, URL)] = []
+        var creationDate: Date?
+        var location: CLLocation?
+        var isFavorite: Bool
+        var isHidden: Bool
+
+        init(asset: PHAsset) {
+            creationDate = asset.creationDate
+            location = asset.location
+            isFavorite = asset.isFavorite
+            isHidden = asset.isHidden
+        }
+    }
+
+    private struct AlbumReference: @unchecked Sendable { let collection: PHAssetCollection }
+
+    private final class IdentifierBox: @unchecked Sendable { var value: String? }
+
+    static func isCompactCopy(_ asset: PHAsset) -> Bool {
+        var found = false
+        PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album, options: nil)
+            .enumerateObjects { collection, _, stop in
+                if collection.localizedTitle == albumTitle {
+                    found = true
+                    stop.pointee = true
+                }
+            }
+        return found
+    }
+
+    private static func album() async throws -> AlbumReference {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "title == %@", albumTitle)
+        if let existing = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular,
+                                                                  options: options).firstObject {
+            return AlbumReference(collection: existing)
+        }
+        let box = IdentifierBox()
+        try await PHPhotoLibrary.shared().performChanges {
+            box.value = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: albumTitle)
+                .placeholderForCreatedAssetCollection.localIdentifier
+        }
+        guard let identifier = box.value, let created = PHAssetCollection.fetchAssetCollections(
+            withLocalIdentifiers: [identifier], options: nil).firstObject else {
+            throw Failure.importFailed("could not create the \(albumTitle) album")
+        }
+        return AlbumReference(collection: created)
+    }
+
+    /// Creates the compact asset in the Homespun album and returns its local identifier.
+    static func save(_ plan: ImportPlan) async throws -> String {
+        let album = try await album()
+        let box = IdentifierBox()
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                let request = PHAssetCreationRequest.forAsset()
+                for (type, url) in plan.resources {
+                    let options = PHAssetResourceCreationOptions()
+                    options.originalFilename = url.lastPathComponent
+                    request.addResource(with: type, fileURL: url, options: options)
+                }
+                request.creationDate = plan.creationDate
+                request.location = plan.location
+                request.isFavorite = plan.isFavorite
+                request.isHidden = plan.isHidden
+                guard let placeholder = request.placeholderForCreatedAsset else { return }
+                box.value = placeholder.localIdentifier
+                PHAssetCollectionChangeRequest(for: album.collection)?.addAssets([placeholder] as NSArray)
+            }
+        } catch {
+            throw Failure.importFailed(error.localizedDescription)
+        }
+        guard let identifier = box.value else { throw Failure.importFailed("no asset was created") }
+        return identifier
+    }
+
+    /// Skips items that already have a compact copy, and compact copies themselves.
+    static func skipReason(for asset: PHAsset, ledger: CompactLedger) async -> String? {
+        if let existing = await ledger.compactIdentifier(for: asset.localIdentifier), self.asset(existing) != nil {
+            return "Already has a compact copy"
+        }
+        return isCompactCopy(asset) ? "This is a Homespun compact copy" : nil
+    }
+
+    static func describe(heldReasons: [String]) -> String {
+        let names = [
+            "hdr": "HDR video", "dolby_vision": "Dolby Vision", "high_frame_rate": "high frame rate",
+            "spatial_audio": "spatial audio", "multichannel_audio": "multichannel audio",
+        ]
+        return heldReasons.map { names[$0] ?? $0 }.joined(separator: ", ")
+    }
+}

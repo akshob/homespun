@@ -53,8 +53,7 @@ import Testing
         ]
         #expect(try asset(originals[0]).mediaSubtypes.contains(.photoLive))
 
-        let compactor = OnDeviceCompactor(ledger: CompactLedger(url: directory.appendingPathComponent("ledger.json")),
-                                          workRoot: directory.appendingPathComponent("work"))
+        let compactor = OnDeviceCompactor(ledger: CompactLedger(url: directory.appendingPathComponent("ledger.json")))
         for identifier in originals {
             let outcome = try await compactor.compact(identifier) { _ in }
             guard case .saved(let compactIdentifier, let before, let after) = outcome else {
@@ -68,8 +67,8 @@ import Testing
             #expect(compact.creationDate == date)
             #expect(compact.isFavorite == original.isFavorite)
             #expect(abs((compact.location?.coordinate.latitude ?? 0) - 37.33) < 0.0001)
-            #expect(OnDeviceCompactor.isCompactCopy(compact))
-            #expect(!OnDeviceCompactor.isCompactCopy(original))
+            #expect(PhotoLibrary.isCompactCopy(compact))
+            #expect(!PhotoLibrary.isCompactCopy(original))
             if compact.mediaType == .image {
                 #expect(max(compact.pixelWidth, compact.pixelHeight) == 2048)
             }
@@ -79,7 +78,7 @@ import Testing
             #expect(try await compactor.compact(compactIdentifier) { _ in }
                     == .unchanged("This is a Homespun compact copy"))
         }
-        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.appendingPathComponent("work").path)
-                .isEmpty)
+        let work = FileManager.default.temporaryDirectory.appendingPathComponent("Homespun")
+        #expect((try? FileManager.default.contentsOfDirectory(atPath: work.path))?.isEmpty ?? true)
     }
 }

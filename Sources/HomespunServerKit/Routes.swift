@@ -96,6 +96,17 @@ struct Routes: Sendable {
         let resources = try await catalog.resources(assetID)
         switch mode {
         case .files:
+            // A server restart during verification leaves a complete partial file; finish it now.
+            for resource in resources where resource.state != .verified {
+                let partial = storage.partial(assetID, resource.role)
+                let key = "\(assetID)/\(resource.role.rawValue)"
+                if (try? JobRunner.size(of: partial)) == resource.size, await locks.acquire(key) {
+                    try? await finishUpload(asset, resource, partial)
+                    await locks.release(key)
+                }
+            }
+            let resources = try await catalog.resources(assetID)
+            let asset = try await catalog.asset(assetID) ?? asset
             if asset.state == .receiving, resources.allSatisfy({ $0.state == .verified }) {
                 try await catalog.setState(assetID, .queued)
                 try await catalog.enqueue(JobRunner.compress, assetID: assetID)

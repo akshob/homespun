@@ -267,6 +267,40 @@ struct Fixture {
     }
 }
 
+@Test(.enabled(if: ffmpegAvailable)) func editsAndInterruptedVerificationAreHandled() async throws {
+    let fixture = try Fixture()
+    let media = try Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let photo = try descriptor(.photo, media.photo)
+        let asset = photo.sha256
+        // All bytes arrived but the server stopped before verifying them.
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [photo]))
+        let staging = fixture.directory.appendingPathComponent("data/staging/\(asset)-photo.partial")
+        try FileManager.default.copyItem(at: media.photo, to: staging)
+        let finished = try await client.call("/api/v1/assets/\(asset)/resources/photo?offset=\(photo.size)", .put,
+                                             token: token, body: Data())
+        #expect(try finished.decode(ServerAPI.ResourceStatus.self).state == .verified)
+        try await fixture.server.drainJobs()
+        #expect(try await client.call("/api/v1/assets/\(asset)/imported", .post, token: token).status == .ok)
+
+        // An edit adds resources: the old compact copy is dropped until the new ones arrive.
+        let render = try descriptor(.fullSizePhoto, media.motion, name: "FullSizeRender.mov")
+        let edited = ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [photo, render])
+        let changed = try await client.call("/api/v1/assets", .post, token: token, json: edited)
+            .decode(ServerAPI.AssetStatus.self)
+        #expect(changed.state == .receiving && changed.compact.isEmpty)
+        #expect(changed.resources.first { $0.role == .photo }?.state == .verified)
+
+        // Registering again finishes a complete partial file left by a restart.
+        let renderStaging = fixture.directory.appendingPathComponent("data/staging/\(asset)-full_size_photo.partial")
+        try FileManager.default.copyItem(at: media.motion, to: renderStaging)
+        let recovered = try await client.call("/api/v1/assets", .post, token: token, json: edited)
+            .decode(ServerAPI.AssetStatus.self)
+        #expect(recovered.state == .queued && recovered.resources.allSatisfy { $0.state == .verified })
+    }
+}
+
 // MARK: Immich mode
 
 /// A fake Immich server holding some originals, for the endpoints Homespun uses.

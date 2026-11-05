@@ -267,7 +267,7 @@ public actor Catalog {
                     }
                     continue
                 }
-                changed = changed || current[resource.role] != nil
+                changed = changed || !existing.isEmpty
                 try database.execute(
                     """
                     INSERT OR REPLACE INTO resources (asset_id, role, filename, size, sha256, sha1, state, received_bytes)
