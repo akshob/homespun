@@ -89,6 +89,10 @@ cd Apps/Homespun && xcodegen generate   # macOS only
   `xcrun simctl privacy <id> grant photos photos.homespun.app.dev`, then delete it.
   Do not reuse other simulators on the machine. Test code cannot delete assets
   (iOS asks for confirmation).
+- `HomespunUITests` drives the system photo picker (grid cells are images with identifier
+  `PXGGridLayout-Info`; confirm with "Done") and reads item states from the
+  `status.<state>` accessibility identifiers in `ContentView`. It picks the newest
+  items, so it runs before `HomespunTests` in the scheme and needs a fresh simulator.
 - Live Photo content identifiers in tests must be UUID strings: ImageIO stores Apple
   maker-note tag 17 as a fixed 36-byte field and pads shorter values.
 - iOS simulator video encoders ignore requested bitrates; do not assert encoder-dependent

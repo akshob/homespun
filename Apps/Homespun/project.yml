@@ -51,10 +51,27 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).tests
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
+  # Drives the on-phone workflow through the system photo picker on a simulator.
+  HomespunUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [HomespunUITests]
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+    dependencies:
+      - target: Homespun
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).uitests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Homespun
 schemes:
   Homespun:
     build:
       targets:
         Homespun: all
     test:
-      targets: [HomespunTests]
+      # The UI test picks the newest items, so it runs before HomespunTests adds its own.
+      targets: [HomespunUITests, HomespunTests]

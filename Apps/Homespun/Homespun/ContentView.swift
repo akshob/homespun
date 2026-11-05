@@ -101,8 +101,19 @@ private struct ItemRow: View {
             Image(systemName: item.symbol).foregroundStyle(.secondary).frame(width: 24)
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.name).lineLimit(1).truncationMode(.middle)
-                status.font(.caption)
+                status.font(.caption).accessibilityIdentifier("status.\(stateName)")
             }
+        }
+    }
+
+    /// Stable name for UI tests.
+    private var stateName: String {
+        switch item.state {
+        case .waiting: "waiting"
+        case .working: "working"
+        case .saved: "saved"
+        case .unchanged: "unchanged"
+        case .failed: "failed"
         }
     }
 

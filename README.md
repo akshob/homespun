@@ -111,10 +111,30 @@ install them again.
 5. On the iPhone, trust the developer under Settings > General > VPN & Device
    Management.
 
+### Trying it on a simulator
+
+```bash
+SIM=$(xcrun simctl create "Homespun Demo" com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
+  com.apple.CoreSimulator.SimRuntime.iOS-27-2)
+xcrun simctl boot "$SIM" && open -a Simulator
+# Optional: add your own test media. A still and a MOV with the same name and Live Photo
+# content identifier are imported as one Live Photo.
+xcrun simctl addmedia "$SIM" IMG_1001.HEIC IMG_1001.MOV IMG_1002.JPG
+xcodebuild -project Homespun.xcodeproj -scheme Homespun -destination "id=$SIM" \
+  -derivedDataPath build build
+xcrun simctl install "$SIM" build/Build/Products/Debug-iphonesimulator/Homespun.app
+xcrun simctl launch "$SIM" photos.homespun.app.dev
+```
+
+Simulator encoders are slower than an iPhone's and ignore bitrate settings, so sizes
+there are only indicative.
+
 ### App tests
 
-The app's tests run the on-phone pipeline inside the app, on a simulator whose library
-holds only synthetic media. Use a throwaway simulator and grant it photo access first:
+`HomespunUITests` picks the newest items in the system photo picker and waits for their
+compact copies. `HomespunTests` runs the pipeline inside the app on synthetic Live
+Photos, photos, and videos and checks the saved copies with PhotoKit. Run both on a fresh
+throwaway simulator with photo access granted:
 
 ```bash
 SIM=$(xcrun simctl create "Homespun Tests" com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
