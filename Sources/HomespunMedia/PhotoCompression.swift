@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import HomespunCore
 
 public enum PhotoCompressionError: Error, Equatable {
     case emptyInput
@@ -67,5 +68,25 @@ public enum JPEGIntegrity {
             }
             return false
         }
+    }
+}
+
+/// A photo backend: ImageIO on Apple platforms, libvips on Linux.
+public protocol PhotoCompressor: Sendable {
+    /// Writes a compact JPEG to `output`, or publishes the original bytes (under the original's
+    /// extension) when the compact copy would not be smaller. Throws for undecodable input.
+    func compress(input: URL, output: URL) throws -> PhotoCompressionResult
+}
+
+public enum PlatformMedia {
+    /// The photo backend for this platform, or nil where none is available.
+    public static func photoCompressor(profile: CompressionProfile) -> (any PhotoCompressor)? {
+        #if canImport(ImageIO)
+        ImageIOPhotoCompressor(profile: profile)
+        #elseif os(Linux)
+        VipsPhotoCompressor(profile: profile)
+        #else
+        nil
+        #endif
     }
 }

@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
 /// Apple maker notes (including the Live Photo content identifier) are kept.
 ///
 /// HDR gain maps and depth data are not carried over; the compact copy is SDR.
-public struct ImageIOPhotoCompressor: Sendable {
+public struct ImageIOPhotoCompressor: PhotoCompressor {
     public enum Format: String, Sendable {
         case jpeg, heic
         var type: UTType { self == .jpeg ? .jpeg : .heic }

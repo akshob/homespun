@@ -18,13 +18,22 @@ let package = Package(
     ],
     targets: [
         .target(name: "HomespunCore", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
-        .target(name: "HomespunMedia", dependencies: ["HomespunCore"]),
+        .target(name: "HomespunMedia", dependencies: [
+            "HomespunCore",
+            .target(name: "CHomespunVips", condition: .when(platforms: [.linux])),
+        ]),
+        // libvips (Linux photo backend). Install with: apt install libvips-dev
+        .systemLibrary(name: "CLibVips", pkgConfig: "vips", providers: [.apt(["libvips-dev"])]),
+        .target(name: "CHomespunVips", dependencies: [
+            .target(name: "CLibVips", condition: .when(platforms: [.linux])),
+        ]),
         .target(name: "HomespunTestSupport"),
         .executableTarget(
             name: "HomespunServer",
             dependencies: ["HomespunCore", "HomespunMedia", .product(name: "Hummingbird", package: "hummingbird")],
             exclude: ["LICENSE"]),
         .testTarget(name: "HomespunCoreTests", dependencies: ["HomespunCore"]),
-        .testTarget(name: "HomespunMediaTests", dependencies: ["HomespunMedia", "HomespunTestSupport"]),
+        .testTarget(name: "HomespunMediaTests", dependencies: ["HomespunMedia", "HomespunTestSupport"],
+                    resources: [.copy("Fixtures")]),
     ]
 )

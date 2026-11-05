@@ -1,0 +1,5 @@
+module CLibVips [system] {
+    header "shim.h"
+    link "vips"
+    export *
+}

@@ -24,7 +24,7 @@ from the iPhone only after the server proves it has an identical copy.
 | Target | Platforms | Purpose |
 |---|---|---|
 | `HomespunCore` | iOS, macOS, Linux | Compression profile, SHA-256 fingerprints, download manifest, deletion gate |
-| `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: x265 via the `ffmpeg` tool. Apple: ImageIO photos, AVFoundation video and Live Photo motion, `PHLivePhoto` pair validation |
+| `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: libvips photos (EXIF copied byte for byte, so Live Photo identifiers survive) and x265 via the `ffmpeg` tool. Apple: ImageIO photos, AVFoundation video and Live Photo motion, `PHLivePhoto` pair validation |
 | `HomespunTestSupport` | iOS, macOS | Synthetic photos, Live Photos, and videos for tests (not product code) |
 | `homespun-server` | Linux, macOS | Hummingbird HTTP API (`GET /api/v1/health` so far) |
 | `Apps/Homespun` | iOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package |
@@ -47,7 +47,9 @@ the pair as a Live Photo.
 
 ## Build and test
 
-Requires Swift 6. On Linux the media tests need `ffmpeg` with libx265. On a Mac,
+Requires Swift 6. On Linux, install `libvips-dev` (photo backend) and `ffmpeg` with
+libx265 (video and media tests). On macOS SwiftPM warns that it cannot find `vips`; that is
+expected, because Apple platforms use ImageIO instead. On a Mac,
 `swift test` also runs the Apple backend tests (ImageIO, AVFoundation, `PHLivePhoto`)
 on synthetic media.
 
@@ -156,11 +158,10 @@ npx wrangler@4 pages deploy site --project-name homespun --branch main
 
 ## Roadmap
 
-1. Linux photo backend (libheif + libvips + exiv2), matching PhotoRelay's 2048 px output.
-2. Server catalog (SQLite), resumable verified uploads, job queue, download manifests.
-3. iOS app: pairing, upload, server-mode import, copying album membership, gated
+1. Server catalog (SQLite), resumable verified uploads, job queue, download manifests.
+2. iOS app: pairing, upload, server-mode import, copying album membership, gated
    deletion. (On-phone compression and import are in place.)
-4. Immich add-on, Docker image, demo mode, then TestFlight and the App Store.
+3. Immich add-on, Docker image, demo mode, then TestFlight and the App Store.
 
 ## License
 
