@@ -1,0 +1,45 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Support · Homespun</title>
+  <meta name="description" content="Help with Homespun.">
+  <link rel="canonical" href="https://homespun.photos/support">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <a class="name" href="/">Homespun</a>
+    <nav><a href="/privacy">Privacy</a><a href="/support" aria-current="page">Support</a></nav>
+  </header>
+  <main>
+    <h1>Support</h1>
+    <p class="lead">Homespun is in development and not yet on the App Store. A support contact will be listed here
+      before it is released.</p>
+
+    <h2>Common questions</h2>
+
+    <h3>Will Homespun delete my photos?</h3>
+    <p>Only if you ask it to, and only after your server has proven it holds an identical copy of the original.
+      iOS asks you to confirm, and deleted items stay in Recently Deleted. Homespun never empties Recently Deleted.
+      Without a server, Homespun only adds compact copies and never deletes anything.</p>
+
+    <h3>Do I need a server?</h3>
+    <p>No. On-phone mode compresses with your iPhone's own encoders. A server, or an existing Immich server, lets
+      you keep the originals at home and free up space on the phone.</p>
+
+    <h3>How small are the compact copies?</h3>
+    <p>Photos fit within 2048 pixels on the long edge. Videos fit within 720p and use HEVC. Copies keep the date,
+      place, favorite, and Live Photo motion. If a copy would not be smaller, Homespun keeps the original as is.</p>
+
+    <h3>What does Homespun leave unchanged?</h3>
+    <p>Some videos are kept as they are until their conversion has been tested: HDR in formats other than HLG,
+      Dolby Vision without an HLG base, and video above 60 frames per second.</p>
+  </main>
+  <footer>
+    <a href="/">Home</a><a href="/privacy">Privacy policy</a>
+  </footer>
+</body>
+</html>

@@ -144,6 +144,16 @@ xcodebuild test -project Homespun.xcodeproj -scheme Homespun -destination "id=$S
 xcrun simctl delete "$SIM"
 ```
 
+## Website
+
+`site/` holds the static site for [homespun.photos](https://homespun.photos): plain HTML
+and CSS, no scripts or build step. It is hosted on Cloudflare Pages (project `homespun`).
+To deploy, with a Pages-scoped API token and the account ID in the environment:
+
+```bash
+npx wrangler@4 pages deploy site --project-name homespun --branch main
+```
+
 ## Roadmap
 
 1. Linux photo backend (libheif + libvips + exiv2), matching PhotoRelay's 2048 px output.

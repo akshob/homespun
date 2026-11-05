@@ -19,6 +19,9 @@ and may not exist in other checkouts.
   the App Store ID. `Signing.xcconfig` includes the git-ignored `Local.xcconfig`, which
   holds `DEVELOPMENT_TEAM`. Never put a team ID in `project.yml`.
 - Everything is Swift. Do not add Python, Node, or shell pipelines to the product.
+- `site/` is the homespun.photos website: static HTML and CSS only (no JavaScript, no
+  third-party assets or analytics; `_headers` sets a strict CSP). The privacy policy there
+  must match what the app actually does; update it when data handling changes.
 - Code that uses `Foundation.Process` must be wrapped in `#if os(Linux) || os(macOS)`,
   because iOS has no `Process`.
 - Apple backends live in `Sources/HomespunMedia/Apple`, each file wrapped in

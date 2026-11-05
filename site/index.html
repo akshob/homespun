@@ -1,0 +1,59 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Homespun: originals at home, compact copies on your iPhone</title>
+  <meta name="description" content="Homespun keeps full-quality photo and video originals on your own server and compact copies in Apple Photos.">
+  <link rel="canonical" href="https://homespun.photos/">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <a class="name" href="/">Homespun</a>
+    <nav><a href="/privacy">Privacy</a><a href="/support">Support</a></nav>
+  </header>
+  <main>
+    <h1>Originals at home.<br>Compact copies on your iPhone.</h1>
+    <p class="lead">Homespun keeps full-quality photos and videos on a server you own, and puts small,
+      good-looking copies back in Apple Photos.</p>
+    <p class="status">In development. Not yet on the App Store.</p>
+    <p>On-phone mode works in testing today. Server and Immich modes are being built.</p>
+
+    <h2>How it works</h2>
+    <ol class="steps">
+      <li><strong>Pick</strong> the photos and videos you want to slim down.</li>
+      <li><strong>Store</strong> the originals on your server. Each one is checked byte for byte (SHA-256).</li>
+      <li><strong>Get compact copies</strong> back in Apple Photos with the same date, place, and favorites.
+        Live Photos stay live.</li>
+      <li><strong>Free up space</strong> if you want. Homespun asks iOS to remove an original only after your
+        server proves it holds an identical copy. iOS asks you to confirm, and the item stays in Recently Deleted.</li>
+    </ol>
+
+    <h2>Three ways to use it</h2>
+    <div class="modes">
+      <section class="mode">
+        <h3>On your iPhone</h3>
+        <p>Compress with Apple's built-in encoders. No server needed. Your originals stay where they are.</p>
+      </section>
+      <section class="mode">
+        <h3>Your own server <small>(coming)</small></h3>
+        <p>Run Homespun Server at home (Linux or Docker). It keeps the originals and makes the smallest copies.</p>
+      </section>
+      <section class="mode">
+        <h3>With Immich <small>(coming)</small></h3>
+        <p>Already run Immich? Homespun can use it as the home for your originals.</p>
+      </section>
+    </div>
+
+    <h2>Why</h2>
+    <p>Homespun grew out of a personal setup that shrank a 37,000-item photo library to about a fifth of its
+      size while keeping every original safe at home. Photos fit within 2048 pixels, videos within 720p,
+      and nothing is deleted until a verified copy exists.</p>
+  </main>
+  <footer>
+    <a href="/privacy">Privacy policy</a><a href="/support">Support</a>
+  </footer>
+</body>
+</html>
