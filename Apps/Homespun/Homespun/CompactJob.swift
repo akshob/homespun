@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: Apache-2.0
+import Foundation
+import Observation
+import UIKit
+
+/// The queue of items the user picked, processed one at a time.
+@MainActor @Observable
+final class CompactJob {
+    enum State: Equatable {
+        case waiting
+        case working(String)
+        case saved(originalBytes: Int, compactBytes: Int)
+        case unchanged(String)
+        case failed(String)
+    }
+
+    struct Item: Identifiable {
+        let id = UUID()
+        let assetIdentifier: String
+        var name: String
+        var symbol: String
+        var state: State
+    }
+
+    private(set) var items: [Item] = []
+    private(set) var isRunning = false
+    private let compactor: OnDeviceCompactor
+
+    init(compactor: OnDeviceCompactor = OnDeviceCompactor(ledger: CompactLedger())) {
+        self.compactor = compactor
+    }
+
+    var savedOriginalBytes: Int { items.reduce(0) { if case .saved(let o, _) = $1.state { $0 + o } else { $0 } } }
+    var savedCompactBytes: Int { items.reduce(0) { if case .saved(_, let c) = $1.state { $0 + c } else { $0 } } }
+
+    func enqueue(_ assetIdentifiers: [String]) {
+        for identifier in assetIdentifiers {
+            let description = OnDeviceCompactor.describe(identifier)
+            items.append(Item(assetIdentifier: identifier, name: description?.name ?? "Item",
+                              symbol: description?.kind.symbol ?? "questionmark.square",
+                              state: description == nil ? .failed(OnDeviceCompactor.Failure.notFound
+                                  .localizedDescription) : .waiting))
+        }
+        if !isRunning { Task { await run() } }
+    }
+
+    func clearFinished() {
+        items.removeAll { item in
+            switch item.state {
+            case .waiting, .working: false
+            default: true
+            }
+        }
+    }
+
+    private func run() async {
+        isRunning = true
+        // Encoding stops if the phone locks; keep the screen on while working.
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer {
+            isRunning = false
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
+        while let index = items.firstIndex(where: { $0.state == .waiting }) {
+            let id = items[index].id
+            items[index].state = .working("Starting")
+            let state: State
+            do {
+                let outcome = try await compactor.compact(items[index].assetIdentifier) { [weak self] message in
+                    Task { @MainActor in self?.report(message, for: id) }
+                }
+                switch outcome {
+                case .saved(_, let original, let compact): state = .saved(originalBytes: original, compactBytes: compact)
+                case .unchanged(let reason): state = .unchanged(reason)
+                }
+            } catch {
+                state = .failed(error.localizedDescription)
+            }
+            if let index = items.firstIndex(where: { $0.id == id }) { items[index].state = state }
+        }
+    }
+
+    private func report(_ message: String, for id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }), case .working = items[index].state else { return }
+        items[index].state = .working(message)
+    }
+}

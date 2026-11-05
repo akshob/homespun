@@ -8,9 +8,10 @@ import ImageIO
 import UniformTypeIdentifiers
 import VideoToolbox
 
-/// Synthetic photos and videos for Apple backend tests. Never use a real library in tests.
-enum Synthetic {
-    static func directory() throws -> URL {
+/// Synthetic photos and videos for tests of the Apple backend and the app. Tests never use
+/// a real photo library.
+public enum Synthetic {
+    public static func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("homespun-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         return url
@@ -18,7 +19,7 @@ enum Synthetic {
 
     /// Deterministic textured image: a gradient with many small rectangles, so encoders have
     /// real detail to work with.
-    static func texture(width: Int, height: Int, alpha: Bool = false, seed: UInt64 = 1) -> CGImage {
+    public static func texture(width: Int, height: Int, alpha: Bool = false, seed: UInt64 = 1) -> CGImage {
         let space = CGColorSpace(name: CGColorSpace.displayP3)!
         let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
                                 space: space, bitmapInfo: (alpha ? CGImageAlphaInfo.premultipliedLast
@@ -47,18 +48,32 @@ enum Synthetic {
         return context.makeImage()!
     }
 
-    struct PhotoSpec {
-        var type: UTType = .jpeg
-        var width = 4032
-        var height = 3024
-        var orientation = 1
-        var alpha = false
-        var flat = false
-        var quality = 0.95
-        var contentIdentifier: String?
+    public struct PhotoSpec: Sendable {
+        public var type: UTType
+        public var width: Int
+        public var height: Int
+        public var orientation: Int
+        public var alpha: Bool
+        public var flat: Bool
+        public var quality: Double
+        /// Live Photo content identifier (Apple maker note 17). Use a UUID string: ImageIO pads
+        /// shorter values to 36 bytes.
+        public var contentIdentifier: String?
+
+        public init(type: UTType = .jpeg, width: Int = 4032, height: Int = 3024, orientation: Int = 1,
+                    alpha: Bool = false, flat: Bool = false, quality: Double = 0.95, contentIdentifier: String? = nil) {
+            self.type = type
+            self.width = width
+            self.height = height
+            self.orientation = orientation
+            self.alpha = alpha
+            self.flat = flat
+            self.quality = quality
+            self.contentIdentifier = contentIdentifier
+        }
     }
 
-    static func photo(at url: URL, _ spec: PhotoSpec) throws {
+    public static func photo(at url: URL, _ spec: PhotoSpec) throws {
         let image: CGImage
         if spec.flat {
             let context = CGContext(data: nil, width: spec.width, height: spec.height, bitsPerComponent: 8,
@@ -88,24 +103,42 @@ enum Synthetic {
         guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
     }
 
-    struct VideoSpec {
-        var width = 1920
-        var height = 1080
-        var fps: Int32 = 30
-        var frames = 60
-        var bitrate = 20_000_000
-        var audioChannels: UInt32 = 2
-        var audioSampleRate = 44_100
-        var audioBitrate = 128_000
+    public struct VideoSpec: Sendable {
+        public var width: Int
+        public var height: Int
+        public var fps: Int32
+        public var frames: Int
+        public var bitrate: Int
+        public var audioChannels: UInt32
+        public var audioSampleRate: Int
+        public var audioBitrate: Int
         /// HLG or PQ transfer function; writes 10-bit HEVC tagged BT.2020.
-        var transfer: String?
-        var transform: CGAffineTransform = .identity
+        public var transfer: String?
+        public var transform: CGAffineTransform
         /// Writes Live Photo motion: content identifier, still-image-time track, and its link.
-        var liveIdentifier: String?
-        var cleanAperture: (width: Int, height: Int)?
+        public var liveIdentifier: String?
+        public var cleanAperture: (width: Int, height: Int)?
+
+        public init(width: Int = 1920, height: Int = 1080, fps: Int32 = 30, frames: Int = 60,
+                    bitrate: Int = 20_000_000, audioChannels: UInt32 = 2, audioSampleRate: Int = 44_100,
+                    audioBitrate: Int = 128_000, transfer: String? = nil, transform: CGAffineTransform = .identity,
+                    liveIdentifier: String? = nil, cleanAperture: (width: Int, height: Int)? = nil) {
+            self.width = width
+            self.height = height
+            self.fps = fps
+            self.frames = frames
+            self.bitrate = bitrate
+            self.audioChannels = audioChannels
+            self.audioSampleRate = audioSampleRate
+            self.audioBitrate = audioBitrate
+            self.transfer = transfer
+            self.transform = transform
+            self.liveIdentifier = liveIdentifier
+            self.cleanAperture = cleanAperture
+        }
     }
 
-    static func video(at url: URL, _ spec: VideoSpec) async throws {
+    public static func video(at url: URL, _ spec: VideoSpec) async throws {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: url.pathExtension == "mp4" ? .mp4 : .mov)
         var compression: [String: Any] = [AVVideoAverageBitRateKey: spec.bitrate]

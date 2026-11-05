@@ -8,6 +8,8 @@ let package = Package(
     products: [
         .library(name: "HomespunCore", targets: ["HomespunCore"]),
         .library(name: "HomespunMedia", targets: ["HomespunMedia"]),
+        // Synthetic media for tests in this package and the iOS app. Not for product code.
+        .library(name: "HomespunTestSupport", targets: ["HomespunTestSupport"]),
         .executable(name: "homespun-server", targets: ["HomespunServer"]),
     ],
     dependencies: [
@@ -17,11 +19,12 @@ let package = Package(
     targets: [
         .target(name: "HomespunCore", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
         .target(name: "HomespunMedia", dependencies: ["HomespunCore"]),
+        .target(name: "HomespunTestSupport"),
         .executableTarget(
             name: "HomespunServer",
             dependencies: ["HomespunCore", "HomespunMedia", .product(name: "Hummingbird", package: "hummingbird")],
             exclude: ["LICENSE"]),
         .testTarget(name: "HomespunCoreTests", dependencies: ["HomespunCore"]),
-        .testTarget(name: "HomespunMediaTests", dependencies: ["HomespunMedia"]),
+        .testTarget(name: "HomespunMediaTests", dependencies: ["HomespunMedia", "HomespunTestSupport"]),
     ]
 )

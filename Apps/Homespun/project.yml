@@ -11,6 +11,9 @@ targets:
     type: application
     platform: iOS
     sources: [Homespun]
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
     dependencies:
       - package: HomespunPackage
         product: HomespunCore
@@ -18,7 +21,7 @@ targets:
         product: HomespunMedia
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: photos.homespun.app
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID)
         PRODUCT_NAME: Homespun
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
@@ -31,3 +34,27 @@ targets:
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Homespun reads the photos and videos you choose so it can store the originals on your server and make compact copies."
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Homespun saves compact copies of your photos and videos to your library."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Homespun connects to your Homespun or Immich server on your home network."
+  # Runs inside the app on a simulator whose library holds only synthetic media.
+  HomespunTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [HomespunTests]
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+    dependencies:
+      - target: Homespun
+      - package: HomespunPackage
+        product: HomespunTestSupport
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).tests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Homespun:
+    build:
+      targets:
+        Homespun: all
+    test:
+      targets: [HomespunTests]

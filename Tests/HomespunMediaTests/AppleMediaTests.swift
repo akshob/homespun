@@ -19,6 +19,7 @@ import Testing
 import AVFoundation
 import CoreMedia
 import HomespunCore
+import HomespunTestSupport
 import ImageIO
 import UniformTypeIdentifiers
 

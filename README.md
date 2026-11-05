@@ -25,6 +25,7 @@ from the iPhone only after the server proves it has an identical copy.
 |---|---|---|
 | `HomespunCore` | iOS, macOS, Linux | Compression profile, SHA-256 fingerprints, download manifest, deletion gate |
 | `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: x265 via the `ffmpeg` tool. Apple: ImageIO photos, AVFoundation video and Live Photo motion, `PHLivePhoto` pair validation |
+| `HomespunTestSupport` | iOS, macOS | Synthetic photos, Live Photos, and videos for tests (not product code) |
 | `homespun-server` | Linux, macOS | Hummingbird HTTP API (`GET /api/v1/health` so far) |
 | `Apps/Homespun` | iOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package |
 
@@ -72,6 +73,11 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 
 ## iOS app
 
+The app currently runs **on-phone mode**: choose photos, Live Photos, and videos; the
+iPhone compresses them and saves the compact copies to a "Homespun" album with the
+original's date, location, and favorite and hidden state. Originals are never changed
+or deleted. Edited items are compressed as they currently look.
+
 On a Mac with Xcode:
 
 ```bash
@@ -79,15 +85,51 @@ brew install xcodegen
 cd Apps/Homespun && xcodegen generate && open Homespun.xcodeproj
 ```
 
-The Xcode project is generated from `project.yml` and not committed. Signing settings
-(your development team) are chosen in Xcode and stay out of the repository.
+The Xcode project is generated from `project.yml` and not committed.
+
+### Running it on your iPhone
+
+A free Apple ID works; apps signed this way stop launching after 7 days until you
+install them again.
+
+1. In Xcode, sign in under Settings > Accounts. This creates a "Personal Team".
+2. Put the team ID in `Apps/Homespun/Local.xcconfig` (git-ignored):
+   `DEVELOPMENT_TEAM = ABCDE12345`. Debug builds use the bundle ID
+   `photos.homespun.app.dev`, so a personal team never registers the App Store ID.
+3. Connect the iPhone, then turn on Settings > Privacy & Security > Developer Mode.
+4. Build and install:
+
+   ```bash
+   xcodegen generate
+   xcodebuild -project Homespun.xcodeproj -scheme Homespun -configuration Debug \
+     -destination 'platform=iOS,name=<your iPhone>' -derivedDataPath build \
+     -allowProvisioningUpdates build
+   xcrun devicectl device install app --device '<your iPhone>' \
+     build/Build/Products/Debug-iphoneos/Homespun.app
+   ```
+
+5. On the iPhone, trust the developer under Settings > General > VPN & Device
+   Management.
+
+### App tests
+
+The app's tests run the on-phone pipeline inside the app, on a simulator whose library
+holds only synthetic media. Use a throwaway simulator and grant it photo access first:
+
+```bash
+SIM=$(xcrun simctl create "Homespun Tests" com.apple.CoreSimulator.SimDeviceType.iPhone-17 \
+  com.apple.CoreSimulator.SimRuntime.iOS-27-2)
+xcrun simctl boot "$SIM" && xcrun simctl privacy "$SIM" grant photos photos.homespun.app.dev
+xcodebuild test -project Homespun.xcodeproj -scheme Homespun -destination "id=$SIM"
+xcrun simctl delete "$SIM"
+```
 
 ## Roadmap
 
 1. Linux photo backend (libheif + libvips + exiv2), matching PhotoRelay's 2048 px output.
 2. Server catalog (SQLite), resumable verified uploads, job queue, download manifests.
-3. iOS app: pick, upload, on-phone compression (using the Apple backend), PhotoKit
-   import with date/location/favorite/albums, gated deletion.
+3. iOS app: pairing, upload, server-mode import, copying album membership, gated
+   deletion. (On-phone compression and import are in place.)
 4. Immich add-on, Docker image, demo mode, then TestFlight and the App Store.
 
 ## License

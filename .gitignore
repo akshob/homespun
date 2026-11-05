@@ -4,3 +4,4 @@
 DerivedData/
 Apps/Homespun/*.xcodeproj/
 .copilot/
+Apps/Homespun/Local.xcconfig
