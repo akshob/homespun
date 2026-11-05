@@ -21,6 +21,12 @@ public struct CompressionProfile: Codable, Equatable, Sendable {
 
     public static let standard = CompressionProfile()
 
+    // `videoCrf` survives snake_case conversion both ways ("video_crf"); `videoCRF` would not.
+    enum CodingKeys: String, CodingKey {
+        case photoMaxEdge, photoQuality, videoLongEdge, videoShortEdge, audioBitrateKbps
+        case videoCRF = "videoCrf"
+    }
+
     /// Photo output size: fit the long edge within `photoMaxEdge`, keep aspect, never upscale.
     public func photoSize(width: Int, height: Int) -> (width: Int, height: Int) {
         let longEdge = max(width, height)

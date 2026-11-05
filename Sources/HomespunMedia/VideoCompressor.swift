@@ -50,11 +50,17 @@ public struct FFmpegVideoCompressor: Sendable {
     public func arguments(input: URL, output: URL, probe: VideoProbe) -> [String] {
         let size = profile.videoSize(width: probe.width, height: probe.height)
         var arguments = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", input.path,
-                         "-map", "0:v:0"]
+                         "-map", "0:\(probe.videoStreamIndex)"]
         for index in probe.audioStreams { arguments += ["-map", "0:\(index)"] }
+        // HLG (including iPhone Dolby Vision 8.4, whose base layer is HLG) stays 10-bit HLG;
+        // the Dolby Vision metadata is dropped.
+        let color = probe.isHLG
+            ? ["-pix_fmt", "yuv420p10le", "-x265-params", "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+               "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc"]
+            : ["-pix_fmt", "yuv420p"]
         arguments += ["-map_metadata", "0",
-                      "-c:v", "libx265", "-preset", "medium", "-crf", String(profile.videoCRF),
-                      "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+                      "-c:v", "libx265", "-preset", "medium", "-crf", String(profile.videoCRF)] + color + [
+                      "-tag:v", "hvc1",
                       "-vf", "scale=\(size.width):\(size.height)",
                       "-c:a", "aac", "-b:a", "\(profile.audioBitrateKbps)k",
                       "-movflags", "+use_metadata_tags+faststart",
@@ -69,7 +75,16 @@ public struct FFmpegVideoCompressor: Sendable {
 
     #if os(Linux) || os(macOS)
     public func compress(input: URL, output: URL) throws -> VideoCompressionResult {
+        guard try MediaFiles.size(of: input) > 0 else { throw VideoCompressionError.emptyInput }
         let probe = try VideoProbe.read(input)
+        if probe.contentIdentifier != nil {
+            throw VideoCompressionError.unsupported("Live Photo motion must be compressed with AVFoundation")
+        }
+        if !probe.holdReasons.isEmpty {
+            let copy = try MediaFiles.publishCopy(of: input, to: output)
+            return VideoCompressionResult(mode: .originalKeptHeld, sha256: copy.sha256, size: copy.size,
+                                          heldReasons: probe.holdReasons)
+        }
         let partial = MediaFiles.partialURL(for: output)
         try? FileManager.default.removeItem(at: partial)
         defer { try? FileManager.default.removeItem(at: partial) }
@@ -79,6 +94,9 @@ public struct FFmpegVideoCompressor: Sendable {
         let box = profile.videoSize(width: probe.width, height: probe.height)
         guard result.width <= box.width, result.height <= box.height else {
             throw VideoCompressionError.dimensionsExceedProfile(result.width, result.height)
+        }
+        if probe.isHLG, !result.isHLG || result.hasDolbyVisionConfiguration {
+            throw VideoCompressionError.verificationFailed("HLG output is not plain HLG")
         }
         guard result.audioStreams.count == probe.audioStreams.count else {
             throw VideoCompressionError.audioTrackCountChanged(probe.audioStreams.count, result.audioStreams.count)

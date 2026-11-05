@@ -1,0 +1,388 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+import Foundation
+import HTTPTypes
+import HomespunCore
+import Hummingbird
+import HummingbirdTesting
+import NIOCore
+import Testing
+@testable import HomespunServerKit
+
+// MARK: Helpers
+
+func temporaryDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("homespun-server-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url
+}
+
+func run(_ arguments: [String]) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = arguments
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else { throw CocoaError(.executableLoad) }
+}
+
+let ffmpegAvailable = (try? run(["ffmpeg", "-version"])) != nil
+
+/// Synthetic media made by ffmpeg: a detailed still, a short movie, and its "motion" twin.
+struct Media {
+    let photo: URL, motion: URL, movie: URL
+
+    static func make(in directory: URL) throws -> Media {
+        let media = Media(photo: directory.appendingPathComponent("IMG_0001.JPG"),
+                          motion: directory.appendingPathComponent("IMG_0001.MOV"),
+                          movie: directory.appendingPathComponent("IMG_0002.MP4"))
+        try run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200", "-frames:v", "1",
+                 "-q:v", "1", media.photo.path])
+        for (url, size) in [(media.motion, "640x480"), (media.movie, "1280x720")] {
+            try run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=\(size):rate=30:duration=2",
+                     "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:v", "mpeg4", "-q:v", "2",
+                     "-c:a", "aac", "-shortest", url.path])
+        }
+        return media
+    }
+}
+
+func descriptor(_ role: ServerAPI.ResourceRole, _ url: URL, name: String? = nil) throws -> ServerAPI.ResourceDescriptor {
+    let digests = try Fingerprint.digests(of: url)
+    return .init(role: role, filename: name ?? url.lastPathComponent, size: digests.size, sha256: digests.sha256,
+                 sha1: digests.sha1)
+}
+
+let testProfile = CompressionProfile(photoMaxEdge: 512, videoLongEdge: 320, videoShortEdge: 180)
+
+extension TestClientProtocol {
+    func call(_ uri: String, _ method: HTTPRequest.Method = .get, token: String? = nil, json: (some Encodable)? = Optional<Int>.none,
+              body: Data? = nil) async throws -> TestResponse {
+        var headers = HTTPFields()
+        if let token { headers[.authorization] = "Bearer \(token)" }
+        var buffer: ByteBuffer?
+        if let json {
+            headers[.contentType] = "application/json"
+            buffer = ByteBuffer(bytes: try ServerAPI.encoder.encode(json))
+        } else if let body {
+            buffer = ByteBuffer(bytes: body)
+        }
+        return try await execute(uri: uri, method: method, headers: headers, body: buffer)
+    }
+}
+
+extension TestResponse {
+    func decode<T: Decodable>(_ type: T.Type) throws -> T {
+        try ServerAPI.decoder.decode(T.self, from: Data(body.readableBytesView))
+    }
+    var data: Data { Data(body.readableBytesView) }
+}
+
+/// A server in a temporary data directory with one paired device.
+struct Fixture {
+    let directory: URL
+    let server: HomespunServer
+
+    init(immich: ImmichConfiguration? = nil) throws {
+        directory = try temporaryDirectory()
+        var configuration = ServerConfiguration(dataDirectory: directory.appendingPathComponent("data"),
+                                                name: "test", profile: testProfile, immich: immich)
+        configuration.maximumChunkBytes = 1 << 20
+        server = try HomespunServer(configuration: configuration)
+    }
+
+    func pair(_ client: some TestClientProtocol) async throws -> String {
+        let code = try await server.newPairingCode()
+        let response = try await client.call("/api/v1/pair", .post,
+                                             json: ServerAPI.PairRequest(code: code.lowercased(), deviceName: "Test iPhone"))
+        #expect(response.status == .created)
+        return try response.decode(ServerAPI.PairResponse.self).token
+    }
+
+    func test(_ body: @escaping @Sendable (any TestClientProtocol, String) async throws -> Void) async throws {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = Application(router: server.router())
+        try await app.test(.router) { client in try await body(client, try await pair(client)) }
+    }
+
+    /// Uploads a file in 512 KiB chunks, sending one wrong offset to exercise resume.
+    func upload(_ client: some TestClientProtocol, token: String, asset: String, role: ServerAPI.ResourceRole,
+                file: URL) async throws -> ServerAPI.ResourceStatus {
+        let data = try Data(contentsOf: file), chunk = 512 << 10
+        let path = "/api/v1/assets/\(asset)/resources/\(role.rawValue)"
+        var offset = 0, last: ServerAPI.ResourceStatus?
+        while offset < data.count {
+            let end = min(offset + chunk, data.count)
+            let response = try await client.call(path + "?offset=\(offset)", .put, token: token, body: data[offset..<end])
+            #expect(response.status == .ok, "\(String(decoding: response.data, as: UTF8.self))")
+            last = try response.decode(ServerAPI.ResourceStatus.self)
+            if offset == 0, end < data.count {
+                let wrong = try await client.call(path + "?offset=0", .put, token: token, body: data[end..<min(end + chunk, data.count)])
+                #expect(wrong.status == .conflict)
+                #expect(try wrong.decode(ServerAPI.ResourceStatus.self).receivedBytes == end)
+            }
+            offset = end
+        }
+        return try #require(last)
+    }
+}
+
+// MARK: Pairing
+
+@Test func pairingCodesWorkOnceAndTokensAreRequired() async throws {
+    let fixture = try Fixture()
+    try await fixture.test { client, token in
+        #expect(try await client.call("/api/v1/health").status == .ok)
+        #expect(try await client.call("/api/v1/info").status == .unauthorized)
+        #expect(try await client.call("/api/v1/info", token: "hs1_wrong").status == .unauthorized)
+        let info = try await client.call("/api/v1/info", token: token).decode(ServerAPI.ServerInfo.self)
+        #expect(info.mode == .files && info.name == "test")
+
+        let code = try await fixture.server.newPairingCode()
+        let request = ServerAPI.PairRequest(code: code, deviceName: "Second")
+        #expect(try await client.call("/api/v1/pair", .post, json: request).status == .created)
+        #expect(try await client.call("/api/v1/pair", .post, json: request).status == .forbidden)
+
+        // Too many wrong codes invalidate outstanding ones.
+        let fresh = try await fixture.server.newPairingCode()
+        for _ in 0..<Catalog.pairingFailureLimit {
+            _ = try await client.call("/api/v1/pair", .post, json: ServerAPI.PairRequest(code: "ZZZZ-ZZZZ", deviceName: "x"))
+        }
+        #expect(try await client.call("/api/v1/pair", .post, json: ServerAPI.PairRequest(code: fresh, deviceName: "y")).status
+                == .forbidden)
+
+        let devices = try await fixture.server.catalog.devices()
+        #expect(devices.count == 2)
+        #expect(try await fixture.server.catalog.revoke(deviceID: devices[0].id))
+        #expect(try await client.call("/api/v1/info", token: token).status == .unauthorized)
+    }
+}
+
+// MARK: Files mode
+
+@Test(.enabled(if: ffmpegAvailable)) func filesModePhotoRoundTrip() async throws {
+    let fixture = try Fixture()
+    let media = try Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let photo = try descriptor(.photo, media.photo)
+        let register = ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: Date(timeIntervalSince1970: 1_714_592_096),
+                                                      resources: [photo])
+        let created = try await client.call("/api/v1/assets", .post, token: token, json: register)
+        #expect(created.status == .created)
+        let asset = photo.sha256
+        #expect(try created.decode(ServerAPI.AssetStatus.self).state == .receiving)
+
+        let uploaded = try await fixture.upload(client, token: token, asset: asset, role: .photo, file: media.photo)
+        #expect(uploaded.state == .verified && uploaded.receivedBytes == photo.size)
+        let stored = fixture.directory.appendingPathComponent("data/originals/2024/05/IMG_0001.JPG")
+        #expect(try Data(contentsOf: stored) == Data(contentsOf: media.photo))
+
+        try await fixture.server.drainJobs()
+        let ready = try await client.call("/api/v1/assets/\(asset)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(ready.state == .ready && ready.deviceCompresses.isEmpty)
+        let compact = try #require(ready.compact.first)
+        #expect(compact.role == .photo && compact.filename == "IMG_0001.jpg" && compact.size < photo.size)
+
+        let download = try await client.call("/api/v1/assets/\(asset)/compact/photo", token: token)
+        #expect(download.status == .ok && Fingerprint.sha256(of: download.data) == compact.sha256)
+
+        let verification = try await client.call("/api/v1/assets/\(asset)/verify", .post, token: token)
+            .decode(ServerAPI.Verification.self)
+        #expect(verification.allVerified && verification.resources.first?.sha256 == photo.sha256)
+
+        #expect(try await client.call("/api/v1/assets/\(asset)/imported", .post, token: token)
+            .decode(ServerAPI.AssetStatus.self).state == .imported)
+        // Registering again changes nothing and needs no upload.
+        let again = try await client.call("/api/v1/assets", .post, token: token, json: register)
+        #expect(again.status == .ok)
+        #expect(try again.decode(ServerAPI.AssetStatus.self).state == .imported)
+
+        // A changed stored original no longer verifies.
+        try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: stored.path)
+        try Data("tampered".utf8).write(to: stored)
+        let tampered = try await client.call("/api/v1/assets/\(asset)/verify", .post, token: token)
+            .decode(ServerAPI.Verification.self)
+        #expect(!tampered.allVerified)
+    }
+}
+
+@Test(.enabled(if: ffmpegAvailable)) func livePhotoAndVideoCompactCopies() async throws {
+    let fixture = try Fixture()
+    let media = try Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let still = try descriptor(.photo, media.photo), motion = try descriptor(.pairedVideo, media.motion)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .livePhoto, captureDate: nil, resources: [still, motion]))
+        _ = try await fixture.upload(client, token: token, asset: still.sha256, role: .photo, file: media.photo)
+        try await fixture.server.drainJobs()
+        #expect(try await client.call("/api/v1/assets/\(still.sha256)", token: token)
+            .decode(ServerAPI.AssetStatus.self).state == .receiving)
+        _ = try await fixture.upload(client, token: token, asset: still.sha256, role: .pairedVideo, file: media.motion)
+        try await fixture.server.drainJobs()
+        let live = try await client.call("/api/v1/assets/\(still.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(live.state == .ready && live.compact.map(\.role) == [.photo] && live.deviceCompresses == [.pairedVideo])
+        #expect(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("data/originals/undated/IMG_0001.MOV").path))
+
+        let movie = try descriptor(.video, media.movie)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [movie]))
+        _ = try await fixture.upload(client, token: token, asset: movie.sha256, role: .video, file: media.movie)
+        try await fixture.server.drainJobs()
+        let video = try await client.call("/api/v1/assets/\(movie.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(video.state == .ready, "\(video.message ?? "")")
+        #expect(video.compact.first?.filename == "IMG_0002.mp4")
+        #expect((video.compact.first?.size ?? .max) < movie.size)
+    }
+}
+
+@Test(.enabled(if: ffmpegAvailable)) func uploadsAreCheckedAndPathsAreSafe() async throws {
+    let fixture = try Fixture()
+    let media = try Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let photo = try descriptor(.photo, media.photo, name: "../../etc/.passwd")
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [photo]))
+        let path = "/api/v1/assets/\(photo.sha256)/resources/photo"
+        var corrupt = try Data(contentsOf: media.photo)
+        corrupt[corrupt.count / 2] ^= 0xFF
+        let mismatch = try await client.call(path + "?offset=0", .put, token: token, body: corrupt)
+        #expect(mismatch.status == .unprocessableContent)
+        let status = try await client.call("/api/v1/assets/\(photo.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(status.resources.first?.state == .mismatch && status.resources.first?.receivedBytes == 0)
+
+        let tooMuch = try await client.call(path + "?offset=0", .put, token: token,
+                                            body: try Data(contentsOf: media.photo) + Data([0]))
+        #expect(tooMuch.status == .contentTooLarge)
+        #expect(try await client.call(path + "?offset=0", .put, token: token, body: try Data(contentsOf: media.photo)).status == .ok)
+        let stored = fixture.directory.appendingPathComponent("data/originals/undated/passwd")
+        #expect(FileManager.default.fileExists(atPath: stored.path))
+
+        let empty = ServerAPI.ResourceDescriptor(role: .photo, filename: "a.jpg", size: 0, sha256: String(repeating: "a", count: 64))
+        #expect(try await client.call("/api/v1/assets", .post, token: token,
+                                      json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [empty])).status
+                == .unprocessableContent)
+        #expect(try await client.call("/api/v1/assets/\(photo.sha256)/compact/photo", token: token).status == .notFound)
+        #expect(try await client.call("/api/v1/assets/nothex/compact/photo", token: token).status == .badRequest)
+    }
+}
+
+// MARK: Immich mode
+
+/// A fake Immich server holding some originals, for the endpoints Homespun uses.
+final class FakeImmich: @unchecked Sendable {
+    struct Stored { var id: String; var data: Data; var trashed = false; var livePhotoVideoId: String? }
+    let lock = NSLock()
+    var assets: [String: Stored] = [:]
+    let key = "immich-test-key"
+
+    @discardableResult
+    func add(_ data: Data, motion: String? = nil) -> String {
+        let id = UUID().uuidString.lowercased()
+        lock.withLock { assets[id] = Stored(id: id, data: data, livePhotoVideoId: motion) }
+        return id
+    }
+
+    func json(_ stored: Stored) -> [String: Any] {
+        var value: [String: Any] = ["id": stored.id, "checksum": Data(Fingerprint.sha1Bytes(stored.data)).base64EncodedString(),
+                                    "isTrashed": stored.trashed, "type": "IMAGE", "originalFileName": "x"]
+        if let motion = stored.livePhotoVideoId { value["livePhotoVideoId"] = motion }
+        return value
+    }
+
+    func router() -> Router<BasicRequestContext> {
+        let router = Router()
+        let authorized: @Sendable (Request) throws -> Void = { request in
+            guard request.headers[HTTPField.Name("x-api-key")!] == self.key else { throw HTTPError(.unauthorized) }
+        }
+        router.post("api/search/metadata") { request, _ in
+            try authorized(request)
+            let body = try JSONSerialization.jsonObject(with: Data(try await request.body.collect(upTo: 1 << 20).readableBytesView)) as! [String: Any]
+            let checksum = body["checksum"] as? String
+            let archive = body["visibility"] as? String == "archive"
+            let items = archive ? [] : self.lock.withLock { self.assets.values.filter { !$0.trashed && Data(Fingerprint.sha1Bytes($0.data)).base64EncodedString() == checksum } }
+            let data = try JSONSerialization.data(withJSONObject: ["assets": ["items": items.map(self.json)], "albums": ["items": []]])
+            return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(bytes: data)))
+        }
+        router.get("api/assets/:id") { request, context in
+            try authorized(request)
+            guard let stored = self.lock.withLock({ self.assets[context.parameters.get("id") ?? ""] }) else { throw HTTPError(.badRequest) }
+            return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(bytes: try JSONSerialization.data(withJSONObject: self.json(stored)))))
+        }
+        router.get("api/assets/:id/original") { request, context in
+            try authorized(request)
+            guard let stored = self.lock.withLock({ self.assets[context.parameters.get("id") ?? ""] }) else { throw HTTPError(.notFound) }
+            return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(bytes: stored.data)))
+        }
+        return router
+    }
+}
+
+extension Fingerprint {
+    static func sha1Bytes(_ data: Data) -> [UInt8] {
+        let hex = sha1(of: data)
+        return stride(from: 0, to: hex.count, by: 2).map {
+            UInt8(hex[hex.index(hex.startIndex, offsetBy: $0)..<hex.index(hex.startIndex, offsetBy: $0 + 2)], radix: 16)!
+        }
+    }
+}
+
+@Test(.enabled(if: ffmpegAvailable)) func immichModeFindsVerifiesAndRechecksOriginals() async throws {
+    let immich = FakeImmich()
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let media = try Media.make(in: directory)
+    try await Application(router: immich.router(), configuration: .init(address: .hostname("localhost", port: 0)))
+        .test(.live) { immichClient in
+            let url = URL(string: "http://localhost:\(immichClient.port!)")!
+            let fixture = try Fixture(immich: ImmichConfiguration(url: url, apiKey: immich.key))
+            try await fixture.test { client, token in
+                let still = try descriptor(.photo, media.photo), motion = try descriptor(.pairedVideo, media.motion)
+                let register = ServerAPI.RegisterAssetRequest(kind: .livePhoto, captureDate: nil, resources: [still, motion])
+                let asset = still.sha256
+                // Not backed up to Immich yet.
+                _ = try await client.call("/api/v1/assets", .post, token: token, json: register)
+                try await fixture.server.drainJobs()
+                var status = try await client.call("/api/v1/assets/\(asset)", token: token).decode(ServerAPI.AssetStatus.self)
+                #expect(status.state == .waitingForImmich && status.resources.allSatisfy { $0.state == .notInImmich })
+                #expect(try await client.call("/api/v1/assets/\(asset)/resources/photo?offset=0", .put, token: token,
+                                              body: Data([1])).status == .conflict)
+
+                // The Immich app backs it up; registering again finds and verifies it.
+                let motionID = immich.add(try Data(contentsOf: media.motion))
+                let stillID = immich.add(try Data(contentsOf: media.photo), motion: motionID)
+                _ = try await client.call("/api/v1/assets", .post, token: token, json: register)
+                try await fixture.server.drainJobs()
+                status = try await client.call("/api/v1/assets/\(asset)", token: token).decode(ServerAPI.AssetStatus.self)
+                #expect(status.state == .ready, "\(status.message ?? "")")
+                #expect(status.resources.allSatisfy { $0.state == .verified } && status.deviceCompresses == [.pairedVideo])
+                #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/cache").path).isEmpty)
+                #expect(try FileManager.default.subpathsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/originals").path).isEmpty)
+
+                var verification = try await client.call("/api/v1/assets/\(asset)/verify", .post, token: token)
+                    .decode(ServerAPI.Verification.self)
+                #expect(verification.allVerified)
+                immich.lock.withLock { immich.assets[motionID]?.trashed = true }
+                verification = try await client.call("/api/v1/assets/\(asset)/verify", .post, token: token)
+                    .decode(ServerAPI.Verification.self)
+                #expect(!verification.allVerified && verification.resources.first { $0.role == .pairedVideo }?.detail == "in the Immich trash")
+                _ = stillID
+
+                // An Immich copy whose bytes differ from the phone's is never trusted.
+                let movie = try descriptor(.video, media.movie)
+                var wrong = try Data(contentsOf: media.movie)
+                immich.add(wrong)
+                wrong[0] ^= 1
+                let lying = ServerAPI.ResourceDescriptor(role: .video, filename: "m.mp4", size: movie.size,
+                                                         sha256: movie.sha256, sha1: Fingerprint.sha1(of: try Data(contentsOf: media.movie)))
+                _ = try await client.call("/api/v1/assets", .post, token: token,
+                                          json: ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [
+                                            .init(role: .video, filename: "m.mp4", size: wrong.count,
+                                                  sha256: Fingerprint.sha256(of: wrong), sha1: lying.sha1)]))
+                try await fixture.server.drainJobs()
+                let failed = try await client.call("/api/v1/assets/\(Fingerprint.sha256(of: wrong))", token: token)
+                    .decode(ServerAPI.AssetStatus.self)
+                #expect(failed.state == .failed && failed.resources.first?.state == .mismatch)
+            }
+        }
+}

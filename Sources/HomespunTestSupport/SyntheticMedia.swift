@@ -213,58 +213,108 @@ public enum Synthetic {
 
         guard writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
         writer.startSession(atSourceTime: .zero)
-        let background = texture(width: spec.width + spec.frames * 4, height: spec.height)
+        let feeder = Feeder(spec: spec, writer: writer, videoInput: videoInput, adaptor: adaptor, audioInput: audioInput,
+                            audioFormat: audioFormat, sampleRate: sampleRate, metadataAdaptor: metadataAdaptor,
+                            background: texture(width: spec.width + spec.frames * 4, height: spec.height))
+        // Each track is fed on its own: AVAssetWriter holds back one track until the others
+        // catch up, so feeding them from a single loop can deadlock.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await feeder.video() }
+            if audioInput != nil { group.addTask { try await feeder.audio() } }
+            if metadataAdaptor != nil { group.addTask { try await feeder.metadata() } }
+            try await group.waitForAll()
+        }
+        await writer.finishWriting()
+        guard writer.status == .completed else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
+    }
+
+    private final class Feeder: @unchecked Sendable {
+        let spec: VideoSpec
+        let writer: AVAssetWriter
+        let videoInput: AVAssetWriterInput
+        let adaptor: AVAssetWriterInputPixelBufferAdaptor
+        let audioInput: AVAssetWriterInput?
+        let audioFormat: CMAudioFormatDescription?
+        let sampleRate: Int
+        let metadataAdaptor: AVAssetWriterInputMetadataAdaptor?
+        let background: CGImage
+
+        init(spec: VideoSpec, writer: AVAssetWriter, videoInput: AVAssetWriterInput,
+             adaptor: AVAssetWriterInputPixelBufferAdaptor, audioInput: AVAssetWriterInput?,
+             audioFormat: CMAudioFormatDescription?, sampleRate: Int,
+             metadataAdaptor: AVAssetWriterInputMetadataAdaptor?, background: CGImage) {
+            self.spec = spec
+            self.writer = writer
+            self.videoInput = videoInput
+            self.adaptor = adaptor
+            self.audioInput = audioInput
+            self.audioFormat = audioFormat
+            self.sampleRate = sampleRate
+            self.metadataAdaptor = metadataAdaptor
+            self.background = background
+        }
+
         func ready(_ input: AVAssetWriterInput) async throws {
-            var waits = 0
+            let deadline = Date().addingTimeInterval(120)
             while !input.isReadyForMoreMediaData {
                 if writer.status == .failed { throw writer.error! }
-                waits += 1
-                guard waits < 20_000 else { throw CocoaError(.fileWriteUnknown) }
-                try await Task.sleep(nanoseconds: 500_000)
+                guard Date() < deadline else { throw CocoaError(.fileWriteUnknown) }
+                try await Task.sleep(nanoseconds: 1_000_000)
             }
         }
-        var audioFrame = 0
-        for frame in 0..<spec.frames {
-            let time = CMTime(value: CMTimeValue(frame), timescale: spec.fps)
-            var buffer: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &buffer)
-            let pixels = buffer!
-            CVPixelBufferLockBaseAddress(pixels, [])
-            let context = CGContext(data: CVPixelBufferGetBaseAddress(pixels), width: spec.width, height: spec.height,
-                                    bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pixels),
-                                    space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                    bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
-                                        | CGBitmapInfo.byteOrder32Little.rawValue)!
-            context.draw(background, in: CGRect(x: -frame * 4, y: 0, width: background.width, height: background.height))
-            CVPixelBufferUnlockBaseAddress(pixels, [])
-            if let transfer = spec.transfer {
-                // Tagging the frames avoids a colour conversion VideoToolbox rejects for HLG.
-                CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey,
-                                      kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
-                CVBufferSetAttachment(pixels, kCVImageBufferTransferFunctionKey, transfer as CFString, .shouldPropagate)
-                CVBufferSetAttachment(pixels, kCVImageBufferYCbCrMatrixKey,
-                                      kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
-            }
-            try await ready(videoInput)
-            guard adaptor.append(pixels, withPresentationTime: time) else { throw writer.error! }
 
-            if let metadataAdaptor, frame == spec.frames / 2 {
-                let item = AVMutableMetadataItem()
-                item.identifier = AVMetadataIdentifier(rawValue: "mdta/com.apple.quicktime.still-image-time")
-                item.dataType = "com.apple.metadata.datatype.int8"
-                item.value = 0 as NSNumber
-                try await ready(metadataAdaptor.assetWriterInput)
-                metadataAdaptor.append(AVTimedMetadataGroup(
-                    items: [item], timeRange: CMTimeRange(start: time, duration: CMTime(value: 1, timescale: spec.fps))))
-            }
+        func time(_ frame: Int) -> CMTime { CMTime(value: CMTimeValue(frame), timescale: spec.fps) }
 
-            if let audioInput, let audioFormat {
-                let end = (frame + 1) * sampleRate / Int(spec.fps)
-                let count = end - audioFrame
-                let channels = Int(spec.audioChannels)
+        func video() async throws {
+            for frame in 0..<spec.frames {
+                var buffer: CVPixelBuffer?
+                CVPixelBufferPoolCreatePixelBuffer(nil, adaptor.pixelBufferPool!, &buffer)
+                let pixels = buffer!
+                CVPixelBufferLockBaseAddress(pixels, [])
+                let context = CGContext(data: CVPixelBufferGetBaseAddress(pixels), width: spec.width, height: spec.height,
+                                        bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pixels),
+                                        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                        bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+                                            | CGBitmapInfo.byteOrder32Little.rawValue)!
+                context.draw(background, in: CGRect(x: -frame * 4, y: 0, width: background.width, height: background.height))
+                CVPixelBufferUnlockBaseAddress(pixels, [])
+                if let transfer = spec.transfer {
+                    // Tagging the frames avoids a colour conversion VideoToolbox rejects for HLG.
+                    CVBufferSetAttachment(pixels, kCVImageBufferColorPrimariesKey,
+                                          kCVImageBufferColorPrimaries_ITU_R_2020, .shouldPropagate)
+                    CVBufferSetAttachment(pixels, kCVImageBufferTransferFunctionKey, transfer as CFString, .shouldPropagate)
+                    CVBufferSetAttachment(pixels, kCVImageBufferYCbCrMatrixKey,
+                                          kCVImageBufferYCbCrMatrix_ITU_R_2020, .shouldPropagate)
+                }
+                try await ready(videoInput)
+                guard adaptor.append(pixels, withPresentationTime: time(frame)) else { throw writer.error! }
+            }
+            videoInput.markAsFinished()
+        }
+
+        func metadata() async throws {
+            guard let metadataAdaptor else { return }
+            let item = AVMutableMetadataItem()
+            item.identifier = AVMetadataIdentifier(rawValue: "mdta/com.apple.quicktime.still-image-time")
+            item.dataType = "com.apple.metadata.datatype.int8"
+            item.value = 0 as NSNumber
+            try await ready(metadataAdaptor.assetWriterInput)
+            let start = time(spec.frames / 2)
+            metadataAdaptor.append(AVTimedMetadataGroup(
+                items: [item], timeRange: CMTimeRange(start: start, duration: CMTime(value: 1, timescale: spec.fps))))
+            metadataAdaptor.assetWriterInput.markAsFinished()
+        }
+
+        func audio() async throws {
+            guard let audioInput, let audioFormat else { return }
+            let channels = Int(spec.audioChannels)
+            let total = spec.frames * sampleRate / Int(spec.fps)
+            var start = 0
+            while start < total {
+                let count = min(1024, total - start)
                 var samples = [Int16](repeating: 0, count: count * channels)
                 for index in 0..<count {
-                    let value = Int16(8000 * sin(2 * Double.pi * 440 * Double(audioFrame + index) / Double(sampleRate)))
+                    let value = Int16(8000 * sin(2 * Double.pi * 440 * Double(start + index) / Double(sampleRate)))
                     for channel in 0..<channels { samples[index * channels + channel] = value }
                 }
                 var block: CMBlockBuffer?
@@ -277,19 +327,15 @@ public enum Synthetic {
                 var sample: CMSampleBuffer?
                 CMAudioSampleBufferCreateReadyWithPacketDescriptions(
                     allocator: kCFAllocatorDefault, dataBuffer: block!, formatDescription: audioFormat,
-                    sampleCount: count, presentationTimeStamp: CMTime(value: CMTimeValue(audioFrame),
+                    sampleCount: count, presentationTimeStamp: CMTime(value: CMTimeValue(start),
                                                                       timescale: CMTimeScale(sampleRate)),
                     packetDescriptions: nil, sampleBufferOut: &sample)
                 try await ready(audioInput)
                 guard audioInput.append(sample!) else { throw writer.error! }
-                audioFrame = end
+                start += count
             }
+            audioInput.markAsFinished()
         }
-        videoInput.markAsFinished()
-        audioInput?.markAsFinished()
-        metadataAdaptor?.assetWriterInput.markAsFinished()
-        await writer.finishWriting()
-        guard writer.status == .completed else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
     }
 }
 #endif

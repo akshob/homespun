@@ -49,4 +49,36 @@ func compressesSyntheticVideoEndToEnd() throws {
     #expect(probe.width == 1280 && probe.height == 720 && probe.audioStreams.count == 1)
     #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted() == ["in.mp4", "out.mp4"])
 }
+
+@Test(.enabled(if: ProcessRunner.available("ffmpeg")), arguments: [
+    ("pq", "smpte2084", 30, ["hdr"]),
+    ("fps120", "bt709", 120, ["high_frame_rate"]),
+    ("hlg", "arib-std-b67", 30, []),
+])
+func ffmpegHoldsUnvalidatedVideoAndKeepsHLG(name: String, transfer: String, fps: Int, held: [String]) throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("\(name).mp4")
+    let tenBit = transfer != "bt709"
+    let primaries = tenBit ? "bt2020" : "bt709", matrix = tenBit ? "bt2020nc" : "bt709"
+    // FFmpeg 8+ takes colour tags from the frames, so set them with a filter as well.
+    try ProcessRunner.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=\(fps):duration=1",
+                           "-vf", "setparams=color_trc=\(transfer):color_primaries=\(primaries):colorspace=\(matrix)",
+                           "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error", "-crf", "12",
+                           "-pix_fmt", tenBit ? "yuv420p10le" : "yuv420p",
+                           "-color_trc", transfer, "-color_primaries", tenBit ? "bt2020" : "bt709",
+                           "-colorspace", tenBit ? "bt2020nc" : "bt709", "-tag:v", "hvc1", input.path])
+    let output = directory.appendingPathComponent("out.mp4")
+    let result = try FFmpegVideoCompressor().compress(input: input, output: output)
+    #expect(result.heldReasons == held)
+    if held.isEmpty {
+        #expect(result.mode == .transcoded)
+        let probe = try VideoProbe.read(output)
+        #expect(probe.isHLG && probe.width == 1280 && probe.height == 720)
+    } else {
+        #expect(result.mode == .originalKeptHeld)
+        #expect(try Data(contentsOf: output) == Data(contentsOf: input))
+    }
+}
 #endif

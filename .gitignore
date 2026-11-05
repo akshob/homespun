@@ -6,3 +6,4 @@ Apps/Homespun/*.xcodeproj/
 .copilot/
 Apps/Homespun/Local.xcconfig
 .wrangler/
+Apps/Homespun/Homespun/Info.plist

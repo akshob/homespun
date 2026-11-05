@@ -15,6 +15,11 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.20.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.60.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.0.0"),
+        .package(url: "https://github.com/apple/swift-http-types.git", from: "1.0.0"),
     ],
     targets: [
         .target(name: "HomespunCore", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
@@ -28,11 +33,27 @@ let package = Package(
             .target(name: "CLibVips", condition: .when(platforms: [.linux])),
         ]),
         .target(name: "HomespunTestSupport"),
-        .executableTarget(
-            name: "HomespunServer",
-            dependencies: ["HomespunCore", "HomespunMedia", .product(name: "Hummingbird", package: "hummingbird")],
+        // System SQLite for the server catalog (Linux: apt install libsqlite3-dev).
+        .systemLibrary(name: "CSQLite", providers: [.apt(["libsqlite3-dev"])]),
+        .target(
+            name: "HomespunServerKit",
+            dependencies: [
+                "HomespunCore", "HomespunMedia", "CSQLite",
+                .product(name: "Hummingbird", package: "hummingbird"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+            ],
             exclude: ["LICENSE"]),
+        .executableTarget(name: "HomespunServer", dependencies: ["HomespunServerKit"], exclude: ["LICENSE"]),
         .testTarget(name: "HomespunCoreTests", dependencies: ["HomespunCore"]),
+        .testTarget(name: "HomespunServerTests", dependencies: [
+            "HomespunServerKit",
+            .product(name: "HummingbirdTesting", package: "hummingbird"),
+        ]),
         .testTarget(name: "HomespunMediaTests", dependencies: ["HomespunMedia", "HomespunTestSupport"],
                     resources: [.copy("Fixtures")]),
     ]

@@ -27,17 +27,43 @@ import Testing
     try Data("abc".utf8).write(to: url)
     defer { try? FileManager.default.removeItem(at: url) }
     #expect(try Fingerprint.sha256(of: url, chunkSize: 1) == Fingerprint.sha256(of: Data("abc".utf8)))
+    let digests = try Fingerprint.digests(of: url, chunkSize: 2)
+    #expect(digests.sha1 == "a9993e364706816aba3e25717850c26c9cd0d89d" && digests.size == 3)
+    #expect(digests.sha256 == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
 }
 
-@Test func manifestUsesSnakeCaseAndRoundTrips() throws {
-    let manifest = DownloadManifest(
-        assetID: "abc", captureDate: Date(timeIntervalSince1970: 1_700_000_000),
-        resources: [.init(role: .pairedVideo, downloadURL: URL(string: "https://h/x.mov")!,
-                          sha256: "def", size: 10)])
-    let data = try DownloadManifest.encoder.encode(manifest)
+@Test func serverAPIUsesSnakeCaseAndRoundTrips() throws {
+    let status = ServerAPI.AssetStatus(
+        assetID: "abc", kind: .livePhoto, state: .ready, message: nil,
+        resources: [.init(role: .pairedVideo, sha256: "def", size: 10, state: .verified, receivedBytes: 10,
+                          verifiedAt: Date(timeIntervalSince1970: 1_700_000_000))],
+        compact: [.init(role: .photo, filename: "IMG_1.jpg", size: 5, sha256: "123")],
+        deviceCompresses: [.pairedVideo])
+    let data = try ServerAPI.encoder.encode(status)
     let text = String(decoding: data, as: UTF8.self)
-    #expect(text.contains("\"asset_id\"") && text.contains("\"download_url\"") && text.contains("\"paired_video\""))
-    #expect(try DownloadManifest.decoder.decode(DownloadManifest.self, from: data) == manifest)
+    for key in ["\"asset_id\"", "\"live_photo\"", "\"paired_video\"", "\"received_bytes\"", "\"device_compresses\"",
+                "\"verified_at\":\"2023-11-14T22:13:20Z\""] {
+        #expect(text.contains(key), "\(key) in \(text)")
+    }
+    #expect(try ServerAPI.decoder.decode(ServerAPI.AssetStatus.self, from: data) == status)
+    let pair = try ServerAPI.encoder.encode(ServerAPI.PairResponse(
+        deviceID: "d", token: "t", server: .init(name: "n", version: "v", mode: .immich, profile: .standard)))
+    #expect(String(decoding: pair, as: UTF8.self).contains("\"device_id\":\"d\""))
+    let request = ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [
+        .init(role: .fullSizeVideo, filename: "a", size: 1, sha256: "AA"), .init(role: .video, filename: "b", size: 1, sha256: "BB")])
+    #expect(request.assetID == "bb")
+}
+
+@Test func multiResourceGateNeedsEveryResourceVerified() {
+    let gate = DeletionGate()
+    let photo = DeletionGate.Resource(role: "photo", sha256: "aa", size: 5)
+    let motion = DeletionGate.Resource(role: "paired_video", sha256: "bb", size: 9)
+    #expect(gate.evaluate(deviceResources: [photo, motion], serverVerified: [motion, photo], compactImported: true) == .allowed)
+    #expect(gate.evaluate(deviceResources: [photo, motion], serverVerified: [photo], compactImported: true)
+            == .blocked("paired_video: server has no verified copy"))
+    #expect(gate.evaluate(deviceResources: [photo], serverVerified: [photo], compactImported: false)
+            == .blocked("photo: compact copy not imported yet"))
+    #expect(gate.evaluate(deviceResources: [], serverVerified: [photo], compactImported: true) != .allowed)
 }
 
 @Test func deletionGateRequiresMatchingServerCopyAndImport() {
