@@ -13,11 +13,14 @@ final class ServerModeUITests: XCTestCase {
             throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
         }
         let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES"]
         app.launch()
 
-        app.buttons["settings"].tap()
-        let addressField = app.textFields["server.address"]
-        if addressField.waitForExistence(timeout: 5) {
+        let connect = app.buttons["connect.open"]
+        if connect.waitForExistence(timeout: 5) {
+            connect.tap()
+            let addressField = app.textFields["server.address"]
+            XCTAssertTrue(addressField.waitForExistence(timeout: 10))
             addressField.tap()
             addressField.typeText(address)
             let codeField = app.textFields["server.code"]
@@ -25,12 +28,11 @@ final class ServerModeUITests: XCTestCase {
             codeField.typeText(code)
             app.buttons["server.pair"].tap()
         }
-        let unpair = app.buttons["Unpair"]
-        if !unpair.waitForExistence(timeout: 20) {
+        if !app.buttons["server.card"].waitForExistence(timeout: 20) {
             XCTFail("pairing failed: \(app.staticTexts["server.error"].label)")
         }
-        attach(app, "Settings")
-        app.buttons["Done"].tap()
+        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 15), "server not reachable")
+        attach(app, "Paired")
 
         app.buttons["Choose photos and videos"].tap()
         let grid = app.images.matching(identifier: "PXGGridLayout-Info")
@@ -53,7 +55,15 @@ final class ServerModeUITests: XCTestCase {
         guard environment["HOMESPUN_REMOVE"] == "1" else { return }
         let remove = app.buttons["remove.originals"]
         XCTAssertTrue(remove.waitForExistence(timeout: 20), "no originals offered for removal")
+        for _ in 0..<4 where !remove.isHittable { app.swipeUp() }
+        attach(app, "Before removal")
         remove.tap()
+        // The first time, Homespun explains what removal does.
+        let proceed = app.buttons["removal.continue"]
+        if proceed.waitForExistence(timeout: 5) {
+            attach(app, "Explanation")
+            proceed.tap()
+        }
         // iOS asks for confirmation; the alert may belong to the app or to SpringBoard.
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let confirmation = [app.alerts.buttons["Delete"], springboard.alerts.buttons["Delete"]]
@@ -66,6 +76,10 @@ final class ServerModeUITests: XCTestCase {
         XCTAssertTrue(summary.waitForExistence(timeout: 60))
         attach(app, "Removed")
         XCTAssertTrue(summary.label.contains("Removed"), summary.label)
+        let looksRight = app.buttons["trial.confirm"]
+        XCTAssertTrue(looksRight.waitForExistence(timeout: 5), "trial check not offered")
+        looksRight.tap()
+        XCTAssertFalse(looksRight.waitForExistence(timeout: 2))
     }
 
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {

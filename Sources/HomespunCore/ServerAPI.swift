@@ -67,14 +67,17 @@ public enum ServerAPI {
         public var apiVersion: Int
         public var mode: StorageMode
         public var profile: CompressionProfile
+        /// Missing from servers older than the setup check.
+        public var platform: ServerSetup.Platform?
 
         public init(name: String, version: String, apiVersion: Int = ServerAPI.version, mode: StorageMode,
-                    profile: CompressionProfile) {
+                    profile: CompressionProfile, platform: ServerSetup.Platform? = nil) {
             self.name = name
             self.version = version
             self.apiVersion = apiVersion
             self.mode = mode
             self.profile = profile
+            self.platform = platform
         }
     }
 
@@ -254,6 +257,33 @@ public enum ServerAPI {
 
         enum CodingKeys: String, CodingKey {
             case assetID = "assetId", checkedAt, resources
+        }
+    }
+
+    /// `GET`/`PUT`/`DELETE /api/v1/settings/immich`. The API key itself is never sent back.
+    public struct ImmichSettings: Codable, Equatable, Sendable {
+        public var url: String?
+        /// The key's last four characters.
+        public var keyHint: String?
+        public var permissions: [String]
+        public var connected: Bool
+        public var message: String?
+
+        public init(url: String?, keyHint: String?, permissions: [String], connected: Bool, message: String?) {
+            self.url = url
+            self.keyHint = keyHint
+            self.permissions = permissions
+            self.connected = connected
+            self.message = message
+        }
+    }
+
+    public struct ImmichSettingsRequest: Codable, Equatable, Sendable {
+        public var url: String
+        public var apiKey: String
+        public init(url: String, apiKey: String) {
+            self.url = url
+            self.apiKey = apiKey
         }
     }
 

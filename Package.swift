@@ -20,6 +20,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
         .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-http-types.git", from: "1.0.0"),
+        .package(url: "https://github.com/fwcd/swift-qrcode-generator.git", from: "2.0.0"),
     ],
     targets: [
         .target(name: "HomespunCore", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
@@ -46,12 +47,14 @@ let package = Package(
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "HTTPTypes", package: "swift-http-types"),
+                .product(name: "QRCodeGenerator", package: "swift-qrcode-generator"),
             ],
             exclude: ["LICENSE"]),
         .executableTarget(name: "HomespunServer", dependencies: ["HomespunServerKit"], exclude: ["LICENSE"]),
         .testTarget(name: "HomespunCoreTests", dependencies: ["HomespunCore"]),
         .testTarget(name: "HomespunServerTests", dependencies: [
             "HomespunServerKit",
+            "HomespunTestSupport",
             .product(name: "HummingbirdTesting", package: "hummingbird"),
         ]),
         .testTarget(name: "HomespunMediaTests", dependencies: ["HomespunMedia", "HomespunTestSupport"],

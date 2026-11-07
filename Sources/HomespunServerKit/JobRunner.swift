@@ -14,17 +14,17 @@ public final class JobRunner: Service, Sendable {
     let catalog: Catalog
     let storage: Storage
     let compactor: Compactor
-    let immichClient: ImmichClient?
+    let immichState: ImmichState
     let logger: Logger
     let owner = UUID().uuidString
     let pollInterval: Duration
 
-    init(catalog: Catalog, storage: Storage, compactor: Compactor, immich: ImmichClient?, logger: Logger,
+    init(catalog: Catalog, storage: Storage, compactor: Compactor, immichState: ImmichState, logger: Logger,
          pollInterval: Duration = .seconds(1)) {
         self.catalog = catalog
         self.storage = storage
         self.compactor = compactor
-        immichClient = immich
+        self.immichState = immichState
         self.logger = logger
         self.pollInterval = pollInterval
     }
@@ -80,7 +80,10 @@ public final class JobRunner: Service, Sendable {
     }
 
     private func processFromImmich(_ assetID: String) async throws {
-        guard let immich = immichClient, let asset = try await catalog.asset(assetID) else { return }
+        guard let asset = try await catalog.asset(assetID) else { return }
+        guard let immich = await immichState.client else {
+            throw Compactor.Unprocessable(description: "Immich is not connected to this server any more.")
+        }
         let resources = try await catalog.resources(assetID)
         try await catalog.setState(assetID, .verifying)
 

@@ -13,24 +13,13 @@ struct ServerClient: Sendable {
     let baseURL: URL
     var token: String?
     var session: URLSession = .shared
+    var timeout: TimeInterval = 60
     static let chunkSize = 8 << 20
-
-    /// Accepts "host", "host:port", or a full URL; defaults to http and port 8787.
-    static func normalizedURL(_ text: String) -> URL? {
-        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !value.contains("://") { value = "http://" + value }
-        guard var components = URLComponents(string: value), let host = components.host, !host.isEmpty,
-              ["http", "https"].contains(components.scheme ?? "") else { return nil }
-        if components.port == nil, components.scheme == "http" { components.port = 8787 }
-        components.path = ""
-        components.query = nil
-        return components.url
-    }
 
     private func request(_ path: String, method: String = "GET") -> URLRequest {
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/" + path))
         request.httpMethod = method
-        request.timeoutInterval = 60
+        request.timeoutInterval = timeout
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         return request
     }
@@ -62,6 +51,21 @@ struct ServerClient: Sendable {
     }
 
     func info() async throws -> ServerAPI.ServerInfo { try await send("info", as: ServerAPI.ServerInfo.self) }
+
+    func setup() async throws -> ServerSetup.Report { try await send("setup", as: ServerSetup.Report.self) }
+
+    func immichSettings() async throws -> ServerAPI.ImmichSettings {
+        try await send("settings/immich", as: ServerAPI.ImmichSettings.self)
+    }
+
+    func connectImmich(url: String, apiKey: String) async throws -> ServerAPI.ImmichSettings {
+        try await send("settings/immich", method: "PUT", json: ServerAPI.ImmichSettingsRequest(url: url, apiKey: apiKey),
+                       as: ServerAPI.ImmichSettings.self)
+    }
+
+    func disconnectImmich() async throws -> ServerAPI.ImmichSettings {
+        try await send("settings/immich", method: "DELETE", as: ServerAPI.ImmichSettings.self)
+    }
 
     func register(_ body: ServerAPI.RegisterAssetRequest) async throws -> ServerAPI.AssetStatus {
         try await send("assets", method: "POST", json: body, as: ServerAPI.AssetStatus.self)

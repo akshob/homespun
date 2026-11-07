@@ -50,6 +50,29 @@ struct Compactor: Sendable {
             catch let error as PhotoCompressionError { throw Unprocessable(description: "photo: \(error)") }
             let record = CompactRecord(role: .photo, filename: result.url.lastPathComponent, size: result.size,
                                        sha256: result.sha256, path: result.url.path)
+            #if os(macOS)
+            if kind == .livePhoto {
+                // A Mac compresses the motion too (AVFoundation keeps the pairing), so the phone
+                // only downloads and imports.
+                guard let motionSource = sources[.fullSizePairedVideo] ?? sources[.pairedVideo] else {
+                    throw Unprocessable(description: "the Live Photo has no motion")
+                }
+                let motionOutput = directory.appendingPathComponent("\(stem).mov")
+                let motion: VideoCompressionResult
+                do { motion = try await LivePhotoMotionCompressor(profile: profile).compress(input: motionSource, output: motionOutput) }
+                catch let error as VideoCompressionError { throw Unprocessable(description: "motion: \(error)") }
+                guard result.mode == .compressed || motion.mode == .transcoded else {
+                    try? FileManager.default.removeItem(at: directory)
+                    return Outcome(files: [], deviceCompresses: [], state: .held, message: "Already compact")
+                }
+                if case .invalid(let reason) = await LivePhotoValidator.validate(photo: result.url, video: motionOutput) {
+                    throw Unprocessable(description: "the compact Live Photo did not validate (\(reason))")
+                }
+                return Outcome(files: [record, CompactRecord(role: .pairedVideo, filename: motionOutput.lastPathComponent,
+                                                             size: motion.size, sha256: motion.sha256, path: motionOutput.path)],
+                               deviceCompresses: [], state: .ready, message: nil)
+            }
+            #endif
             if kind == .livePhoto {
                 // The still pairs with motion the phone compresses, even if the still itself
                 // could not get smaller.
@@ -65,10 +88,20 @@ struct Compactor: Sendable {
             #if os(Linux) || os(macOS)
             let ext = source.pathExtension.lowercased() == "mov" ? "mov" : "mp4"
             let output = directory.appendingPathComponent("\(stem).\(ext)")
-            let compressor = FFmpegVideoCompressor(profile: profile)
             let result: VideoCompressionResult
-            do { result = try await detached { try compressor.compress(input: source, output: output) } }
-            catch let error as VideoCompressionError { throw Unprocessable(description: "video: \(error)") }
+            do {
+                if Tools.path("ffmpeg") != nil {
+                    let compressor = FFmpegVideoCompressor(profile: profile)
+                    result = try await detached { try compressor.compress(input: source, output: output) }
+                } else {
+                    #if os(macOS)
+                    // Without ffmpeg a Mac uses its own encoder; files are larger than x265's.
+                    result = try await AVFoundationVideoCompressor(profile: profile).compress(input: source, output: output)
+                    #else
+                    throw Unprocessable(description: "ffmpeg is not installed on the server")
+                    #endif
+                }
+            } catch let error as VideoCompressionError { throw Unprocessable(description: "video: \(error)") }
             switch result.mode {
             case .transcoded:
                 return Outcome(files: [CompactRecord(role: .video, filename: output.lastPathComponent, size: result.size,

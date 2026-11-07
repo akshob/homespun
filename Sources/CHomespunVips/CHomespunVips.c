@@ -111,6 +111,10 @@ int hs_vips_decode(const char *input, int *width, int *height, char **error) {
 
 void hs_vips_free(void *pointer) { free(pointer); }
 
+const char *hs_vips_version(void) {
+    return hs_vips_init(NULL) == 0 ? vips_version_string() : NULL;
+}
+
 #else
 // Built without libvips headers (for example on macOS, where ImageIO is used instead).
 static int unavailable(char **error) {
@@ -125,4 +129,5 @@ int hs_vips_metadata(const char *input, unsigned char **exif, size_t *exif_lengt
                      unsigned char **xmp, size_t *xmp_length, char **error) { return unavailable(error); }
 int hs_vips_decode(const char *input, int *width, int *height, char **error) { return unavailable(error); }
 void hs_vips_free(void *pointer) { free(pointer); }
+const char *hs_vips_version(void) { return NULL; }
 #endif

@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Set up a server · Homespun</title>
+  <meta name="description" content="Set up Homespun Server on a Mac or a Linux computer.">
+  <link rel="canonical" href="https://homespun.photos/setup">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <a class="name" href="/">Homespun</a>
+    <nav><a href="/setup" aria-current="page">Setup</a><a href="/privacy">Privacy</a><a href="/support">Support</a></nav>
+  </header>
+  <main>
+    <h1>Set up a server</h1>
+    <p class="lead">Homespun Server keeps your originals and makes the compact copies. It runs on any always-on Mac or
+      Linux computer with room for your photos and videos.</p>
+    <p class="status">For now you build it from source. Ready-made packages come once the code is public.</p>
+
+    <p>The Homespun app walks you through the same steps: on the first screen, choose
+      <strong>Don't have a server yet? Set one up</strong>. After the server is running, the app checks it and tells
+      you if anything still needs installing.</p>
+
+    <h2 id="mac">On a Mac</h2>
+    <p>A Mac that stays on, like a Mac mini, works well. A Mac also compresses Live Photos itself, so your iPhone
+      only downloads the finished copies.</p>
+    <ol class="steps">
+      <li><strong>Install Apple's developer tools</strong> (they include Swift and git; skip if Xcode is installed):
+        <pre><code>xcode-select --install</code></pre></li>
+      <li><strong>Install Homebrew and ffmpeg</strong> (ffmpeg makes the smallest videos):
+        <pre><code>/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install ffmpeg</code></pre></li>
+      <li><strong>Download and build Homespun Server:</strong>
+        <pre><code>git clone https://github.com/akshob/homespun.git ~/homespun
+cd ~/homespun &amp;&amp; swift build -c release --product homespun-server</code></pre></li>
+      <li><strong>Choose where originals are kept, and start the server.</strong> It starts again whenever you log in:
+        <pre><code>~/homespun/.build/release/homespun-server install-service --data ~/Homespun</code></pre></li>
+      <li><strong>Pair the app.</strong> This shows a QR code; scan it with your iPhone's camera:
+        <pre><code>~/homespun/.build/release/homespun-server pair</code></pre></li>
+    </ol>
+
+    <h2 id="linux">On Linux</h2>
+    <ol class="steps">
+      <li><strong>Install the packages Homespun needs</strong> (photo and video tools, SQLite, and Bonjour so the app can
+        find the server). On Ubuntu or Debian:
+        <pre><code>sudo apt install -y git libvips-dev libsqlite3-dev ffmpeg avahi-utils</code></pre>
+        Fedora: <code>sudo dnf install -y git vips-devel sqlite-devel ffmpeg avahi-tools</code> (enable RPM Fusion
+        first for an ffmpeg with x265). Arch: <code>sudo pacman -S --needed git libvips sqlite ffmpeg avahi</code>.</li>
+      <li><strong>Install Swift</strong> with its installer, swiftly:
+        <pre><code>curl -fsSLO https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz
+tar zxf swiftly-$(uname -m).tar.gz &amp;&amp; ./swiftly init --quiet-shell-followup
+. ~/.local/share/swiftly/env.sh</code></pre></li>
+      <li><strong>Download and build Homespun Server:</strong>
+        <pre><code>git clone https://github.com/akshob/homespun.git ~/homespun
+cd ~/homespun &amp;&amp; swift build -c release --product homespun-server</code></pre></li>
+      <li><strong>Choose where originals are kept, and start the server.</strong> It runs as a systemd user service and
+        starts with the computer:
+        <pre><code>~/homespun/.build/release/homespun-server install-service --data ~/Homespun</code></pre></li>
+      <li><strong>Pair the app.</strong> This shows a QR code; scan it with your iPhone's camera:
+        <pre><code>~/homespun/.build/release/homespun-server pair</code></pre></li>
+    </ol>
+
+    <h2 id="immich">Using Immich</h2>
+    <p>If you already back up to Immich, Homespun Server can use the originals there instead of storing its own. In
+      the app, open <strong>Settings › Connect Immich</strong> and enter Immich's address and an API key. Create the
+      key in Immich under <strong>Account Settings › API Keys</strong> with only the <code>asset.read</code> and
+      <code>asset.download</code> permissions. Homespun never changes or deletes anything in Immich.</p>
+    <p>In the Immich app, exclude the <strong>Homespun</strong> album from backup so compact copies are not uploaded.</p>
+
+    <h2 id="network">Your network</h2>
+    <p>For now the app reaches the server on your home network only. Keep the iPhone on the same Wi-Fi while
+      Homespun works.</p>
+  </main>
+  <footer>
+    <a href="/">Home</a><a href="/privacy">Privacy policy</a><a href="/support">Support</a>
+  </footer>
+</body>
+</html>

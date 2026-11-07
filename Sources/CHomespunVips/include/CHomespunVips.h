@@ -28,4 +28,7 @@ int hs_vips_decode(const char *input, int *width, int *height, char **error);
 
 void hs_vips_free(void *pointer);
 
+/// The libvips version, or NULL if libvips is unavailable.
+const char *hs_vips_version(void);
+
 #endif

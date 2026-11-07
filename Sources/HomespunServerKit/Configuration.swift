@@ -23,6 +23,8 @@ public struct ServerConfiguration: Sendable {
     public var profile: CompressionProfile
     /// When set, originals are read from Immich instead of being uploaded.
     public var immich: ImmichConfiguration?
+    /// The address the app should use (`HOMESPUN_PUBLIC_URL`), when the detected one is wrong.
+    public var publicURL: String?
     /// Largest body accepted by one upload request.
     public var maximumChunkBytes = 64 << 20
 
@@ -61,6 +63,10 @@ public struct ServerConfiguration: Sendable {
             configuration.port = number
         }
         configuration.name = environment["HOMESPUN_NAME"] ?? ProcessInfo.processInfo.hostName
+        if let publicURL = environment["HOMESPUN_PUBLIC_URL"], !publicURL.isEmpty {
+            guard PairingLink.serverURL(from: publicURL) != nil else { throw Failure.invalid("bad HOMESPUN_PUBLIC_URL") }
+            configuration.publicURL = publicURL
+        }
         if let url = environment["HOMESPUN_IMMICH_URL"] {
             guard let parsed = URL(string: url), ["http", "https"].contains(parsed.scheme ?? "") else {
                 throw Failure.invalid("HOMESPUN_IMMICH_URL must be an http(s) URL")

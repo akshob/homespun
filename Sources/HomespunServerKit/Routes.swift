@@ -45,12 +45,12 @@ struct Routes: Sendable {
     let configuration: ServerConfiguration
     let catalog: Catalog
     let storage: Storage
-    let immich: ImmichClient?
+    let immichState: ImmichState
     let locks = UploadLocks()
 
-    var info: ServerAPI.ServerInfo {
-        .init(name: configuration.name, version: ServerConfiguration.version, mode: configuration.mode,
-              profile: configuration.profile)
+    func info() async -> ServerAPI.ServerInfo {
+        .init(name: configuration.name, version: ServerConfiguration.version, mode: await immichState.mode,
+              profile: configuration.profile, platform: HostPlatform.current())
     }
 
     func add(to router: Router<HomespunRequestContext>) {
@@ -59,7 +59,16 @@ struct Routes: Sendable {
         api.post("pair") { request, context in try await pair(request, context) }
 
         let authenticated = api.group().add(middleware: DeviceAuthentication(catalog: catalog))
-        authenticated.get("info") { _, _ in try json(info) }
+        authenticated.get("info") { _, _ in try json(await info()) }
+        authenticated.get("setup") { _, _ in
+            try json(await SetupChecks(configuration: configuration, storage: storage, immichState: immichState).report())
+        }
+        authenticated.get("settings/immich") { _, _ in try json(await immichState.settings()) }
+        authenticated.put("settings/immich") { request, context in try await connectImmich(request, context) }
+        authenticated.delete("settings/immich") { _, _ in
+            try await immichState.clear()
+            return try json(await immichState.settings())
+        }
         authenticated.post("assets") { request, context in try await register(request, context) }
         authenticated.get("assets/:id") { _, context in try json(try await status(context)) }
         authenticated.put("assets/:id/resources/:role") { request, context in try await upload(request, context) }
@@ -80,16 +89,39 @@ struct Routes: Sendable {
         guard try await catalog.redeemPairingCode(hash: Pairing.hash(code), device: device, tokenHash: Pairing.hash(token)) else {
             throw HTTPError(.forbidden, message: "That code is wrong, used, or expired. Run `homespun-server pair` for a new one.")
         }
-        return try json(ServerAPI.PairResponse(deviceID: device.id, token: token, server: info), status: .created)
+        return try json(ServerAPI.PairResponse(deviceID: device.id, token: token, server: await info()), status: .created)
+    }
+
+    // MARK: Settings
+
+    /// Tests the Immich URL and key before saving them. The key is kept on the server only.
+    func connectImmich(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
+        let body = try await request.decode(as: ServerAPI.ImmichSettingsRequest.self, context: context)
+        let key = body.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: body.url.trimmingCharacters(in: .whitespacesAndNewlines)),
+              ["http", "https"].contains(url.scheme ?? ""), url.host != nil else {
+            throw HTTPError(.badRequest, message: "Enter Immich's address, for example http://192.168.1.20:2283.")
+        }
+        guard !key.isEmpty, key.count <= 200, !key.contains(where: \.isWhitespace) else {
+            throw HTTPError(.badRequest, message: "Paste the API key from Immich.")
+        }
+        let configuration = ImmichConfiguration(url: url, apiKey: key)
+        let permissions: [String]
+        do { permissions = try await ImmichState.test(configuration) } catch {
+            throw HTTPError(.unprocessableContent, message: "\(error)")
+        }
+        try await immichState.set(configuration)
+        return try json(ServerAPI.ImmichSettings(url: url.absoluteString, keyHint: String(key.suffix(4)), permissions: permissions,
+                                                 connected: true, message: ImmichState.permissionWarning(permissions)))
     }
 
     // MARK: Assets
 
     func register(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
         let body = try await request.decode(as: ServerAPI.RegisterAssetRequest.self, context: context)
-        try validate(body)
+        let mode = await immichState.mode
+        try validate(body, mode: mode)
         let assetID = body.assetID!
-        let mode = configuration.mode
         let outcome = try await catalog.register(body, assetID: assetID, device: context.deviceID ?? "",
                                                  initialState: mode == .files ? .receiving : .verifying)
         guard let asset = try await catalog.asset(assetID) else { throw HTTPError(.internalServerError) }
@@ -121,7 +153,7 @@ struct Routes: Sendable {
         return try json(try await catalog.status(assetID)!, status: outcome == .created ? .created : .ok)
     }
 
-    func validate(_ body: ServerAPI.RegisterAssetRequest) throws {
+    func validate(_ body: ServerAPI.RegisterAssetRequest, mode: ServerAPI.StorageMode) throws {
         let roles = body.resources.map(\.role)
         guard !roles.isEmpty, roles.count <= 16, Set(roles).count == roles.count else {
             throw HTTPError(.badRequest, message: "An asset needs 1 to 16 resources with distinct roles.")
@@ -139,7 +171,7 @@ struct Routes: Sendable {
                 throw HTTPError(.badRequest, message: "Bad filename.")
             }
             if let sha1 = resource.sha1, !Validation.isSHA1(sha1) { throw HTTPError(.badRequest, message: "Bad SHA-1.") }
-            if configuration.mode == .immich, resource.sha1 == nil {
+            if mode == .immich, resource.sha1 == nil {
                 throw HTTPError(.badRequest, message: "Immich mode needs the SHA-1 of every resource.")
             }
         }
@@ -168,7 +200,7 @@ struct Routes: Sendable {
     /// `PUT …/resources/{role}?offset=N` appends the body at byte N. A wrong offset gets 409 with
     /// the current status so the app can resume. The last chunk triggers SHA-256 verification.
     func upload(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
-        guard configuration.mode == .files else {
+        guard await immichState.mode == .files else {
             throw HTTPError(.conflict, message: "This server reads originals from Immich; nothing is uploaded.")
         }
         let assetID = try assetID(context), role = try role(context)
@@ -291,7 +323,7 @@ struct Routes: Sendable {
                 let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
                 verified = check?.0 == resource.sha256 && check?.1 == resource.size
                 detail = verified ? nil : "stored file is missing or changed"
-            } else if let immich, let id = resource.immichAssetID, let sha1 = resource.sha1 {
+            } else if let immich = await immichState.client, let id = resource.immichAssetID, let sha1 = resource.sha1 {
                 (verified, detail) = try await immich.stillHolds(id: id, sha1Hex: sha1)
             } else {
                 detail = "no copy on record"

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+#if os(Linux)
+import CHomespunVips
+#endif
 
 public enum PhotoCompressionError: Error, Equatable {
     case emptyInput
@@ -79,6 +82,17 @@ public protocol PhotoCompressor: Sendable {
 }
 
 public enum PlatformMedia {
+    /// The photo backend's name, or nil if none works here.
+    public static var photoBackend: String? {
+        #if canImport(ImageIO)
+        "Apple ImageIO"
+        #elseif os(Linux)
+        hs_vips_version().map { "libvips " + String(cString: $0) }
+        #else
+        nil
+        #endif
+    }
+
     /// The photo backend for this platform, or nil where none is available.
     public static func photoCompressor(profile: CompressionProfile) -> (any PhotoCompressor)? {
         #if canImport(ImageIO)

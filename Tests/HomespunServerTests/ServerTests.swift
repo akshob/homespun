@@ -6,6 +6,9 @@ import Hummingbird
 import HummingbirdTesting
 import NIOCore
 import Testing
+#if canImport(AVFoundation)
+import HomespunTestSupport
+#endif
 @testable import HomespunServerKit
 
 // MARK: Helpers
@@ -29,17 +32,27 @@ func run(_ arguments: [String]) throws {
 
 let ffmpegAvailable = (try? run(["ffmpeg", "-version"])) != nil
 
-/// Synthetic media made by ffmpeg: a detailed still, a short movie, and its "motion" twin.
+/// Synthetic media: a detailed still, a short movie, and its "motion" twin. On macOS the still
+/// and motion are a real Live Photo pair (shared content identifier), as the server checks it.
 struct Media {
     let photo: URL, motion: URL, movie: URL
 
-    static func make(in directory: URL) throws -> Media {
+    static func make(in directory: URL) async throws -> Media {
         let media = Media(photo: directory.appendingPathComponent("IMG_0001.JPG"),
                           motion: directory.appendingPathComponent("IMG_0001.MOV"),
                           movie: directory.appendingPathComponent("IMG_0002.MP4"))
+        #if canImport(AVFoundation)
+        let identifier = "5E4F1A2B-3C4D-4E5F-8A9B-0C1D2E3F4A5B"
+        try Synthetic.photo(at: media.photo, .init(width: 1600, height: 1200, contentIdentifier: identifier))
+        try await Synthetic.video(at: media.motion, .init(width: 640, height: 480, bitrate: 8_000_000,
+                                                          liveIdentifier: identifier))
+        let ffmpegMedia = [(media.movie, "1280x720")]
+        #else
         try run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1600x1200", "-frames:v", "1",
                  "-q:v", "1", media.photo.path])
-        for (url, size) in [(media.motion, "640x480"), (media.movie, "1280x720")] {
+        let ffmpegMedia = [(media.motion, "640x480"), (media.movie, "1280x720")]
+        #endif
+        for (url, size) in ffmpegMedia {
             try run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=\(size):rate=30:duration=2",
                      "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-c:v", "mpeg4", "-q:v", "2",
                      "-c:a", "aac", "-shortest", url.path])
@@ -47,6 +60,13 @@ struct Media {
         return media
     }
 }
+
+/// A Mac server compresses Live Photo motion itself; elsewhere the phone does.
+#if os(macOS)
+let liveCompactRoles: [ServerAPI.ResourceRole] = [.photo, .pairedVideo], liveDeviceCompresses: [ServerAPI.ResourceRole] = []
+#else
+let liveCompactRoles: [ServerAPI.ResourceRole] = [.photo], liveDeviceCompresses: [ServerAPI.ResourceRole] = [.pairedVideo]
+#endif
 
 func descriptor(_ role: ServerAPI.ResourceRole, _ url: URL, name: String? = nil) throws -> ServerAPI.ResourceDescriptor {
     let digests = try Fingerprint.digests(of: url)
@@ -84,12 +104,12 @@ struct Fixture {
     let directory: URL
     let server: HomespunServer
 
-    init(immich: ImmichConfiguration? = nil) throws {
+    init(immich: ImmichConfiguration? = nil) async throws {
         directory = try temporaryDirectory()
         var configuration = ServerConfiguration(dataDirectory: directory.appendingPathComponent("data"),
                                                 name: "test", profile: testProfile, immich: immich)
         configuration.maximumChunkBytes = 1 << 20
-        server = try HomespunServer(configuration: configuration)
+        server = try await HomespunServer(configuration: configuration)
     }
 
     func pair(_ client: some TestClientProtocol) async throws -> String {
@@ -131,7 +151,7 @@ struct Fixture {
 // MARK: Pairing
 
 @Test func pairingCodesWorkOnceAndTokensAreRequired() async throws {
-    let fixture = try Fixture()
+    let fixture = try await Fixture()
     try await fixture.test { client, token in
         #expect(try await client.call("/api/v1/health").status == .ok)
         #expect(try await client.call("/api/v1/info").status == .unauthorized)
@@ -162,8 +182,8 @@ struct Fixture {
 // MARK: Files mode
 
 @Test(.enabled(if: ffmpegAvailable)) func filesModePhotoRoundTrip() async throws {
-    let fixture = try Fixture()
-    let media = try Media.make(in: fixture.directory)
+    let fixture = try await Fixture()
+    let media = try await Media.make(in: fixture.directory)
     try await fixture.test { client, token in
         let photo = try descriptor(.photo, media.photo)
         let register = ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: Date(timeIntervalSince1970: 1_714_592_096),
@@ -208,8 +228,8 @@ struct Fixture {
 }
 
 @Test(.enabled(if: ffmpegAvailable)) func livePhotoAndVideoCompactCopies() async throws {
-    let fixture = try Fixture()
-    let media = try Media.make(in: fixture.directory)
+    let fixture = try await Fixture()
+    let media = try await Media.make(in: fixture.directory)
     try await fixture.test { client, token in
         let still = try descriptor(.photo, media.photo), motion = try descriptor(.pairedVideo, media.motion)
         _ = try await client.call("/api/v1/assets", .post, token: token,
@@ -221,7 +241,8 @@ struct Fixture {
         _ = try await fixture.upload(client, token: token, asset: still.sha256, role: .pairedVideo, file: media.motion)
         try await fixture.server.drainJobs()
         let live = try await client.call("/api/v1/assets/\(still.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
-        #expect(live.state == .ready && live.compact.map(\.role) == [.photo] && live.deviceCompresses == [.pairedVideo])
+        #expect(live.state == .ready && Set(live.compact.map(\.role)) == Set(liveCompactRoles)
+                && live.deviceCompresses == liveDeviceCompresses, "\(live.message ?? "")")
         #expect(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("data/originals/undated/IMG_0001.MOV").path))
 
         let movie = try descriptor(.video, media.movie)
@@ -237,8 +258,8 @@ struct Fixture {
 }
 
 @Test(.enabled(if: ffmpegAvailable)) func uploadsAreCheckedAndPathsAreSafe() async throws {
-    let fixture = try Fixture()
-    let media = try Media.make(in: fixture.directory)
+    let fixture = try await Fixture()
+    let media = try await Media.make(in: fixture.directory)
     try await fixture.test { client, token in
         let photo = try descriptor(.photo, media.photo, name: "../../etc/.passwd")
         _ = try await client.call("/api/v1/assets", .post, token: token,
@@ -268,8 +289,8 @@ struct Fixture {
 }
 
 @Test(.enabled(if: ffmpegAvailable)) func editsAndInterruptedVerificationAreHandled() async throws {
-    let fixture = try Fixture()
-    let media = try Media.make(in: fixture.directory)
+    let fixture = try await Fixture()
+    let media = try await Media.make(in: fixture.directory)
     try await fixture.test { client, token in
         let photo = try descriptor(.photo, media.photo)
         let asset = photo.sha256
@@ -309,6 +330,7 @@ final class FakeImmich: @unchecked Sendable {
     let lock = NSLock()
     var assets: [String: Stored] = [:]
     let key = "immich-test-key"
+    var permissions = ["asset.read", "asset.download"]
 
     @discardableResult
     func add(_ data: Data, motion: String? = nil) -> String {
@@ -328,6 +350,15 @@ final class FakeImmich: @unchecked Sendable {
         let router = Router()
         let authorized: @Sendable (Request) throws -> Void = { request in
             guard request.headers[HTTPField.Name("x-api-key")!] == self.key else { throw HTTPError(.unauthorized) }
+        }
+        router.get("api/server/ping") { _, _ in
+            Response(status: .ok, body: .init(byteBuffer: ByteBuffer(string: #"{"res":"pong"}"#)))
+        }
+        router.get("api/api-keys/me") { request, _ in
+            try authorized(request)
+            let body = try JSONSerialization.data(withJSONObject: ["id": "k", "name": "homespun",
+                                                                    "permissions": self.lock.withLock { self.permissions }])
+            return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(bytes: body)))
         }
         router.post("api/search/metadata") { request, _ in
             try authorized(request)
@@ -365,11 +396,11 @@ extension Fingerprint {
     let immich = FakeImmich()
     let directory = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
-    let media = try Media.make(in: directory)
+    let media = try await Media.make(in: directory)
     try await Application(router: immich.router(), configuration: .init(address: .hostname("localhost", port: 0)))
         .test(.live) { immichClient in
             let url = URL(string: "http://localhost:\(immichClient.port!)")!
-            let fixture = try Fixture(immich: ImmichConfiguration(url: url, apiKey: immich.key))
+            let fixture = try await Fixture(immich: ImmichConfiguration(url: url, apiKey: immich.key))
             try await fixture.test { client, token in
                 let still = try descriptor(.photo, media.photo), motion = try descriptor(.pairedVideo, media.motion)
                 let register = ServerAPI.RegisterAssetRequest(kind: .livePhoto, captureDate: nil, resources: [still, motion])
@@ -389,7 +420,7 @@ extension Fingerprint {
                 try await fixture.server.drainJobs()
                 status = try await client.call("/api/v1/assets/\(asset)", token: token).decode(ServerAPI.AssetStatus.self)
                 #expect(status.state == .ready, "\(status.message ?? "")")
-                #expect(status.resources.allSatisfy { $0.state == .verified } && status.deviceCompresses == [.pairedVideo])
+                #expect(status.resources.allSatisfy { $0.state == .verified } && status.deviceCompresses == liveDeviceCompresses)
                 #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/cache").path).isEmpty)
                 #expect(try FileManager.default.subpathsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/originals").path).isEmpty)
 
@@ -419,4 +450,124 @@ extension Fingerprint {
                 #expect(failed.state == .failed && failed.resources.first?.state == .mismatch)
             }
         }
+}
+
+// MARK: Setup
+
+@Test func setupHelpersPickTheHomeNetworkAndWriteServices() throws {
+    let interfaces: [Network.Interface] = [
+        .init(name: "lo", address: "127.0.0.1"), .init(name: "lxdbr0", address: "10.85.43.1"),
+        .init(name: "wg0", address: "10.230.195.1"), .init(name: "docker0", address: "172.17.0.1"),
+        .init(name: "eno2", address: "10.0.0.116"), .init(name: "wlo1", address: "192.168.1.5"),
+    ]
+    #expect(Network.preferredAddress(interfaces) == "10.0.0.116")
+    #expect(Network.preferredAddress(Array(interfaces.prefix(4)) + [.init(name: "wlan0", address: "192.168.1.5")]) == "192.168.1.5")
+    #expect(Network.preferredAddress(Array(interfaces.prefix(4))) == nil)
+
+    let qr = try TerminalQR.render("homespun://pair?server=10.0.0.116:8787&code=K7Q4-M9XT")
+    let rows = qr.split(separator: "\n")
+    #expect(rows.count > 10 && rows.allSatisfy { $0.hasPrefix("\u{1B}[30;47m") && $0.hasSuffix("\u{1B}[0m") })
+    #expect(Set(rows.map { $0.count }).count == 1)
+
+    let home = URL(fileURLWithPath: "/home/alex")
+    let environment = ["HOMESPUN_DATA": "/srv/homespun", "HOMESPUN_HOST": "0.0.0.0", "PATH": "/usr/bin"]
+    let linux = ServiceInstaller.plan(executable: "/opt/hs/homespun-server", environment: environment, os: .linux,
+                                      home: home, userID: 1000, user: "alex")
+    #expect(linux.path.path == "/home/alex/.config/systemd/user/homespun.service")
+    #expect(linux.contents.contains("ExecStart=/opt/hs/homespun-server serve")
+            && linux.contents.contains("Environment=\"HOMESPUN_DATA=/srv/homespun\""))
+    #expect(linux.commands.contains(["systemctl", "--user", "enable", "--now", "homespun.service"]))
+    let mac = ServiceInstaller.plan(executable: "/Users/alex/hs & co/homespun-server", environment: environment, os: .macOS,
+                                    home: URL(fileURLWithPath: "/Users/alex"), userID: 501, user: "alex")
+    #expect(mac.path.path == "/Users/alex/Library/LaunchAgents/photos.homespun.server.plist")
+    let plist = try PropertyListSerialization.propertyList(from: Data(mac.contents.utf8), format: nil) as? [String: Any]
+    #expect((plist?["ProgramArguments"] as? [String]) == ["/Users/alex/hs & co/homespun-server", "serve"])
+    #expect((plist?["EnvironmentVariables"] as? [String: String])?["HOMESPUN_DATA"] == "/srv/homespun")
+    #expect(mac.commands.last == ["launchctl", "bootstrap", "gui/501", mac.path.path])
+}
+
+@Test func pairingInstructionsAndSelfCheck() async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let text = fixture.server.pairingInstructions(code: "K7Q4-M9XT")
+        #expect(text.contains("homespun://pair?server=") && text.contains("K7Q4-M9XT") && text.contains("only on this computer"))
+        let report = try await client.call("/api/v1/setup", token: token).decode(ServerSetup.Report.self)
+        #expect(Set(report.checks.map(\.id)) == ["photos", "videos", "live_photos", "discovery", "storage", "service", "immich"])
+        #expect(report.checks.first { $0.id == "photos" }?.status == .ok)
+        #expect(report.checks.first { $0.id == "immich" }?.status == .info)
+        #expect(report.checks.first { $0.id == "service" }?.fix.first?.contains("install-service --data") == true)
+        let info = try await client.call("/api/v1/info", token: token).decode(ServerAPI.ServerInfo.self)
+        #expect(info.platform == report.platform)
+
+        var configuration = fixture.server.configuration
+        configuration.publicURL = "photos.example.lan:9000"
+        #expect(Network.publicURL(configuration: configuration)?.absoluteString == "http://photos.example.lan:9000")
+        // The catalog holds secrets, so only the server's user can read it.
+        let catalog = fixture.server.storage.catalog.path
+        for file in [catalog, catalog + "-wal"] {
+            #expect(try FileManager.default.attributesOfItem(atPath: file)[.posixPermissions] as? Int == 0o600)
+        }
+    }
+}
+
+@Test func immichIsConnectedFromTheApp() async throws {
+    let immich = FakeImmich()
+    try await Application(router: immich.router(), configuration: .init(address: .hostname("localhost", port: 0)))
+        .test(.live) { immichClient in
+            let url = "http://localhost:\(immichClient.port!)"
+            let fixture = try await Fixture()
+            try await fixture.test { client, token in
+                let wrong = ServerAPI.ImmichSettingsRequest(url: url, apiKey: "nope")
+                let rejected = try await client.call("/api/v1/settings/immich", .put, token: token, json: wrong)
+                #expect(rejected.status == .unprocessableContent)
+                #expect(String(decoding: rejected.data, as: UTF8.self).contains("did not accept"))
+                #expect(try await client.call("/api/v1/settings/immich", .put, token: token,
+                                              json: ServerAPI.ImmichSettingsRequest(url: "ftp://x", apiKey: "k")).status == .badRequest)
+
+                immich.lock.withLock { immich.permissions = ["asset.read"] }
+                #expect(try await client.call("/api/v1/settings/immich", .put, token: token,
+                                              json: ServerAPI.ImmichSettingsRequest(url: url, apiKey: immich.key)).status
+                        == .unprocessableContent)
+
+                immich.lock.withLock { immich.permissions = ["all"] }
+                let connected = try await client.call("/api/v1/settings/immich", .put, token: token,
+                                                      json: ServerAPI.ImmichSettingsRequest(url: url, apiKey: immich.key))
+                    .decode(ServerAPI.ImmichSettings.self)
+                #expect(connected.connected && connected.keyHint == "-key" && connected.message?.contains("only asset.read") == true)
+                #expect(try await client.call("/api/v1/info", token: token).decode(ServerAPI.ServerInfo.self).mode == .immich)
+                let shown = try await client.call("/api/v1/settings/immich", token: token)
+                #expect(!String(decoding: shown.data, as: UTF8.self).contains(immich.key))
+                #expect(try shown.decode(ServerAPI.ImmichSettings.self).connected)
+
+                // The setting survives a restart.
+                let restarted = try await HomespunServer(configuration: fixture.server.configuration)
+                let immichMode = await restarted.immichState.mode
+                #expect(immichMode == .immich)
+
+                let cleared = try await client.call("/api/v1/settings/immich", .delete, token: token)
+                    .decode(ServerAPI.ImmichSettings.self)
+                #expect(!cleared.connected && cleared.url == nil)
+                #expect(try await client.call("/api/v1/info", token: token).decode(ServerAPI.ServerInfo.self).mode == .files)
+
+                // Disconnecting outlasts an Immich set in the environment.
+                var configured = fixture.server.configuration
+                configured.immich = ImmichConfiguration(url: URL(string: url)!, apiKey: immich.key)
+                let reconfigured = try await HomespunServer(configuration: configured)
+                let reconfiguredMode = await reconfigured.immichState.mode
+                #expect(reconfiguredMode == .files)
+            }
+        }
+}
+
+@Test func applicationRunsWithItsServices() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    // Listening on all interfaces adds Bonjour advertising, which must not stop the server
+    // when the tools are missing.
+    let configuration = ServerConfiguration(dataDirectory: directory, host: "0.0.0.0", port: 0, name: "test")
+    let server = try await HomespunServer(configuration: configuration)
+    try await server.application().test(.live) { client in
+        try await Task.sleep(for: .seconds(2))
+        #expect(try await client.call("/api/v1/health").status == .ok)
+    }
 }

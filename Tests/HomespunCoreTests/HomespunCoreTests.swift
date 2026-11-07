@@ -79,3 +79,28 @@ import Testing
     #expect(check("ab", 10, imported: false) == .blocked("compact copy not imported yet"))
     #expect(check("ab", 0, size: 0) == .blocked("zero-byte original"))
 }
+
+@Test func pairingLinksRoundTripAndParseFromText() throws {
+    let link = PairingLink(serverURL: URL(string: "http://10.0.0.116:8787")!, code: "K7Q4-M9XT", name: "hydrogen (test)")
+    #expect(link.url.absoluteString == "homespun://pair?server=10.0.0.116:8787&code=K7Q4-M9XT&name=hydrogen%20(test)")
+    #expect(PairingLink(link.url) == link)
+    #expect(PairingLink(text: "Pairing link: \(link.url.absoluteString)\n") == link)
+    let https = PairingLink(serverURL: URL(string: "https://home.example.com")!, code: "ABCD-EFGH")
+    #expect(PairingLink(https.url)?.serverURL.absoluteString == "https://home.example.com")
+    #expect(PairingLink(URL(string: "homespun://pair?server=nas.local&code=X")!)?.serverURL.absoluteString
+            == "http://nas.local:8787")
+    #expect(PairingLink(URL(string: "https://pair?server=a&code=b")!) == nil)
+    #expect(PairingLink(URL(string: "homespun://pair?server=a")!) == nil)
+    #expect(PairingLink.serverURL(from: "file:///etc") == nil)
+}
+
+@Test func linuxPlatformPicksPackageManager() {
+    let ubuntu = ServerSetup.Platform.linux(osRelease: "PRETTY_NAME=\"Ubuntu 24.04.3 LTS\"\nID=ubuntu\nID_LIKE=debian\n")
+    #expect(ubuntu.packageManager == .apt && ubuntu.name == "Ubuntu 24.04.3 LTS")
+    #expect(ServerSetup.Platform.linux(osRelease: "ID=fedora\n").packageManager == .dnf)
+    #expect(ServerSetup.Platform.linux(osRelease: "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"").packageManager == .dnf)
+    #expect(ServerSetup.Platform.linux(osRelease: "ID=nixos").packageManager == nil)
+    let mac = ServerSetup.installSteps(for: .macOS)
+    #expect(mac.contains { $0.commands.contains("brew install ffmpeg") })
+    #expect(ServerSetup.installSteps(for: .linux, packageManager: .pacman).first?.commands.first?.hasPrefix("sudo pacman") == true)
+}

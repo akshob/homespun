@@ -96,6 +96,20 @@ struct ImmichClient: Sendable {
         try handle.synchronize()
     }
 
+    /// Whether an Immich server answers at the URL.
+    func ping() async throws -> Bool {
+        let response = try await client.execute(try request("/server/ping"), timeout: .seconds(10))
+        return response.status == .ok
+    }
+
+    /// The API key's permissions, or nil if Immich rejects the key.
+    func keyPermissions() async throws -> [String]? {
+        struct Key: Decodable { var permissions: [String] }
+        let (status, data) = try await send(try request("/api-keys/me"))
+        guard status == .ok else { return nil }
+        return try JSONDecoder().decode(Key.self, from: data).permissions
+    }
+
     /// Whether Immich still holds this original, untrashed and with the same SHA-1.
     func stillHolds(id: String, sha1Hex: String) async throws -> (Bool, String?) {
         guard let asset = try await asset(id: id) else { return (false, "not in Immich any more") }

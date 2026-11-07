@@ -8,7 +8,7 @@ import XCTest
 final class OnPhoneWorkflowUITests: XCTestCase {
     @MainActor func testPickedItemsGetCompactCopies() throws {
         let app = XCUIApplication()
-        app.launchArguments += ["-useServer", "NO"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-compactMode", "device"]
         app.launch()
         app.buttons["Choose photos and videos"].tap()
 

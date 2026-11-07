@@ -62,6 +62,15 @@ public actor Catalog {
     static let pairingFailureLimit = 10
 
     public init(path: String) throws {
+        // Owner-only: the catalog holds token hashes and the Immich API key. SQLite gives its
+        // -wal and -shm files the database's permissions.
+        let files = FileManager.default
+        if !files.fileExists(atPath: path) {
+            files.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600])
+        }
+        for file in [path, path + "-wal", path + "-shm"] where files.fileExists(atPath: file) {
+            try files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file)
+        }
         database = try SQLiteDatabase(path: path)
         try Self.migrate(database)
     }
@@ -142,6 +151,9 @@ public actor Catalog {
         );
         CREATE INDEX jobs_ready ON jobs (status, available_at);
         """,
+        """
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        """,
     ]
 
     static func migrate(_ database: SQLiteDatabase) throws {
@@ -154,6 +166,21 @@ public actor Catalog {
                 try database.executeScript(script)
                 try database.execute("PRAGMA user_version = \(index + 1)")
             }
+        }
+    }
+
+    // MARK: Settings
+
+    func setting(_ key: String) throws -> String? {
+        try database.query("SELECT value FROM settings WHERE key = ?", [.text(key)]).first?["value"]?.string
+    }
+
+    func setSetting(_ key: String, _ value: String?) throws {
+        if let value {
+            try database.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                                 [.text(key), .text(value)])
+        } else {
+            try database.execute("DELETE FROM settings WHERE key = ?", [.text(key)])
         }
     }
 

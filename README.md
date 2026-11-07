@@ -75,10 +75,13 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 
 ## iOS app
 
-The app currently runs **on-phone mode**: choose photos, Live Photos, and videos; the
-iPhone compresses them and saves the compact copies to a "Homespun" album with the
-original's date, location, and favorite and hidden state. Originals are never changed
-or deleted. Edited items are compressed as they currently look.
+On first launch the app explains what it does, connects to a server (found on the network,
+by QR code or link, or by address and code), shows the server's self-check, and asks for
+Photos access. Compact copies go to a "Homespun" album with the original's date, location,
+and favorite and hidden state; edited items are compressed as they currently look. Before the
+first removal it explains what removal means (including iCloud Photos), and the first removal
+takes at most 10 originals until you confirm the copies look right. Making copies on the
+iPhone alone is in Settings; it frees no space, since there is no verified copy elsewhere.
 
 On a Mac with Xcode:
 
@@ -148,46 +151,63 @@ xcrun simctl delete "$SIM"
 
 ## Homespun Server
 
-Homespun Server keeps originals and makes the compact copies (x265 for video, libvips or
-ImageIO for photos). Live Photo motion is still compressed on the iPhone, because only
-AVFoundation keeps the still and its motion paired.
+Homespun Server keeps originals and makes the compact copies (x265 for video, libvips on
+Linux or ImageIO on a Mac for photos). On a Mac it also compresses Live Photo motion with
+AVFoundation, so the phone only downloads and imports; on Linux the phone compresses the
+motion, because only AVFoundation keeps the still and its motion paired.
 
-On Linux, install `libvips-dev`, `libsqlite3-dev`, and `ffmpeg` (with libx265), then:
+The app's first-run screens walk through setup: "Don't have a server yet? Set one up" shows
+the steps for a Mac or Linux (also at [homespun.photos/setup](https://homespun.photos/setup)).
+Until packages exist, the server is built from source:
 
 ```bash
-swift build -c release --product homespun-server
-export HOMESPUN_DATA=/srv/homespun          # catalog, originals, compact copies
-export HOMESPUN_HOST=0.0.0.0                # listen on the home network (default 127.0.0.1)
-.build/release/homespun-server serve        # port 8787 (HOMESPUN_PORT)
-.build/release/homespun-server pair         # one-time code for the app, valid 10 minutes
-.build/release/homespun-server devices      # list paired devices; `revoke <id>` to remove one
+# Linux (Ubuntu/Debian; the app shows dnf, pacman, and zypper equivalents)
+sudo apt install -y git libvips-dev libsqlite3-dev ffmpeg avahi-utils
+# macOS: xcode-select --install && brew install ffmpeg
+
+git clone https://github.com/akshob/homespun.git ~/homespun
+cd ~/homespun && swift build -c release --product homespun-server
+.build/release/homespun-server install-service --data ~/Homespun   # systemd user service or LaunchAgent
+.build/release/homespun-server pair                                 # QR code + homespun:// link, 10 minutes
+.build/release/homespun-server devices                              # paired devices; `revoke <id>` removes one
 ```
 
-In the app, open Settings, enter the server's address (for example `192.168.1.20:8787`) and
-the code. The app keeps its token in the Keychain. For now the app talks plain HTTP, and only
-to servers on the home network (IP addresses and `.local` names); HTTPS comes later.
+`install-service` listens on the home network (`0.0.0.0:8787`, unless `HOMESPUN_HOST` is set),
+starts with the computer, and saves its settings to `~/.config/homespun/server.env` so later
+commands find the same data. If the pairing address is wrong (for example behind a proxy), set
+`HOMESPUN_PUBLIC_URL`. The catalog (`homespun.db`, with token hashes and any Immich key) is
+readable only by the server's user.
+The server advertises itself with Bonjour (`_homespun._tcp`, via `dns-sd` on macOS or
+`avahi-publish` on Linux), so the app lists it; pairing still needs the one-time code. You can
+also scan the QR code with the iPhone's Camera app, paste the `homespun://pair?…` link (handy
+on the simulator), or type the address and code.
 
-The server stores originals read-only under `originals/YYYY/MM/` (by capture month), checks
-each upload's SHA-256 before accepting it, and lets the app remove an original only after
-checking its copy again at that moment (`POST /api/v1/assets/{id}/verify`).
+After pairing, the app shows the server's self-check (`GET /api/v1/setup`): photo and video
+encoders, Live Photos, Bonjour, free space, whether it starts automatically, and Immich, each
+with the command that fixes it on that server's system. Install what it asks for, then tap
+"Check again".
+
+For now the app talks plain HTTP, and only to servers on the home network (IP addresses and
+`.local` names); HTTPS comes later. The server stores originals read-only under
+`originals/YYYY/MM/` (by capture month), checks each upload's SHA-256 before accepting it, and
+lets the app remove an original only after checking its copy again at that moment
+(`POST /api/v1/assets/{id}/verify`).
 
 ### Immich mode
 
 If you already run [Immich](https://immich.app) and back up your iPhone with its app, Homespun
-Server can use the originals Immich holds instead of storing its own:
+Server can use the originals Immich holds instead of storing its own. Connect it from the app
+(Settings › Connect Immich): enter Immich's address and an API key created with only the
+`asset.read` and `asset.download` permissions. The server tests the key and keeps it; the app
+never stores it. (`HOMESPUN_IMMICH_URL` with `HOMESPUN_IMMICH_API_KEY_FILE` also works, until
+Immich is disconnected from the app.)
 
-```bash
-export HOMESPUN_IMMICH_URL=http://immich.local:2283
-export HOMESPUN_IMMICH_API_KEY_FILE=/etc/homespun/immich.key   # a file holding only the key
-```
-
-Create the API key in Immich with only the `asset.read` and `asset.download` permissions.
 Homespun finds each original by its checksum, downloads it, and checks it byte for byte
 against the iPhone's file before making a compact copy. It never uploads to, changes, or
 deletes anything in Immich. Items Immich does not have yet show "Not in Immich yet"; pick
-them again after the Immich app has backed them up. Edited items are not supported in
-Immich mode yet. In the Immich app, exclude the "Homespun" album from backup so compact
-copies are not uploaded.
+them again after the Immich app has backed them up. Edited items and RAW+JPEG pairs are not
+supported in Immich mode yet. In the Immich app, exclude the "Homespun" album from backup so
+compact copies are not uploaded.
 
 ## Website
 

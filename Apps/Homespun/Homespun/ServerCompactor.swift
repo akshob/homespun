@@ -109,7 +109,12 @@ struct ServerCompactor: Compacting {
         var plan = PhotoLibrary.ImportPlan(asset: asset)
         for compact in status.compact {
             let url = try await client.download(compact, assetID: assetID, to: compactDirectory)
-            plan.resources.append((compact.role == .video ? .video : .photo, url))
+            let type: PHAssetResourceType = switch compact.role {
+            case .video: .video
+            case .pairedVideo: .pairedVideo
+            default: .photo
+            }
+            plan.resources.append((type, url))
         }
         if status.deviceCompresses.contains(.pairedVideo) {
             progress("Compressing motion")
@@ -125,6 +130,13 @@ struct ServerCompactor: Compacting {
                 throw PhotoLibrary.Failure.livePhotoInvalid(reason)
             }
             plan.resources.append((.pairedVideo, output))
+        } else if let still = plan.resources.first(where: { $0.0 == .photo })?.1,
+                  let motion = plan.resources.first(where: { $0.0 == .pairedVideo })?.1 {
+            // A Mac server compressed the motion; check the pair before importing it.
+            progress("Checking Live Photo")
+            if case .invalid(let reason) = await LivePhotoValidator.validate(photo: still, video: motion) {
+                throw PhotoLibrary.Failure.livePhotoInvalid(reason)
+            }
         }
         guard !plan.resources.isEmpty else { return .unchanged("Already compact") }
         let compactBytes = try plan.resources.reduce(0) { $0 + (try PhotoLibrary.size(of: $1.1)) }

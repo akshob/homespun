@@ -24,10 +24,11 @@ struct OriginalRemover: Sendable {
         await ledger.serverBacked().filter { PhotoLibrary.asset($0.original) != nil }
     }
 
-    func removeEligible(progress: @escaping @Sendable (String) -> Void) async throws -> Report {
+    /// Checks and removes eligible originals; `limit` caps how many (the first-time trial).
+    func removeEligible(limit: Int? = nil, progress: @escaping @Sendable (String) -> Void) async throws -> Report {
         var report = Report()
         var approved: [(asset: PHAsset, name: String, bytes: Int)] = []
-        let candidates = await candidates()
+        let candidates = Array(await candidates().prefix(limit ?? .max))
         for (index, candidate) in candidates.enumerated() {
             guard let asset = PhotoLibrary.asset(candidate.original), let assetID = candidate.entry.serverAssetID else { continue }
             let name = PhotoLibrary.describe(candidate.original)?.name ?? "Item"
