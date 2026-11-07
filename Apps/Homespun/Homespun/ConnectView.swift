@@ -9,25 +9,23 @@ struct ConnectView: View {
     var onPaired: () -> Void
     @State private var discovery = ServerDiscovery()
     @State private var address = ""
-    @State private var code = ""
     @State private var scanning = false
     @State private var pairing = false
     @State private var error: String?
-    @FocusState private var codeFocused: Bool
+    @State private var target: ServerPairView.Target?
+    @State private var paired = false
 
     var body: some View {
         List {
             Section {
-                Text("On the computer that keeps your originals, run this. It shows a QR code: scan it with this "
-                     + "iPhone's Camera app, or use one of the options below.")
-                CommandRow(command: ServerSetup.serverCommand + " pair")
+                Text("Tap the computer that keeps your originals. A Mac asks you to click Allow on its screen; "
+                     + "a Linux server gives you a code.")
             }
 
             Section {
                 ForEach(discovery.servers) { found in
                     Button {
-                        if let url = found.url { address = url.host.map { "\($0):\(url.port ?? 8787)" } ?? "" }
-                        codeFocused = true
+                        if let url = found.url { target = .init(url: url, name: found.name) }
                     } label: {
                         HStack {
                             Label(found.name, systemImage: "server.rack")
@@ -36,6 +34,7 @@ struct ConnectView: View {
                             else { ProgressView().controlSize(.small) }
                         }
                     }
+                    .disabled(found.url == nil)
                     .accessibilityIdentifier("discovered.\(found.name)")
                 }
                 if discovery.servers.isEmpty {
@@ -64,8 +63,18 @@ struct ConnectView: View {
                 }
             } header: {
                 Text("On your network")
-            } footer: {
-                Text("Tap a server, then enter the code `homespun-server pair` shows.")
+            }
+
+            Section {
+                TextField("Address, e.g. 192.168.1.20:8787", text: $address)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    .accessibilityIdentifier("server.address")
+                    .onSubmit(continueWithAddress)
+                Button("Continue", action: continueWithAddress)
+                    .disabled(address.isEmpty)
+                    .accessibilityIdentifier("server.continue")
+            } header: {
+                Text("Or enter its address")
             }
 
             Section("Pair with a link") {
@@ -79,23 +88,6 @@ struct ConnectView: View {
                     }
                 }
                 .accessibilityIdentifier("connect.paste")
-            }
-
-            Section("Or enter the address and code") {
-                TextField("Address, e.g. 192.168.1.20:8787", text: $address)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    .accessibilityIdentifier("server.address")
-                TextField("Pairing code", text: $code)
-                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
-                    .focused($codeFocused)
-                    .accessibilityIdentifier("server.code")
-                Button {
-                    Task { await pair() }
-                } label: {
-                    if pairing { ProgressView() } else { Text("Pair") }
-                }
-                .disabled(address.isEmpty || code.isEmpty || pairing)
-                .accessibilityIdentifier("server.pair")
             }
 
             if let error {
@@ -119,15 +111,36 @@ struct ConnectView: View {
             }
             .ignoresSafeArea()
         }
+        .sheet(item: $target, onDismiss: {
+            // After the pairing sheet has gone, so the next screen isn't presented under it.
+            if paired {
+                paired = false
+                onPaired()
+            }
+        }) { target in
+            ServerPairView(settings: settings, target: target) {
+                paired = true
+                self.target = nil
+            }
+        }
         .onAppear { discovery.start() }
         .onDisappear { discovery.stop() }
     }
 
-    private func pair(_ link: PairingLink? = nil) async {
+    private func continueWithAddress() {
+        guard let url = PairingLink.serverURL(from: address) else {
+            error = "Enter the server's address, for example 192.168.1.20:8787."
+            return
+        }
+        error = nil
+        target = .init(url: url, name: nil)
+    }
+
+    private func pair(_ link: PairingLink) async {
         pairing = true
         defer { pairing = false }
         do {
-            if let link { try await settings.pair(link) } else { try await settings.pair(address: address, code: code) }
+            try await settings.pair(link)
             error = nil
             onPaired()
         } catch {

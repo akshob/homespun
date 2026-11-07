@@ -67,20 +67,18 @@ final class AppSettings {
 
     func pair(_ link: PairingLink) async throws {
         let response = try await ServerClient(baseURL: link.serverURL).pair(code: link.code, deviceName: UIDevice.current.name)
-        try Keychain.setToken(response.token, for: link.serverURL.absoluteString)
-        if let serverURL, serverURL != link.serverURL { Keychain.removeToken(for: serverURL.absoluteString) }
-        serverURL = link.serverURL
-        defaults.set(link.serverURL, forKey: "serverURL")
+        try finishPairing(serverURL: link.serverURL, response: response)
+    }
+
+    /// Keeps a pairing made with a code or allowed on the server.
+    func finishPairing(serverURL newURL: URL, response: ServerAPI.PairResponse) throws {
+        try Keychain.setToken(response.token, for: newURL.absoluteString)
+        if let serverURL, serverURL != newURL { Keychain.removeToken(for: serverURL.absoluteString) }
+        serverURL = newURL
+        defaults.set(newURL, forKey: "serverURL")
         store(response.server)
         serverStatus = .reachable
         mode = .server
-    }
-
-    func pair(address: String, code: String) async throws {
-        guard let url = PairingLink.serverURL(from: address) else {
-            throw ServerClient.Failure(status: 0, message: "Enter the server's address, for example 192.168.1.20:8787.")
-        }
-        try await pair(PairingLink(serverURL: url, code: code))
     }
 
     func unpair() {

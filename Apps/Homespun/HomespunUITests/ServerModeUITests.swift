@@ -23,16 +23,27 @@ final class ServerModeUITests: XCTestCase {
             XCTAssertTrue(addressField.waitForExistence(timeout: 10))
             addressField.tap()
             addressField.typeText(address)
-            let codeField = app.textFields["server.code"]
+            app.buttons["server.continue"].tap()
+            let codeField = app.textFields["pair.code"]
+            XCTAssertTrue(codeField.waitForExistence(timeout: 15), "no pairing screen for \(address)")
             codeField.tap()
             codeField.typeText(code)
-            app.buttons["server.pair"].tap()
+            app.buttons["pair.submit"].tap()
         }
         if !app.buttons["server.card"].waitForExistence(timeout: 20) {
-            XCTFail("pairing failed: \(app.staticTexts["server.error"].label)")
+            XCTFail("pairing failed: \(app.staticTexts["pair.error"].label)")
         }
         XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 15), "server not reachable")
         attach(app, "Paired")
+
+        // A paired iPhone can make a code for another device.
+        app.buttons["server.card"].tap()
+        app.buttons["settings.addDevice"].tap()
+        XCTAssertTrue(app.staticTexts["addDevice.code"].waitForExistence(timeout: 15), "no code for another device")
+        attach(app, "Add another device")
+        app.navigationBars["Add another device"].buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
+        app.buttons["Done"].tap()
 
         app.buttons["Choose photos and videos"].tap()
         let grid = app.images.matching(identifier: "PXGGridLayout-Info")

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import CoreImage.CIFilterBuiltins
 import HomespunCore
 import SwiftUI
 
@@ -21,6 +22,8 @@ struct SettingsView: View {
                         NavigationLink(server.mode == .immich ? "Immich" : "Connect Immich") {
                             ImmichConnectView(settings: settings)
                         }
+                        NavigationLink("Add another device") { AddDeviceView(settings: settings) }
+                            .accessibilityIdentifier("settings.addDevice")
                         Button("Unpair", role: .destructive) { settings.unpair() }
                     }
                 } else {
@@ -70,5 +73,67 @@ struct SettingsView: View {
                 if mode == .server, !settings.isPaired { settings.mode = nil }
             }
         }
+    }
+}
+
+/// A one-time code and QR code that pair another iPhone or iPad with this server.
+struct AddDeviceView: View {
+    let settings: AppSettings
+    @State private var link: PairingLink?
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            if let link {
+                Section {
+                    if let image = Self.qrCode(link.url.absoluteString) {
+                        Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
+                            .frame(maxWidth: 220).frame(maxWidth: .infinity)
+                            .accessibilityLabel("Pairing QR code")
+                    }
+                } footer: {
+                    Text("On the other iPhone or iPad, scan this with the Camera app.")
+                }
+                Section {
+                    LabeledContent("Address", value: link.serverURL.host.map { "\($0):\(link.serverURL.port ?? 8787)" } ?? "")
+                    LabeledContent("Code", value: link.code)
+                        .accessibilityIdentifier("addDevice.code")
+                } header: {
+                    Text("Or enter these in Homespun there")
+                } footer: {
+                    Text("The code works once, for 10 minutes.")
+                }
+                Section { Button("New code") { Task { await load() } } }
+            } else if let error {
+                Section {
+                    Text(error).foregroundStyle(.red)
+                    Button("Try again") { Task { await load() } }
+                }
+            } else {
+                Section { ProgressView().frame(maxWidth: .infinity) }
+            }
+        }
+        .navigationTitle("Add another device")
+        .task { await load() }
+    }
+
+    private func load() async {
+        guard let client = settings.client, let url = settings.serverURL else { return }
+        do {
+            let code = try await client.newPairingCode()
+            link = PairingLink(serverURL: url, code: code.code, name: settings.server?.name)
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    static func qrCode(_ text: String) -> UIImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        filter.correctionLevel = "M"
+        guard let image = filter.outputImage,
+              let cgImage = CIContext().createCGImage(image, from: image.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 }

@@ -233,6 +233,13 @@ public actor Catalog {
         return redeemed
     }
 
+    /// Registers a device someone at the server allowed.
+    func addApprovedDevice(_ device: DeviceRecord, tokenHash: String) throws {
+        try database.execute("INSERT INTO devices (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)",
+                             [.text(device.id), .text(device.name), .text(tokenHash), .text(Timestamp.string())])
+        log("device_paired", device: device.id, detail: "\(device.name) (allowed on the server)")
+    }
+
     func device(tokenHash: String) throws -> DeviceRecord? {
         guard let row = try database.query(
             "SELECT * FROM devices WHERE token_hash = ? AND revoked_at IS NULL", [.text(tokenHash)]).first else { return nil }

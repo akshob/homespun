@@ -75,9 +75,10 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 
 ## iOS app
 
-On first launch the app explains what it does, connects to a server (found on the network,
-by QR code or link, or by address and code), shows the server's self-check, and asks for
-Photos access. Compact copies go to a "Homespun" album with the original's date, location,
+On first launch the app explains what it does, connects to a server (tap one found on the
+network: a Mac asks you to click Allow on its screen, a Linux server gives you a code; or use a
+QR code, link, or address), shows the server's self-check, and asks for Photos access. A paired
+iPhone can add another device from Settings › Add another device (a QR code and one-time code). Compact copies go to a "Homespun" album with the original's date, location,
 and favorite and hidden state; edited items are compressed as they currently look. Before the
 first removal it explains what removal means (including iCloud Photos), and the first removal
 takes at most 10 originals until you confirm the copies look right. Making copies on the
@@ -167,21 +168,24 @@ sudo apt install -y git libvips-dev libsqlite3-dev ffmpeg avahi-utils
 
 git clone https://github.com/akshob/homespun.git ~/homespun
 cd ~/homespun && swift build -c release --product homespun-server
-.build/release/homespun-server install-service --data ~/Homespun   # systemd user service or LaunchAgent
-.build/release/homespun-server pair                                 # QR code + homespun:// link, 10 minutes
-.build/release/homespun-server devices                              # paired devices; `revoke <id>` removes one
+.build/release/homespun-server install-service --data ~/Homespun   # copies to ~/.local/bin, starts the service
+~/.local/bin/homespun-server pair                                   # QR code + homespun:// link, 10 minutes
+~/.local/bin/homespun-server devices                                # paired devices; `revoke <id>` removes one
 ```
 
-`install-service` listens on the home network (`0.0.0.0:8787`, unless `HOMESPUN_HOST` is set),
-starts with the computer, and saves its settings to `~/.config/homespun/server.env` so later
+`install-service` copies the server to `~/.local/bin/homespun-server` (rerun it after
+rebuilding to update), listens on the home network (`0.0.0.0:8787`, unless `HOMESPUN_HOST` is
+set), starts with the computer, and saves its settings to `~/.config/homespun/server.env` so later
 commands find the same data. If the pairing address is wrong (for example behind a proxy), set
 `HOMESPUN_PUBLIC_URL`. The catalog (`homespun.db`, with token hashes and any Immich key) is
 readable only by the server's user.
 The server advertises itself with Bonjour (`_homespun._tcp`, via `dns-sd` on macOS or
 `avahi-publish` on Linux, from avahi-utils; a running server notices it within seconds of being
-installed), so the app lists it; pairing still needs the one-time code. You can
-also scan the QR code with the iPhone's Camera app, paste the `homespun://pair?…` link (handy
-on the simulator), or type the address and code.
+installed), so the app lists it. Tapping a Mac server asks the person at its screen to click
+Allow (a dialog from the LaunchAgent; the Mac and the iPhone show the same 4-digit number, and
+the server asks about one device at a time). Linux servers, or a Mac server started over SSH,
+need the one-time code from `pair` instead: scan its QR code with the iPhone's Camera app,
+paste the `homespun://pair?…` link (handy on the simulator), or type the code.
 
 After pairing, the app shows the server's self-check (`GET /api/v1/setup`): photo and video
 encoders, Live Photos, Bonjour, free space, whether it starts automatically, and Immich, each

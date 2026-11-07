@@ -46,6 +46,7 @@ struct Routes: Sendable {
     let catalog: Catalog
     let storage: Storage
     let immichState: ImmichState
+    let approvals: PairingApprovals
     let locks = UploadLocks()
 
     func info() async -> ServerAPI.ServerInfo {
@@ -57,9 +58,27 @@ struct Routes: Sendable {
         let api = router.group("api/v1")
         api.get("health") { _, _ in try json(ServerAPI.Health()) }
         api.post("pair") { request, context in try await pair(request, context) }
+        api.get("pair/options") { _, _ in
+            try json(ServerAPI.PairingOptions(serverName: configuration.name, canApprove: approvals.canApprove,
+                                              pairCommand: HostPlatform.serverCommand + " pair"))
+        }
+        api.post("pair/requests") { request, context in try await requestApproval(request, context) }
+        api.get("pair/requests/:id") { request, context in try await approvalStatus(request, context) }
+        api.delete("pair/requests/:id") { request, context in
+            guard await approvals.cancel(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") else {
+                throw HTTPError(.notFound)
+            }
+            return Response(status: .noContent)
+        }
 
         let authenticated = api.group().add(middleware: DeviceAuthentication(catalog: catalog))
         authenticated.get("info") { _, _ in try json(await info()) }
+        authenticated.post("pairing-codes") { _, _ in
+            let code = Pairing.newCode(), lifetime = 600
+            try await catalog.addPairingCode(hash: Pairing.hash(Pairing.normalized(code)),
+                                             expiresAt: Date().addingTimeInterval(TimeInterval(lifetime)))
+            return try json(ServerAPI.PairingCode(code: code, expiresIn: lifetime), status: .created)
+        }
         authenticated.get("setup") { _, _ in
             try json(await SetupChecks(configuration: configuration, storage: storage, immichState: immichState).report())
         }
@@ -79,6 +98,35 @@ struct Routes: Sendable {
 
     // MARK: Pairing
 
+    private func bearer(_ request: Request) -> String? {
+        guard let header = request.headers[.authorization], header.hasPrefix("Bearer ") else { return nil }
+        return String(header.dropFirst(7))
+    }
+
+    func requestApproval(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
+        let body = try await request.decode(as: ServerAPI.ApprovalRequest.self, context: context)
+        do {
+            return try json(try await approvals.start(device: body.deviceName), status: .accepted)
+        } catch PairingApprovals.Failure.unavailable {
+            throw HTTPError(.conflict, message: "\(configuration.name) can't ask for approval. Run "
+                            + "`\(HostPlatform.serverCommand) pair` on it for a pairing code.")
+        } catch PairingApprovals.Failure.busy {
+            throw HTTPError(.tooManyRequests, message: "\(configuration.name) is busy with another device. "
+                            + "Try again in a moment.")
+        }
+    }
+
+    func approvalStatus(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
+        let status = try await approvals.status(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") { name in
+            let token = Pairing.newToken()
+            let device = DeviceRecord(id: UUID().uuidString, name: name, createdAt: "", lastSeenAt: nil, revokedAt: nil)
+            try await catalog.addApprovedDevice(device, tokenHash: Pairing.hash(token))
+            return ServerAPI.PairResponse(deviceID: device.id, token: token, server: await info())
+        }
+        guard let status else { throw HTTPError(.notFound, message: "No such pairing request. Ask again.") }
+        return try json(status)
+    }
+
     func pair(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
         let body = try await request.decode(as: ServerAPI.PairRequest.self, context: context)
         let name = String(body.deviceName.prefix(100)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -87,7 +135,7 @@ struct Routes: Sendable {
         let token = Pairing.newToken()
         let device = DeviceRecord(id: UUID().uuidString, name: name, createdAt: "", lastSeenAt: nil, revokedAt: nil)
         guard try await catalog.redeemPairingCode(hash: Pairing.hash(code), device: device, tokenHash: Pairing.hash(token)) else {
-            throw HTTPError(.forbidden, message: "That code is wrong, used, or expired. Run `homespun-server pair` for a new one.")
+            throw HTTPError(.forbidden, message: "That code is wrong, used, or expired. Run `\(HostPlatform.serverCommand) pair` for a new one.")
         }
         return try json(ServerAPI.PairResponse(deviceID: device.id, token: token, server: await info()), status: .created)
     }

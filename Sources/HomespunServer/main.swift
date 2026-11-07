@@ -7,8 +7,8 @@ let usage = """
 
       serve              Run the server (default).
       pair               Show a QR code and link to pair the Homespun app (one use, 10 minutes).
-      install-service    Start the server now and whenever this computer starts
-                         (systemd user service on Linux, LaunchAgent on macOS).
+      install-service    Copy the server to ~/.local/bin and start it now and whenever this
+                         computer starts (systemd user service on Linux, LaunchAgent on macOS).
       devices            List paired devices.
       revoke <id>        Stop a device from using the server.
 
@@ -73,7 +73,12 @@ do {
         try FileManager.default.createDirectory(at: settingsFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         try saved.write(to: settingsFile, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: settingsFile.path)
-        print("\nNext, pair the app:  \(executable) pair")
+        #if os(macOS)
+        print("\nNext, open Homespun on your iPhone, pick \"\(configuration.name)\", and click Allow on this Mac."
+              + "\n(Or show a pairing code: ~/.local/bin/homespun-server pair)")
+        #else
+        print("\nNext, pair the app:  ~/.local/bin/homespun-server pair")
+        #endif
     case "devices":
         for device in try await server.catalog.devices() {
             print("\(device.id)  \(device.name)  paired \(device.createdAt)  last seen \(device.lastSeenAt ?? "never")"

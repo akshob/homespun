@@ -21,6 +21,15 @@ enum HostPlatform {
     }
 }
 
+extension HostPlatform {
+    /// This program's path for commands shown to people, with the home folder as `~`.
+    static var serverCommand: String {
+        let path = Bundle.main.executablePath ?? "homespun-server"
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+}
+
 /// Finds command-line tools without running a shell. Includes Homebrew's folders, which a
 /// LaunchAgent's PATH may lack.
 enum Tools {
@@ -126,6 +135,27 @@ enum TerminalQR {
 /// Starts automatically with the computer: a systemd user unit on Linux, a LaunchAgent on macOS.
 enum ServiceInstaller {
     static let label = "photos.homespun.server"
+
+    /// Where `install-service` puts the server, so rebuilding the source doesn't change the
+    /// running server and every instruction names the same command.
+    static func installedExecutable(home: URL) -> URL {
+        home.appendingPathComponent(".local/bin/homespun-server")
+    }
+
+    /// Copies the server into place (atomically, so a running copy keeps working).
+    static func install(_ executable: String, home: URL) throws -> URL {
+        let target = installedExecutable(home: home)
+        let source = URL(fileURLWithPath: executable).resolvingSymlinksInPath()
+        guard source.path != target.resolvingSymlinksInPath().path else { return target }
+        let files = FileManager.default
+        try files.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let temporary = target.appendingPathExtension("new")
+        try? files.removeItem(at: temporary)
+        try files.copyItem(at: source, to: temporary)
+        try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: temporary.path)
+        guard rename(temporary.path, target.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
+        return target
+    }
 
     struct Plan: Equatable {
         var path: URL

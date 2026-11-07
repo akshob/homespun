@@ -106,6 +106,65 @@ public enum ServerAPI {
         }
     }
 
+    /// `GET /api/v1/pair/options`: how this server lets a new device pair.
+    public struct PairingOptions: Codable, Equatable, Sendable {
+        public var serverName: String
+        /// Someone at the server's screen can allow a device (a Mac with a user logged in).
+        public var canApprove: Bool
+        /// Run on the server to show a pairing code and QR code.
+        public var pairCommand: String
+        public init(serverName: String, canApprove: Bool, pairCommand: String) {
+            self.serverName = serverName
+            self.canApprove = canApprove
+            self.pairCommand = pairCommand
+        }
+    }
+
+    /// `POST /api/v1/pair/requests`: ask someone at the server to allow this device.
+    public struct ApprovalRequest: Codable, Equatable, Sendable {
+        public var deviceName: String
+        public init(deviceName: String) { self.deviceName = deviceName }
+    }
+
+    /// The pending request. Poll `GET /api/v1/pair/requests/{id}` with `secret` as the bearer token.
+    public struct ApprovalTicket: Codable, Equatable, Sendable {
+        public var id: String
+        public var secret: String
+        /// Shown on both screens, so the person at the server allows the right device.
+        public var match: String
+        public var expiresIn: Int
+        public init(id: String, secret: String, match: String, expiresIn: Int) {
+            self.id = id
+            self.secret = secret
+            self.match = match
+            self.expiresIn = expiresIn
+        }
+    }
+
+    public enum ApprovalState: String, Codable, Sendable {
+        case waiting, approved, denied, expired
+    }
+
+    public struct ApprovalStatus: Codable, Equatable, Sendable {
+        public var state: ApprovalState
+        /// Set once, when approved.
+        public var pairing: PairResponse?
+        public init(state: ApprovalState, pairing: PairResponse? = nil) {
+            self.state = state
+            self.pairing = pairing
+        }
+    }
+
+    /// `POST /api/v1/pairing-codes`: a paired device makes a code for another device.
+    public struct PairingCode: Codable, Equatable, Sendable {
+        public var code: String
+        public var expiresIn: Int
+        public init(code: String, expiresIn: Int) {
+            self.code = code
+            self.expiresIn = expiresIn
+        }
+    }
+
     public struct ResourceDescriptor: Codable, Equatable, Sendable {
         public var role: ResourceRole
         public var filename: String

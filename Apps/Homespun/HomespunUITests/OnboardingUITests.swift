@@ -17,10 +17,26 @@ final class OnboardingUITests: XCTestCase {
         start.tap()
 
         XCTAssertTrue(app.textFields["server.address"].waitForExistence(timeout: 10), "no connect screen")
-        for name in (environment["HOMESPUN_DISCOVER"] ?? "").split(separator: ",") {
+        let discover = (environment["HOMESPUN_DISCOVER"] ?? "").split(separator: ",")
+        for name in discover {
             XCTAssertTrue(app.buttons["discovered.\(name)"].waitForExistence(timeout: 20), "server \(name) not discovered")
         }
         attach(app, "2 Connect")
+        // Tapping a server asks a Mac to allow this iPhone (its screen and this one show a number),
+        // or shows the command that prints a code. Cancelling withdraws the question.
+        for name in discover {
+            let server = app.buttons["discovered.\(name)"]
+            let resolved = NSPredicate(format: "isEnabled == true")
+            expectation(for: resolved, evaluatedWith: server)
+            waitForExpectations(timeout: 15)
+            server.tap()
+            let outcome = app.descendants(matching: .any).matching(
+                NSPredicate(format: "identifier IN {'pair.match', 'pair.command'}")).firstMatch
+            XCTAssertTrue(outcome.waitForExistence(timeout: 15), "no way to pair with \(name)")
+            attach(app, "2 Pair with \(name)")
+            app.buttons["Cancel"].firstMatch.tap()
+            XCTAssertTrue(app.textFields["server.address"].waitForExistence(timeout: 10))
+        }
         if let link = environment["HOMESPUN_PAIR_LINK"].flatMap(URL.init(string:)) {
             app.open(link)
             let confirm = app.buttons["pair.confirm"]

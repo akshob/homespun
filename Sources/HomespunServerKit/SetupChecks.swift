@@ -15,7 +15,7 @@ struct SetupChecks {
     var platform = HostPlatform.current()
     /// Linux control group of this process; a systemd service runs in `.../homespun.service`.
     var controlGroup = (try? String(contentsOfFile: "/proc/self/cgroup", encoding: .utf8)) ?? ""
-    static var executable: String { Bundle.main.executablePath ?? "homespun-server" }
+    static var executable: String { HostPlatform.serverCommand }
 
     func report() async -> ServerSetup.Report {
         var checks = [photos(), videos(), livePhotos(), discovery(), storageSpace(), service()]
@@ -32,7 +32,7 @@ struct SetupChecks {
         if let backend = PlatformMedia.photoBackend {
             return Check(id: "photos", title: "Photos", status: .ok, detail: "Compressed with \(backend).")
         }
-        // libvips is found at build time, so installing it needs a rebuild and a restart.
+        // libvips is found at build time, so installing it needs a rebuild, installed again.
         let executable = Self.executable
         let checkout = executable.hasSuffix("/.build/release/homespun-server")
             ? String(executable.dropLast("/.build/release/homespun-server".count)) : "~/homespun"
@@ -40,7 +40,7 @@ struct SetupChecks {
                      detail: "This server was built without libvips, so photos can't be compressed.",
                      fix: install([platform.packageManager?.vipsDevelopment ?? "libvips"])
                         + ["cd \(checkout) && swift build -c release --product homespun-server",
-                           runsAsService ? "systemctl --user restart homespun" : "# Then start homespun-server again."])
+                           "\(checkout)/.build/release/homespun-server install-service --data \(configuration.dataDirectory.path)"])
     }
 
     func videos() -> Check {

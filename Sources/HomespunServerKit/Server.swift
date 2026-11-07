@@ -16,6 +16,11 @@ public struct HomespunServer: Sendable {
     let logger: Logger
 
     public init(configuration: ServerConfiguration, logger: Logger = Logger(label: "homespun")) async throws {
+        try await self.init(configuration: configuration, logger: logger, approver: DialogApprover.detect())
+    }
+
+    init(configuration: ServerConfiguration, logger: Logger = Logger(label: "homespun"),
+         approver: (any PairingApprover)?, approvalPause: TimeInterval = 5) async throws {
         self.configuration = configuration
         self.logger = logger
         storage = Storage(root: configuration.dataDirectory)
@@ -24,7 +29,8 @@ public struct HomespunServer: Sendable {
         immichState = try await ImmichState(catalog: catalog, fallback: configuration.immich)
         runner = JobRunner(catalog: catalog, storage: storage, compactor: Compactor(profile: configuration.profile),
                            immichState: immichState, logger: logger)
-        routes = Routes(configuration: configuration, catalog: catalog, storage: storage, immichState: immichState)
+        routes = Routes(configuration: configuration, catalog: catalog, storage: storage, immichState: immichState,
+                        approvals: PairingApprovals(approver: approver, serverName: configuration.name, pause: approvalPause))
     }
 
     public func router() -> Router<HomespunRequestContext> {
@@ -67,9 +73,11 @@ public struct HomespunServer: Sendable {
 
     public struct ServiceFailure: Error, CustomStringConvertible { public var description: String }
 
-    /// Writes the systemd unit or LaunchAgent and starts it. Returns what was done, or throws
-    /// `ServiceFailure` with the same report when a step failed.
-    public func installService(executable: String) throws -> String {
+    /// Copies the server to `~/.local/bin`, writes the systemd unit or LaunchAgent, and starts
+    /// it. Returns what was done, or throws `ServiceFailure` with the same report when a step failed.
+    public func installService(executable source: String) throws -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let executable = try ServiceInstaller.install(source, home: home).path
         let platform = HostPlatform.current()
         var environment = [
             "HOMESPUN_DATA": configuration.dataDirectory.path,
@@ -82,12 +90,11 @@ public struct HomespunServer: Sendable {
         for key in ["PATH", "HOMESPUN_IMMICH_URL", "HOMESPUN_IMMICH_API_KEY_FILE"] {
             if let value = current[key] { environment[key] = value }
         }
-        let home = FileManager.default.homeDirectoryForCurrentUser
         let plan = ServiceInstaller.plan(executable: executable, environment: environment, os: platform.os, home: home,
                                          userID: getuid(), user: NSUserName())
         try FileManager.default.createDirectory(at: plan.path.deletingLastPathComponent(), withIntermediateDirectories: true)
         try plan.contents.write(to: plan.path, atomically: true, encoding: .utf8)
-        var report = ["Wrote \(plan.path.path)"]
+        var report = ["Installed \(executable)", "Wrote \(plan.path.path)"]
         for command in plan.prepare { _ = Tools.output(command[0], Array(command.dropFirst())) }
         var failed = false
         for command in plan.commands {

@@ -104,12 +104,12 @@ struct Fixture {
     let directory: URL
     let server: HomespunServer
 
-    init(immich: ImmichConfiguration? = nil) async throws {
+    init(immich: ImmichConfiguration? = nil, approver: (any PairingApprover)? = nil) async throws {
         directory = try temporaryDirectory()
         var configuration = ServerConfiguration(dataDirectory: directory.appendingPathComponent("data"),
                                                 name: "test", profile: testProfile, immich: immich)
         configuration.maximumChunkBytes = 1 << 20
-        server = try await HomespunServer(configuration: configuration)
+        server = try await HomespunServer(configuration: configuration, approver: approver, approvalPause: 0.3)
     }
 
     func pair(_ client: some TestClientProtocol) async throws -> String {
@@ -453,6 +453,100 @@ extension Fingerprint {
 }
 
 // MARK: Setup
+
+/// Answers approval requests the way the test says; `hold` waits until withdrawn.
+final class FakeApprover: PairingApprover, @unchecked Sendable {
+    let lock = NSLock()
+    var answer: Bool? = true
+    var hold = false
+    var asked: [(device: String, match: String)] = []
+    var withdrawn = 0
+
+    func ask(device: String, match: String, server: String, seconds: Int) async -> Bool? {
+        let (hold, answer) = lock.withLock { asked.append((device, match)); return (self.hold, self.answer) }
+        guard hold else { return answer }
+        try? await Task.sleep(for: .seconds(30))
+        if Task.isCancelled { lock.withLock { withdrawn += 1 } }
+        return nil
+    }
+}
+
+@Test func devicesPairByApprovalOrWithACodeFromAPairedDevice() async throws {
+    let approver = FakeApprover()
+    let fixture = try await Fixture(approver: approver)
+    try await fixture.test { client, token in
+        let options = try await client.call("/api/v1/pair/options").decode(ServerAPI.PairingOptions.self)
+        #expect(options.canApprove && options.serverName == "test" && options.pairCommand.hasSuffix(" pair"))
+
+        func ask(_ name: String) async throws -> TestResponse {
+            try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(deviceName: name))
+        }
+        func status(_ ticket: ServerAPI.ApprovalTicket, secret: String? = nil) async throws -> TestResponse {
+            try await client.call("/api/v1/pair/requests/\(ticket.id)", token: secret ?? ticket.secret)
+        }
+        func answer(_ ticket: ServerAPI.ApprovalTicket) async throws -> ServerAPI.ApprovalStatus {
+            for _ in 0..<50 {
+                let current = try await status(ticket).decode(ServerAPI.ApprovalStatus.self)
+                if current.state != .waiting { return current }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            return .init(state: .waiting)
+        }
+
+        // Allowed: the device gets a token once, and the dialog named it (on one line) with the shown number.
+        let allowed = try await ask("Alex\u{0}'s\u{2028}iPad").decode(ServerAPI.ApprovalTicket.self)
+        #expect(allowed.match.count == 4)
+        #expect(try await status(allowed, secret: "wrong").status == .notFound)
+        // Until the device collects its token, no one else can take the approval's place.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(try await ask("Imposter").status == .tooManyRequests)
+        let approved = try await answer(allowed)
+        let pairing = try #require(approved.pairing)
+        #expect(approved.state == .approved && approver.lock.withLock { approver.asked.last?.device } == "Alex's iPad")
+        #expect(approver.lock.withLock { approver.asked.last?.match } == allowed.match)
+        #expect(try await client.call("/api/v1/info", token: pairing.token).status == .ok)
+        #expect(try await status(allowed).status == .notFound)
+
+        // Denied: no device, and a pause before the next question.
+        #expect(try await ask("Too soon").status == .tooManyRequests)
+        try await Task.sleep(for: .milliseconds(400))
+        approver.lock.withLock { approver.answer = false }
+        let denied = try await ask("Stranger").decode(ServerAPI.ApprovalTicket.self)
+        #expect(try await answer(denied) == .init(state: .denied))
+        #expect(try await ask("Stranger").status == .tooManyRequests)
+        #expect(try await fixture.server.catalog.devices().count == 2)
+    }
+
+    // One question at a time; withdrawing it closes the dialog.
+    let holding = FakeApprover()
+    holding.hold = true
+    let second = try await Fixture(approver: holding)
+    try await second.test { client, token in
+        let request = ServerAPI.ApprovalRequest(deviceName: "iPhone")
+        let ticket = try await client.call("/api/v1/pair/requests", .post, json: request).decode(ServerAPI.ApprovalTicket.self)
+        #expect(try await client.call("/api/v1/pair/requests", .post, json: request).status == .tooManyRequests)
+        #expect(try await client.call("/api/v1/pair/requests/\(ticket.id)", .delete, token: "wrong").status == .notFound)
+        #expect(try await client.call("/api/v1/pair/requests/\(ticket.id)", .delete, token: ticket.secret).status == .noContent)
+        #expect(try await client.call("/api/v1/pair/requests", .post, json: request).status == .tooManyRequests)
+        try await Task.sleep(for: .milliseconds(200))
+        #expect(holding.lock.withLock { holding.withdrawn } == 1)
+
+        // A paired device makes a code for another device.
+        let code = try await client.call("/api/v1/pairing-codes", .post, token: token).decode(ServerAPI.PairingCode.self)
+        #expect(code.expiresIn == 600)
+        #expect(try await client.call("/api/v1/pairing-codes", .post).status == .unauthorized)
+        let paired = try await client.call("/api/v1/pair", .post, json: ServerAPI.PairRequest(code: code.code, deviceName: "iPad"))
+        #expect(paired.status == .created)
+    }
+
+    // Without someone at the screen (Linux, or a server started over SSH) the app asks for a code.
+    let headless = try await Fixture()
+    try await headless.test { client, _ in
+        #expect(try await !client.call("/api/v1/pair/options").decode(ServerAPI.PairingOptions.self).canApprove)
+        let refused = try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(deviceName: "iPhone"))
+        #expect(refused.status == .conflict && String(decoding: refused.data, as: UTF8.self).contains(" pair` on it"))
+    }
+}
 
 @Test func setupHelpersPickTheHomeNetworkAndWriteServices() throws {
     let interfaces: [Network.Interface] = [

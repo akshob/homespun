@@ -128,8 +128,10 @@ public enum ServerSetup {
     }
 
     public static let repository = "https://github.com/akshob/homespun.git"
-    /// Where the install steps put the server.
-    public static let serverCommand = "~/homespun/.build/release/homespun-server"
+    /// Where `install-service` puts the server; every later command uses this.
+    public static let serverCommand = "~/.local/bin/homespun-server"
+    /// The freshly built server, before it is installed.
+    static let builtCommand = "~/homespun/.build/release/homespun-server"
 
     /// Steps to build and start the server from source. (Packages come later, once the
     /// repository is public.)
@@ -141,13 +143,9 @@ public enum ServerSetup {
                        "cd ~/homespun && swift build -c release --product homespun-server"])
         let service = Step(
             title: "Choose where originals are kept, and start the server",
-            detail: "Pick a folder on a disk with room for your originals. The server starts now and again whenever "
-                + "the computer starts.",
-            commands: ["\(serverCommand) install-service --data ~/Homespun"])
-        let pair = Step(
-            title: "Show the pairing code",
-            detail: "Scan the QR code with this iPhone's camera, or come back here and choose \"Find my server\".",
-            commands: ["\(serverCommand) pair"])
+            detail: "Pick a folder on a disk with room for your originals. This installs the server as "
+                + "\(serverCommand); it starts now and again whenever the computer starts.",
+            commands: ["\(builtCommand) install-service --data ~/Homespun"])
         switch os {
         case .macOS:
             return [
@@ -158,7 +156,11 @@ public enum ServerSetup {
                      detail: "ffmpeg makes the smallest videos. Skip the first command if you already have Homebrew.",
                      commands: [#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#,
                                 PackageManager.homebrew.install(PackageManager.homebrew.packages)]),
-                build, service, pair,
+                build, service,
+                Step(title: "Pair this iPhone",
+                     detail: "Come back here, tap your Mac under \"On your network\", and click Allow on the Mac. "
+                        + "Its screen and this iPhone show the same number.",
+                     commands: []),
             ]
         case .linux:
             let manager = packageManager ?? .apt
@@ -172,7 +174,11 @@ public enum ServerSetup {
                      commands: ["curl -fsSLO https://download.swift.org/swiftly/linux/swiftly-$(uname -m).tar.gz",
                                 "tar zxf swiftly-$(uname -m).tar.gz && ./swiftly init --quiet-shell-followup",
                                 ". ~/.local/share/swiftly/env.sh"]),
-                build, service, pair,
+                build, service,
+                Step(title: "Show the pairing code",
+                     detail: "Scan the QR code with this iPhone's Camera app, or come back here, tap the server "
+                        + "under \"On your network\", and enter the code.",
+                     commands: ["\(serverCommand) pair"]),
             ]
         }
     }

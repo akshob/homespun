@@ -24,7 +24,7 @@ struct ServerClient: Sendable {
         return request
     }
 
-    private func check(_ data: Data, _ response: URLResponse, accepting: Set<Int> = [200, 201]) throws -> Int {
+    private func check(_ data: Data, _ response: URLResponse, accepting: Set<Int> = [200, 201, 202]) throws -> Int {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard accepting.contains(status) else {
             let message = (try? ServerAPI.decoder.decode(ServerAPI.ErrorBody.self, from: data))?.error.message
@@ -48,6 +48,31 @@ struct ServerClient: Sendable {
     func pair(code: String, deviceName: String) async throws -> ServerAPI.PairResponse {
         try await send("pair", method: "POST", json: ServerAPI.PairRequest(code: code, deviceName: deviceName),
                        as: ServerAPI.PairResponse.self)
+    }
+
+    func pairingOptions() async throws -> ServerAPI.PairingOptions {
+        try await send("pair/options", as: ServerAPI.PairingOptions.self)
+    }
+
+    /// Asks someone at the server to allow this device.
+    func requestApproval(deviceName: String) async throws -> ServerAPI.ApprovalTicket {
+        try await send("pair/requests", method: "POST", json: ServerAPI.ApprovalRequest(deviceName: deviceName),
+                       as: ServerAPI.ApprovalTicket.self)
+    }
+
+    /// For a client whose token is the ticket's secret.
+    func approvalStatus(_ id: String) async throws -> ServerAPI.ApprovalStatus {
+        try await send("pair/requests/\(id)", as: ServerAPI.ApprovalStatus.self)
+    }
+
+    /// Withdraws the question (closing the dialog). For a client whose token is the ticket's secret.
+    func cancelApproval(_ id: String) async {
+        _ = try? await session.data(for: request("pair/requests/\(id)", method: "DELETE"))
+    }
+
+    /// A one-time code for pairing another device.
+    func newPairingCode() async throws -> ServerAPI.PairingCode {
+        try await send("pairing-codes", method: "POST", as: ServerAPI.PairingCode.self)
     }
 
     func info() async throws -> ServerAPI.ServerInfo { try await send("info", as: ServerAPI.ServerInfo.self) }
