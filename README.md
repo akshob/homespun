@@ -178,7 +178,8 @@ commands find the same data. If the pairing address is wrong (for example behind
 `HOMESPUN_PUBLIC_URL`. The catalog (`homespun.db`, with token hashes and any Immich key) is
 readable only by the server's user.
 The server advertises itself with Bonjour (`_homespun._tcp`, via `dns-sd` on macOS or
-`avahi-publish` on Linux), so the app lists it; pairing still needs the one-time code. You can
+`avahi-publish` on Linux, from avahi-utils; a running server notices it within seconds of being
+installed), so the app lists it; pairing still needs the one-time code. You can
 also scan the QR code with the iPhone's Camera app, paste the `homespun://pair?…` link (handy
 on the simulator), or type the address and code.
 

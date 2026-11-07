@@ -483,7 +483,8 @@ extension Fingerprint {
     let plist = try PropertyListSerialization.propertyList(from: Data(mac.contents.utf8), format: nil) as? [String: Any]
     #expect((plist?["ProgramArguments"] as? [String]) == ["/Users/alex/hs & co/homespun-server", "serve"])
     #expect((plist?["EnvironmentVariables"] as? [String: String])?["HOMESPUN_DATA"] == "/srv/homespun")
-    #expect(mac.commands.last == ["launchctl", "bootstrap", "gui/501", mac.path.path])
+    #expect(mac.prepare == [["launchctl", "bootout", "gui/501/photos.homespun.server"]])
+    #expect(mac.commands == [["launchctl", "bootstrap", "gui/501", mac.path.path]])
 }
 
 @Test func pairingInstructionsAndSelfCheck() async throws {
@@ -569,5 +570,10 @@ extension Fingerprint {
     try await server.application().test(.live) { client in
         try await Task.sleep(for: .seconds(2))
         #expect(try await client.call("/api/v1/health").status == .ok)
+    }
+    // Shutting down also stops the Bonjour helper, if this computer has one.
+    if let tool = ServiceAdvertiser.tool {
+        let name = (tool as NSString).lastPathComponent
+        #expect(Tools.output("pgrep", ["-f", "\(name) .*test _homespun._tcp"]) == nil, "\(name) outlived the server")
     }
 }

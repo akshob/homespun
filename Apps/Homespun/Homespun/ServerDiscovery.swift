@@ -14,7 +14,12 @@ final class ServerDiscovery {
 
     private(set) var servers: [Found] = []
     private(set) var isSearching = false
+    /// Nothing turned up after a few seconds, so the user should hear why that might be.
+    private(set) var foundNothing = false
+    /// iOS blocked the search: the user turned off Local Network access for Homespun.
+    private(set) var blocked = false
     private var browser: NWBrowser?
+    private var patience: Task<Void, Never>?
 
     func start() {
         guard browser == nil else { return }
@@ -28,18 +33,38 @@ final class ServerDiscovery {
         }
         browser.stateUpdateHandler = { [weak self] state in
             Task { @MainActor in
-                if case .failed = state { self?.stop() }
+                switch state {
+                case .ready: self?.blocked = false
+                case .waiting(let error): self?.blocked = Self.isPolicyDenied(error)
+                case .failed(let error):
+                    self?.blocked = Self.isPolicyDenied(error)
+                    self?.stop()
+                default: break
+                }
             }
         }
         browser.start(queue: .main)
         self.browser = browser
         isSearching = true
+        foundNothing = false
+        patience = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled, let self, self.servers.isEmpty else { return }
+            self.foundNothing = true
+        }
     }
 
     func stop() {
         browser?.cancel()
         browser = nil
+        patience?.cancel()
         isSearching = false
+    }
+
+    /// kDNSServiceErr_PolicyDenied: Local Network access is off for this app.
+    private nonisolated static func isPolicyDenied(_ error: NWError) -> Bool {
+        if case .dns(let code) = error { return code == -65570 }
+        return false
     }
 
     private func update(_ endpoints: [(String, NWEndpoint)]) {

@@ -130,6 +130,8 @@ enum ServiceInstaller {
     struct Plan: Equatable {
         var path: URL
         var contents: String
+        /// Run first and allowed to fail (for example, stopping a service that isn't loaded).
+        var prepare: [[String]] = []
         var commands: [[String]]
     }
 
@@ -189,9 +191,8 @@ enum ServiceInstaller {
 
                 """
             let path = home.appendingPathComponent("Library/LaunchAgents/\(label).plist")
-            return Plan(path: path, contents: plist,
-                        commands: [["launchctl", "bootout", "gui/\(userID)/\(label)"],
-                                   ["launchctl", "bootstrap", "gui/\(userID)", path.path]])
+            return Plan(path: path, contents: plist, prepare: [["launchctl", "bootout", "gui/\(userID)/\(label)"]],
+                        commands: [["launchctl", "bootstrap", "gui/\(userID)", path.path]])
         }
     }
 }
@@ -227,14 +228,23 @@ final class ServiceAdvertiser: Service, Sendable {
     }
 
     func run() async throws {
-        // A service that returns early stops the whole server, so without a tool this waits.
-        guard let tool = Self.tool else {
-            logger.notice("Bonjour advertising is off: install avahi-utils so the app can find this server.")
-            try? await gracefulShutdown()
-            return
-        }
+        // A service that returns early stops the whole server, so this runs until shutdown. It
+        // looks for the tool again now and then, in case it is installed while the server runs.
         await cancelWhenGracefulShutdown {
+            var missing = false
             while !Task.isCancelled {
+                guard let tool = Self.tool else {
+                    if !missing {
+                        self.logger.notice("Bonjour advertising is off: install avahi-utils so the app can find this server.")
+                        missing = true
+                    }
+                    try? await Task.sleep(for: .seconds(15))
+                    continue
+                }
+                if missing {
+                    self.logger.notice("Bonjour advertising is on.")
+                    missing = false
+                }
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: tool)
                 process.arguments = self.arguments()
@@ -245,13 +255,22 @@ final class ServiceAdvertiser: Service, Sendable {
                     try? await Task.sleep(for: .seconds(60))
                     continue
                 }
+                // SIGKILL, because on Linux Foundation starts the child with this process's signals
+                // blocked, SIGTERM included. The Bonjour daemon withdraws the name when it goes.
+                let pid = process.processIdentifier
                 await withTaskCancellationHandler {
                     while process.isRunning && !Task.isCancelled { try? await Task.sleep(for: .seconds(1)) }
                 } onCancel: {
-                    process.terminate()
+                    kill(pid, SIGKILL)
                 }
-                if process.isRunning { process.terminate() }
-                if !Task.isCancelled { try? await Task.sleep(for: .seconds(30)) }
+                if process.isRunning {
+                    kill(pid, SIGKILL)
+                    process.waitUntilExit()
+                }
+                if !Task.isCancelled {
+                    self.logger.warning("Bonjour advertising stopped (\(tool) exited with \(process.terminationStatus)); retrying")
+                    try? await Task.sleep(for: .seconds(30))
+                }
             }
         }
     }

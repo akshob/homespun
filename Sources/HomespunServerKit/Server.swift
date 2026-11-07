@@ -65,7 +65,10 @@ public struct HomespunServer: Sendable {
         return text
     }
 
-    /// Writes the systemd unit or LaunchAgent and starts it. Returns what was done.
+    public struct ServiceFailure: Error, CustomStringConvertible { public var description: String }
+
+    /// Writes the systemd unit or LaunchAgent and starts it. Returns what was done, or throws
+    /// `ServiceFailure` with the same report when a step failed.
     public func installService(executable: String) throws -> String {
         let platform = HostPlatform.current()
         var environment = [
@@ -85,9 +88,21 @@ public struct HomespunServer: Sendable {
         try FileManager.default.createDirectory(at: plan.path.deletingLastPathComponent(), withIntermediateDirectories: true)
         try plan.contents.write(to: plan.path, atomically: true, encoding: .utf8)
         var report = ["Wrote \(plan.path.path)"]
+        for command in plan.prepare { _ = Tools.output(command[0], Array(command.dropFirst())) }
+        var failed = false
         for command in plan.commands {
-            let ok = Tools.output(command[0], Array(command.dropFirst())) != nil
+            // launchctl bootout finishes in the background, so bootstrap can fail at first.
+            var ok = false
+            for attempt in 0..<5 where !ok {
+                if attempt > 0 { Thread.sleep(forTimeInterval: 1) }
+                ok = Tools.output(command[0], Array(command.dropFirst())) != nil
+            }
             report.append("\(ok ? "Ran" : "Could not run") \(command.joined(separator: " "))")
+            failed = failed || !ok
+        }
+        guard !failed else {
+            report.append("Homespun Server is not running as a service yet. Fix the step above, then run install-service again.")
+            throw ServiceFailure(description: report.joined(separator: "\n"))
         }
         report.append("Homespun Server now starts automatically. Data: \(configuration.dataDirectory.path)")
         return report.joined(separator: "\n")

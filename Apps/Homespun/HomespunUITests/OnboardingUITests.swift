@@ -3,8 +3,8 @@ import XCTest
 
 /// Walks the first run on a fresh simulator: welcome, connect, server check, Photos access, and
 /// the main screen. With `HOMESPUN_PAIR_LINK` it pairs through the deep link `homespun-server pair`
-/// prints; with `HOMESPUN_DISCOVER` it also expects that server name on the network. Without
-/// them it skips pairing. Screenshots of every step are attached.
+/// prints; with `HOMESPUN_DISCOVER` (comma-separated names) it also expects those servers on the
+/// network. Without a link it skips pairing. Screenshots of every step are attached.
 final class OnboardingUITests: XCTestCase {
     @MainActor func testFirstRun() throws {
         let environment = ProcessInfo.processInfo.environment
@@ -17,7 +17,7 @@ final class OnboardingUITests: XCTestCase {
         start.tap()
 
         XCTAssertTrue(app.textFields["server.address"].waitForExistence(timeout: 10), "no connect screen")
-        if let name = environment["HOMESPUN_DISCOVER"] {
+        for name in (environment["HOMESPUN_DISCOVER"] ?? "").split(separator: ",") {
             XCTAssertTrue(app.buttons["discovered.\(name)"].waitForExistence(timeout: 20), "server \(name) not discovered")
         }
         attach(app, "2 Connect")

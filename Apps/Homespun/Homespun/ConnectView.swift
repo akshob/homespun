@@ -39,9 +39,27 @@ struct ConnectView: View {
                     .accessibilityIdentifier("discovered.\(found.name)")
                 }
                 if discovery.servers.isEmpty {
-                    HStack(spacing: 10) {
-                        ProgressView()
-                        Text("Looking for servers on your network…").foregroundStyle(.secondary)
+                    if discovery.blocked {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Homespun can't look for servers", systemImage: "wifi.exclamationmark")
+                            Text("Turn on Local Network for Homespun in Settings, or pair with a link or the address below.")
+                                .font(.callout).foregroundStyle(.secondary)
+                            Button("Open Settings") {
+                                if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                            }
+                        }
+                    } else {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Looking for servers on your network…").foregroundStyle(.secondary)
+                        }
+                        if discovery.foundNothing {
+                            Text("None found yet. Check that the server is running and on the same network as this "
+                                 + "iPhone. A Linux server also needs avahi-utils for this (its server check says so). "
+                                 + "You can always pair with the link or the address and code instead.")
+                                .font(.callout).foregroundStyle(.secondary)
+                                .accessibilityIdentifier("discovery.none")
+                        }
                     }
                 }
             } header: {

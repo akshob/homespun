@@ -86,6 +86,7 @@ do {
         exit(2)
     }
 } catch {
-    FileHandle.standardError.write(Data("homespun-server: \(error)\n\n\(usage)\n".utf8))
+    let help = error is ServerConfiguration.Failure ? "\n\(usage)\n" : ""
+    FileHandle.standardError.write(Data("homespun-server: \(error)\n\(help)".utf8))
     exit(1)
 }
