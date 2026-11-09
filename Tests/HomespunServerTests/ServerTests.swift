@@ -548,6 +548,16 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
     }
 }
 
+@Test func refusesToKeepOriginalsInASourceCheckout() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try Data().write(to: directory.appendingPathComponent("Package.swift"))
+    await #expect(throws: Storage.UnsafeLocation.self) {
+        _ = try await HomespunServer(configuration: ServerConfiguration(dataDirectory: directory))
+    }
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("originals").path))
+}
+
 @Test func setupHelpersPickTheHomeNetworkAndWriteServices() throws {
     let interfaces: [Network.Interface] = [
         .init(name: "lo", address: "127.0.0.1"), .init(name: "lxdbr0", address: "10.85.43.1"),

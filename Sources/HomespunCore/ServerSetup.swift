@@ -143,9 +143,10 @@ public enum ServerSetup {
                        "cd ~/homespun && swift build -c release --product homespun-server"])
         let service = Step(
             title: "Choose where originals are kept, and start the server",
-            detail: "Pick a folder on a disk with room for your originals. This installs the server as "
+            detail: "Pick a folder on a disk with room for your originals, not the ~/homespun source folder. "
+                + "This installs the server as "
                 + "\(serverCommand); it starts now and again whenever the computer starts.",
-            commands: ["\(builtCommand) install-service --data ~/Homespun"])
+            commands: ["\(builtCommand) install-service --data ~/Pictures/Homespun"])
         switch os {
         case .macOS:
             return [

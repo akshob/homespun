@@ -38,7 +38,7 @@ brew install ffmpeg</code></pre></li>
 cd ~/homespun &amp;&amp; swift build -c release --product homespun-server</code></pre></li>
       <li><strong>Choose where originals are kept, and start the server.</strong> This installs it as
         <code>~/.local/bin/homespun-server</code>, and it starts again whenever you log in:
-        <pre><code>~/homespun/.build/release/homespun-server install-service --data ~/Homespun</code></pre></li>
+        <pre><code>~/homespun/.build/release/homespun-server install-service --data ~/Pictures/Homespun</code></pre></li>
       <li><strong>Pair the app.</strong> Open Homespun on your iPhone, tap your Mac under <em>On your network</em>, and
         click <strong>Allow</strong> on the Mac. Both screens show the same number.</li>
     </ol>
@@ -59,7 +59,7 @@ tar zxf swiftly-$(uname -m).tar.gz &amp;&amp; ./swiftly init --quiet-shell-follo
 cd ~/homespun &amp;&amp; swift build -c release --product homespun-server</code></pre></li>
       <li><strong>Choose where originals are kept, and start the server.</strong> It runs as a systemd user service and
         starts with the computer:
-        <pre><code>~/homespun/.build/release/homespun-server install-service --data ~/Homespun</code></pre>
+        <pre><code>~/homespun/.build/release/homespun-server install-service --data ~/Pictures/Homespun</code></pre>
         This installs it as <code>~/.local/bin/homespun-server</code>.</li>
       <li><strong>Pair the app.</strong> This shows a QR code; scan it with your iPhone's camera, or tap the server in
         the app and enter the code:

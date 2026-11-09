@@ -89,6 +89,8 @@ public struct ServerConfiguration: Sendable {
 struct Storage: Sendable {
     let root: URL
 
+    public struct UnsafeLocation: Error, CustomStringConvertible { public var description: String }
+
     var catalog: URL { root.appendingPathComponent("homespun.db") }
     var originals: URL { root.appendingPathComponent("originals", isDirectory: true) }
     var staging: URL { root.appendingPathComponent("staging", isDirectory: true) }
@@ -96,6 +98,15 @@ struct Storage: Sendable {
     var cacheRoot: URL { root.appendingPathComponent("cache", isDirectory: true) }
 
     func prepare() throws {
+        // Updating or re-cloning source code deletes what isn't part of it, originals included.
+        // On macOS, folder names usually ignore case: ~/homespun and ~/Homespun are one folder.
+        for marker in [".git", "Package.swift"]
+        where FileManager.default.fileExists(atPath: root.appendingPathComponent(marker).path) {
+            throw UnsafeLocation(description:
+                "\(root.path) holds source code (it has \(marker)), so originals there could be deleted. "
+                + "Keep them in another folder, for example ~/Pictures/Homespun. (On a Mac, ~/homespun and "
+                + "~/Homespun are the same folder.)")
+        }
         for directory in [root, originals, staging, compactRoot, cacheRoot] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
