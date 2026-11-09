@@ -36,7 +36,7 @@ final class CompactJob {
     var savedCompactBytes: Int { items.reduce(0) { if case .saved(_, let c) = $1.state { $0 + c } else { $0 } } }
 
     func enqueue(_ assetIdentifiers: [String]) {
-        for identifier in assetIdentifiers {
+        for identifier in PhotoLibrary.chronological(assetIdentifiers) {
             let description = PhotoLibrary.describe(identifier)
             items.append(Item(assetIdentifier: identifier, name: description?.name ?? "Item",
                               symbol: description?.kind.symbol ?? "questionmark.square",

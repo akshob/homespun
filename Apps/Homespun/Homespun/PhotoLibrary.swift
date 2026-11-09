@@ -64,6 +64,27 @@ enum PhotoLibrary {
         PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil).firstObject
     }
 
+    /// Oldest capture first, like the Photos library, so copies are also added to Photos in
+    /// capture order. Items without a date keep their order, after the dated ones.
+    static func chronological(_ localIdentifiers: [String]) -> [String] {
+        var dates: [String: Date] = [:]
+        PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: nil).enumerateObjects { asset, _, _ in
+            dates[asset.localIdentifier] = asset.creationDate
+        }
+        return chronological(localIdentifiers, dates: dates)
+    }
+
+    static func chronological(_ identifiers: [String], dates: [String: Date]) -> [String] {
+        identifiers.enumerated().sorted { a, b in
+            switch (dates[a.element], dates[b.element]) {
+            case let (x?, y?) where x != y: x < y
+            case (_?, nil): true
+            case (nil, _?): false
+            default: a.offset < b.offset
+            }
+        }.map(\.element)
+    }
+
     static func kind(of asset: PHAsset) -> Kind? {
         switch asset.mediaType {
         case .image: asset.mediaSubtypes.contains(.photoLive) ? .livePhoto : .photo

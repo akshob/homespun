@@ -82,3 +82,11 @@ import Testing
         #expect((try? FileManager.default.contentsOfDirectory(atPath: work.path))?.isEmpty ?? true)
     }
 }
+
+@Test func pickedItemsAreQueuedOldestFirst() {
+    let dates = ["2011": Date(timeIntervalSince1970: 1_300_000_000), "2009": Date(timeIntervalSince1970: 1_255_000_000),
+                 "2018": Date(timeIntervalSince1970: 1_522_000_000), "same": Date(timeIntervalSince1970: 1_300_000_000)]
+    // The picker lists newest first; ties and undated items keep the picker's order.
+    #expect(PhotoLibrary.chronological(["2018", "undated", "2011", "same", "2009"], dates: dates)
+            == ["2009", "2011", "same", "2018", "undated"])
+}
