@@ -43,6 +43,14 @@ enum PhotoLibrary {
     enum Kind: Sendable {
         case photo, livePhoto, video
 
+        var name: String {
+            switch self {
+            case .photo: "Photo"
+            case .livePhoto: "Live Photo"
+            case .video: "Video"
+            }
+        }
+
         var symbol: String {
             switch self {
             case .photo: "photo"
@@ -177,6 +185,25 @@ enum PhotoLibrary {
     private struct AlbumReference: @unchecked Sendable { let collection: PHAssetCollection }
 
     private final class IdentifierBox: @unchecked Sendable { var value: String? }
+
+    /// Which of these items are still in the library, in one fetch.
+    static func existing(_ localIdentifiers: [String]) -> Set<String> {
+        guard !localIdentifiers.isEmpty else { return [] }
+        var found = Set<String>()
+        PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: nil).enumerateObjects { asset, _, _ in
+            found.insert(asset.localIdentifier)
+        }
+        return found
+    }
+
+    /// The items in the Homespun album, or `nil` if there is no album yet.
+    static func albumAssets() -> PHFetchResult<PHAsset>? {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "title == %@", albumTitle)
+        guard let album = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular,
+                                                                 options: options).firstObject else { return nil }
+        return PHAsset.fetchAssets(in: album, options: nil)
+    }
 
     static func isCompactCopy(_ asset: PHAsset) -> Bool {
         var found = false

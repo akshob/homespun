@@ -19,16 +19,21 @@ struct OriginalRemover: Sendable {
     let mode: ServerAPI.StorageMode
     let ledger: CompactLedger
 
-    /// Originals still in the library that have a server copy and a compact copy on record.
-    func candidates() async -> [(original: String, entry: CompactLedger.Entry)] {
-        await ledger.serverBacked().filter { PhotoLibrary.asset($0.original) != nil }
+    /// Originals still in the library that have a server copy and a compact copy on record,
+    /// optionally only these.
+    func candidates(only: Set<String>? = nil) async -> [(original: String, entry: CompactLedger.Entry)] {
+        let backed = await ledger.serverBacked().filter { only?.contains($0.original) ?? true }
+        let present = PhotoLibrary.existing(backed.map(\.original))
+        return backed.filter { present.contains($0.original) }
     }
 
-    /// Checks and removes eligible originals; `limit` caps how many (the first-time trial).
-    func removeEligible(limit: Int? = nil, progress: @escaping @Sendable (String) -> Void) async throws -> Report {
+    /// Checks and removes eligible originals; `only` limits it to these originals, and `limit`
+    /// caps how many (the first-time trial).
+    func removeEligible(limit: Int? = nil, only: Set<String>? = nil,
+                        progress: @escaping @Sendable (String) -> Void) async throws -> Report {
         var report = Report()
         var approved: [(asset: PHAsset, name: String, bytes: Int)] = []
-        let candidates = Array(await candidates().prefix(limit ?? .max))
+        let candidates = Array(await candidates(only: only).prefix(limit ?? .max))
         for (index, candidate) in candidates.enumerated() {
             guard let asset = PhotoLibrary.asset(candidate.original), let assetID = candidate.entry.serverAssetID else { continue }
             let name = PhotoLibrary.describe(candidate.original)?.name ?? "Item"

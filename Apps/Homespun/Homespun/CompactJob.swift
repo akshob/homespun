@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Observation
+import Photos
 import UIKit
 
 /// The queue of items the user picked, processed one at a time.
@@ -12,7 +13,20 @@ final class CompactJob {
         case saved(originalBytes: Int, compactBytes: Int)
         case unchanged(String)
         case failed(String)
+
+        /// The state without its message or sizes; enough for the grid's badges.
+        var phase: Phase {
+            switch self {
+            case .waiting: .waiting
+            case .working: .working
+            case .saved: .saved
+            case .unchanged: .unchanged
+            case .failed: .failed
+            }
+        }
     }
+
+    enum Phase: Equatable { case waiting, working, saved, unchanged, failed }
 
     struct Item: Identifiable {
         let id = UUID()
@@ -20,6 +34,8 @@ final class CompactJob {
         var name: String
         var symbol: String
         var state: State
+
+        var isWorking: Bool { if case .working = state { true } else { false } }
     }
 
     private(set) var items: [Item] = []
@@ -32,16 +48,32 @@ final class CompactJob {
         self.ledger = ledger
     }
 
+    /// The latest state of each item picked this session.
+    var states: [String: State] {
+        Dictionary(items.map { ($0.assetIdentifier, $0.state) }, uniquingKeysWith: { _, latest in latest })
+    }
+
     var savedOriginalBytes: Int { items.reduce(0) { if case .saved(let o, _) = $1.state { $0 + o } else { $0 } } }
     var savedCompactBytes: Int { items.reduce(0) { if case .saved(_, let c) = $1.state { $0 + c } else { $0 } } }
 
+    /// Queues items oldest first, skipping any already waiting or working. One fetch for all of
+    /// them, so selecting a whole library is quick; file names are filled in as each starts.
     func enqueue(_ assetIdentifiers: [String]) {
-        for identifier in PhotoLibrary.chronological(assetIdentifiers) {
-            let description = PhotoLibrary.describe(identifier)
-            items.append(Item(assetIdentifier: identifier, name: description?.name ?? "Item",
-                              symbol: description?.kind.symbol ?? "questionmark.square",
-                              state: description == nil ? .failed(PhotoLibrary.Failure.notFound
-                                  .localizedDescription) : .waiting))
+        var assets: [String: PHAsset] = [:]
+        PHAsset.fetchAssets(withLocalIdentifiers: assetIdentifiers, options: nil).enumerateObjects { asset, _, _ in
+            assets[asset.localIdentifier] = asset
+        }
+        let busy = Set(items.filter { $0.state == .waiting || $0.isWorking }.map(\.assetIdentifier))
+        for identifier in PhotoLibrary.chronological(assetIdentifiers, dates: assets.compactMapValues(\.creationDate))
+        where !busy.contains(identifier) {
+            guard let asset = assets[identifier], let kind = PhotoLibrary.kind(of: asset) else {
+                items.append(Item(assetIdentifier: identifier, name: "Item", symbol: "questionmark.square",
+                                  state: .failed(PhotoLibrary.Failure.notFound.localizedDescription)))
+                continue
+            }
+            let date = asset.creationDate?.formatted(date: .abbreviated, time: .shortened)
+            items.append(Item(assetIdentifier: identifier, name: date.map { "\(kind.name), \($0)" } ?? kind.name,
+                              symbol: kind.symbol, state: .waiting))
         }
         if !isRunning { Task { await run() } }
     }
@@ -67,6 +99,7 @@ final class CompactJob {
         while let index = items.firstIndex(where: { $0.state == .waiting }) {
             let id = items[index].id
             items[index].state = .working("Starting")
+            if let name = PhotoLibrary.describe(items[index].assetIdentifier)?.name { items[index].name = name }
             let state: State
             do {
                 let compactor = settings.compactor(ledger: ledger)

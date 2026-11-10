@@ -25,6 +25,8 @@ actor CompactLedger {
         entries = (try? JSONDecoder().decode([String: Entry].self, from: Data(contentsOf: url))) ?? [:]
     }
 
+    func snapshot() -> [String: Entry] { entries }
+
     func compactIdentifier(for original: String) -> String? {
         entries[original]?.compactIdentifier
     }

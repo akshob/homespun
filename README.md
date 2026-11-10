@@ -78,7 +78,14 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 On first launch the app explains what it does, connects to a server (tap one found on the
 network: a Mac asks you to click Allow on its screen, a Linux server gives you a code; or use a
 QR code, link, or address), shows the server's self-check, and asks for Photos access. A paired
-iPhone can add another device from Settings › Add another device (a QR code and one-time code). Compact copies go to a "Homespun" album with the original's date, location,
+iPhone can add another device from Settings › Add another device (a QR code and one-time code).
+
+The main screen is the whole library as a grid, oldest first like Photos. Tap photos to select
+them (or "Select all not backed up"), then Compact; afterwards Homespun offers to free up space
+for them. Once an item has a compact copy, the grid shows the copy instead of the original, with
+a badge: orange (the original is still on this iPhone; Free up space removes it) or green
+(backed up: the original is only on the server). Filters show everything, only what isn't backed
+up, or only what is. Compact copies go to a "Homespun" album with the original's date, location,
 and favorite and hidden state; edited items are compressed as they currently look. Before the
 first removal it explains what removal means (including iCloud Photos), and the first removal
 takes at most 10 originals until you confirm the copies look right. Making copies on the

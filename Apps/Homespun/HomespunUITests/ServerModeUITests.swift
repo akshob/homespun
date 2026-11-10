@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 
-/// Pairs with a running Homespun Server, compacts the newest items through it, and optionally
-/// removes the originals. Needs a fresh simulator with synthetic media and these variables
+/// Pairs with a running Homespun Server, compacts the newest items in the library grid through
+/// it, checks their badges, and optionally removes the originals. Needs a fresh simulator with synthetic media and these variables
 /// (pass them to `xcodebuild test` with a `TEST_RUNNER_` prefix):
 /// `HOMESPUN_SERVER` (address), `HOMESPUN_PAIRING_CODE` (from `homespun-server pair`),
 /// optional `HOMESPUN_PICK` (number of newest items, default 3) and `HOMESPUN_REMOVE=1`.
@@ -45,30 +45,20 @@ final class ServerModeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()
 
-        app.buttons["Choose photos and videos"].tap()
-        let grid = app.images.matching(identifier: "PXGGridLayout-Info")
-        XCTAssertTrue(grid.firstMatch.waitForExistence(timeout: 20), "photo picker did not show any items")
-        let count = min(Int(environment["HOMESPUN_PICK"] ?? "") ?? 3, grid.count)
-        for index in 0..<count { grid.element(boundBy: index).tap() }
-        app.buttons["Done"].tap()
-
-        let rows = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'status.'"))
-        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10), "no items were queued")
-        let busy = app.staticTexts.matching(NSPredicate(format: "identifier IN {'status.waiting', 'status.working'}"))
-        let deadline = Date().addingTimeInterval(900)
-        while busy.count > 0 && Date() < deadline { sleep(2) }
-        attach(app, "Results")
-        XCTAssertEqual(busy.count, 0, "items still working after 15 minutes")
-        let failed = app.staticTexts.matching(identifier: "status.failed")
-        XCTAssertEqual(failed.count, 0, failed.allElementsBoundByIndex.map(\.label).joined(separator: "; "))
-        XCTAssertGreaterThan(app.staticTexts.matching(identifier: "status.saved").count, 0)
+        attach(app, "Grid")
+        _ = app.compactNewest(Int(environment["HOMESPUN_PICK"] ?? "") ?? 3)
+        attach(app, "Compacted")
+        // The originals are on the server and still on the iPhone; the grid shows their copies.
+        let onPhone = app.gridItems("Original still on this iPhone")
+        XCTAssertGreaterThan(onPhone.count, 0, "no compact copies marked")
+        XCTAssertTrue(app.checkActivity().contains("status.saved"))
 
         guard environment["HOMESPUN_REMOVE"] == "1" else { return }
-        let remove = app.buttons["remove.originals"]
-        XCTAssertTrue(remove.waitForExistence(timeout: 20), "no originals offered for removal")
-        for _ in 0..<4 where !remove.isHittable { app.swipeUp() }
+        // Homespun offers to free up space for what was just compacted.
+        let offer = app.buttons["offer.free"]
+        XCTAssertTrue(offer.waitForExistence(timeout: 20), "no offer to free up space")
         attach(app, "Before removal")
-        remove.tap()
+        offer.tap()
         // The first time, Homespun explains what removal does.
         let proceed = app.buttons["removal.continue"]
         if proceed.waitForExistence(timeout: 5) {
@@ -91,6 +81,9 @@ final class ServerModeUITests: XCTestCase {
         XCTAssertTrue(looksRight.waitForExistence(timeout: 5), "trial check not offered")
         looksRight.tap()
         XCTAssertFalse(looksRight.waitForExistence(timeout: 2))
+        // The removed originals' copies now show as backed up.
+        XCTAssertTrue(app.gridItems("Backed up").firstMatch.waitForExistence(timeout: 10), "no items marked backed up")
+        attach(app, "Backed up")
     }
 
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {

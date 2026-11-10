@@ -90,3 +90,28 @@ import Testing
     #expect(PhotoLibrary.chronological(["2018", "undated", "2011", "same", "2009"], dates: dates)
             == ["2009", "2011", "same", "2018", "undated"])
 }
+
+@Test func gridShowsCompactCopiesWithWhereTheOriginalIs() {
+    func entry(_ compact: String, server: Bool) -> CompactLedger.Entry {
+        .init(compactIdentifier: compact, originalBytes: 100, compactBytes: 10, savedAt: Date(),
+              serverAssetID: server ? "sha-\(compact)" : nil)
+    }
+    let ledger = ["orig-kept": entry("copy-kept", server: true),      // original still on the phone
+                  "orig-removed": entry("copy-removed", server: true), // original removed after backup
+                  "orig-device": entry("copy-device", server: false),  // made on the phone only
+                  "orig-gone": entry("copy-missing", server: true)]    // copy deleted by the user
+    let library = ["orig-kept", "copy-kept", "copy-removed", "orig-device", "copy-device", "orig-gone",
+                   "album-only", "plain", "busy", "broken"]
+    let state = LibraryState(library: library, ledger: ledger, album: ["album-only", "copy-kept"],
+                             job: ["busy": .working("Uploading"), "broken": .failed("x"), "plain": .saved(originalBytes: 1, compactBytes: 1)])
+    let badges = Dictionary(uniqueKeysWithValues: state.cells.map { ($0.id, $0.badge) })
+    // An original with its copy in the library is shown as the copy.
+    #expect(state.cells.map(\.id) == ["copy-kept", "copy-removed", "copy-device", "orig-gone", "album-only", "plain", "busy", "broken"])
+    #expect(badges == ["copy-kept": .originalOnPhone, "copy-removed": .backedUp, "copy-device": .originalOnPhone,
+                       "orig-gone": .none, "album-only": .compactCopy, "plain": .none, "busy": .working, "broken": .failed])
+    let kept = state.cells[0], device = state.cells[2]
+    #expect(kept.canFree && kept.original == "orig-kept" && !device.canFree)
+    #expect(state.cells(.backedUp).map(\.id) == ["copy-kept", "copy-removed", "album-only"])
+    #expect(state.cells(.notBackedUp).map(\.id) == ["copy-device", "orig-gone", "plain", "busy", "broken"])
+}
+
