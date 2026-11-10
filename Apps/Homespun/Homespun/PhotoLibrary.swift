@@ -236,12 +236,16 @@ enum PhotoLibrary {
         return identifier
     }
 
-    /// Skips items that already have a compact copy, and compact copies themselves.
+    /// Skips items that already have a compact copy, and compact copies themselves (known to
+    /// this iPhone, or in the Homespun album). The server also refuses copies it made.
     static func skipReason(for asset: PHAsset, ledger: CompactLedger) async -> String? {
         if let existing = await ledger.compactIdentifier(for: asset.localIdentifier), self.asset(existing) != nil {
             return "Already has a compact copy"
         }
-        return isCompactCopy(asset) ? "This is a Homespun compact copy" : nil
+        if await ledger.isCompactCopy(asset.localIdentifier) || isCompactCopy(asset) {
+            return "This is a Homespun compact copy"
+        }
+        return nil
     }
 
     static func describe(heldReasons: [String]) -> String {

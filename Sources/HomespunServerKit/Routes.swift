@@ -169,6 +169,13 @@ struct Routes: Sendable {
         let body = try await request.decode(as: ServerAPI.RegisterAssetRequest.self, context: context)
         let mode = await immichState.mode
         try validate(body, mode: mode)
+        for resource in body.resources {
+            if let copy = try await catalog.madeCopy(sha256: resource.sha256.lowercased()) {
+                throw APIError(.unprocessableContent, code: ServerAPI.ErrorCode.compactCopy,
+                               message: "This is a compact copy Homespun made"
+                                   + (copy.originalName.map { " of \($0)" } ?? "") + "; its original is on the server.")
+            }
+        }
         let assetID = body.assetID!
         let outcome = try await catalog.register(body, assetID: assetID, device: context.deviceID ?? "",
                                                  initialState: mode == .files ? .receiving : .verifying)
@@ -382,6 +389,23 @@ struct Routes: Sendable {
         await catalog.log("verified", asset: assetID, device: context.deviceID,
                           detail: results.allSatisfy(\.verified) ? "all" : "incomplete")
         return ServerAPI.Verification(assetID: assetID, checkedAt: Date(), resources: results)
+    }
+}
+
+/// An error with a `code` the app acts on, in the same JSON shape as other errors.
+struct APIError: HTTPResponseError {
+    let status: HTTPResponse.Status
+    let code: String
+    let message: String
+
+    init(_ status: HTTPResponse.Status, code: String, message: String) {
+        self.status = status
+        self.code = code
+        self.message = message
+    }
+
+    func response(from request: Request, context: some RequestContext) throws -> Response {
+        try json(ServerAPI.ErrorBody(error: .init(message: message, code: code)), status: status)
     }
 }
 

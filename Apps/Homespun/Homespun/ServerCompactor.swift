@@ -72,7 +72,12 @@ struct ServerCompactor: Compacting {
         let request = ServerAPI.RegisterAssetRequest(kind: kind.api, captureDate: asset.creationDate,
                                                      resources: exported.map(\.descriptor))
         guard let assetID = request.assetID else { throw PhotoLibrary.Failure.missingResource(request.primaryRole.rawValue) }
-        var status = try await client.register(request)
+        var status: ServerAPI.AssetStatus
+        do {
+            status = try await client.register(request)
+        } catch let failure as ServerClient.Failure where failure.code == ServerAPI.ErrorCode.compactCopy {
+            return .unchanged(failure.message)
+        }
 
         if mode == .files {
             for item in exported where status.resources.first(where: { $0.role == item.role })?.state != .verified {

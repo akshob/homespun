@@ -7,6 +7,8 @@ struct ServerClient: Sendable {
     struct Failure: LocalizedError {
         var status: Int
         var message: String
+        /// The server's error code, for errors handled specially (`ServerAPI.ErrorCode`).
+        var code: String?
         var errorDescription: String? { message }
     }
 
@@ -27,8 +29,8 @@ struct ServerClient: Sendable {
     private func check(_ data: Data, _ response: URLResponse, accepting: Set<Int> = [200, 201, 202]) throws -> Int {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard accepting.contains(status) else {
-            let message = (try? ServerAPI.decoder.decode(ServerAPI.ErrorBody.self, from: data))?.error.message
-            throw Failure(status: status, message: message ?? "The server returned HTTP \(status).")
+            let detail = (try? ServerAPI.decoder.decode(ServerAPI.ErrorBody.self, from: data))?.error
+            throw Failure(status: status, message: detail?.message ?? "The server returned HTTP \(status).", code: detail?.code)
         }
         return status
     }

@@ -347,7 +347,21 @@ public enum ServerAPI {
     }
 
     public struct ErrorBody: Codable, Equatable, Sendable {
-        public struct Detail: Codable, Equatable, Sendable { public var message: String }
+        public struct Detail: Codable, Equatable, Sendable {
+            public var message: String
+            /// Set for errors a client handles specially, for example `compact_copy`.
+            public var code: String?
+            public init(message: String, code: String? = nil) {
+                self.message = message
+                self.code = code
+            }
+        }
         public var error: Detail
+        public init(error: Detail) { self.error = error }
+    }
+
+    public enum ErrorCode {
+        /// The registered file is a compact copy this server made, not an original.
+        public static let compactCopy = "compact_copy"
     }
 }

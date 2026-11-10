@@ -207,6 +207,16 @@ struct Fixture {
         let download = try await client.call("/api/v1/assets/\(asset)/compact/photo", token: token)
         #expect(download.status == .ok && Fingerprint.sha256(of: download.data) == compact.sha256)
 
+        // The compact copy, picked again on the phone (say, outside the Homespun album), is not an original.
+        let copy = ServerAPI.ResourceDescriptor(role: .photo, filename: "IMG_0001.jpg", size: download.data.count,
+                                                sha256: compact.sha256, sha1: Fingerprint.sha1(of: download.data))
+        let refused = try await client.call("/api/v1/assets", .post, token: token,
+                                            json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [copy]))
+        let error = try refused.decode(ServerAPI.ErrorBody.self).error
+        #expect(refused.status == .unprocessableContent && error.code == ServerAPI.ErrorCode.compactCopy)
+        #expect(error.message.contains("of IMG_0001.JPG"))
+        #expect(try await client.call("/api/v1/assets/\(compact.sha256)", token: token).status == .notFound)
+
         let verification = try await client.call("/api/v1/assets/\(asset)/verify", .post, token: token)
             .decode(ServerAPI.Verification.self)
         #expect(verification.allVerified && verification.resources.first?.sha256 == photo.sha256)

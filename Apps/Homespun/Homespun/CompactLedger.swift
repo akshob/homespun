@@ -29,6 +29,11 @@ actor CompactLedger {
         entries[original]?.compactIdentifier
     }
 
+    /// Whether this item is a compact copy Homespun saved, wherever it is in Photos now.
+    func isCompactCopy(_ identifier: String) -> Bool {
+        entries.values.contains { $0.compactIdentifier == identifier }
+    }
+
     /// Originals whose server copy is known, with their entries.
     func serverBacked() -> [(original: String, entry: Entry)] {
         entries.compactMap { key, value in value.serverAssetID == nil ? nil : (key, value) }

@@ -154,6 +154,18 @@ public actor Catalog {
         """
         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         """,
+        // Every compact copy ever made, kept after re-compression, so a copy is never taken for
+        // an original (it may sit outside the Homespun album on the phone, or be backed up to Immich).
+        """
+        CREATE TABLE made_copies (
+            sha256 TEXT PRIMARY KEY,
+            asset_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO made_copies (sha256, asset_id, role, created_at)
+            SELECT sha256, asset_id, role, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM compact;
+        """,
     ]
 
     static func migrate(_ database: SQLiteDatabase) throws {
@@ -330,6 +342,19 @@ public actor Catalog {
         return outcome
     }
 
+    /// The original's file name when `sha256` is a compact copy this server made (and not
+    /// also an original's bytes, as when a photo couldn't be made smaller).
+    func madeCopy(sha256: String) throws -> (assetID: String, originalName: String?)? {
+        guard let row = try database.query("""
+            SELECT m.asset_id AS asset_id,
+                   (SELECT r.filename FROM resources r WHERE r.asset_id = m.asset_id
+                    ORDER BY CASE r.role WHEN 'photo' THEN 0 WHEN 'video' THEN 1 ELSE 2 END LIMIT 1) AS name
+            FROM made_copies m
+            WHERE m.sha256 = ? AND NOT EXISTS (SELECT 1 FROM resources r WHERE r.sha256 = m.sha256)
+            """, [.text(sha256)]).first, let assetID = row["asset_id"]?.string else { return nil }
+        return (assetID, row["name"]?.string)
+    }
+
     func asset(_ id: String) throws -> AssetRecord? {
         guard let row = try database.query("SELECT * FROM assets WHERE id = ?", [.text(id)]).first else { return nil }
         return AssetRecord(
@@ -408,6 +433,8 @@ public actor Catalog {
                 try database.execute("INSERT INTO compact (asset_id, role, filename, size, sha256, path) VALUES (?, ?, ?, ?, ?, ?)",
                                      [.text(assetID), .text(file.role.rawValue), .text(file.filename),
                                       .integer(Int64(file.size)), .text(file.sha256), .text(file.path)])
+                try database.execute("INSERT OR IGNORE INTO made_copies (sha256, asset_id, role, created_at) VALUES (?, ?, ?, ?)",
+                                     [.text(file.sha256), .text(assetID), .text(file.role.rawValue), .text(Timestamp.string())])
             }
             try database.execute(
                 "UPDATE assets SET state = ?, message = ?, device_compresses = ?, updated_at = ? WHERE id = ?",
