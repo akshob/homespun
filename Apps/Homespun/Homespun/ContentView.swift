@@ -9,6 +9,8 @@ struct ContentView: View {
     @State private var library = LibraryModel()
     @State private var access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @State private var filter = LibraryState.Filter.all
+    /// The grid has its first contents, so it can open scrolled to the newest items.
+    @State private var gridLoaded = false
     @State private var selected = Set<String>()
     /// Originals compacted by the last selection; offered for removal when the job finishes.
     @State private var batch = Set<String>()
@@ -135,7 +137,11 @@ struct ContentView: View {
 
     private var cells: [LibraryState.Cell] { library.state.cells(filter) }
 
-    private var grid: some View {
+    @ViewBuilder private var grid: some View {
+        if gridLoaded { scrollingGrid } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
+    }
+
+    private var scrollingGrid: some View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 2)], spacing: 2) {
                 ForEach(cells) { cell in
@@ -149,7 +155,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary).padding(40)
             }
         }
-        .defaultScrollAnchor(.bottom)
+        .modifier(OpensAtNewest())
         .accessibilityIdentifier("grid")
     }
 
@@ -440,6 +446,7 @@ struct ContentView: View {
 
     private func refreshGrid() async {
         library.update(ledger: await job.ledger.snapshot(), job: job.states)
+        gridLoaded = true
     }
 
     private func refreshRemovable() async {
@@ -486,6 +493,19 @@ struct ContentView: View {
         }
         lines += report.blocked.map { "Kept \($0)" }
         return lines.isEmpty ? "Nothing to remove." : lines.joined(separator: "\n")
+    }
+}
+
+/// Opens a long library at the newest items, like Photos, while a short one stays at the top.
+private struct OpensAtNewest: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18, *) {
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.top, for: .alignment)
+        } else {
+            content
+        }
     }
 }
 
