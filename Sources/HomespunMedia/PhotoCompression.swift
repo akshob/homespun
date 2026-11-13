@@ -93,6 +93,23 @@ public enum PlatformMedia {
         #endif
     }
 
+    /// Converts photos (HEIC, PNG, ...) to full-size JPEGs at `quality`, upright, keeping EXIF
+    /// (including Apple maker notes), always as JPEG even when larger than the original.
+    public static func jpegConverter(quality: Int = 92) -> (any PhotoCompressor)? {
+        let profile = CompressionProfile(photoMaxEdge: 1 << 20, photoQuality: quality)
+        #if canImport(ImageIO)
+        var converter = ImageIOPhotoCompressor(profile: profile)
+        converter.keepsSmallerOriginal = false
+        return converter
+        #elseif os(Linux)
+        var converter = VipsPhotoCompressor(profile: profile)
+        converter.keepsSmallerOriginal = false
+        return converter
+        #else
+        return nil
+        #endif
+    }
+
     /// The photo backend for this platform, or nil where none is available.
     public static func photoCompressor(profile: CompressionProfile) -> (any PhotoCompressor)? {
         #if canImport(ImageIO)

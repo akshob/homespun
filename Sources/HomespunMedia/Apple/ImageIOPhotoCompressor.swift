@@ -20,6 +20,8 @@ public struct ImageIOPhotoCompressor: PhotoCompressor {
 
     public var profile: CompressionProfile
     public var format: Format
+    /// Publish the original when the result isn't smaller. Off when a JPEG is needed regardless.
+    public var keepsSmallerOriginal = true
 
     public init(profile: CompressionProfile = .standard, format: Format = .jpeg) {
         self.profile = profile
@@ -89,7 +91,7 @@ public struct ImageIOPhotoCompressor: PhotoCompressor {
         }
         try verify(partial, width: image.width, height: image.height, source: properties)
 
-        if try MediaFiles.size(of: partial) >= inputSize {
+        if keepsSmallerOriginal, try MediaFiles.size(of: partial) >= inputSize {
             let kept = output.deletingPathExtension().appendingPathExtension(input.pathExtension)
             let copy = try MediaFiles.publishCopy(of: input, to: kept)
             let oriented = Self.isQuarterTurn(properties) ? (height, width) : (width, height)

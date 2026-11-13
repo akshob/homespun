@@ -82,3 +82,27 @@ func ffmpegHoldsUnvalidatedVideoAndKeepsHLG(name: String, transfer: String, fps:
     }
 }
 #endif
+
+@Test func jpegConverterAlwaysWritesAJPEGKeepingMetadata() throws {
+    let source = try #require(Bundle.module.url(forResource: "orient6", withExtension: "heic", subdirectory: "Fixtures"))
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("jpeg-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let converter = try #require(PlatformMedia.jpegConverter(quality: 95))
+    let result = try converter.compress(input: source, output: directory.appendingPathComponent("still.jpg"))
+    // Larger than the HEIC, but still a JPEG: full size, upright, same capture date and Live Photo identifier.
+    #expect(result.mode == .compressed && result.url.pathExtension == "jpg")
+    #expect(result.width == 600 && result.height == 900)
+    let jpeg = try Data(contentsOf: result.url)
+    let heic = try Data(contentsOf: source)
+    #expect(JPEGIntegrity.isJPEG(jpeg) && jpeg.count > heic.count)
+    #expect(jpeg.range(of: Data("2024:05:01 12:34:56".utf8)) != nil)
+    #expect(jpeg.range(of: Data("8C1A3F52-7D44-4E1B-9B2A-5F6E7D8C9A01".utf8)) != nil)
+
+    // XMP is replaced; EXIF stays.
+    let xmp = Data(#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><test/></x:xmpmeta>"#.utf8)
+    let edited = try JPEGMetadata.replacingXMP(in: try JPEGMetadata.replacingXMP(in: jpeg, with: xmp), with: xmp)
+    #expect(edited.ranges(of: Data("http://ns.adobe.com/xap/1.0/".utf8)).count == 1)
+    #expect(edited.range(of: xmp) != nil && edited.range(of: Data("2024:05:01 12:34:56".utf8)) != nil)
+    #expect(edited.range(of: Data("Exif\0\0".utf8))!.lowerBound < edited.range(of: xmp)!.lowerBound)
+}

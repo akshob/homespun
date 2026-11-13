@@ -11,6 +11,8 @@ import HomespunCore
 /// libvips drops Apple maker notes, which carry the Live Photo content identifier.
 public struct VipsPhotoCompressor: PhotoCompressor {
     public var profile: CompressionProfile
+    /// Publish the original when the JPEG isn't smaller. Off when a JPEG is needed regardless.
+    public var keepsSmallerOriginal = true
 
     public init(profile: CompressionProfile = .standard) { self.profile = profile }
 
@@ -42,7 +44,7 @@ public struct VipsPhotoCompressor: PhotoCompressor {
         try JPEGSegments.inserting(exif: exif, xmp: xmp, into: Data(contentsOf: encoded)).write(to: partial)
         try verify(partial, width: Int(width), height: Int(height), exif: exif)
 
-        if try MediaFiles.size(of: partial) >= inputSize {
+        if keepsSmallerOriginal, try MediaFiles.size(of: partial) >= inputSize {
             let kept = output.deletingPathExtension().appendingPathExtension(input.pathExtension)
             let copy = try MediaFiles.publishCopy(of: input, to: kept)
             return PhotoCompressionResult(mode: .originalKeptNotSmaller, url: kept, sha256: copy.sha256,

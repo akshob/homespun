@@ -144,6 +144,40 @@ public enum ExifEditor {
     }
 }
 
+/// Public JPEG metadata edits.
+public enum JPEGMetadata {
+    /// `jpeg` with its XMP replaced by `xmp` (one segment, at most about 64 KB). EXIF and every
+    /// other segment are kept as they are.
+    public static func replacingXMP(in jpeg: Data, with xmp: Data) throws -> Data {
+        var bytes = [UInt8](jpeg)
+        guard bytes.count > 4, bytes[0] == 0xFF, bytes[1] == 0xD8 else {
+            throw PhotoCompressionError.encodingFailed("not a JPEG")
+        }
+        guard JPEGSegments.xmpHeader.count + xmp.count <= JPEGSegments.maximumPayload else {
+            throw PhotoCompressionError.encodingFailed("XMP larger than one segment")
+        }
+        var index = 2, insertAt = 2
+        while index + 4 <= bytes.count, bytes[index] == 0xFF, (0xE0...0xEF).contains(bytes[index + 1]) || bytes[index + 1] == 0xFE {
+            let length = Int(bytes[index + 2]) << 8 | Int(bytes[index + 3])
+            guard length >= 2, index + 2 + length <= bytes.count else {
+                throw PhotoCompressionError.encodingFailed("damaged segment")
+            }
+            let payload = bytes[(index + 4)..<(index + 2 + length)]
+            if bytes[index + 1] == 0xE1, payload.starts(with: JPEGSegments.xmpHeader) {
+                bytes.removeSubrange(index..<(index + 2 + length))
+                continue
+            }
+            // After APP0 and the EXIF APP1, so readers that expect EXIF first still find it.
+            if bytes[index + 1] == 0xE0 || bytes[index + 1] == 0xE1 { insertAt = index + 2 + length }
+            index += 2 + length
+        }
+        let payload = JPEGSegments.xmpHeader + [UInt8](xmp)
+        let length = payload.count + 2
+        bytes.insert(contentsOf: [0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)] + payload, at: insertAt)
+        return Data(bytes)
+    }
+}
+
 /// Places EXIF and XMP segments into a JPEG that has none.
 enum JPEGSegments {
     static let xmpHeader: [UInt8] = Array("http://ns.adobe.com/xap/1.0/".utf8) + [0]

@@ -58,6 +58,14 @@ public struct ConnectorItem: Sendable {
         public var filename: String
         public var size: Int
         public var sha256: String
+
+        public init(role: ServerAPI.ResourceRole, url: URL, filename: String, size: Int, sha256: String) {
+            self.role = role
+            self.url = url
+            self.filename = filename
+            self.size = size
+            self.sha256 = sha256
+        }
     }
 
     public var assetID: String

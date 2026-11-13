@@ -140,6 +140,9 @@ public struct HomespunServer: Sendable {
         return code
     }
 
+    /// A connector's saved settings, for tools and tests of your own connectors.
+    public func connectorContext(_ id: String) async -> ConnectorContext { await hub.context(id) }
+
     /// Runs queued jobs until none is ready.
     public func drainJobs() async throws {
         try await runner.drain()
