@@ -559,6 +559,20 @@ extension Fingerprint {
                 #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/cache").path).isEmpty)
                 #expect(try FileManager.default.subpathsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/originals").path).isEmpty)
 
+                // The self-check notices when the Immich app uploads Homespun's compact copies.
+                func copiesCheck() async throws -> ServerSetup.Check? {
+                    try await client.call("/api/v1/setup", token: token).decode(ServerSetup.Report.self)
+                        .checks.first { $0.id == "immich_copies" }
+                }
+                // Copies from before SHA-1s were kept are looked up from their files.
+                try await fixture.server.catalog.forgetCopySHA1s()
+                #expect(try await copiesCheck()?.status == .ok)
+                let compactPhoto = try await client.call("/api/v1/assets/\(asset)/compact/photo", token: token).data
+                _ = immich.add(compactPhoto)
+                let warned = try #require(try await copiesCheck())
+                #expect(warned.status == .warning && warned.detail.hasPrefix("1 of the latest")
+                        && warned.detail.contains("exclude the Homespun album"))
+
                 var verification = try await client.call("/api/v1/assets/\(asset)/verify", .post, token: token)
                     .decode(ServerAPI.Verification.self)
                 #expect(verification.allVerified)
@@ -815,4 +829,9 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
         let name = (tool as NSString).lastPathComponent
         #expect(Tools.output("pgrep", ["-f", "\(name) .*test _homespun._tcp"]) == nil, "\(name) outlived the server")
     }
+}
+
+extension Catalog {
+    /// Like a catalog from before compact copies' SHA-1s were kept.
+    func forgetCopySHA1s() throws { try database.execute("UPDATE made_copies SET sha1 = NULL") }
 }

@@ -81,7 +81,8 @@ struct Routes: Sendable {
             return try json(ServerAPI.PairingCode(code: code, expiresIn: lifetime), status: .created)
         }
         authenticated.get("setup") { _, _ in
-            try json(await SetupChecks(configuration: configuration, storage: storage, immichState: immichState).report())
+            try json(await SetupChecks(configuration: configuration, storage: storage, immichState: immichState,
+                                       catalog: catalog).report())
         }
         authenticated.get("settings/immich") { _, _ in try json(await immichState.settings()) }
         authenticated.put("settings/immich") { request, context in try await connectImmich(request, context) }

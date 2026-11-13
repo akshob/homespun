@@ -249,7 +249,9 @@ against the iPhone's file before making a compact copy. It never uploads to, cha
 deletes anything in Immich. Items Immich does not have yet show "Not in Immich yet"; pick
 them again after the Immich app has backed them up. Edited items and RAW+JPEG pairs are not
 supported in Immich mode yet. In the Immich app, exclude the "Homespun" album from backup so
-compact copies are not uploaded.
+compact copies are not uploaded. The self-check looks up the latest 40 compact copies in
+Immich and warns if any were uploaded; delete those in Immich yourself, since Homespun's key
+can only read.
 
 ## Website
 

@@ -11,6 +11,7 @@ struct SetupChecks {
     let configuration: ServerConfiguration
     let storage: Storage
     let immichState: ImmichState
+    let catalog: Catalog
     var environment = ProcessInfo.processInfo.environment
     var platform = HostPlatform.current()
     /// Linux control group of this process; a systemd service runs in `.../homespun.service`.
@@ -19,7 +20,9 @@ struct SetupChecks {
 
     func report() async -> ServerSetup.Report {
         var checks = [photos(), videos(), livePhotos(), discovery(), storageSpace(), service()]
-        checks.append(await immich())
+        let (immich, connected) = await self.immich()
+        checks.append(immich)
+        if connected, let copies = await immichCopies() { checks.append(copies) }
         return ServerSetup.Report(platform: platform, checks: checks)
     }
 
@@ -110,15 +113,65 @@ struct SetupChecks {
                     fix: ["\(Self.executable) install-service --data \(configuration.dataDirectory.path)"])
     }
 
-    func immich() async -> Check {
+    func immich() async -> (Check, connected: Bool) {
         guard await immichState.current != nil else {
-            return Check(id: "immich", title: "Immich", status: .info,
-                         detail: "Not connected. Originals are kept on this server.")
+            return (Check(id: "immich", title: "Immich", status: .info,
+                          detail: "Not connected. Originals are kept on this server."), false)
         }
         let settings = await immichState.settings()
         return settings.connected
-            ? Check(id: "immich", title: "Immich", status: settings.message == nil ? .ok : .warning,
-                    detail: settings.message ?? "Originals are read from Immich at \(settings.url ?? "").")
-            : Check(id: "immich", title: "Immich", status: .problem, detail: settings.message ?? "Immich is not reachable.")
+            ? (Check(id: "immich", title: "Immich", status: settings.message == nil ? .ok : .warning,
+                     detail: settings.message ?? "Originals are read from Immich at \(settings.url ?? "")."), true)
+            : (Check(id: "immich", title: "Immich", status: .problem, detail: settings.message ?? "Immich is not reachable."),
+               false)
+    }
+
+    static let copiesToCheck = 40
+
+    /// Whether the Immich app uploaded Homespun's compact copies (the Homespun album isn't
+    /// excluded from its backup), looking up the newest copies by SHA-1. Nil if there are no
+    /// copies yet or Immich can't be asked.
+    func immichCopies() async -> Check? {
+        guard let client = await immichState.client,
+              let copies = try? await catalog.recentMadeCopies(limit: Self.copiesToCheck), !copies.isEmpty else { return nil }
+        var hashes: [String] = []
+        for copy in copies {
+            if let sha1 = copy.sha1 {
+                hashes.append(sha1)
+            } else if let path = copy.path, let url = storage.resolve(path),
+                      let sha1 = try? await detached({ try Fingerprint.digests(of: url).sha1 }) {
+                try? await catalog.setMadeCopySHA1(copy.sha256, sha1)
+                hashes.append(sha1)
+            }
+        }
+        guard !hashes.isEmpty else { return nil }
+        let found: Int
+        do {
+            found = try await withThrowingTaskGroup(of: Bool.self) { group in
+                var found = 0, next = 0
+                func add() {
+                    let sha1 = hashes[next]
+                    next += 1
+                    group.addTask { !(try await client.assets(sha1Hex: sha1)).isEmpty }
+                }
+                while next < min(8, hashes.count) { add() }
+                while let inImmich = try await group.next() {
+                    if inImmich { found += 1 }
+                    if next < hashes.count { add() }
+                }
+                return found
+            }
+        } catch {
+            return nil
+        }
+        let title = "Compact copies in Immich"
+        guard found > 0 else {
+            return Check(id: "immich_copies", title: title, status: .ok,
+                         detail: "None of the latest \(hashes.count) compact copies were uploaded to Immich.")
+        }
+        return Check(id: "immich_copies", title: title, status: .warning,
+                     detail: "\(found) of the latest \(hashes.count) compact copies were uploaded to Immich, so it shows them "
+                        + "next to their originals. In the Immich app's backup settings, exclude the Homespun album. Then "
+                        + "delete those copies in Immich (Homespun can't: its key only reads).")
     }
 }

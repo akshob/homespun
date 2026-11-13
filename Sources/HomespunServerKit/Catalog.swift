@@ -36,6 +36,8 @@ struct CompactRecord: Equatable, Sendable {
     var size: Int
     var sha256: String
     var path: String
+    /// Immich finds files by SHA-1, so it is kept to spot compact copies uploaded there.
+    var sha1: String? = nil
 }
 
 struct AssetRecord: Equatable, Sendable {
@@ -178,6 +180,10 @@ public actor Catalog {
             PRIMARY KEY (asset_id, connector)
         );
         CREATE INDEX connector_copies_state ON connector_copies (connector, state);
+        """,
+        // SHA-1 of each compact copy (filled in later for older ones whose file is still here).
+        """
+        ALTER TABLE made_copies ADD COLUMN sha1 TEXT;
         """,
     ]
 
@@ -355,6 +361,20 @@ public actor Catalog {
         return outcome
     }
 
+    /// The newest compact copies made, with their SHA-1 if known, or else where the file is.
+    func recentMadeCopies(limit: Int) throws -> [(sha256: String, sha1: String?, path: String?)] {
+        try database.query("""
+            SELECT m.sha256 AS sha256, m.sha1 AS sha1, (SELECT c.path FROM compact c WHERE c.sha256 = m.sha256 LIMIT 1) AS path
+            FROM made_copies m ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?
+            """, [.integer(Int64(limit))]).compactMap { row in
+            row["sha256"]?.string.map { ($0, row["sha1"]?.string, row["path"]?.string) }
+        }
+    }
+
+    func setMadeCopySHA1(_ sha256: String, _ sha1: String) throws {
+        try database.execute("UPDATE made_copies SET sha1 = ? WHERE sha256 = ?", [.text(sha1), .text(sha256)])
+    }
+
     /// The original's file name when `sha256` is a compact copy this server made (and not
     /// also an original's bytes, as when a photo couldn't be made smaller).
     func madeCopy(sha256: String) throws -> (assetID: String, originalName: String?)? {
@@ -446,8 +466,12 @@ public actor Catalog {
                 try database.execute("INSERT INTO compact (asset_id, role, filename, size, sha256, path) VALUES (?, ?, ?, ?, ?, ?)",
                                      [.text(assetID), .text(file.role.rawValue), .text(file.filename),
                                       .integer(Int64(file.size)), .text(file.sha256), .text(file.path)])
-                try database.execute("INSERT OR IGNORE INTO made_copies (sha256, asset_id, role, created_at) VALUES (?, ?, ?, ?)",
-                                     [.text(file.sha256), .text(assetID), .text(file.role.rawValue), .text(Timestamp.string())])
+                try database.execute(
+                    """
+                    INSERT INTO made_copies (sha256, asset_id, role, created_at, sha1) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (sha256) DO UPDATE SET sha1 = COALESCE(made_copies.sha1, excluded.sha1)
+                    """, [.text(file.sha256), .text(assetID), .text(file.role.rawValue), .text(Timestamp.string()),
+                          file.sha1.sqlValue])
             }
             try database.execute(
                 "UPDATE assets SET state = ?, message = ?, device_compresses = ?, updated_at = ? WHERE id = ?",

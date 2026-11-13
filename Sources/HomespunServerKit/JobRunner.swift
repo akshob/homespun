@@ -214,10 +214,12 @@ public final class JobRunner: Service, Sendable {
         let directory = storage.compact(asset.id)
         try? FileManager.default.removeItem(at: directory)
         let outcome = try await compactor.compact(kind: asset.kind, sources: sources, baseName: base, into: directory)
-        let files = outcome.files.map { file in
+        var files: [CompactRecord] = []
+        for file in outcome.files {
             var record = file
+            record.sha1 = try? await detached { try Fingerprint.digests(of: URL(fileURLWithPath: file.path)).sha1 }
             record.path = storage.relative(URL(fileURLWithPath: file.path))
-            return record
+            files.append(record)
         }
         try await catalog.storeCompact(asset.id, files, deviceCompresses: outcome.deviceCompresses,
                                        state: outcome.state, message: outcome.message)
