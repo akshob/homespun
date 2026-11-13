@@ -1,0 +1,29 @@
+{
+  "products" : [
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : true,
+      "internalID" : "6A3F1C2B",
+      "localizations" : [
+        {
+          "description" : "Automatic mode and cloud copies. A one-time purchase.",
+          "displayName" : "Homespun Premium",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "photos.homespun.app.premium",
+      "referenceName" : "Homespun Premium",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+
+  },
+  "subscriptionGroups" : [
+
+  ],
+  "version" : {
+    "major" : 1,
+    "minor" : 0
+  }
+}

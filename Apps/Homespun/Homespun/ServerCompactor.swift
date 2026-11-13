@@ -94,7 +94,7 @@ struct ServerCompactor: Compacting {
             case .ready, .imported: break
             case .held: return .unchanged(status.message ?? "Kept as is")
             case .waitingForImmich:
-                return .unchanged((status.message ?? "Not in Immich yet.") + " Back it up with the Immich app, then pick it again.")
+                return .notYet((status.message ?? "Not in Immich yet.") + " Back it up with the Immich app, then pick it again.")
             case .failed: throw ServerClient.Failure(status: 0, message: status.message ?? "The server could not process it.")
             case .receiving where status.resources.allSatisfy({ $0.state == .verified }): progress("Queued on server")
             case .receiving:

@@ -5,7 +5,10 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable var settings: AppSettings
+    let premium: Premium
+    let automatic: AutomaticMode
     @Environment(\.dismiss) private var dismiss
+    @State private var askExisting = false
 
     var body: some View {
         NavigationStack {
@@ -22,8 +25,12 @@ struct SettingsView: View {
                         NavigationLink(server.mode == .immich ? "Immich" : "Connect Immich") {
                             ImmichConnectView(settings: settings)
                         }
-                        NavigationLink("Cloud copies") { ConnectorsView(settings: settings) }
-                            .accessibilityIdentifier("settings.connectors")
+                        NavigationLink {
+                            if premium.isUnlocked { ConnectorsView(settings: settings) } else { PremiumView(premium: premium) }
+                        } label: {
+                            premiumLabel("Cloud copies")
+                        }
+                        .accessibilityIdentifier("settings.connectors")
                         NavigationLink("Add another device") { AddDeviceView(settings: settings) }
                             .accessibilityIdentifier("settings.addDevice")
                         Button("Unpair", role: .destructive) { settings.unpair() }
@@ -38,28 +45,59 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Picker("Make compact copies", selection: $settings.mode) {
-                        Text("On my server").tag(AppSettings.Mode?.some(.server))
-                        Text("On this iPhone").tag(AppSettings.Mode?.some(.device))
-                        if settings.mode == nil { Text("Not set up").tag(AppSettings.Mode?.none) }
+                    if premium.isUnlocked {
+                        Toggle(isOn: Binding(get: { automatic.enabled }, set: { on in
+                            if on { askExisting = true } else { automatic.disable() }
+                        })) {
+                            Text("Automatic mode")
+                        }
+                        .disabled(!settings.canCompact)
+                        .accessibilityIdentifier("automatic.toggle")
+                        if automatic.enabled, let lastRun = automatic.state.lastRun {
+                            LabeledContent("Last run", value: lastRun.formatted(date: .abbreviated, time: .shortened))
+                            if let summary = automatic.state.lastSummary {
+                                Text(summary).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    } else {
+                        NavigationLink { PremiumView(premium: premium) } label: { premiumLabel("Automatic mode") }
+                            .accessibilityIdentifier("automatic.premium")
                     }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                    .accessibilityIdentifier("mode.picker")
                 } header: {
-                    Text("Make compact copies")
+                    Text("Automatic mode")
                 } footer: {
-                    Text(settings.mode == .device
-                         ? "On this iPhone, Homespun only adds compact copies; it removes nothing, because there is no "
-                           + "verified copy of the original elsewhere."
-                         : "With a server, originals are kept there and can be removed from this iPhone once verified.")
+                    Text("New photos and videos are backed up and compacted on their own, usually overnight while "
+                         + "charging, and when you open Homespun. You still choose when to free up space; Homespun "
+                         + "tells you when there's space to free.")
+                }
+                .confirmationDialog("Back up what's already on this iPhone too?", isPresented: $askExisting,
+                                    titleVisibility: .visible) {
+                    Button("Only new photos and videos") { Task { await automatic.enable(existing: false) } }
+                    Button("Everything not backed up yet") { Task { await automatic.enable(existing: true) } }
+                        .accessibilityIdentifier("automatic.everything")
                 }
 
-                Section("Compact copies") {
+                Section {
+                    NavigationLink { PremiumView(premium: premium) } label: {
+                        LabeledContent("Premium", value: premium.isUnlocked ? "Unlocked" : "Not unlocked")
+                    }
+                    .accessibilityIdentifier("settings.premium")
+                }
+
+                Section {
                     let profile = settings.server?.profile ?? .standard
                     LabeledContent("Photos", value: "JPEG, up to \(profile.photoMaxEdge) px")
                     LabeledContent("Videos", value: "HEVC, up to \(profile.videoShortEdge)p")
-                    LabeledContent("Live Photos", value: "Motion re-encoded, still paired")
+                    LabeledContent("Live Photos", value: "Still paired")
+                } header: {
+                    Text("Compact copies")
+                } footer: {
+                    switch settings.server?.platform?.os {
+                    case .macOS?: Text("Your Mac server makes every compact copy, Live Photos included.")
+                    case .linux?: Text("Your server makes the compact copies. Live Photo motion is compressed on this iPhone, "
+                                       + "because only Apple's video tools keep it paired with the photo.")
+                    case nil: Text("Your server makes the compact copies.")
+                    }
                 }
 
                 Section {
@@ -71,8 +109,18 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-            .onChange(of: settings.mode) { _, mode in
-                if mode == .server, !settings.isPaired { settings.mode = nil }
+        }
+    }
+}
+
+extension SettingsView {
+    /// A settings row for a Premium feature, marked when it isn't unlocked.
+    func premiumLabel(_ title: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            if !premium.isUnlocked {
+                Text("Premium").font(.caption.weight(.semibold)).foregroundStyle(.tint)
             }
         }
     }

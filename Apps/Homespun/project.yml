@@ -24,6 +24,9 @@ targets:
           - CFBundleURLName: photos.homespun.pair
             CFBundleURLSchemes: [homespun]
         NSBonjourServices: [_homespun._tcp]
+        # Automatic mode (Premium) runs as a background processing task.
+        UIBackgroundModes: [processing]
+        BGTaskSchedulerPermittedIdentifiers: [photos.homespun.app.automatic]
         # Plain HTTP only to servers on the home network (IP addresses and .local names).
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
@@ -65,7 +68,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).tests
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
-  # Drives the on-phone workflow through the system photo picker on a simulator.
+  # Drives the workflows through the app's own screens on a simulator.
   HomespunUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -86,6 +89,8 @@ schemes:
     build:
       targets:
         Homespun: all
+    run:
+      # Purchases in builds run from Xcode use this local App Store, never real money.
+      storeKitConfiguration: Homespun.storekit
     test:
-      # The UI test picks the newest items, so it runs before HomespunTests adds its own.
-      targets: [HomespunUITests, HomespunTests]
+      targets: [HomespunTests, HomespunUITests]

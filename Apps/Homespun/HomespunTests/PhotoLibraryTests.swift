@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: Apache-2.0
+import CoreLocation
+import Foundation
+import HomespunTestSupport
+import Photos
+import Testing
+@testable import Homespun
+
+/// Saves compact copies the way the server path does, on a simulator library that holds only
+/// synthetic media. Grant access first: `xcrun simctl privacy <device> grant photos photos.homespun.app.dev`.
+@Suite(.serialized) struct PhotoLibraryTests {
+    static var authorized: Bool { PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized }
+
+    private final class Box: @unchecked Sendable { var value: String? }
+
+    private func createOriginal(_ resources: [(PHAssetResourceType, URL)], date: Date, favorite: Bool) async throws -> String {
+        let box = Box()
+        try await PHPhotoLibrary.shared().performChanges {
+            let request = PHAssetCreationRequest.forAsset()
+            for (type, url) in resources { request.addResource(with: type, fileURL: url, options: nil) }
+            request.creationDate = date
+            request.location = CLLocation(latitude: 37.33, longitude: -122.01)
+            request.isFavorite = favorite
+            box.value = request.placeholderForCreatedAsset?.localIdentifier
+        }
+        return try #require(box.value)
+    }
+
+    private func asset(_ identifier: String) throws -> PHAsset {
+        try #require(PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject)
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func compactCopiesKeepTheOriginalsDetails() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func file(_ name: String) -> URL { directory.appendingPathComponent(name) }
+        // Copies in their own folder: the file system ignores case (IMG_0002.JPG is IMG_0002.jpg).
+        func copy(_ name: String) -> URL { directory.appendingPathComponent("compact/" + name) }
+        try FileManager.default.createDirectory(at: copy(""), withIntermediateDirectories: true)
+        let pairing = UUID().uuidString, compactPairing = pairing
+        try Synthetic.photo(at: file("IMG_0001.HEIC"), .init(type: .heic, contentIdentifier: pairing))
+        try await Synthetic.video(at: file("IMG_0001.MOV"), .init(width: 960, height: 720, frames: 30, bitrate: 12_000_000,
+                                                                  audioChannels: 1, liveIdentifier: pairing))
+        try Synthetic.photo(at: file("IMG_0002.JPG"), .init())
+        // What the server sends back: smaller files, the Live pair still sharing its identifier.
+        try Synthetic.photo(at: copy("IMG_0001.jpg"), .init(width: 2048, height: 1536, quality: 0.8,
+                                                            contentIdentifier: compactPairing))
+        try await Synthetic.video(at: copy("IMG_0001.mov"), .init(width: 640, height: 480, frames: 30, bitrate: 2_000_000,
+                                                                  audioChannels: 1, liveIdentifier: compactPairing))
+        try Synthetic.photo(at: copy("IMG_0002.jpg"), .init(width: 2048, height: 1536, quality: 0.8))
+
+        let date = Date(timeIntervalSince1970: 1_714_592_096)
+        let live = try await createOriginal([(.photo, file("IMG_0001.HEIC")), (.pairedVideo, file("IMG_0001.MOV"))],
+                                            date: date, favorite: true)
+        let photo = try await createOriginal([(.photo, file("IMG_0002.JPG"))], date: date, favorite: false)
+        #expect(try asset(live).mediaSubtypes.contains(.photoLive))
+
+        let copies: [(String, [(PHAssetResourceType, URL)])] = [
+            (live, [(.photo, copy("IMG_0001.jpg")), (.pairedVideo, copy("IMG_0001.mov"))]),
+            (photo, [(.photo, copy("IMG_0002.jpg"))]),
+        ]
+        for (identifier, resources) in copies {
+            let original = try asset(identifier)
+            var plan = PhotoLibrary.ImportPlan(asset: original)
+            plan.resources = resources
+            let compact = try asset(try await PhotoLibrary.save(plan))
+            #expect(compact.mediaType == original.mediaType)
+            #expect(compact.mediaSubtypes.contains(.photoLive) == original.mediaSubtypes.contains(.photoLive))
+            #expect(compact.creationDate == date && compact.isFavorite == original.isFavorite)
+            #expect(abs((compact.location?.coordinate.latitude ?? 0) - 37.33) < 0.0001)
+            #expect(PhotoLibrary.isCompactCopy(compact) && !PhotoLibrary.isCompactCopy(original))
+            #expect(PhotoLibrary.albumMembers().contains(compact.localIdentifier))
+        }
+    }
+}
+
+@Test func pickedItemsAreQueuedOldestFirst() {
+    let dates = ["2011": Date(timeIntervalSince1970: 1_300_000_000), "2009": Date(timeIntervalSince1970: 1_255_000_000),
+                 "2018": Date(timeIntervalSince1970: 1_522_000_000), "same": Date(timeIntervalSince1970: 1_300_000_000)]
+    // The picker lists newest first; ties and undated items keep the picker's order.
+    #expect(PhotoLibrary.chronological(["2018", "undated", "2011", "same", "2009"], dates: dates)
+            == ["2009", "2011", "same", "2018", "undated"])
+}
+
+@Test func gridShowsCompactCopiesWithWhereTheOriginalIs() {
+    func entry(_ compact: String, server: Bool) -> CompactLedger.Entry {
+        .init(compactIdentifier: compact, originalBytes: 100, compactBytes: 10, savedAt: Date(),
+              serverAssetID: server ? "sha-\(compact)" : nil)
+    }
+    let ledger = ["orig-kept": entry("copy-kept", server: true),      // original still on the phone
+                  "orig-removed": entry("copy-removed", server: true), // original removed after backup
+                  "orig-device": entry("copy-device", server: false),  // made on the phone only
+                  "orig-gone": entry("copy-missing", server: true)]    // copy deleted by the user
+    let library = ["orig-kept", "copy-kept", "copy-removed", "orig-device", "copy-device", "orig-gone",
+                   "album-only", "plain", "busy", "broken"]
+    let state = LibraryState(library: library, ledger: ledger, album: ["album-only", "copy-kept"],
+                             job: ["busy": .working("Uploading"), "broken": .failed("x"), "plain": .saved(originalBytes: 1, compactBytes: 1)])
+    let badges = Dictionary(uniqueKeysWithValues: state.cells.map { ($0.id, $0.badge) })
+    // A backed-up original with its copy in the library is shown as the copy. An old on-phone
+    // copy doesn't hide its original, which can still be backed up.
+    #expect(state.cells.map(\.id) == ["copy-kept", "copy-removed", "orig-device", "copy-device", "orig-gone", "album-only",
+                                      "plain", "busy", "broken"])
+    #expect(badges == ["copy-kept": .originalOnPhone, "copy-removed": .backedUp, "orig-device": .none,
+                       "copy-device": .compactCopy, "orig-gone": .none, "album-only": .compactCopy, "plain": .none,
+                       "busy": .working, "broken": .failed])
+    let kept = state.cells[0], device = state.cells[2]
+    #expect(kept.canFree && kept.original == "orig-kept" && device.canCompact && !device.canFree)
+    #expect(state.cells(.backedUp).map(\.id) == ["copy-kept", "copy-removed", "copy-device", "album-only"])
+    #expect(state.cells(.notBackedUp).map(\.id) == ["orig-device", "orig-gone", "plain", "busy", "broken"])
+}
+

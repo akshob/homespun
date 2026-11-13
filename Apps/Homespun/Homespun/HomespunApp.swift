@@ -3,7 +3,9 @@ import SwiftUI
 
 @main
 struct HomespunApp: App {
+    init() { AppModel.registerBackgroundRun() }
+
     var body: some Scene {
-        WindowGroup { ContentView() }
+        WindowGroup { ContentView(model: .shared) }
     }
 }

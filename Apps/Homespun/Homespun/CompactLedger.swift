@@ -27,6 +27,8 @@ actor CompactLedger {
 
     func snapshot() -> [String: Entry] { entries }
 
+    func entry(for original: String) -> Entry? { entries[original] }
+
     func compactIdentifier(for original: String) -> String? {
         entries[original]?.compactIdentifier
     }

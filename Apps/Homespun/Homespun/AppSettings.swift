@@ -7,8 +7,6 @@ import UIKit
 /// Where compact copies are made, the paired server, and first-run progress.
 @MainActor @Observable
 final class AppSettings {
-    enum Mode: String { case server, device }
-
     enum ServerStatus: Equatable {
         case unknown, checking, reachable
         case unreachable(String)
@@ -21,8 +19,6 @@ final class AppSettings {
     /// A pairing link opened from the Camera app, waiting for the user to confirm.
     var pendingLink: PairingLink?
 
-    /// nil until the user pairs a server or chooses this iPhone in Settings.
-    var mode: Mode? { didSet { defaults.set(mode?.rawValue, forKey: "compactMode") } }
     var onboardingComplete: Bool { didSet { defaults.set(onboardingComplete, forKey: "onboardingComplete") } }
     /// The one-time explanation before removing originals was shown.
     var removalExplained: Bool { didSet { defaults.set(removalExplained, forKey: "removalExplained") } }
@@ -34,12 +30,13 @@ final class AppSettings {
         self.defaults = defaults
         serverURL = defaults.url(forKey: "serverURL")
         server = defaults.data(forKey: "serverInfo").flatMap { try? ServerAPI.decoder.decode(ServerAPI.ServerInfo.self, from: $0) }
-        mode = defaults.string(forKey: "compactMode").flatMap(Mode.init(rawValue:))
-            ?? (defaults.bool(forKey: "useServer") ? .server : nil)
+        // Homespun always works through the paired server; the old mode choice (server or
+        // "on this iPhone") is gone, so a paired iPhone keeps working whatever it had chosen.
+        defaults.removeObject(forKey: "compactMode")
+        defaults.removeObject(forKey: "useServer")
         onboardingComplete = defaults.bool(forKey: "onboardingComplete")
         removalExplained = defaults.bool(forKey: "removalExplained")
         trialConfirmed = defaults.bool(forKey: "trialConfirmed")
-        if mode == .server, client == nil { mode = nil }
     }
 
     var client: ServerClient? {
@@ -48,14 +45,15 @@ final class AppSettings {
     }
 
     var isPaired: Bool { client != nil && server != nil }
-    var usesServer: Bool { mode == .server && isPaired }
-    var canCompact: Bool { usesServer || mode == .device }
+    var usesServer: Bool { isPaired }
+    var canCompact: Bool { usesServer }
 
-    func compactor(ledger: CompactLedger) -> any Compacting {
-        if usesServer, let client, let server {
-            return ServerCompactor(client: client, mode: server.mode, profile: server.profile, ledger: ledger)
-        }
-        return OnDeviceCompactor(ledger: ledger)
+    /// Compacts through the paired server. A Mac server does everything, Live Photos included;
+    /// with a Linux server, this iPhone compresses Live Photo motion (only Apple's AVFoundation
+    /// keeps it paired with the photo).
+    func compactor(ledger: CompactLedger) -> (any Compacting)? {
+        guard usesServer, let client, let server else { return nil }
+        return ServerCompactor(client: client, mode: server.mode, profile: server.profile, ledger: ledger)
     }
 
     func remover(ledger: CompactLedger) -> OriginalRemover? {
@@ -78,7 +76,6 @@ final class AppSettings {
         defaults.set(newURL, forKey: "serverURL")
         store(response.server)
         serverStatus = .reachable
-        mode = .server
     }
 
     func unpair() {
@@ -86,7 +83,6 @@ final class AppSettings {
         serverURL = nil
         server = nil
         serverStatus = .unknown
-        if mode == .server { mode = nil }
         defaults.removeObject(forKey: "serverURL")
         defaults.removeObject(forKey: "serverInfo")
     }

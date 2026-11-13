@@ -11,11 +11,13 @@ from the iPhone only after the server proves it has an identical copy.
 
 ## Modes
 
-1. **On-phone:** the app compresses with Apple's encoders. No server needed for
-   compression; originals stay wherever they already are.
-2. **Self-hosted:** Homespun Server (Linux, Docker) stores originals and compresses
-   with x265, producing the smallest files.
-3. **Immich add-on:** the server reads originals from an existing Immich server by API
+Homespun always works with a server you run; the app doesn't compress on its own.
+
+1. **Self-hosted:** Homespun Server on a Mac or Linux computer stores originals and
+   compresses with x265, producing the smallest files. A Mac server makes every compact
+   copy, Live Photos included; with a Linux server the iPhone compresses Live Photo motion,
+   because only Apple's AVFoundation keeps it paired with the photo.
+2. **Immich add-on:** the server reads originals from an existing Immich server by API
    key. The app saves compact copies to a "Homespun" album that you exclude from
    Immich backup, so they are not re-uploaded or shown in the Immich timeline.
 
@@ -88,8 +90,19 @@ a badge: orange (the original is still on this iPhone; Free up space removes it)
 up, or only what is. Compact copies go to a "Homespun" album with the original's date, location,
 and favorite and hidden state; edited items are compressed as they currently look. Before the
 first removal it explains what removal means (including iCloud Photos), and the first removal
-takes at most 10 originals until you confirm the copies look right. Making copies on the
-iPhone alone is in Settings; it frees no space, since there is no verified copy elsewhere.
+takes at most 10 originals until you confirm the copies look right.
+
+**Premium** (one-time In-App Purchase; everything above stays free):
+
+- **Automatic mode**: new photos and videos (or, if chosen, everything not backed up yet) are
+  backed up and compacted without being selected: when the app opens and in a background
+  processing task iOS runs when it chooses, usually overnight while charging. Removing
+  originals still waits for you; a notification says when there is space to free up. Items
+  added later with older dates (synced, saved) are found through Photos' change history.
+- **Cloud copies**: the server's connectors (see below).
+
+Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
+`Homespun.storekit` is a local App Store for trying the purchase on the simulator.
 
 On a Mac with Xcode:
 

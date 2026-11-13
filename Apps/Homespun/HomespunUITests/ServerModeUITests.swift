@@ -7,7 +7,8 @@ import XCTest
 /// `HOMESPUN_SERVER` (address), `HOMESPUN_PAIRING_CODE` (from `homespun-server pair`),
 /// optional `HOMESPUN_PICK` (number of newest items, default 3) and `HOMESPUN_REMOVE=1`.
 final class ServerModeUITests: XCTestCase {
-    @MainActor func testCompactThroughServerAndRemoveOriginals() throws {
+    // Numbered: the first pairs and compacts a selection; the second relies on that pairing.
+    @MainActor func test1CompactThroughServerAndRemoveOriginals() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"] else {
             throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
@@ -84,6 +85,46 @@ final class ServerModeUITests: XCTestCase {
         // The removed originals' copies now show as backed up.
         XCTAssertTrue(app.gridItems("Backed up").firstMatch.waitForExistence(timeout: 10), "no items marked backed up")
         attach(app, "Backed up")
+    }
+
+    /// Automatic mode (unlocked in Debug builds) backs up and compacts everything else, with
+    /// nothing selected. Uses the pairing from the first test.
+    @MainActor func test2AutomaticModeBacksUpTheRest() throws {
+        guard ProcessInfo.processInfo.environment["HOMESPUN_SERVER"] != nil else {
+            throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 20), "not paired with the server")
+        let remaining = app.gridItems("Not backed up")
+        XCTAssertTrue(remaining.firstMatch.waitForExistence(timeout: 20), "nothing left to compact")
+        let before = app.gridItems("Original still on this iPhone").count + app.gridItems("Backed up").count
+
+        app.buttons["settings"].tap()
+        let toggle = app.switches["automatic.toggle"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "automatic mode isn't offered")
+        toggle.switches.firstMatch.tap()
+        app.buttons["Everything not backed up yet"].firstMatch.tap()
+        // iOS asks once whether Homespun may send notifications.
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let allow = springboard.alerts.buttons["Allow"]
+        if allow.waitForExistence(timeout: 10) { allow.tap() }
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "1")
+        app.buttons["Done"].tap()
+
+        // Nothing selected, yet the rest gets compact copies.
+        let busy = app.gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Working'}"))
+        let deadline = Date().addingTimeInterval(900)
+        repeat { sleep(2) } while (busy.count > 0 || app.buttons["job.progress"].exists) && Date() < deadline
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Automatic"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        XCTAssertGreaterThan(app.gridItems("Original still on this iPhone").count + app.gridItems("Backed up").count, before)
+        XCTAssertEqual(app.gridItems("Not backed up").count, 0, "automatic mode left items")
+        XCTAssertEqual(app.gridItems("Failed").count, 0)
     }
 
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {

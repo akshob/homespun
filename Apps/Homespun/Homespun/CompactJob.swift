@@ -12,6 +12,8 @@ final class CompactJob {
         case working(String)
         case saved(originalBytes: Int, compactBytes: Int)
         case unchanged(String)
+        /// Not done yet for a reason that may pass; automatic mode tries again later.
+        case notYet(String)
         case failed(String)
 
         /// The state without its message or sizes; enough for the grid's badges.
@@ -21,12 +23,13 @@ final class CompactJob {
             case .working: .working
             case .saved: .saved
             case .unchanged: .unchanged
+            case .notYet: .notYet
             case .failed: .failed
             }
         }
     }
 
-    enum Phase: Equatable { case waiting, working, saved, unchanged, failed }
+    enum Phase: Equatable { case waiting, working, saved, unchanged, notYet, failed }
 
     struct Item: Identifiable {
         let id = UUID()
@@ -78,6 +81,12 @@ final class CompactJob {
         if !isRunning { Task { await run() } }
     }
 
+    /// Drops these items if they haven't started (when iOS ends a background run); an item
+    /// being worked on finishes, and items the user queued are left alone.
+    func stopWaiting(_ identifiers: Set<String>) {
+        items.removeAll { $0.state == .waiting && identifiers.contains($0.assetIdentifier) }
+    }
+
     func clearFinished() {
         items.removeAll { item in
             switch item.state {
@@ -102,13 +111,16 @@ final class CompactJob {
             if let name = PhotoLibrary.describe(items[index].assetIdentifier)?.name { items[index].name = name }
             let state: State
             do {
-                let compactor = settings.compactor(ledger: ledger)
+                guard let compactor = settings.compactor(ledger: ledger) else {
+                    throw ServerClient.Failure(status: 0, message: "Connect your Homespun Server first.")
+                }
                 let outcome = try await compactor.compact(items[index].assetIdentifier) { [weak self] message in
                     Task { @MainActor in self?.report(message, for: id) }
                 }
                 switch outcome {
                 case .saved(_, let original, let compact): state = .saved(originalBytes: original, compactBytes: compact)
                 case .unchanged(let reason): state = .unchanged(reason)
+                case .notYet(let reason): state = .notYet(reason)
                 }
             } catch {
                 state = .failed(error.localizedDescription)

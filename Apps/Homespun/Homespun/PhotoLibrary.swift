@@ -9,6 +9,8 @@ enum CompactOutcome: Equatable, Sendable {
     case saved(compactIdentifier: String, originalBytes: Int, compactBytes: Int)
     /// Nothing was saved; the reason is shown to the user.
     case unchanged(String)
+    /// Not done yet, for a reason that may pass (for example, not in Immich yet). Try again later.
+    case notYet(String)
 }
 
 /// Makes and saves a compact copy of one library item.
@@ -196,6 +198,13 @@ enum PhotoLibrary {
         return found
     }
 
+    /// The identifiers of the items in the Homespun album.
+    static func albumMembers() -> Set<String> {
+        var members = Set<String>()
+        albumAssets()?.enumerateObjects { asset, _, _ in members.insert(asset.localIdentifier) }
+        return members
+    }
+
     /// The items in the Homespun album, or `nil` if there is no album yet.
     static func albumAssets() -> PHFetchResult<PHAsset>? {
         let options = PHFetchOptions()
@@ -263,10 +272,13 @@ enum PhotoLibrary {
         return identifier
     }
 
-    /// Skips items that already have a compact copy, and compact copies themselves (known to
-    /// this iPhone, or in the Homespun album). The server also refuses copies it made.
+    /// Skips items already backed up with a compact copy, and compact copies themselves (known
+    /// to this iPhone, or in the Homespun album). The server also refuses copies it made.
+    /// (A copy made on this iPhone by the old on-phone mode doesn't count: the original still
+    /// needs backing up.)
     static func skipReason(for asset: PHAsset, ledger: CompactLedger) async -> String? {
-        if let existing = await ledger.compactIdentifier(for: asset.localIdentifier), self.asset(existing) != nil {
+        if let entry = await ledger.entry(for: asset.localIdentifier), entry.serverAssetID != nil,
+           self.asset(entry.compactIdentifier) != nil {
             return "Already has a compact copy"
         }
         if await ledger.isCompactCopy(asset.localIdentifier) || isCompactCopy(asset) {

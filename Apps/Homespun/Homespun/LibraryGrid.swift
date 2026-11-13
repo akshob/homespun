@@ -87,31 +87,39 @@ struct LibraryState: Equatable {
 
     init(cells: [Cell] = []) { self.cells = cells }
 
-    /// `library` in display order (oldest first). An original with a compact copy in the
-    /// library is hidden; the copy is shown with a badge saying where the original is.
+    /// `library` in display order (oldest first). An original backed up with a compact copy in
+    /// the library is hidden; the copy is shown with a badge saying where the original is. (A
+    /// copy made on this iPhone by the old on-phone mode doesn't hide its original, which still
+    /// needs backing up.)
     init(library: [String], ledger: [String: CompactLedger.Entry], album: Set<String>, job: [String: CompactJob.State]) {
         let present = Set(library)
         var originalOf: [String: String] = [:]
-        var hidden = Set<String>()
+        var hidden = Set<String>(), unbackedCopies = Set<String>()
         for (original, entry) in ledger where present.contains(entry.compactIdentifier) {
+            guard entry.serverAssetID != nil else {
+                unbackedCopies.insert(entry.compactIdentifier)
+                continue
+            }
             originalOf[entry.compactIdentifier] = original
             hidden.insert(original)
         }
         cells = library.compactMap { id in
             guard !hidden.contains(id) else { return nil }
-            if let original = originalOf[id], let entry = ledger[original] {
-                let backed = entry.serverAssetID != nil
+            if let original = originalOf[id] {
                 if present.contains(original) {
-                    return Cell(id: id, badge: .originalOnPhone, original: original, canFree: backed)
+                    return Cell(id: id, badge: .originalOnPhone, original: original, canFree: true)
                 }
-                return Cell(id: id, badge: backed ? .backedUp : .compactCopy, original: original, canFree: false)
+                return Cell(id: id, badge: .backedUp, original: original, canFree: false)
             }
-            if album.contains(id) { return Cell(id: id, badge: .compactCopy, original: nil, canFree: false) }
+            if album.contains(id) || unbackedCopies.contains(id) {
+                return Cell(id: id, badge: .compactCopy, original: nil, canFree: false)
+            }
             let badge: Badge = switch job[id] {
             case .waiting?: .waiting
             case .working?: .working
             case .failed?: .failed
             case .unchanged?: .kept
+            case .notYet?: .none
             case .saved?, nil: .none
             }
             return Cell(id: id, badge: badge, original: nil, canFree: false)

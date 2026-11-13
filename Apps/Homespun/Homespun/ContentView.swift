@@ -6,6 +6,8 @@ import SwiftUI
 struct ContentView: View {
     @State private var settings: AppSettings
     @State private var job: CompactJob
+    private let premium: Premium
+    private let automatic: AutomaticMode
     @State private var library = LibraryModel()
     @State private var access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @State private var filter = LibraryState.Filter.all
@@ -43,10 +45,11 @@ struct ContentView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
 
-    init() {
-        let settings = AppSettings()
-        _settings = State(initialValue: settings)
-        _job = State(initialValue: CompactJob(settings: settings))
+    init(model: AppModel) {
+        _settings = State(initialValue: model.settings)
+        _job = State(initialValue: model.job)
+        premium = model.premium
+        automatic = model.automatic
     }
 
     var body: some View {
@@ -88,7 +91,7 @@ struct ContentView: View {
             .sheet(item: $sheet, onDismiss: sheetDismissed) { sheet in
                 switch sheet {
                 case .settings:
-                    SettingsView(settings: settings)
+                    SettingsView(settings: settings, premium: premium, automatic: automatic)
                 case .connect:
                     NavigationStack {
                         ConnectView(settings: settings) { self.sheet = nil }
@@ -120,8 +123,19 @@ struct ContentView: View {
                 if !running { Task { await jobFinished() } }
             }
             .onChange(of: settings.onboardingComplete) { _, _ in Task { await refresh() } }
+            .onChange(of: automatic.enabled) { _, on in
+                if on { Task { await runAutomatic() } }
+            }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { Task { await refresh() } }
+                switch phase {
+                case .active:
+                    Task {
+                        await refresh()
+                        await runAutomatic()
+                    }
+                case .background: automatic.schedule()
+                default: break
+                }
             }
             .onOpenURL { url in
                 if let link = PairingLink(url) { settings.pendingLink = link }
@@ -129,6 +143,9 @@ struct ContentView: View {
             .task {
                 library.onChange = { @MainActor in Task { await refreshGrid() } }
                 await refresh()
+                // Only what this Apple Account owns; the product itself loads on the Premium screen.
+                await premium.refresh()
+                await runAutomatic()
             }
         }
     }
@@ -206,9 +223,6 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("server.card")
-        } else if settings.mode == .device {
-            Label("Compact copies on this iPhone only; nothing is backed up or removed.", systemImage: "iphone")
-                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Connect your Homespun Server").font(.headline)
@@ -297,7 +311,7 @@ struct ContentView: View {
     }
 
     private var compactBlockedReason: String? {
-        if !settings.canCompact { return "Connect a server first, or make copies on this iPhone in Settings." }
+        if !settings.canCompact { return "Connect your Homespun Server first." }
         if settings.usesServer, settings.serverStatus != .reachable { return "The server isn't reachable right now." }
         return nil
     }
@@ -440,6 +454,14 @@ struct ContentView: View {
         access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         library.reload()
         if settings.isPaired { await settings.refreshServerInfo() }
+        await refreshRemovable()
+        await refreshGrid()
+    }
+
+    /// Automatic mode catches up whenever the app opens (unless something is already running).
+    private func runAutomatic() async {
+        guard automatic.enabled, premium.isUnlocked, !job.isRunning, !isRemoving, settings.onboardingComplete else { return }
+        await automatic.run(settings: settings, job: job, premium: premium, notify: false)
         await refreshRemovable()
         await refreshGrid()
     }
@@ -617,6 +639,7 @@ private struct ItemRow: View {
         case .working: "working"
         case .saved: "saved"
         case .unchanged: "unchanged"
+        case .notYet: "notYet"
         case .failed: "failed"
         }
     }
@@ -632,7 +655,7 @@ private struct ItemRow: View {
             }.foregroundStyle(.secondary)
         case .saved(let original, let compact):
             Text("\(bytes(original)) → \(bytes(compact))").foregroundStyle(.green)
-        case .unchanged(let reason):
+        case .unchanged(let reason), .notYet(let reason):
             Text(reason).foregroundStyle(.secondary)
         case .failed(let reason):
             Text(reason).foregroundStyle(.red)

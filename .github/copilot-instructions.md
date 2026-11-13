@@ -48,7 +48,7 @@ and may not exist in other checkouts.
   Keep the encoded size and clean aperture, or the motion looks zoomed in.
   Validate pairs with `PHLivePhoto`.
 - Hardware HEVC (VideoToolbox) files were about 2-3x larger than x265 at similar
-  quality (VMAF). Use x265 on servers; use phone hardware only for on-device mode.
+  quality (VMAF). Use x265 on servers; the phone encodes only Live Photo motion (Linux server).
 - Map only audio streams the local decoder can decode. Apple spatial audio (APAC)
   is skipped in derivatives and kept in the original.
 - Verify before publishing: dimensions within profile, same audio track count,
@@ -70,8 +70,8 @@ and may not exist in other checkouts.
 - The app may ask iOS to delete an original only if the server's stored copy
   matches its size and SHA-256 and the compact copy was imported and verified
   (`DeletionGate`). Re-evaluate at deletion time; never trust a stored status alone.
-- On-phone mode has no server copy, so it never deletes originals; it only adds
-  compact copies.
+- The app always works through a paired server (the on-phone mode was removed);
+  an item with no server copy can never be removed.
 - Deletion always goes through the iOS confirmation. Items stay in Recently
   Deleted. Never empty Recently Deleted.
 - Zero-byte originals and hash mismatches block deletion.
@@ -108,10 +108,11 @@ cd Apps/Homespun && xcodegen generate   # macOS only
   `TEST_RUNNER_HOMESPUN_PICK`, `TEST_RUNNER_HOMESPUN_REMOVE=1`). Use a fresh simulator whose
   library holds only synthetic media, and a server with a test data directory.
 - Feed each AVAssetWriter input from its own task; one loop over several inputs can deadlock.
-- `HomespunUITests` drives the system photo picker (grid cells are images with identifier
-  `PXGGridLayout-Info`; confirm with "Done") and reads item states from the
-  `status.<state>` accessibility identifiers in `ContentView`. It picks the newest
-  items, so it runs before `HomespunTests` in the scheme and needs a fresh simulator.
+- `HomespunUITests` selects in the app's own library grid (`GridSteps.swift`: cells have
+  identifier `asset` and the badge label as value) and reads item states from `status.<state>`
+  in Activity. Server tests are numbered (`test1…` pairs, `test2…` reuses the pairing).
+  Don't use SKTestSession in the hosted unit tests: the app process talks to the real App Store
+  (purchases asked for an Apple Account sign-in). Test Premium logic with the `owned:` stand-in.
 - Live Photo content identifiers in tests must be UUID strings: ImageIO stores Apple
   maker-note tag 17 as a fixed 36-byte field and pads shorter values.
 - iOS simulator video encoders ignore requested bitrates; do not assert encoder-dependent
