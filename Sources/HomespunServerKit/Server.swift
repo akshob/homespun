@@ -47,7 +47,9 @@ public struct HomespunServer: Sendable {
     }
 
     /// The connectors every server has.
-    static func builtInConnectors(_ configuration: ServerConfiguration) -> [any Connector] { [] }
+    static func builtInConnectors(_ configuration: ServerConfiguration) -> [any Connector] {
+        [OneDriveConnector(clientID: configuration.onedriveClientID)]
+    }
 
     public func router() -> Router<HomespunRequestContext> {
         let router = Router(context: HomespunRequestContext.self)
@@ -103,7 +105,7 @@ public struct HomespunServer: Sendable {
         ]
         if let publicURL = configuration.publicURL { environment["HOMESPUN_PUBLIC_URL"] = publicURL }
         let current = ProcessInfo.processInfo.environment
-        for key in ["PATH", "HOMESPUN_IMMICH_URL", "HOMESPUN_IMMICH_API_KEY_FILE"] {
+        for key in ["PATH", "HOMESPUN_IMMICH_URL", "HOMESPUN_IMMICH_API_KEY_FILE", "HOMESPUN_ONEDRIVE_CLIENT_ID"] {
             if let value = current[key] { environment[key] = value }
         }
         let plan = ServiceInstaller.plan(executable: executable, environment: environment, os: platform.os, home: home,

@@ -205,6 +205,23 @@ For now the app talks plain HTTP, and only to servers on the home network (IP ad
 lets the app remove an original only after checking its copy again at that moment
 (`POST /api/v1/assets/{id}/verify`).
 
+### Cloud copies (connectors)
+
+The server can also copy each original somewhere else once it has stored and checked it, as
+an extra backup (Settings › Cloud copies in the app). Copies never count toward removing an
+original from the iPhone; only the server's own verified copy does. Each copy is checked
+where the service allows it, and a full or offline destination is retried later without
+holding up compact copies.
+
+- **OneDrive**: sign in from the app with a code. Homespun asks only for its own app folder
+  (`Apps/Homespun` in OneDrive) and checks every upload against OneDrive's QuickXorHash.
+  Until Homespun ships its own Microsoft app ID, set `HOMESPUN_ONEDRIVE_CLIENT_ID` to the
+  ID of a Microsoft app registration (public client, device code flow, delegated
+  `Files.ReadWrite.AppFolder`, `User.Read`, `offline_access`).
+- Your own connectors: implement `Connector` and build a server binary that calls
+  `ServerCommand.run(connectors: [YourConnector()])` from its `main`, depending on the
+  `HomespunServerKit` library product.
+
 ### Immich mode
 
 If you already run [Immich](https://immich.app) and back up your iPhone with its app, Homespun

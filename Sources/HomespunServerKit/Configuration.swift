@@ -25,6 +25,8 @@ public struct ServerConfiguration: Sendable {
     public var immich: ImmichConfiguration?
     /// The address the app should use (`HOMESPUN_PUBLIC_URL`), when the detected one is wrong.
     public var publicURL: String?
+    /// A Microsoft app registration for the OneDrive connector (`HOMESPUN_ONEDRIVE_CLIENT_ID`).
+    public var onedriveClientID: String?
     /// Largest body accepted by one upload request.
     public var maximumChunkBytes = 64 << 20
 
@@ -63,6 +65,7 @@ public struct ServerConfiguration: Sendable {
             configuration.port = number
         }
         configuration.name = environment["HOMESPUN_NAME"] ?? ProcessInfo.processInfo.hostName
+        configuration.onedriveClientID = environment["HOMESPUN_ONEDRIVE_CLIENT_ID"].flatMap { $0.isEmpty ? nil : $0 }
         if let publicURL = environment["HOMESPUN_PUBLIC_URL"], !publicURL.isEmpty {
             guard PairingLink.serverURL(from: publicURL) != nil else { throw Failure.invalid("bad HOMESPUN_PUBLIC_URL") }
             configuration.publicURL = publicURL

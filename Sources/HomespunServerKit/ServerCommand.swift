@@ -72,7 +72,8 @@ public enum ServerCommand {
                 print(try server.installService(executable: executable))
                 let saved = [("HOMESPUN_DATA", configuration.dataDirectory.path), ("HOMESPUN_HOST", configuration.host),
                              ("HOMESPUN_PORT", String(configuration.port)), ("HOMESPUN_NAME", configuration.name),
-                             ("HOMESPUN_PUBLIC_URL", configuration.publicURL)]
+                             ("HOMESPUN_PUBLIC_URL", configuration.publicURL),
+                             ("HOMESPUN_ONEDRIVE_CLIENT_ID", configuration.onedriveClientID)]
                     .compactMap { key, value in value.map { "\(key)=\($0)" } }.joined(separator: "\n") + "\n"
                 try FileManager.default.createDirectory(at: settingsFile.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try saved.write(to: settingsFile, atomically: true, encoding: .utf8)
