@@ -166,6 +166,19 @@ public actor Catalog {
         INSERT OR IGNORE INTO made_copies (sha256, asset_id, role, created_at)
             SELECT sha256, asset_id, role, strftime('%Y-%m-%dT%H:%M:%SZ', 'now') FROM compact;
         """,
+        // Copies of each item's originals made by connectors (OneDrive and so on).
+        """
+        CREATE TABLE connector_copies (
+            asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+            connector TEXT NOT NULL,
+            state TEXT NOT NULL,
+            reference TEXT,
+            message TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (asset_id, connector)
+        );
+        CREATE INDEX connector_copies_state ON connector_copies (connector, state);
+        """,
     ]
 
     static func migrate(_ database: SQLiteDatabase) throws {
@@ -456,6 +469,63 @@ public actor Catalog {
     // MARK: Jobs
 
     /// Queues `type` for the asset unless it is already queued or running.
+    // MARK: Connector copies
+
+    func setCopyState(_ assetID: String, connector: String, state: String, reference: String? = nil,
+                      message: String? = nil) throws {
+        try database.execute(
+            """
+            INSERT INTO connector_copies (asset_id, connector, state, reference, message, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (asset_id, connector) DO UPDATE SET state = excluded.state,
+                reference = COALESCE(excluded.reference, connector_copies.reference), message = excluded.message,
+                updated_at = excluded.updated_at
+            """,
+            [.text(assetID), .text(connector), .text(state), reference.sqlValue, message.sqlValue, .text(Timestamp.string())])
+        if state == "copied" || state == "failed" {
+            log("copy_\(state)", asset: assetID, detail: [connector, reference ?? message].compactMap { $0 }.joined(separator: ": "))
+        }
+    }
+
+    func copyState(_ assetID: String, connector: String) throws -> (state: String, reference: String?, message: String?)? {
+        guard let row = try database.query("SELECT state, reference, message FROM connector_copies WHERE asset_id = ? AND connector = ?",
+                                           [.text(assetID), .text(connector)]).first else { return nil }
+        return (row["state"]?.string ?? "", row["reference"]?.string, row["message"]?.string)
+    }
+
+    func copyCounts(connector: String) throws -> ServerAPI.ConnectorCounts {
+        var counts = ServerAPI.ConnectorCounts()
+        for row in try database.query("SELECT state, count(*) AS n FROM connector_copies WHERE connector = ? GROUP BY state",
+                                      [.text(connector)]) {
+            let n = row["n"]?.int ?? 0
+            switch row["state"]?.string {
+            case "copied": counts.copied += n
+            case "failed": counts.failed += n
+            default: counts.pending += n
+            }
+        }
+        return counts
+    }
+
+    /// Items whose every original is stored here or was checked in Immich.
+    func assetsWithVerifiedOriginals() throws -> [String] {
+        try database.query("""
+            SELECT a.id AS id FROM assets a
+            WHERE EXISTS (SELECT 1 FROM resources r WHERE r.asset_id = a.id)
+              AND NOT EXISTS (SELECT 1 FROM resources r WHERE r.asset_id = a.id AND r.state != 'verified')
+            ORDER BY a.capture_date, a.created_at
+            """).compactMap { $0["id"]?.string }
+    }
+
+    /// Drops queued jobs of a type (a connector being removed), and their pending copies.
+    func cancelJobs(prefix type: String) throws {
+        try database.execute("DELETE FROM jobs WHERE type = ? AND status IN ('queued', 'retry_wait')", [.text(type)])
+        let connector = String(type.dropFirst(ConnectorHub.jobPrefix.count))
+        try database.execute("DELETE FROM connector_copies WHERE connector = ? AND state IN ('queued', 'copying')",
+                             [.text(connector)])
+    }
+
+    // MARK: Jobs
+
     func enqueue(_ type: String, assetID: String) throws {
         let now = Timestamp.string()
         try database.execute(
@@ -468,7 +538,9 @@ public actor Catalog {
             [.text(type), .text(assetID), .text(now), .text(now)])
     }
 
-    func claim(owner: String, lease: TimeInterval) throws -> Job? {
+    /// Claims the oldest ready job of one lane: connector copies (`connectors`) or everything else,
+    /// so a long backlog of copies never delays compact copies.
+    func claim(owner: String, lease: TimeInterval, connectors: Bool = false) throws -> Job? {
         let now = Date()
         return try database.transaction {
             try database.execute(
@@ -477,8 +549,11 @@ public actor Catalog {
             guard let row = try database.query(
                 """
                 SELECT id, type, asset_id, attempts FROM jobs
-                WHERE status IN ('queued', 'retry_wait') AND available_at <= ? ORDER BY id LIMIT 1
-                """, [.text(Timestamp.string(now))]).first, let id = row["id"]?.int else { return nil }
+                WHERE status IN ('queued', 'retry_wait') AND available_at <= ?
+                  AND (substr(type, 1, length(?)) = ?) = ?
+                ORDER BY id LIMIT 1
+                """, [.text(Timestamp.string(now)), .text(ConnectorHub.jobPrefix), .text(ConnectorHub.jobPrefix),
+                      .integer(connectors ? 1 : 0)]).first, let id = row["id"]?.int else { return nil }
             try database.execute(
                 "UPDATE jobs SET status = 'leased', lease_owner = ?, lease_expires_at = ?, attempts = attempts + 1 WHERE id = ?",
                 [.text(owner), .text(Timestamp.string(now.addingTimeInterval(lease))), .integer(Int64(id))])
@@ -502,6 +577,15 @@ public actor Catalog {
              .integer(Int64(job.id))])
         log(retry ? "job_retry" : "job_failed", asset: job.assetID, detail: "\(job.type): \(error)")
         return retry
+    }
+
+    /// Waits before trying a job again without counting the attempt (the destination is full or offline).
+    func postpone(_ job: Job, by delay: TimeInterval, reason: String) throws {
+        try database.execute(
+            """
+            UPDATE jobs SET status = 'retry_wait', attempts = max(attempts - 1, 0), last_error = ?, available_at = ?,
+                lease_owner = NULL, lease_expires_at = NULL WHERE id = ?
+            """, [.text(reason), .text(Timestamp.string(Date().addingTimeInterval(delay))), .integer(Int64(job.id))])
     }
 
     /// At startup nothing can hold a lease, so leased jobs from a previous run are queued again.

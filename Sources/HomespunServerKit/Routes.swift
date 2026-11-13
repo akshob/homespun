@@ -47,6 +47,7 @@ struct Routes: Sendable {
     let storage: Storage
     let immichState: ImmichState
     let approvals: PairingApprovals
+    let connectors: ConnectorHub
     let locks = UploadLocks()
 
     func info() async -> ServerAPI.ServerInfo {
@@ -87,6 +88,21 @@ struct Routes: Sendable {
         authenticated.delete("settings/immich") { _, _ in
             try await immichState.clear()
             return try json(await immichState.settings())
+        }
+        authenticated.get("connectors") { _, _ in try json(try await connectors.all()) }
+        authenticated.put("connectors/:id") { request, context in
+            let update = try await request.decode(as: ServerAPI.ConnectorUpdate.self, context: context)
+            return try json(try await connectorCall { try await connectors.update(context.parameters.get("id") ?? "", update) })
+        }
+        authenticated.delete("connectors/:id") { _, context in
+            try await connectorCall { try await connectors.remove(context.parameters.get("id") ?? "") }
+            return Response(status: .noContent)
+        }
+        authenticated.post("connectors/:id/sign-in") { _, context in
+            try json(try await connectorCall { try await connectors.beginSignIn(context.parameters.get("id") ?? "") })
+        }
+        authenticated.get("connectors/:id/sign-in") { _, context in
+            try json(try await connectorCall { try await connectors.pollSignIn(context.parameters.get("id") ?? "") })
         }
         authenticated.post("assets") { request, context in try await register(request, context) }
         authenticated.get("assets/:id") { _, context in try json(try await status(context)) }
@@ -163,6 +179,15 @@ struct Routes: Sendable {
                                                  connected: true, message: ImmichState.permissionWarning(permissions)))
     }
 
+    /// A connector's own errors are messages for the app (422); anything else is a server error.
+    private func connectorCall<T: Sendable>(_ body: () async throws -> T) async throws -> T {
+        do {
+            return try await body()
+        } catch let error as ConnectorError {
+            throw HTTPError(.unprocessableContent, message: error.description)
+        }
+    }
+
     // MARK: Assets
 
     func register(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
@@ -197,6 +222,7 @@ struct Routes: Sendable {
             if asset.state == .receiving, resources.allSatisfy({ $0.state == .verified }) {
                 try await catalog.setState(assetID, .queued)
                 try await catalog.enqueue(JobRunner.compress, assetID: assetID)
+                try await connectors.originalsVerified(assetID)
             }
         case .immich:
             // Registering again re-checks Immich, for example after the Immich app backed the item up.
@@ -328,6 +354,7 @@ struct Routes: Sendable {
         if try await catalog.resources(asset.id).allSatisfy({ $0.state == .verified }) {
             try await catalog.setState(asset.id, .queued)
             try await catalog.enqueue(JobRunner.compress, assetID: asset.id)
+            try await connectors.originalsVerified(asset.id)
         }
     }
 

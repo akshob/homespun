@@ -11,27 +11,43 @@ public struct HomespunServer: Sendable {
     public let catalog: Catalog
     let storage: Storage
     let runner: JobRunner
+    let copier: JobRunner
+    let hub: ConnectorHub
     let routes: Routes
     let immichState: ImmichState
     let logger: Logger
 
-    public init(configuration: ServerConfiguration, logger: Logger = Logger(label: "homespun")) async throws {
-        try await self.init(configuration: configuration, logger: logger, approver: DialogApprover.detect())
+    /// `connectors`: extra destinations besides the built-in ones (see `Connector`).
+    public init(configuration: ServerConfiguration, connectors: [any Connector] = [],
+                logger: Logger = Logger(label: "homespun")) async throws {
+        try await self.init(configuration: configuration, connectors: connectors, logger: logger,
+                            approver: DialogApprover.detect())
     }
 
-    init(configuration: ServerConfiguration, logger: Logger = Logger(label: "homespun"),
-         approver: (any PairingApprover)?, approvalPause: TimeInterval = 5) async throws {
+    init(configuration: ServerConfiguration, connectors: [any Connector] = [], logger: Logger = Logger(label: "homespun"),
+         approver: (any PairingApprover)?, approvalPause: TimeInterval = 5, builtIn: [any Connector]? = nil) async throws {
         self.configuration = configuration
         self.logger = logger
         storage = Storage(root: configuration.dataDirectory)
         try storage.prepare()
         catalog = try Catalog(path: storage.catalog.path)
+        // Nothing can hold a lease before the runners start.
+        try await catalog.releaseLeases()
         immichState = try await ImmichState(catalog: catalog, fallback: configuration.immich)
-        runner = JobRunner(catalog: catalog, storage: storage, compactor: Compactor(profile: configuration.profile),
-                           immichState: immichState, logger: logger)
+        hub = ConnectorHub(connectors: (builtIn ?? Self.builtInConnectors(configuration)) + connectors,
+                           catalog: catalog, storage: storage)
+        let compactor = Compactor(profile: configuration.profile)
+        runner = JobRunner(catalog: catalog, storage: storage, compactor: compactor, immichState: immichState, hub: hub,
+                           logger: logger)
+        copier = JobRunner(catalog: catalog, storage: storage, compactor: compactor, immichState: immichState, hub: hub,
+                           logger: logger, pollInterval: .seconds(2), connectors: true)
         routes = Routes(configuration: configuration, catalog: catalog, storage: storage, immichState: immichState,
-                        approvals: PairingApprovals(approver: approver, serverName: configuration.name, pause: approvalPause))
+                        approvals: PairingApprovals(approver: approver, serverName: configuration.name, pause: approvalPause),
+                        connectors: hub)
     }
+
+    /// The connectors every server has.
+    static func builtInConnectors(_ configuration: ServerConfiguration) -> [any Connector] { [] }
 
     public func router() -> Router<HomespunRequestContext> {
         let router = Router(context: HomespunRequestContext.self)
@@ -45,7 +61,7 @@ public struct HomespunServer: Sendable {
         Application(router: router(), server: .http1(configuration: .init(idleTimeout: .seconds(60))),
                     configuration: .init(address: .hostname(configuration.host, port: configuration.port),
                                          serverName: "homespun"),
-                    services: [runner] + advertiser(), logger: logger)
+                    services: [runner, copier] + advertiser(), logger: logger)
     }
 
     private func advertiser() -> [any Service] {
@@ -123,5 +139,8 @@ public struct HomespunServer: Sendable {
     }
 
     /// Runs queued jobs until none is ready.
-    public func drainJobs() async throws { try await runner.drain() }
+    public func drainJobs() async throws {
+        try await runner.drain()
+        try await copier.drain()
+    }
 }

@@ -165,6 +165,115 @@ public enum ServerAPI {
         }
     }
 
+    // MARK: Connectors
+
+    /// A setting a connector asks for; the app draws a form from these.
+    public struct ConnectorField: Codable, Equatable, Sendable {
+        public enum Kind: String, Codable, Sendable { case text, secret, toggle, choice }
+        public var key: String
+        public var label: String
+        public var kind: Kind
+        public var help: String?
+        public var placeholder: String?
+        public var choices: [String]?
+        /// The current value; never sent for secrets.
+        public var value: String?
+        /// A secret has a value (it is never sent back).
+        public var isSet: Bool
+
+        public init(key: String, label: String, kind: Kind = .text, help: String? = nil, placeholder: String? = nil,
+                    choices: [String]? = nil, value: String? = nil, isSet: Bool = false) {
+            self.key = key
+            self.label = label
+            self.kind = kind
+            self.help = help
+            self.placeholder = placeholder
+            self.choices = choices
+            self.value = value
+            self.isSet = isSet
+        }
+    }
+
+    public struct ConnectorCounts: Codable, Equatable, Sendable {
+        public var copied: Int
+        public var pending: Int
+        public var failed: Int
+        public init(copied: Int = 0, pending: Int = 0, failed: Int = 0) {
+            self.copied = copied
+            self.pending = pending
+            self.failed = failed
+        }
+    }
+
+    /// `GET /api/v1/connectors`: a destination the server copies originals to.
+    public struct ConnectorInfo: Codable, Equatable, Sendable, Identifiable {
+        public var id: String
+        public var name: String
+        public var summary: String
+        public var fields: [ConnectorField]
+        /// Signs in with a code shown in the app (`POST /connectors/{id}/sign-in`).
+        public var signsIn: Bool
+        /// The signed-in account, if any.
+        public var account: String?
+        public var enabled: Bool
+        /// A problem to show, for example the last copy error.
+        public var message: String?
+        public var counts: ConnectorCounts
+
+        public init(id: String, name: String, summary: String, fields: [ConnectorField], signsIn: Bool,
+                    account: String?, enabled: Bool, message: String?, counts: ConnectorCounts) {
+            self.id = id
+            self.name = name
+            self.summary = summary
+            self.fields = fields
+            self.signsIn = signsIn
+            self.account = account
+            self.enabled = enabled
+            self.message = message
+            self.counts = counts
+        }
+    }
+
+    /// `PUT /api/v1/connectors/{id}`. Missing values are unchanged; an empty secret is unchanged.
+    public struct ConnectorUpdate: Codable, Equatable, Sendable {
+        public var enabled: Bool?
+        public var settings: [String: String]?
+        /// Also copy originals already on the server, not only new ones.
+        public var copyExisting: Bool?
+        public init(enabled: Bool? = nil, settings: [String: String]? = nil, copyExisting: Bool? = nil) {
+            self.enabled = enabled
+            self.settings = settings
+            self.copyExisting = copyExisting
+        }
+    }
+
+    /// `POST /api/v1/connectors/{id}/sign-in`: open `url` and enter `userCode` there.
+    public struct ConnectorSignIn: Codable, Equatable, Sendable {
+        public var userCode: String
+        public var url: String
+        public var message: String?
+        public var expiresIn: Int
+        public init(userCode: String, url: String, message: String? = nil, expiresIn: Int) {
+            self.userCode = userCode
+            self.url = url
+            self.message = message
+            self.expiresIn = expiresIn
+        }
+    }
+
+    /// `GET /api/v1/connectors/{id}/sign-in`.
+    public struct ConnectorSignInStatus: Codable, Equatable, Sendable {
+        public enum State: String, Codable, Sendable { case waiting, done, failed }
+        public var state: State
+        public var account: String?
+        public var message: String?
+        public init(state: State, account: String? = nil, message: String? = nil) {
+            self.state = state
+            self.account = account
+            self.message = message
+        }
+    }
+
     public struct ResourceDescriptor: Codable, Equatable, Sendable {
         public var role: ResourceRole
         public var filename: String

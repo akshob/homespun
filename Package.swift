@@ -10,6 +10,8 @@ let package = Package(
         .library(name: "HomespunMedia", targets: ["HomespunMedia"]),
         // Synthetic media for tests in this package and the iOS app. Not for product code.
         .library(name: "HomespunTestSupport", targets: ["HomespunTestSupport"]),
+        // The server as a library, for server binaries that add their own connectors.
+        .library(name: "HomespunServerKit", targets: ["HomespunServerKit"]),
         .executable(name: "homespun-server", targets: ["HomespunServer"]),
     ],
     dependencies: [

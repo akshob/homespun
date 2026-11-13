@@ -22,6 +22,8 @@ struct SettingsView: View {
                         NavigationLink(server.mode == .immich ? "Immich" : "Connect Immich") {
                             ImmichConnectView(settings: settings)
                         }
+                        NavigationLink("Cloud copies") { ConnectorsView(settings: settings) }
+                            .accessibilityIdentifier("settings.connectors")
                         NavigationLink("Add another device") { AddDeviceView(settings: settings) }
                             .accessibilityIdentifier("settings.addDevice")
                         Button("Unpair", role: .destructive) { settings.unpair() }

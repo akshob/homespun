@@ -79,6 +79,29 @@ struct ServerClient: Sendable {
 
     func info() async throws -> ServerAPI.ServerInfo { try await send("info", as: ServerAPI.ServerInfo.self) }
 
+    // MARK: Connectors
+
+    func connectors() async throws -> [ServerAPI.ConnectorInfo] {
+        try await send("connectors", as: [ServerAPI.ConnectorInfo].self)
+    }
+
+    func updateConnector(_ id: String, _ update: ServerAPI.ConnectorUpdate) async throws -> ServerAPI.ConnectorInfo {
+        try await send("connectors/\(id)", method: "PUT", json: update, as: ServerAPI.ConnectorInfo.self)
+    }
+
+    func removeConnector(_ id: String) async throws {
+        let (data, response) = try await session.data(for: request("connectors/\(id)", method: "DELETE"))
+        _ = try check(data, response, accepting: [204])
+    }
+
+    func beginConnectorSignIn(_ id: String) async throws -> ServerAPI.ConnectorSignIn {
+        try await send("connectors/\(id)/sign-in", method: "POST", as: ServerAPI.ConnectorSignIn.self)
+    }
+
+    func connectorSignInStatus(_ id: String) async throws -> ServerAPI.ConnectorSignInStatus {
+        try await send("connectors/\(id)/sign-in", as: ServerAPI.ConnectorSignInStatus.self)
+    }
+
     func setup() async throws -> ServerSetup.Report { try await send("setup", as: ServerSetup.Report.self) }
 
     func immichSettings() async throws -> ServerAPI.ImmichSettings {

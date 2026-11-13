@@ -104,12 +104,14 @@ struct Fixture {
     let directory: URL
     let server: HomespunServer
 
-    init(immich: ImmichConfiguration? = nil, approver: (any PairingApprover)? = nil) async throws {
+    init(immich: ImmichConfiguration? = nil, approver: (any PairingApprover)? = nil,
+         connectors: [any Connector] = []) async throws {
         directory = try temporaryDirectory()
         var configuration = ServerConfiguration(dataDirectory: directory.appendingPathComponent("data"),
                                                 name: "test", profile: testProfile, immich: immich)
         configuration.maximumChunkBytes = 1 << 20
-        server = try await HomespunServer(configuration: configuration, approver: approver, approvalPause: 0.3)
+        server = try await HomespunServer(configuration: configuration, connectors: connectors, approver: approver,
+                                          approvalPause: 0.3, builtIn: [])
     }
 
     func pair(_ client: some TestClientProtocol) async throws -> String {
@@ -234,6 +236,122 @@ struct Fixture {
         let tampered = try await client.call("/api/v1/assets/\(asset)/verify", .post, token: token)
             .decode(ServerAPI.Verification.self)
         #expect(!tampered.allVerified)
+    }
+}
+
+/// A connector that records what it was given, or fails the way a test asks.
+final class FakeConnector: Connector, @unchecked Sendable {
+    enum Behaviour { case copy, fail, retryLater, error }
+    let id = "fake"
+    let name = "Fake cloud"
+    let summary = "A test destination."
+    var fields: [ServerAPI.ConnectorField] {
+        [.init(key: "folder", label: "Folder"), .init(key: "token", label: "Token", kind: .secret)]
+    }
+    let lock = NSLock()
+    var behaviour = Behaviour.copy
+    var checkError: String?
+    var copies: [(assetID: String, files: [ServerAPI.ResourceRole: Data], settings: [String: String])] = []
+
+    func check(_ context: ConnectorContext) async throws -> String? {
+        if let error = lock.withLock({ checkError }) { throw ConnectorError.failed(error) }
+        return "Folder \(try await context.value("folder") ?? "?")"
+    }
+
+    func copy(_ item: ConnectorItem, context: ConnectorContext) async throws -> String? {
+        switch lock.withLock({ behaviour }) {
+        case .fail: throw ConnectorError.failed("The fake cloud refused it.")
+        case .retryLater: throw ConnectorError.retryLater("The fake cloud is full.", after: 3600)
+        case .error: throw CocoaError(.fileWriteUnknown)
+        case .copy: break
+        }
+        var files: [ServerAPI.ResourceRole: Data] = [:]
+        for file in item.files {
+            let data = try Data(contentsOf: file.url)
+            #expect(Fingerprint.sha256(of: data) == file.sha256 && data.count == file.size)
+            files[file.role] = data
+        }
+        let settings = try await context.settings()
+        lock.withLock { copies.append((item.assetID, files, settings)) }
+        return "fake://\(item.assetID.prefix(8))"
+    }
+}
+
+@Test(.enabled(if: ffmpegAvailable)) func connectorsCopyCheckedOriginals() async throws {
+    let fake = FakeConnector()
+    let fixture = try await Fixture(connectors: [fake])
+    let media = try await Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        func connectors() async throws -> [ServerAPI.ConnectorInfo] {
+            try await client.call("/api/v1/connectors", token: token).decode([ServerAPI.ConnectorInfo].self)
+        }
+        func update(_ body: ServerAPI.ConnectorUpdate) async throws -> TestResponse {
+            try await client.call("/api/v1/connectors/fake", .put, token: token, json: body)
+        }
+        func add(_ url: URL, _ kind: ServerAPI.AssetKind, _ role: ServerAPI.ResourceRole) async throws -> String {
+            let resource = try descriptor(role, url)
+            _ = try await client.call("/api/v1/assets", .post, token: token,
+                                      json: ServerAPI.RegisterAssetRequest(kind: kind, captureDate: nil, resources: [resource]))
+            _ = try await fixture.upload(client, token: token, asset: resource.sha256, role: role, file: url)
+            try await fixture.server.drainJobs()
+            return resource.sha256
+        }
+        #expect(try await client.call("/api/v1/connectors").status == .unauthorized)
+        var fakeInfo = try #require(try await connectors().first)
+        #expect(fakeInfo.id == "fake" && !fakeInfo.enabled && fakeInfo.fields.map(\.key) == ["folder", "token"])
+
+        // Off: nothing is copied.
+        let first = try await add(media.photo, .photo, .photo)
+        #expect(fake.lock.withLock { fake.copies.isEmpty })
+
+        // Turning it on checks the settings; secrets are kept but never sent back.
+        fake.lock.withLock { fake.checkError = "Wrong folder." }
+        let refused = try await update(.init(enabled: true, settings: ["folder": "Photos", "token": "s3cret"]))
+        #expect(refused.status == .unprocessableContent && String(decoding: refused.data, as: UTF8.self).contains("Wrong folder."))
+        #expect(try await update(.init(settings: ["nope": "x"])).status == .unprocessableContent)
+        fake.lock.withLock { fake.checkError = nil }
+        let enabled = try await update(.init(enabled: true))
+        #expect(!String(decoding: enabled.data, as: UTF8.self).contains("s3cret"))
+        fakeInfo = try enabled.decode(ServerAPI.ConnectorInfo.self)
+        #expect(fakeInfo.enabled && fakeInfo.account == "Folder Photos")
+        #expect(fakeInfo.fields.map(\.value) == ["Photos", nil] && fakeInfo.fields.map(\.isSet) == [true, true])
+
+        // New originals are copied once checked; the item's own state doesn't change.
+        let second = try await add(media.movie, .video, .video)
+        let copied = try #require(fake.lock.withLock { fake.copies.first })
+        let movie = try Data(contentsOf: media.movie)
+        #expect(copied.assetID == second && copied.files[.video] == movie)
+        #expect(copied.settings["token"] == "s3cret")
+        #expect(try await connectors().first?.counts == .init(copied: 1))
+        #expect(try await client.call("/api/v1/assets/\(second)", token: token).decode(ServerAPI.AssetStatus.self).state == .ready)
+
+        // A full destination waits without failing; a refusal is final and shown in the app.
+        fake.lock.withLock { fake.behaviour = .retryLater }
+        let thirdPhoto = fixture.directory.appendingPathComponent("IMG_0003.JPG")
+        try (Data(contentsOf: media.photo) + Data("another photo".utf8)).write(to: thirdPhoto)
+        let third = try await add(thirdPhoto, .photo, .photo)
+        fakeInfo = try #require(try await connectors().first)
+        #expect(fakeInfo.counts == .init(copied: 1, pending: 1) && fakeInfo.message == "The fake cloud is full.")
+        #expect(try await client.call("/api/v1/assets/\(third)", token: token).decode(ServerAPI.AssetStatus.self).state == .ready)
+        // Copying what's already on the server skips copies already made (the waiting one stays waiting).
+        fake.lock.withLock { fake.behaviour = .fail }
+        #expect(try await update(.init(copyExisting: true)).status == .ok)
+        try await fixture.server.drainJobs()
+        fakeInfo = try #require(try await connectors().first)
+        #expect(fakeInfo.counts == .init(copied: 1, pending: 1, failed: 1) && fakeInfo.message == "The fake cloud refused it.")
+
+        // Asking again retries the failed one; removing forgets the settings but keeps copies made.
+        fake.lock.withLock { fake.behaviour = .copy }
+        #expect(try await update(.init(copyExisting: true)).status == .ok)
+        try await fixture.server.drainJobs()
+        #expect(Set(fake.lock.withLock { fake.copies.map(\.assetID) }) == [first, second])
+        #expect(try await connectors().first?.counts == .init(copied: 2, pending: 1))
+        #expect(try await client.call("/api/v1/connectors/fake", .delete, token: token).status == .noContent)
+        fakeInfo = try #require(try await connectors().first)
+        #expect(!fakeInfo.enabled && fakeInfo.account == nil && fakeInfo.fields.allSatisfy { !$0.isSet })
+        #expect(fakeInfo.counts == .init(copied: 2))
+        #expect(try await client.call("/api/v1/connectors/nope", .put, token: token, json: ServerAPI.ConnectorUpdate(enabled: true))
+            .status == .unprocessableContent)
     }
 }
 
@@ -410,8 +528,11 @@ extension Fingerprint {
     try await Application(router: immich.router(), configuration: .init(address: .hostname("localhost", port: 0)))
         .test(.live) { immichClient in
             let url = URL(string: "http://localhost:\(immichClient.port!)")!
-            let fixture = try await Fixture(immich: ImmichConfiguration(url: url, apiKey: immich.key))
+            let fake = FakeConnector()
+            let fixture = try await Fixture(immich: ImmichConfiguration(url: url, apiKey: immich.key), connectors: [fake])
             try await fixture.test { client, token in
+                #expect(try await client.call("/api/v1/connectors/fake", .put, token: token,
+                                              json: ServerAPI.ConnectorUpdate(enabled: true)).status == .ok)
                 let still = try descriptor(.photo, media.photo), motion = try descriptor(.pairedVideo, media.motion)
                 let register = ServerAPI.RegisterAssetRequest(kind: .livePhoto, captureDate: nil, resources: [still, motion])
                 let asset = still.sha256
@@ -431,6 +552,10 @@ extension Fingerprint {
                 status = try await client.call("/api/v1/assets/\(asset)", token: token).decode(ServerAPI.AssetStatus.self)
                 #expect(status.state == .ready, "\(status.message ?? "")")
                 #expect(status.resources.allSatisfy { $0.state == .verified } && status.deviceCompresses == liveDeviceCompresses)
+                // A connector gets the originals downloaded from Immich again and checked.
+                let copied = try #require(fake.lock.withLock { fake.copies.first })
+                let stillData = try Data(contentsOf: media.photo), motionData = try Data(contentsOf: media.motion)
+                #expect(copied.assetID == asset && copied.files[.photo] == stillData && copied.files[.pairedVideo] == motionData)
                 #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/cache").path).isEmpty)
                 #expect(try FileManager.default.subpathsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/originals").path).isEmpty)
 
