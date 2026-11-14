@@ -28,6 +28,8 @@ struct ResourceRecord: Equatable, Sendable {
     var storedPath: String?
     var immichAssetID: String?
     var verifiedAt: String?
+    /// An original kept outside the data folder (`homespun-server import`): read, never changed.
+    var externalPath: String? = nil
 }
 
 struct CompactRecord: Equatable, Sendable {
@@ -184,6 +186,13 @@ public actor Catalog {
         // SHA-1 of each compact copy (filled in later for older ones whose file is still here).
         """
         ALTER TABLE made_copies ADD COLUMN sha1 TEXT;
+        """,
+        // Originals that stay where they already were on this computer, and lookups by hash.
+        """
+        ALTER TABLE resources ADD COLUMN external_path TEXT;
+        CREATE INDEX resources_sha256 ON resources (sha256);
+        CREATE INDEX resources_external_path ON resources (external_path);
+        CREATE INDEX made_copies_asset ON made_copies (asset_id);
         """,
     ]
 
@@ -388,6 +397,85 @@ public actor Catalog {
         return (assetID, row["name"]?.string)
     }
 
+    /// Which of these hashes are compact copies or originals of items here.
+    func lookup(_ hashes: [String]) throws -> [ServerAPI.CopyLookupResponse.Match] {
+        guard !hashes.isEmpty else { return [] }
+        let marks = Array(repeating: "?", count: hashes.count).joined(separator: ", ")
+        let values = hashes.map { SQLValue.text($0) }
+        var found: [String: (assetID: String, role: Role, isOriginal: Bool)] = [:]
+        for row in try database.query("SELECT sha256, asset_id, role FROM made_copies WHERE sha256 IN (\(marks))", values) {
+            guard let sha256 = row["sha256"]?.string, let asset = row["asset_id"]?.string else { continue }
+            found[sha256] = (asset, Role(rawValue: row["role"]?.string ?? "") ?? .other, false)
+        }
+        for row in try database.query(
+            "SELECT sha256, asset_id, role FROM resources WHERE sha256 IN (\(marks)) AND state = 'verified'", values) {
+            guard let sha256 = row["sha256"]?.string, let asset = row["asset_id"]?.string else { continue }
+            found[sha256] = (asset, Role(rawValue: row["role"]?.string ?? "") ?? .other, true)
+        }
+        var originals: [String: (verified: Bool, bytes: Int)] = [:]
+        return try found.sorted { $0.key < $1.key }.map { sha256, match in
+            if originals[match.assetID] == nil {
+                let resources = try resources(match.assetID)
+                originals[match.assetID] = (!resources.isEmpty && resources.allSatisfy { $0.state == .verified },
+                                            resources.reduce(0) { $0 + $1.size })
+            }
+            let summary = originals[match.assetID]!
+            return .init(sha256: sha256, assetID: match.assetID, role: match.role, isOriginal: match.isOriginal,
+                         originalsVerified: summary.verified, originalBytes: summary.bytes)
+        }
+    }
+
+    /// The item an original kept at `path` belongs to, if it was imported before and is the same size.
+    func importedAsset(path: String, size: Int) throws -> String? {
+        try database.query("SELECT asset_id FROM resources WHERE external_path = ? AND size = ?",
+                           [.text(path), .integer(Int64(size))]).first?["asset_id"]?.string
+    }
+
+    enum ImportOutcome: Equatable { case imported, linked }
+
+    /// Records an item whose originals stay at their paths and whose compact copies were made
+    /// elsewhere (and are already on the phone). An item already here keeps its originals and
+    /// only learns the copies.
+    func importExisting(assetID: String, kind: ServerAPI.AssetKind, captureDate: Date?,
+                        originals: [ResourceRecord], copies: [ServerAPI.ImportItem.Copy]) throws -> ImportOutcome {
+        let now = Timestamp.string()
+        let outcome: ImportOutcome = try database.transaction {
+            let exists = !(try database.query("SELECT id FROM assets WHERE id = ?", [.text(assetID)]).isEmpty)
+            if !exists {
+                try database.execute(
+                    """
+                    INSERT INTO assets (id, kind, capture_date, state, created_at, updated_at, imported_at)
+                    VALUES (?, ?, ?, 'imported', ?, ?, ?)
+                    """,
+                    [.text(assetID), .text(kind.rawValue), captureDate.map(Timestamp.string).sqlValue,
+                     .text(now), .text(now), .text(now)])
+                for original in originals {
+                    try database.execute(
+                        """
+                        INSERT INTO resources (asset_id, role, filename, size, sha256, sha1, state, received_bytes,
+                                               verified_at, external_path)
+                        VALUES (?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?)
+                        """,
+                        [.text(assetID), .text(original.role.rawValue), .text(original.filename),
+                         .integer(Int64(original.size)), .text(original.sha256), original.sha1.sqlValue,
+                         .integer(Int64(original.size)), .text(now), original.externalPath.sqlValue])
+                }
+            }
+            for copy in copies {
+                try database.execute(
+                    """
+                    INSERT INTO made_copies (sha256, asset_id, role, created_at, sha1) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT (sha256) DO UPDATE SET sha1 = COALESCE(made_copies.sha1, excluded.sha1)
+                    """, [.text(copy.sha256.lowercased()), .text(assetID), .text(copy.role.rawValue), .text(now),
+                          copy.sha1.map { $0.lowercased() }.sqlValue])
+            }
+            return exists ? .linked : .imported
+        }
+        log(outcome == .imported ? "asset_imported_existing" : "copies_linked", asset: assetID,
+            detail: "\(copies.count) compact copies")
+        return outcome
+    }
+
     func asset(_ id: String) throws -> AssetRecord? {
         guard let row = try database.query("SELECT * FROM assets WHERE id = ?", [.text(id)]).first else { return nil }
         return AssetRecord(
@@ -406,7 +494,8 @@ public actor Catalog {
                 size: row["size"]?.int ?? 0, sha256: row["sha256"]?.string ?? "", sha1: row["sha1"]?.string,
                 state: ServerAPI.ResourceState(rawValue: row["state"]?.string ?? "") ?? .missing,
                 receivedBytes: row["received_bytes"]?.int ?? 0, storedPath: row["stored_path"]?.string,
-                immichAssetID: row["immich_asset_id"]?.string, verifiedAt: row["verified_at"]?.string)
+                immichAssetID: row["immich_asset_id"]?.string, verifiedAt: row["verified_at"]?.string,
+                externalPath: row["external_path"]?.string)
         }
     }
 

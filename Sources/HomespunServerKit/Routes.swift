@@ -111,6 +111,14 @@ struct Routes: Sendable {
         authenticated.get("assets/:id/compact/:role") { _, context in try await download(context) }
         authenticated.post("assets/:id/imported") { _, context in try await imported(context) }
         authenticated.post("assets/:id/verify") { _, context in try json(try await verify(context)) }
+        authenticated.post("copies/lookup") { request, context in
+            let body = try await request.decode(as: ServerAPI.CopyLookupRequest.self, context: context)
+            let hashes = body.sha256.map { $0.lowercased() }
+            guard hashes.count <= ServerAPI.CopyLookupRequest.maximumCount, hashes.allSatisfy(Validation.isSHA256) else {
+                throw HTTPError(.badRequest, message: "Send up to \(ServerAPI.CopyLookupRequest.maximumCount) SHA-256 hashes.")
+            }
+            return try json(ServerAPI.CopyLookupResponse(matches: try await catalog.lookup(Array(Set(hashes)))))
+        }
     }
 
     // MARK: Pairing
@@ -402,6 +410,11 @@ struct Routes: Sendable {
             var verified = false, detail: String?
             if resource.state != .verified {
                 detail = "not verified (\(resource.state.rawValue))"
+            } else if let path = resource.externalPath {
+                let url = URL(fileURLWithPath: path)
+                let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
+                verified = check?.0 == resource.sha256 && check?.1 == resource.size
+                detail = verified ? nil : "the original at \(path) is missing or changed"
             } else if let path = resource.storedPath, let url = storage.resolve(path) {
                 let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
                 verified = check?.0 == resource.sha256 && check?.1 == resource.size

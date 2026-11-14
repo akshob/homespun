@@ -253,6 +253,34 @@ compact copies are not uploaded. The self-check looks up the latest 40 compact c
 Immich and warns if any were uploaded; delete those in Immich yourself, since Homespun's key
 can only read.
 
+### Bringing in an existing library
+
+If you already keep originals on the server's disks and made compact copies some other way
+(for example with your own scripts, imported into Photos with PhotoSync), tell Homespun Server
+about them so the app recognises those copies instead of backing them up as originals:
+
+```sh
+homespun-server import library.jsonl --dry-run   # checks the files, records nothing
+homespun-server import library.jsonl             # hashes the originals and records them
+```
+
+It runs beside a running server, and running it again is safe (finished items are skipped).
+The originals stay where they are: Homespun reads them, never moves, changes, or deletes them,
+and hashes them again where they are whenever the app checks an item. `--jobs N` reads N files
+at a time (default 4). Each line of the manifest is one item:
+
+```json
+{"kind": "live_photo", "capture_date": "2024-03-16T22:58:48Z",
+ "originals": [{"role": "photo", "path": "/archive/2024/03/IMG_3139.HEIC"},
+               {"role": "paired_video", "path": "/archive/2024/03/IMG_3139.MOV"}],
+ "copies": [{"role": "photo", "sha256": "1d4f…"}, {"role": "paired_video", "sha256": "eb3c…"}]}
+```
+
+`kind` is `photo`, `live_photo`, or `video`. `copies` lists the SHA-256 of each compact file
+as it is on the phone (Photos keeps imported files byte for byte, though it may rename them).
+An original may carry `"sha256"` to make sure it hasn't changed. The app then finds those
+copies by their hashes (`POST /api/v1/copies/lookup`).
+
 ## Website
 
 `site/` holds the static site for [homespun.photos](https://homespun.photos): plain HTML

@@ -835,3 +835,123 @@ extension Catalog {
     /// Like a catalog from before compact copies' SHA-1s were kept.
     func forgetCopySHA1s() throws { try database.execute("UPDATE made_copies SET sha1 = NULL") }
 }
+
+// MARK: Importing an existing library
+
+@Test func importedLibraryIsRecognisedByItsCompactCopies() async throws {
+    let fixture = try await Fixture()
+    let archive = fixture.directory.appendingPathComponent("archive/2021/11", isDirectory: true)
+    try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+    func file(_ name: String, _ text: String) throws -> URL {
+        let url = archive.appendingPathComponent(name)
+        try Data(String(repeating: text, count: 1000).utf8).write(to: url)
+        return url
+    }
+    let still = try file("IMG_2144.HEIC", "still"), motion = try file("IMG_2144.MOV", "motion")
+    let movie = try file("IMG_2145.MOV", "movie"), gone = archive.appendingPathComponent("IMG_9999.HEIC")
+    let stillCopy = Data("compact still".utf8), motionCopy = Data("compact motion".utf8)
+    let movieHash = try Fingerprint.sha256(of: movie)
+    func line(_ item: ServerAPI.ImportItem) throws -> String { String(decoding: try ServerAPI.encoder.encode(item), as: UTF8.self) }
+    let live = ServerAPI.ImportItem(
+        kind: .livePhoto, captureDate: Date(timeIntervalSince1970: 1_636_061_270),
+        originals: [.init(role: .photo, path: still.path), .init(role: .pairedVideo, path: motion.path)],
+        copies: [.init(role: .photo, sha256: Fingerprint.sha256(of: stillCopy)),
+                 .init(role: .pairedVideo, sha256: Fingerprint.sha256(of: motionCopy))])
+    // A video that couldn't be made smaller: its "copy" is the original itself.
+    let video = ServerAPI.ImportItem(kind: .video, captureDate: nil, originals: [.init(role: .video, path: movie.path)],
+                                     copies: [.init(role: .video, sha256: movieHash)])
+    let manifest = fixture.directory.appendingPathComponent("manifest.jsonl")
+    try ([try line(live), try line(video), "# comment", "",
+          try line(.init(kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: gone.path)], copies: [])),
+          try line(.init(kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: movie.path, sha256: String(repeating: "a", count: 64))],
+                         copies: [])),
+          try line(.init(kind: .livePhoto, captureDate: nil, originals: [.init(role: .photo, path: still.path)], copies: [])),
+          "{not json"].joined(separator: "\n") + "\n").write(to: manifest, atomically: true, encoding: .utf8)
+    let before = try FileManager.default.contentsOfDirectory(atPath: archive.path).sorted()
+    let stillBytes = try Data(contentsOf: still)
+
+    let catalog = fixture.server.catalog
+    let problems = ProblemLog()
+    let checked = try await LibraryImport(catalog: catalog, dryRun: true).run(manifest: manifest) { problems.add($0) }
+    #expect(checked == .init(items: 6, imported: 0, linked: 0, problems: 3, bytes: stillBytes.count + 6000 + 5000 + 5000))
+    #expect(try await catalog.lookup([Fingerprint.sha256(of: stillCopy)]).isEmpty)
+
+    let imported = try await LibraryImport(catalog: catalog).run(manifest: manifest) { problems.add($0) }
+    #expect(imported.imported == 2 && imported.linked == 0 && imported.problems == 4)
+    let messages = problems.lines.suffix(4).joined(separator: "\n")
+    #expect(messages.contains("line 5: \(gone.path) is missing") && messages.contains("line 6: \(movie.path) no longer matches")
+            && messages.contains("line 7: a Live Photo needs its paired video") && messages.contains("line 8: not a valid item"))
+    // Running again only re-links the copies; the originals were left exactly as they were.
+    let again = try await LibraryImport(catalog: catalog).run(manifest: manifest) { _ in }
+    #expect(again.imported == 0 && again.linked == 2 && again.bytes == 0)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: archive.path).sorted() == before)
+    #expect(try Data(contentsOf: still) == stillBytes)
+    #expect(try FileManager.default.subpathsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/originals").path).isEmpty)
+
+    try await fixture.test { client, token in
+        let stillID = try Fingerprint.sha256(of: still)
+        let lookup = try await client.call("/api/v1/copies/lookup", .post, token: token, json: ServerAPI.CopyLookupRequest(sha256: [
+            Fingerprint.sha256(of: stillCopy), Fingerprint.sha256(of: motionCopy).uppercased(), movieHash,
+            String(repeating: "b", count: 64)])).decode(ServerAPI.CopyLookupResponse.self)
+        let matches = Dictionary(uniqueKeysWithValues: lookup.matches.map { ($0.sha256, $0) })
+        #expect(matches.count == 3)
+        let stillMatch = try #require(matches[Fingerprint.sha256(of: stillCopy)])
+        #expect(stillMatch.assetID == stillID && stillMatch.role == .photo && !stillMatch.isOriginal
+                && stillMatch.originalsVerified && stillMatch.originalBytes == 11_000)
+        #expect(matches[Fingerprint.sha256(of: motionCopy)]?.role == .pairedVideo)
+        #expect(matches[movieHash]?.isOriginal == true && matches[movieHash]?.assetID == movieHash)
+        #expect(try await client.call("/api/v1/copies/lookup", .post, token: token,
+                                      json: ServerAPI.CopyLookupRequest(sha256: ["nope"])).status == .badRequest)
+        #expect(try await client.call("/api/v1/copies/lookup", .post, token: token, json: ServerAPI.CopyLookupRequest(
+            sha256: Array(repeating: movieHash, count: ServerAPI.CopyLookupRequest.maximumCount + 1))).status == .badRequest)
+        #expect(try await client.call("/api/v1/copies/lookup", .post, json: ServerAPI.CopyLookupRequest(sha256: [])).status
+                == .unauthorized)
+
+        // The phone's copy is never taken for an original.
+        let copy = ServerAPI.ResourceDescriptor(role: .photo, filename: "IMG_2144.JPG", size: stillCopy.count,
+                                                sha256: Fingerprint.sha256(of: stillCopy))
+        let refused = try await client.call("/api/v1/assets", .post, token: token,
+                                            json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [copy]))
+        let refusal = try refused.decode(ServerAPI.ErrorBody.self).error
+        #expect(refused.status == .unprocessableContent && refusal.message.contains("of IMG_2144.HEIC"))
+
+        // Checking an item hashes its originals again where they are.
+        var verification = try await client.call("/api/v1/assets/\(stillID)/verify", .post, token: token)
+            .decode(ServerAPI.Verification.self)
+        #expect(verification.allVerified && verification.resources.count == 2)
+        try (stillBytes + Data("x".utf8)).write(to: still)
+        verification = try await client.call("/api/v1/assets/\(stillID)/verify", .post, token: token)
+            .decode(ServerAPI.Verification.self)
+        #expect(!verification.allVerified
+                && verification.resources.first { $0.role == .photo }?.detail == "the original at \(still.path) is missing or changed")
+        let status = try await client.call("/api/v1/assets/\(stillID)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(status.kind == .livePhoto && status.state == .imported)
+    }
+}
+
+@Test func importCommandChecksItsArguments() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let photo = directory.appendingPathComponent("IMG_0001.JPG")
+    try Data("photo".utf8).write(to: photo)
+    let manifest = directory.appendingPathComponent("m.jsonl")
+    try String(decoding: try ServerAPI.encoder.encode(ServerAPI.ImportItem(
+        kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: photo.path)], copies: [])), as: UTF8.self)
+        .write(to: manifest, atomically: true, encoding: .utf8)
+    let data = directory.appendingPathComponent("data").path
+    func run(_ arguments: String...) async -> Int32 {
+        await ServerCommand.run(commandLine: ["homespun-server"] + arguments + ["--data", data])
+    }
+    #expect(await run("import") == 2)
+    #expect(await run("import", manifest.path, "--jobs", "0") == 2)
+    #expect(await run("import", manifest.path, "--dry-run", "--jobs", "2") == 0)
+    #expect(await run("import", directory.appendingPathComponent("missing.jsonl").path) == 1)
+    #expect(await run("import", manifest.path) == 0)
+}
+
+final class ProblemLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+    func add(_ line: String) { lock.withLock { stored.append(line) } }
+    var lines: [String] { lock.withLock { stored } }
+}

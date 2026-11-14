@@ -428,6 +428,85 @@ public enum ServerAPI {
         }
     }
 
+    /// `POST /api/v1/copies/lookup`: which of these files (by SHA-256) does the server know?
+    /// The app uses it to find compact copies made elsewhere, or whose record it lost.
+    public struct CopyLookupRequest: Codable, Equatable, Sendable {
+        public static let maximumCount = 500
+        public var sha256: [String]
+        public init(sha256: [String]) { self.sha256 = sha256 }
+    }
+
+    public struct CopyLookupResponse: Codable, Equatable, Sendable {
+        public struct Match: Codable, Equatable, Sendable {
+            public var sha256: String
+            public var assetID: String
+            public var role: ResourceRole
+            /// True when these bytes are the original itself (kept as is), not a compact copy.
+            public var isOriginal: Bool
+            /// Whether every original of the item is verified on the server.
+            public var originalsVerified: Bool
+            /// The originals' total size.
+            public var originalBytes: Int
+
+            public init(sha256: String, assetID: String, role: ResourceRole, isOriginal: Bool,
+                        originalsVerified: Bool, originalBytes: Int) {
+                self.sha256 = sha256
+                self.assetID = assetID
+                self.role = role
+                self.isOriginal = isOriginal
+                self.originalsVerified = originalsVerified
+                self.originalBytes = originalBytes
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case sha256, assetID = "assetId", role, isOriginal, originalsVerified, originalBytes
+            }
+        }
+
+        public var matches: [Match]
+        public init(matches: [Match]) { self.matches = matches }
+    }
+
+    /// One line of an import manifest (JSON Lines) for `homespun-server import`: originals kept
+    /// elsewhere on the server's disks, and the compact copies already made from them.
+    public struct ImportItem: Codable, Equatable, Sendable {
+        public struct Original: Codable, Equatable, Sendable {
+            public var role: ResourceRole
+            /// An absolute path. The file is read, never moved, changed, or deleted.
+            public var path: String
+            /// If given, the file must still have this SHA-256.
+            public var sha256: String?
+            public init(role: ResourceRole, path: String, sha256: String? = nil) {
+                self.role = role
+                self.path = path
+                self.sha256 = sha256
+            }
+        }
+
+        public struct Copy: Codable, Equatable, Sendable {
+            public var role: ResourceRole
+            public var sha256: String
+            public var sha1: String?
+            public init(role: ResourceRole, sha256: String, sha1: String? = nil) {
+                self.role = role
+                self.sha256 = sha256
+                self.sha1 = sha1
+            }
+        }
+
+        public var kind: AssetKind
+        public var captureDate: Date?
+        public var originals: [Original]
+        public var copies: [Copy]
+
+        public init(kind: AssetKind, captureDate: Date?, originals: [Original], copies: [Copy]) {
+            self.kind = kind
+            self.captureDate = captureDate
+            self.originals = originals
+            self.copies = copies
+        }
+    }
+
     /// `GET`/`PUT`/`DELETE /api/v1/settings/immich`. The API key itself is never sent back.
     public struct ImmichSettings: Codable, Equatable, Sendable {
         public var url: String?

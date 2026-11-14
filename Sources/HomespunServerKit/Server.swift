@@ -31,8 +31,6 @@ public struct HomespunServer: Sendable {
         storage = Storage(root: configuration.dataDirectory)
         try storage.prepare()
         catalog = try Catalog(path: storage.catalog.path)
-        // Nothing can hold a lease before the runners start.
-        try await catalog.releaseLeases()
         immichState = try await ImmichState(catalog: catalog, fallback: configuration.immich)
         hub = ConnectorHub(connectors: (builtIn ?? Self.builtInConnectors(configuration)) + connectors,
                            catalog: catalog, storage: storage)
@@ -56,6 +54,13 @@ public struct HomespunServer: Sendable {
         router.add(middleware: LogRequestsMiddleware(.info))
         routes.add(to: router)
         return router
+    }
+
+    /// Serves until stopped. Other commands (pair, import, …) run beside a serving server, so
+    /// only this releases job leases: nothing holds one before these runners start.
+    public func run() async throws {
+        try await catalog.releaseLeases()
+        try await application().runService()
     }
 
     public func application(logger: Logger = Logger(label: "homespun")) -> some ApplicationProtocol {

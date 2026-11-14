@@ -115,17 +115,26 @@ public final class JobRunner: Service, Sendable {
         }
     }
 
-    /// The item's originals: the files stored here, or (Immich mode) fresh downloads from
+    /// The item's originals: the files stored here or imported in place, or (Immich mode) fresh downloads from
     /// Immich into `cache`, checked byte for byte against the iPhone's hashes.
     private func originals(_ asset: AssetRecord, _ resources: [ResourceRecord], cache: URL) async throws -> [Role: URL] {
         guard !resources.isEmpty, resources.allSatisfy({ $0.state == .verified }) else {
             throw ConnectorError.failed("The server doesn't have every original of this item.")
         }
         var urls: [Role: URL] = [:]
-        if resources.allSatisfy({ $0.storedPath != nil }) {
+        if resources.allSatisfy({ $0.storedPath != nil || $0.externalPath != nil }) {
             for resource in resources {
-                guard let url = storage.resolve(resource.storedPath!) else { throw ConnectorError.failed("bad stored path") }
-                urls[resource.role] = url
+                if let path = resource.externalPath {
+                    // Kept where it was before Homespun: make sure it's still there and whole.
+                    let url = URL(fileURLWithPath: path)
+                    guard (try? Self.size(of: url)) == resource.size else {
+                        throw ConnectorError.retryLater("The original at \(path) is missing or changed.", after: 3600)
+                    }
+                    urls[resource.role] = url
+                } else {
+                    guard let url = storage.resolve(resource.storedPath!) else { throw ConnectorError.failed("bad stored path") }
+                    urls[resource.role] = url
+                }
             }
             return urls
         }
