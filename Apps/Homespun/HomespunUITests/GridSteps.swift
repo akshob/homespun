@@ -6,7 +6,9 @@ extension XCUIApplication {
     /// Pairs with the server at `address` using a code from `homespun-server pair`, unless
     /// already paired, and waits until it's connected. Goes through setup from the Library's Set Up
     /// notice: Connect Another Way › Enter Address and Code, then Ready, and Not Now on the estimate.
-    @MainActor func pair(address: String, code: String, file: StaticString = #filePath, line: UInt = #line) {
+    /// `shareAnalytics` answers the analytics page (asked once, after Ready); off by default.
+    @MainActor func pair(address: String, code: String, shareAnalytics: Bool = false, file: StaticString = #filePath,
+                         line: UInt = #line) {
         let connect = buttons["connect.open"]
         if connect.waitForExistence(timeout: 5) {
             connect.tap()
@@ -40,6 +42,8 @@ extension XCUIApplication {
             let ready = buttons["ready.continue"]
             XCTAssertTrue(ready.waitForExistence(timeout: 30), "not paired with \(address)", file: file, line: line)
             ready.tap()
+            let analytics = buttons[shareAnalytics ? "analytics.share" : "analytics.dontShare"]
+            if analytics.waitForExistence(timeout: 5) { analytics.tap() }
             let photos = buttons["photos.continue"]
             if photos.waitForExistence(timeout: 3) {
                 photos.tap()

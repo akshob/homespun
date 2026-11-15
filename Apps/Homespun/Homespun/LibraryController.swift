@@ -240,15 +240,19 @@ final class LibraryController {
         Announce.say("Checking with \(serverName).")
         let report: OriginalRemover.Report
         do {
-            report = try await remover.removeEligible(limit: settings.trialConfirmed ? nil : AppSettings.trialLimit,
-                                                      only: scope) { message in
-                Task { @MainActor [weak self] in
-                    if case .checking = self?.removal { self?.removal = .checking(message) }
+            let limit = settings.trialConfirmed ? nil : AppSettings.trialLimit
+            report = try await Signposts.measure(Signposts.freeUp, "FreeUp") {
+                try await remover.removeEligible(limit: limit, only: scope) { message in
+                    Task { @MainActor [weak self] in
+                        if case .checking = self?.removal { self?.removal = .checking(message) }
+                    }
                 }
             }
         } catch {
             report = OriginalRemover.Report(blocked: [error.localizedDescription])
+            Telemetry.shared.record(error: error, where: "freeup")
         }
+        AppLog.job.info("free up: \(report.removed.count, privacy: .public) removed, \(report.blocked.count, privacy: .public) blocked")
         removal = .done(report)
         if !report.removed.isEmpty {
             settings.freedBytes += report.freedBytes

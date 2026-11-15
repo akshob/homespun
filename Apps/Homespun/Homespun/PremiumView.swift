@@ -22,7 +22,10 @@ struct PremiumView: View {
         .background(Theme.background)
         .safeAreaBar(edge: .bottom) { bottomBar }
         .navigationBarTitleDisplayMode(.inline)
-        .task { await premium.load() }
+        .task {
+            Telemetry.shared.record(.premium("shown"))
+            await premium.load()
+        }
     }
 
     private var features: some View {
@@ -137,7 +140,9 @@ struct PremiumView: View {
         working = true
         defer { working = false }
         do {
-            switch try await premium.purchase() {
+            let outcome = try await premium.purchase()
+            Telemetry.shared.record(.premium("purchase", outcome: String(describing: outcome)))
+            switch outcome {
             case .purchased:
                 message = nil
                 justUnlocked = true
@@ -214,14 +219,19 @@ struct PremiumFeatureSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .task { await premium.load() }
+        .task {
+            Telemetry.shared.record(.premium("shown"))
+            await premium.load()
+        }
     }
 
     private func buy() async {
         working = true
         defer { working = false }
         do {
-            switch try await premium.purchase() {
+            let outcome = try await premium.purchase()
+            Telemetry.shared.record(.premium("purchase", outcome: String(describing: outcome)))
+            switch outcome {
             case .purchased: dismiss()
             case .pending: message = "Waiting for approval. Premium unlocks when it's approved."
             case .cancelled: break

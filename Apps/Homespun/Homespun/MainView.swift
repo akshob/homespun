@@ -26,7 +26,12 @@ struct RootView: View {
         }
         .onChange(of: model.job.items.map(\.state.phase)) { _, _ in Task { await model.library.jobChanged() } }
         .onChange(of: model.job.isRunning) { _, running in
-            if !running { Task { await model.library.jobFinished() } }
+            if !running {
+                Task {
+                    await model.library.jobFinished()
+                    await Telemetry.shared.flush()
+                }
+            }
         }
         .onChange(of: settings.onboardingComplete) { _, done in
             if done { model.library.journey.setupFinished() }
@@ -44,6 +49,7 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                SessionMarker.shared.active()
                 if wasBackground {
                     wasBackground = false
                     model.library.journey.sessionStarted()
@@ -52,9 +58,16 @@ struct RootView: View {
                     await model.library.refresh()
                     await model.library.runAutomatic()
                 }
+                // What an earlier session queued (it may have ended without reaching the background).
+                Task {
+                    try? await Task.sleep(for: .seconds(5))
+                    await Telemetry.shared.flush()
+                }
             case .background:
                 wasBackground = true
+                SessionMarker.shared.background()
                 model.automatic.schedule()
+                Telemetry.shared.flushInBackground()
             default: break
             }
         }
@@ -76,8 +89,10 @@ struct MainTabView: View {
         case freeUp(only: Set<String>?)
         case backUp([String])
         case pair(PairingLink)
+        case report
         var id: String {
             switch self {
+            case .report: "report"
             case .freeUp: "freeUp"
             case .backUp: "backUp"
             case .pair(let link): link.id
@@ -103,8 +118,24 @@ struct MainTabView: View {
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .modifier(StatusAccessoryModifier(model: model, open: openFromAccessory))
+        .alert("Homespun quit unexpectedly", isPresented: Binding(get: { SessionMarker.shared.offersReport && sheet == nil },
+                                                                   set: { if !$0 { SessionMarker.shared.offersReport = false } })) {
+            Button("Report a Problem") { sheet = .report }
+            Button("Not Now", role: .cancel) {}
+        } message: {
+            Text("Telling the developer what you were doing helps fix it.")
+        }
         .sheet(item: $sheet, onDismiss: dismissed) { sheet in
             switch sheet {
+            case .report:
+                NavigationStack {
+                    ReportProblemView(model: model, afterCrash: true)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Cancel", systemImage: "xmark") { self.sheet = nil }
+                            }
+                        }
+                }
             case .freeUp(let scope):
                 FreeUpSpaceSheet(controller: model.library, scope: scope)
             case .backUp(let ids):

@@ -177,9 +177,11 @@ final class CompactJob {
                 guard let compactor = settings.compactor(ledger: ledger) else {
                     throw ServerClient.Failure(status: 0, message: "Connect your Homespun Server first.")
                 }
-                let outcome = try await compactor.compact(items[index].assetIdentifier,
-                                                          compactNow: !items[index].backUpOnly) { [weak self] message in
-                    Task { @MainActor in self?.report(message, for: id) }
+                let asset = items[index].assetIdentifier, compactNow = !items[index].backUpOnly
+                let outcome = try await Signposts.measure(Signposts.backUp, "Item") {
+                    try await compactor.compact(asset, compactNow: compactNow) { [weak self] message in
+                        Task { @MainActor in self?.report(message, for: id) }
+                    }
                 }
                 switch outcome {
                 case .saved(let copy, let original, let compact):
@@ -191,6 +193,9 @@ final class CompactJob {
                 }
             } catch {
                 state = .failed(error.localizedDescription)
+                let code = Telemetry.Event.code(error)
+                AppLog.job.error("item failed: \(code, privacy: .public)")
+                Telemetry.shared.record(error: error, where: "backup")
             }
             if let index = items.firstIndex(where: { $0.id == id }) { items[index].state = state }
         }
@@ -203,6 +208,7 @@ final class CompactJob {
         let triggers = Set(finished.map(\.trigger))
         let trigger: RunHistory.Trigger = triggers.contains(.manual) ? .manual
             : triggers.contains(.firstTask) ? .firstTask : .automatic
+        AppLog.job.info("run finished: \(finished.count, privacy: .public) items, trigger \(trigger.rawValue, privacy: .public)")
         history.record(RunHistory.Run(kind: .backUp, trigger: trigger, start: started, end: Date(),
                                       items: finished.map { Self.historyItem($0, compactID: compactIDs[$0.id]) }))
         for item in finished { compactIDs[item.id] = nil }

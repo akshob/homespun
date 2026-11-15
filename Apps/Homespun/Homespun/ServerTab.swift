@@ -10,7 +10,7 @@ struct ServerTab: View {
 
     enum Route: Hashable {
         case check, originals, existingLibrary, immich, automatic, connectors, compactCopies, devices, addDevice
-        case notifications, premium, help
+        case notifications, premium, help, analytics
     }
 
     @State private var path: [Route] = []
@@ -263,6 +263,11 @@ struct ServerTab: View {
                 ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
             }
             .accessibilityIdentifier("settings.notifications")
+            NavigationLink(value: Route.analytics) {
+                ServerRow(title: "Share Analytics", symbol: "chart.bar",
+                          value: Telemetry.shared.isSharing ? "On" : "Off")
+            }
+            .accessibilityIdentifier("settings.analytics")
             NavigationLink(value: Route.premium) {
                 ServerRow(title: "Premium", symbol: "sparkles",
                           value: model.premium.isUnlocked ? "Unlocked" : nil)
@@ -291,6 +296,7 @@ struct ServerTab: View {
         case .notifications: NotificationsView(model: model)
         case .premium: PremiumView(premium: model.premium, model: model)
         case .help: HelpAboutView(model: model)
+        case .analytics: AnalyticsSettingsView()
         }
     }
 

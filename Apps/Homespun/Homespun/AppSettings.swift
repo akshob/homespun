@@ -108,11 +108,14 @@ final class AppSettings {
         if serverStatus != .reachable { serverStatus = .checking }
         client.timeout = 6
         do {
-            store(try await client.info())
+            let info = try await client.info()
+            store(info)
             serverStatus = .reachable
+            Telemetry.shared.recordServerInfoDaily(info)
         } catch let error as ServerClient.Failure where error.status == 401 {
             serverStatus = .unreachable("The server no longer recognises this iPhone. Pair it again.")
         } catch {
+            AppLog.server.notice("server unreachable: \(Telemetry.Event.code(error), privacy: .public)")
             serverStatus = .unreachable("Can't reach \(server?.name ?? "the server"). Make sure this iPhone is on your home network.")
         }
     }

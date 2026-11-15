@@ -106,6 +106,7 @@ private struct SetupNavigation: View {
         case .immichConnect: ImmichConnectPage(flow: flow)
         case .immichExclude: ImmichExcludePage(flow: flow)
         case .immichReady: ImmichReadyPage(flow: flow)
+        case .analytics: AnalyticsPage(flow: flow)
         case .photos: PhotosPromisesPage(flow: flow)
         case .limitedPhotos: LimitedPhotosPage(flow: flow)
         case .estimate: EstimatePage(flow: flow)

@@ -7,6 +7,9 @@ struct HomespunApp: App {
         AppModel.registerBackgroundRun()
         LongRun.register()
         Journey.configureTips()
+        MetricsReceiver.shared.start()
+        _ = SessionMarker.shared
+        Telemetry.shared.record(.appLaunch())
     }
 
     var body: some Scene {

@@ -84,6 +84,12 @@ final class RunHistory {
     /// Adds a finished run (a backup with at least one item, or freed space).
     func record(_ run: Run) {
         guard !run.items.isEmpty || run.freedBytes > 0 else { return }
+        switch run.kind {
+        case .backUp: Telemetry.shared.record(.runFinished(run))
+        case .freeUp:
+            Telemetry.shared.record(.freeUpFinished(items: run.items.count, bytes: run.freedBytes,
+                                                    first: !runs.contains { $0.kind == .freeUp }))
+        }
         runs.insert(run, at: runs.firstIndex { $0.end <= run.end } ?? runs.endIndex)
         prune()
         save()

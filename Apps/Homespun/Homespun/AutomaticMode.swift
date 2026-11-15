@@ -87,6 +87,7 @@ final class AutomaticMode {
 
     /// `existing`: also back up what's already on the iPhone, not only new items.
     func enable(existing: Bool) async {
+        Telemetry.shared.record(.featureUsed("automatic", existing ? "on.everything" : "on.new"))
         state.enabled = true
         state.since = existing ? .distantPast : Date()
         state.token = Self.archive(PHPhotoLibrary.shared().currentChangeToken)
@@ -111,6 +112,7 @@ final class AutomaticMode {
     /// The slider: shorter compacts more on the next run; longer only affects items not compacted yet.
     func setCompactSchedule(_ schedule: CompactSchedule) {
         guard schedule != state.schedule else { return }
+        Telemetry.shared.record(.featureUsed("cutoff", "\(schedule.days)d" + (schedule.keepFavorites ? ".favorites" : "")))
         state.schedule = schedule
         save()
     }
@@ -127,6 +129,7 @@ final class AutomaticMode {
     }
 
     func disable() {
+        Telemetry.shared.record(.featureUsed("automatic", "off"))
         state.enabled = false
         save()
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskID)

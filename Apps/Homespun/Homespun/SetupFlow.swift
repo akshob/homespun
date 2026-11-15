@@ -19,7 +19,7 @@ final class SetupFlow {
         case waiting(SetupAdvisor.Machine)
         case pair(PairTarget), otherWays, address
         case ready, immich, immichConnect, immichExclude, immichReady
-        case photos, limitedPhotos
+        case analytics, photos, limitedPhotos
         case estimate, firstTask, receipt, freed
     }
 
@@ -101,7 +101,10 @@ final class SetupFlow {
 
     // MARK: Moving between pages
 
-    func go(_ page: Page) { path.append(page) }
+    func go(_ page: Page) {
+        path.append(page)
+        Telemetry.shared.record(.setupStep(page.analyticsName))
+    }
 
     /// Find My Home Computer: the promises page once, then looking (1.2 → 1.4).
     func findHomeComputer() {
@@ -125,6 +128,9 @@ final class SetupFlow {
     /// Setup ends: unpaired with Set Up Later, or after the first task.
     func finish() {
         stop()
+        if !pairOnly {
+            Telemetry.shared.record(.setupDone(current == .freed ? "freed" : settings.isPaired ? "paired" : "later"))
+        }
         if pairOnly, settings.isPaired { onPaired?() }
         settings.onboardingComplete = true
         close()
@@ -210,6 +216,7 @@ final class SetupFlow {
     var answerAdvice: SetupAdvisor.Next { SetupAdvisor.advise(answers: answers) }
 
     func continueWithAnswers() {
+        Telemetry.shared.record(.setupChoice("have", answers.map(\.rawValue).sorted().joined(separator: "+")))
         switch answerAdvice {
         case .ask: break
         case .noneOfThese: go(.noneOfThese)
@@ -225,6 +232,8 @@ final class SetupFlow {
     func paired(_ how: Pairing) {
         pairing = how
         stop()
+        Telemetry.shared.record(.pairResult(method: String(describing: how), error: nil))
+        if let info = settings.server { Telemetry.shared.recordServerInfoDaily(info) }
         path = [usesImmich && !pairOnly ? .immich : .ready]
     }
 
@@ -270,12 +279,26 @@ final class SetupFlow {
 
     // MARK: After pairing
 
-    /// See What You Can Free Up: the Photos promises if access isn't decided, else the estimate.
+    /// See What You Can Free Up: sharing analytics (asked once), then the Photos promises if access
+    /// isn't decided, else the estimate.
     func afterReady() {
         if pairOnly {
             finish()
             return
         }
+        if Telemetry.shared.consent == .unasked {
+            go(.analytics)
+            return
+        }
+        toPhotos()
+    }
+
+    func afterAnalytics(sharing: Bool) {
+        Telemetry.shared.setSharing(sharing)
+        toPhotos()
+    }
+
+    private func toPhotos() {
         switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
         case .authorized: go(.estimate)
         case .notDetermined: go(.photos)
@@ -308,5 +331,17 @@ enum NASBrand: String, Hashable, CaseIterable, Identifiable {
         case .terramaster: "TerraMaster"
         case .other: "Other (Docker)"
         }
+    }
+}
+
+extension SetupFlow.Page {
+    /// The page for analytics: its case, plus a plain choice (`guide.mac`, `nas.synology`). Values
+    /// that aren't simple enum cases (a pairing target holds an address) are never included.
+    var analyticsName: String {
+        guard let child = Mirror(reflecting: self).children.first, let label = child.label else { return String(describing: self) }
+        if let raw = (child.value as? any RawRepresentable)?.rawValue as? String { return "\(label).\(raw)" }
+        let inner = Mirror(reflecting: child.value)
+        if inner.displayStyle == .enum, inner.children.isEmpty { return "\(label).\(child.value)" }
+        return label
     }
 }

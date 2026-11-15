@@ -71,6 +71,7 @@ final class JourneyLog {
     }
 
     func used(_ feature: Journey.Feature) {
+        Telemetry.shared.record(.featureUsed(String(describing: feature)))
         switch feature {
         case .select:
             selectUsed = true

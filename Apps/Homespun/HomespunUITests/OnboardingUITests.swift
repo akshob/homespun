@@ -202,6 +202,12 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(ready.waitForExistence(timeout: 60), "no Ready page after pairing")
         attach("1.7 Ready")
         ready.tap()
+        // Asked once, before Photos access; Share is the prominent choice, Don't Share sits right under it.
+        let share = app.buttons["analytics.share"]
+        XCTAssertTrue(share.waitForExistence(timeout: 10), "no analytics question after Ready")
+        XCTAssertTrue(app.buttons["analytics.dontShare"].exists)
+        attach("1.7a Help improve Homespun")
+        share.tap()
         let photos = app.buttons["photos.continue"]
         if photos.waitForExistence(timeout: 3) {
             attach("1.8 Photos promises")

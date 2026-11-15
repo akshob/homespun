@@ -370,6 +370,12 @@ struct HelpAboutView: View {
         let settings = model.settings
         List {
             Section {
+                NavigationLink {
+                    ReportProblemView(model: model)
+                } label: {
+                    ServerRow(title: "Report a Problem", symbol: "exclamationmark.bubble", value: nil)
+                }
+                .accessibilityIdentifier("help.report")
                 Button { showingBadges = true } label: {
                     ServerRow(title: "Badge Guide", symbol: "circle.lefthalf.filled", value: nil, chevron: true)
                 }
@@ -402,7 +408,8 @@ struct HelpAboutView: View {
                 if let server = settings.server {
                     LabeledContent(server.name, value: "Homespun Server \(server.version)")
                 }
-                Text("Homespun sends your photos and videos only to your own server. No accounts, no tracking.")
+                Text("Homespun sends your photos and videos only to your own server. No accounts, no ads, no tracking; "
+                     + "anonymous analytics only if you share them.")
                     .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
             }
             .listRowBackground(Theme.card)
