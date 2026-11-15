@@ -1,0 +1,46 @@
+{
+  "appVersion" : "1.0",
+  "timeStampBegin" : "2026-11-14 00:00:00",
+  "timeStampEnd" : "2026-11-14 23:59:00",
+  "metaData" : {
+    "appBuildVersion" : "42",
+    "osVersion" : "iPhone OS 27.2 (25C51)",
+    "regionFormat" : "US",
+    "platformArchitecture" : "arm64e",
+    "bundleIdentifier" : "photos.homespun.app",
+    "deviceType" : "iPhone18,1",
+    "isTestFlightApp" : true,
+    "lowPowerModeEnabled" : false,
+    "pid" : 4127
+  },
+  "cpuMetrics" : {
+    "cumulativeCPUTime" : "412 sec",
+    "cumulativeCPUInstructions" : "2,103,000 kiloinstructions"
+  },
+  "memoryMetrics" : {
+    "peakMemoryUsage" : "312,000 kB",
+    "averageSuspendedMemory" : { "averageValue" : "96,000 kB", "standardDeviation" : 0, "sampleCount" : 12 }
+  },
+  "applicationLaunchMetrics" : {
+    "histogrammedTimeToFirstDrawKey" : {
+      "histogramNumBuckets" : 2,
+      "histogramValue" : {
+        "0" : { "bucketCount" : 5, "bucketStart" : "300 ms", "bucketEnd" : "310 ms" },
+        "1" : { "bucketCount" : 1, "bucketStart" : "640 ms", "bucketEnd" : "650 ms" }
+      }
+    }
+  },
+  "applicationTimeMetrics" : {
+    "cumulativeForegroundTime" : "1,830 sec",
+    "cumulativeBackgroundTime" : "640 sec",
+    "cumulativeBackgroundAudioTime" : "0 sec",
+    "cumulativeBackgroundLocationTime" : "0 sec"
+  },
+  "diskIOMetrics" : { "cumulativeLogicalWrites" : "1,204,000 kB" },
+  "networkTransferMetrics" : {
+    "cumulativeWifiUpload" : "2,400,000 kB",
+    "cumulativeWifiDownload" : "52,000 kB",
+    "cumulativeCellularUpload" : "0 kB",
+    "cumulativeCellularDownload" : "0 kB"
+  }
+}

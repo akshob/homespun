@@ -1,0 +1,73 @@
+{
+  "timeStampBegin" : "2026-11-14 00:00:00",
+  "timeStampEnd" : "2026-11-14 23:59:00",
+  "crashDiagnostics" : [
+    {
+      "version" : "1.0.0",
+      "callStackTree" : {
+        "callStackPerThread" : true,
+        "callStacks" : [
+          {
+            "threadAttributed" : true,
+            "callStackRootFrames" : [
+              {
+                "binaryUUID" : "6A0B5F2C-8E4D-3B1A-9C7E-2F4D6B8A1C3E",
+                "offsetIntoBinaryTextSegment" : 412316,
+                "sampleCount" : 1,
+                "binaryName" : "Homespun",
+                "address" : 4377251484,
+                "subFrames" : [
+                  {
+                    "binaryUUID" : "6A0B5F2C-8E4D-3B1A-9C7E-2F4D6B8A1C3E",
+                    "offsetIntoBinaryTextSegment" : 398004,
+                    "sampleCount" : 1,
+                    "binaryName" : "Homespun",
+                    "address" : 4377237172,
+                    "subFrames" : [
+                      {
+                        "binaryUUID" : "0F1E2D3C-4B5A-3968-8776-655443322110",
+                        "offsetIntoBinaryTextSegment" : 23116,
+                        "sampleCount" : 1,
+                        "binaryName" : "SwiftUI",
+                        "address" : 6511234364
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "threadAttributed" : false,
+            "callStackRootFrames" : [
+              {
+                "binaryUUID" : "9B8A7C6D-5E4F-3A2B-1C0D-E9F8A7B6C5D4",
+                "offsetIntoBinaryTextSegment" : 4052,
+                "sampleCount" : 1,
+                "binaryName" : "libsystem_kernel.dylib",
+                "address" : 7934101460
+              }
+            ]
+          }
+        ]
+      },
+      "diagnosticMetaData" : {
+        "appBuildVersion" : "42",
+        "appVersion" : "1.0",
+        "regionFormat" : "US",
+        "exceptionType" : 1,
+        "exceptionCode" : 0,
+        "signal" : 11,
+        "osVersion" : "iPhone OS 27.2 (25C51)",
+        "deviceType" : "iPhone18,1",
+        "platformArchitecture" : "arm64e",
+        "bundleIdentifier" : "photos.homespun.app",
+        "isTestFlightApp" : true,
+        "lowPowerModeEnabled" : false,
+        "pid" : 4127,
+        "terminationReason" : "Namespace SIGNAL, Code 11 Segmentation fault: 11",
+        "virtualMemoryRegionInfo" : "0 is not in any region.  Bytes before following region: 4310450176\n      REGION TYPE                 START - END      [ VSIZE] PRT\/MAX SHRMOD  REGION DETAIL\n      UNUSED SPACE AT START\n--->  \n      __TEXT                   100ed4000-100f84000 [  704K] r-x\/r-x SM=COW  Homespun"
+      }
+    }
+  ]
+}

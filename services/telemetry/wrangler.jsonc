@@ -1,0 +1,44 @@
+// Homespun opt-in telemetry: analytics events, MetricKit payloads and bug reports.
+// See README.md for the API contract and deploy steps.
+{
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "homespun-telemetry",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-11-13",
+	// Keep our own console logs, but not per-request invocation logs (they include client metadata).
+	"observability": { "logs": { "enabled": true, "invocation_logs": false } },
+
+	// Public noise filter sent by the app as `X-Homespun-Key`. Not a secret.
+	"vars": { "APP_KEY": "homespun-app-v1" },
+
+	// Bug reports are emailed here. Set with `wrangler secret put REPORT_TO`; never commit it.
+	"secrets": { "required": ["REPORT_TO"] },
+
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "homespun-telemetry",
+			// Replace with the id printed by `wrangler d1 create homespun-telemetry`.
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
+		}
+	],
+
+	"r2_buckets": [{ "binding": "BUCKET", "bucket_name": "homespun-telemetry" }],
+
+	// Per-IP limits. The binding only supports 10 s or 60 s periods.
+	"ratelimits": [
+		{ "name": "LIMITER", "namespace_id": "4701", "simple": { "limit": 60, "period": 60 } },
+		{ "name": "REPORT_LIMITER", "namespace_id": "4702", "simple": { "limit": 2, "period": 60 } }
+	],
+
+	// Email Routing: may send only to verified destination addresses (REPORT_TO).
+	"send_email": [{ "name": "MAIL" }],
+
+	// Uncomment to serve at https://telemetry.homespun.photos. The homespun.photos zone must be in
+	// the same account; Wrangler creates the DNS record and certificate. See README.md.
+	// "routes": [{ "pattern": "telemetry.homespun.photos", "custom_domain": true }],
+
+	// Daily retention cleanup (UTC).
+	"triggers": { "crons": ["17 3 * * *"] }
+}
