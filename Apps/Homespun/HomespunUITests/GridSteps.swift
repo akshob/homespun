@@ -110,7 +110,10 @@ extension XCUIApplication {
     @MainActor func goBack(from title: String? = nil) {
         // The strip's buttons on the open Duo say they can't be hit, though they can.
         let strip = descendants(matching: .any)["BackButton"]
-        if strip.exists { return strip.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+        // Relative to the element: screen coordinates are rotated on the open Duo.
+        if strip.waitForExistence(timeout: 1) {
+            return strip.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
         guard windows.firstMatch.frame.width < 700 else { return }
         let bar = title.map { screenTitle($0) }.flatMap { $0.elementType == .navigationBar ? $0 : nil }
             ?? navigationBars.firstMatch
@@ -164,6 +167,17 @@ extension XCUIApplication {
         lists.reversed()[attempt % lists.count].swipeUp()
     }
 
+    /// Swipes down on a scrolling list a little, newest first (the counterpart of `swipeUpInContent`).
+    @MainActor func swipeDownInContent(near element: XCUIElement? = nil) {
+        let lists = (collectionViews.allElementsBoundByIndex + scrollViews.allElementsBoundByIndex
+                     + tables.allElementsBoundByIndex).filter { $0.exists && $0.isHittable && $0.frame.height > 200 }
+        let x = element.map { $0.frame.midX }
+        guard let list = lists.last(where: { list in x.map { list.frame.minX <= $0 && $0 <= list.frame.maxX } ?? true })
+        else { return swipeDown() }
+        list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+            .press(forDuration: 0.05, thenDragTo: list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65)))
+    }
+
     /// Scrolls the current screen until the element exists (lists load rows lazily).
     @MainActor @discardableResult func scrollTo(_ element: XCUIElement, swipes: Int = 8) -> Bool {
         var left = swipes
@@ -181,9 +195,13 @@ extension XCUIApplication {
         let connected = NSPredicate(format: "label CONTAINS 'Connected' OR value CONTAINS 'Connected'")
         let deadline = Date().addingTimeInterval(timeout)
         var ok = false
+        var waited = 0
         while Date() < deadline {
             if status.exists, connected.evaluate(with: status) { ok = true; break }
             sleep(1)
+            waited += 1
+            // A busy simulator can drop the tab switch; try it again now and then.
+            if waited % 5 == 0, !status.exists { openTab("Server") }
         }
         openTab("Library")
         return ok

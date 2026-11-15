@@ -12,6 +12,12 @@ extension XCUIApplication {
             swipeUpInContent()
             tries -= 1
         }
+        // Scrolled past it, above the top of the list: bring it back down.
+        tries = 4
+        while element.exists, element.frame.minY < 100, tries > 0 {
+            swipeDownInContent(near: element)
+            tries -= 1
+        }
         return element.exists
     }
 
@@ -56,7 +62,9 @@ final class ServerTabUITests: XCTestCase {
                 app.goBack(from: "Change Folder")
             }
             if row == "settings.existingLibrary" {
-                app.buttons["settings.findCopies"].tap()
+                let find = app.buttons["settings.findCopies"]
+                XCTAssertTrue(find.waitForExistence(timeout: 10) || app.reveal(find), "no Find Compact Copies")
+                find.tap()
                 XCTAssertTrue(app.buttons["copies.start"].waitForExistence(timeout: 10), "no Find Compact Copies sheet")
                 attach(app, "Find Compact Copies")
                 app.buttons["copies.close"].tap()
