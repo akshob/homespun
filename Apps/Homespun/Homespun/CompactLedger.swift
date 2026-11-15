@@ -22,7 +22,9 @@ actor CompactLedger {
 
     init(url: URL = CompactLedger.defaultURL) {
         self.url = url
-        entries = (try? JSONDecoder().decode([String: Entry].self, from: Data(contentsOf: url))) ?? [:]
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        entries = (try? decoder.decode([String: Entry].self, from: Data(contentsOf: url))) ?? [:]
     }
 
     func snapshot() -> [String: Entry] { entries }
