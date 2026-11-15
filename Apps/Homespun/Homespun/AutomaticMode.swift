@@ -285,6 +285,7 @@ final class AppModel {
     let job: CompactJob
     let premium = Premium()
     let automatic = AutomaticMode()
+    let copyFinder = CopyFinder()
 
     private init() {
         settings = AppSettings()

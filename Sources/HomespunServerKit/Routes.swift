@@ -109,7 +109,7 @@ struct Routes: Sendable {
         authenticated.get("assets/:id") { _, context in try json(try await status(context)) }
         authenticated.put("assets/:id/resources/:role") { request, context in try await upload(request, context) }
         authenticated.get("assets/:id/compact/:role") { _, context in try await download(context) }
-        authenticated.post("assets/:id/imported") { _, context in try await imported(context) }
+        authenticated.post("assets/:id/imported") { request, context in try await imported(request, context) }
         authenticated.post("assets/:id/verify") { _, context in try json(try await verify(context)) }
         authenticated.post("copies/lookup") { request, context in
             let body = try await request.decode(as: ServerAPI.CopyLookupRequest.self, context: context)
@@ -228,10 +228,15 @@ struct Routes: Sendable {
             }
             let resources = try await catalog.resources(assetID)
             let asset = try await catalog.asset(assetID) ?? asset
-            if asset.state == .receiving, resources.allSatisfy({ $0.state == .verified }) {
+            // Originals imported in place came with compact copies made elsewhere, not here: make
+            // one now that the phone backs up an original it still has.
+            let hasCompact = !(try await catalog.compact(assetID)).isEmpty
+            let importedWithoutCopy = asset.state == .imported && !hasCompact && resources.contains { $0.externalPath != nil }
+            if asset.state == .receiving || importedWithoutCopy, resources.allSatisfy({ $0.state == .verified }) {
                 try await catalog.setState(assetID, .queued)
                 try await catalog.enqueue(JobRunner.compress, assetID: assetID)
-                try await connectors.originalsVerified(assetID)
+                // Imported originals were checked at import; enabling a connector copies them.
+                if !importedWithoutCopy { try await connectors.originalsVerified(assetID) }
             }
         case .immich:
             // Registering again re-checks Immich, for example after the Immich app backed the item up.
@@ -390,11 +395,22 @@ struct Routes: Sendable {
         return Response(status: .ok, headers: headers, body: body)
     }
 
-    func imported(_ context: HomespunRequestContext) async throws -> Response {
+    func imported(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
         let assetID = try assetID(context)
+        let body = try await request.body.collect(upTo: 64 << 10)
+        var copies: [ServerAPI.CopyHash] = []
+        if body.readableBytes > 0 {
+            copies = try ServerAPI.decoder.decode(ServerAPI.ImportedRequest.self, from: Data(body.readableBytesView)).deviceCopies
+            guard copies.allSatisfy({ Validation.isSHA256($0.sha256) && ($0.sha1.map(Validation.isSHA1) ?? true) }) else {
+                throw HTTPError(.badRequest, message: "Bad hash.")
+            }
+        }
         guard try await catalog.markImported(assetID, device: context.deviceID ?? "") else {
             throw HTTPError(.conflict, message: "The compact copy is not ready.")
         }
+        // Only files the server left to the phone; anything else it made itself.
+        let deviceMade = Set(try await catalog.asset(assetID)?.deviceCompresses ?? [])
+        try await catalog.rememberCopies(assetID, copies.filter { deviceMade.contains($0.role) })
         return try json(try await status(context))
     }
 

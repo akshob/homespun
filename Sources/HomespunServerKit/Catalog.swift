@@ -437,7 +437,7 @@ public actor Catalog {
     /// elsewhere (and are already on the phone). An item already here keeps its originals and
     /// only learns the copies.
     func importExisting(assetID: String, kind: ServerAPI.AssetKind, captureDate: Date?,
-                        originals: [ResourceRecord], copies: [ServerAPI.ImportItem.Copy]) throws -> ImportOutcome {
+                        originals: [ResourceRecord], copies: [ServerAPI.CopyHash]) throws -> ImportOutcome {
         let now = Timestamp.string()
         let outcome: ImportOutcome = try database.transaction {
             let exists = !(try database.query("SELECT id FROM assets WHERE id = ?", [.text(assetID)]).isEmpty)
@@ -461,19 +461,30 @@ public actor Catalog {
                          .integer(Int64(original.size)), .text(now), original.externalPath.sqlValue])
                 }
             }
-            for copy in copies {
-                try database.execute(
-                    """
-                    INSERT INTO made_copies (sha256, asset_id, role, created_at, sha1) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (sha256) DO UPDATE SET sha1 = COALESCE(made_copies.sha1, excluded.sha1)
-                    """, [.text(copy.sha256.lowercased()), .text(assetID), .text(copy.role.rawValue), .text(now),
-                          copy.sha1.map { $0.lowercased() }.sqlValue])
-            }
+            try insertCopies(assetID, copies, at: now)
             return exists ? .linked : .imported
         }
         log(outcome == .imported ? "asset_imported_existing" : "copies_linked", asset: assetID,
             detail: "\(copies.count) compact copies")
         return outcome
+    }
+
+    /// Remembers compact files made from the item (a copy already mapped to another item keeps it).
+    private func insertCopies(_ assetID: String, _ copies: [ServerAPI.CopyHash], at now: String) throws {
+        for copy in copies {
+            try database.execute(
+                """
+                INSERT INTO made_copies (sha256, asset_id, role, created_at, sha1) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (sha256) DO UPDATE SET sha1 = COALESCE(made_copies.sha1, excluded.sha1)
+                """, [.text(copy.sha256.lowercased()), .text(assetID), .text(copy.role.rawValue), .text(now),
+                      copy.sha1.map { $0.lowercased() }.sqlValue])
+        }
+    }
+
+    func rememberCopies(_ assetID: String, _ copies: [ServerAPI.CopyHash]) throws {
+        guard !copies.isEmpty else { return }
+        try database.transaction { try insertCopies(assetID, copies, at: Timestamp.string()) }
+        log("device_copies", asset: assetID, detail: copies.map(\.role.rawValue).joined(separator: ","))
     }
 
     func asset(_ id: String) throws -> AssetRecord? {

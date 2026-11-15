@@ -278,8 +278,13 @@ at a time (default 4). Each line of the manifest is one item:
 
 `kind` is `photo`, `live_photo`, or `video`. `copies` lists the SHA-256 of each compact file
 as it is on the phone (Photos keeps imported files byte for byte, though it may rename them).
-An original may carry `"sha256"` to make sure it hasn't changed. The app then finds those
-copies by their hashes (`POST /api/v1/copies/lookup`).
+An original may carry `"sha256"` to make sure it hasn't changed.
+
+Then, in the app, open Settings › Find compact copies made elsewhere. It hashes the photos and
+videos Homespun doesn't know yet and asks the server about them (`POST /api/v1/copies/lookup`;
+only hashes leave the phone). Copies it finds count as backed up and join the Homespun album;
+an original still on the phone whose copy is found becomes ready to free up. It also restores
+what Homespun knew after reinstalling the app or moving to a new iPhone.
 
 ## Website
 

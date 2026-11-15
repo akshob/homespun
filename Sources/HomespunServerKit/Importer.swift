@@ -26,10 +26,13 @@ struct LibraryImport: Sendable {
     /// Imports every line of the manifest (JSON Lines). Bad lines and missing or changed files are
     /// reported through `report` and skipped; running again picks them up once fixed.
     func run(manifest: URL, report: @escaping @Sendable (String) -> Void) async throws -> Summary {
-        let lines = try String(contentsOf: manifest, encoding: .utf8).split(separator: "\n", omittingEmptySubsequences: false)
+        var contents = try String(contentsOf: manifest, encoding: .utf8)
+        if contents.hasPrefix("\u{FEFF}") { contents.removeFirst() }
+        // Characters, not bytes: "\r\n" is one Character, so split on any line break.
+        let lines = contents.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
         var work: [(line: Int, text: String)] = []
         for (index, line) in lines.enumerated() {
-            let text = line.trimmingCharacters(in: .whitespaces)
+            let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty, !text.hasPrefix("#") { work.append((index + 1, text)) }
         }
         var summary = Summary()

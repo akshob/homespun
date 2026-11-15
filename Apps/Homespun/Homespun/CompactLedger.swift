@@ -48,6 +48,22 @@ actor CompactLedger {
                 serverAssetID: String? = nil) throws {
         entries[original] = Entry(compactIdentifier: compact, originalBytes: originalBytes,
                                   compactBytes: compactBytes, savedAt: Date(), serverAssetID: serverAssetID)
+        try save()
+    }
+
+    /// The key for a compact copy whose original isn't on this iPhone: it was made elsewhere, or
+    /// its original was removed before this record was kept.
+    static func elsewhere(_ compactIdentifier: String) -> String { "elsewhere:" + compactIdentifier }
+
+    /// Records several entries, and forgets `removing`, in one write.
+    func record(_ new: [String: Entry], removing: [String] = []) throws {
+        guard !new.isEmpty || !removing.isEmpty else { return }
+        for key in removing { entries[key] = nil }
+        entries.merge(new) { _, latest in latest }
+        try save()
+    }
+
+    private func save() throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]

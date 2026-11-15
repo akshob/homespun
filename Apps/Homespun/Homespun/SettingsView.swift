@@ -7,6 +7,8 @@ struct SettingsView: View {
     @Bindable var settings: AppSettings
     let premium: Premium
     let automatic: AutomaticMode
+    let copyFinder: CopyFinder
+    let ledger: CompactLedger
     @Environment(\.dismiss) private var dismiss
     @State private var askExisting = false
 
@@ -33,6 +35,10 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings.connectors")
                         NavigationLink("Add another device") { AddDeviceView(settings: settings) }
                             .accessibilityIdentifier("settings.addDevice")
+                        NavigationLink("Find compact copies made elsewhere") {
+                            CopyFinderView(finder: copyFinder, settings: settings, ledger: ledger)
+                        }
+                        .accessibilityIdentifier("settings.findCopies")
                         Button("Unpair", role: .destructive) { settings.unpair() }
                     }
                 } else {

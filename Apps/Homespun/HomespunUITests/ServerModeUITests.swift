@@ -17,24 +17,7 @@ final class ServerModeUITests: XCTestCase {
         app.launchArguments += ["-onboardingComplete", "YES"]
         app.launch()
 
-        let connect = app.buttons["connect.open"]
-        if connect.waitForExistence(timeout: 5) {
-            connect.tap()
-            let addressField = app.textFields["server.address"]
-            XCTAssertTrue(addressField.waitForExistence(timeout: 10))
-            addressField.tap()
-            addressField.typeText(address)
-            app.buttons["server.continue"].tap()
-            let codeField = app.textFields["pair.code"]
-            XCTAssertTrue(codeField.waitForExistence(timeout: 15), "no pairing screen for \(address)")
-            codeField.tap()
-            codeField.typeText(code)
-            app.buttons["pair.submit"].tap()
-        }
-        if !app.buttons["server.card"].waitForExistence(timeout: 20) {
-            XCTFail("pairing failed: \(app.staticTexts["pair.error"].label)")
-        }
-        XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 15), "server not reachable")
+        app.pair(address: address, code: code)
         attach(app, "Paired")
 
         // A paired iPhone can make a code for another device.

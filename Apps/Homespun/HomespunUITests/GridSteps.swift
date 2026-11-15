@@ -3,6 +3,29 @@ import XCTest
 
 /// Steps shared by the workflow tests: select in Homespun's library grid, compact, and check.
 extension XCUIApplication {
+    /// Pairs with the server at `address` using a code from `homespun-server pair`, unless
+    /// already paired, and waits until it's connected.
+    @MainActor func pair(address: String, code: String, file: StaticString = #filePath, line: UInt = #line) {
+        let connect = buttons["connect.open"]
+        if connect.waitForExistence(timeout: 5) {
+            connect.tap()
+            let addressField = textFields["server.address"]
+            XCTAssertTrue(addressField.waitForExistence(timeout: 10), file: file, line: line)
+            addressField.tap()
+            addressField.typeText(address)
+            buttons["server.continue"].tap()
+            let codeField = textFields["pair.code"]
+            XCTAssertTrue(codeField.waitForExistence(timeout: 15), "no pairing screen for \(address)", file: file, line: line)
+            codeField.tap()
+            codeField.typeText(code)
+            buttons["pair.submit"].tap()
+        }
+        if !buttons["server.card"].waitForExistence(timeout: 20) {
+            XCTFail("pairing failed: \(staticTexts["pair.error"].label)", file: file, line: line)
+        }
+        XCTAssertTrue(staticTexts["Connected"].waitForExistence(timeout: 15), "server not reachable", file: file, line: line)
+    }
+
     /// Grid items, optionally only those with this badge (`Badge.label` in the app).
     func gridItems(_ badge: String? = nil) -> XCUIElementQuery {
         let predicate = badge.map { NSPredicate(format: "identifier == 'asset' AND value == %@", $0) }

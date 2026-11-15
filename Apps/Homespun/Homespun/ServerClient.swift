@@ -125,12 +125,21 @@ struct ServerClient: Sendable {
         try await send("assets/\(assetID)", as: ServerAPI.AssetStatus.self)
     }
 
-    func imported(_ assetID: String) async throws {
-        _ = try await send("assets/\(assetID)/imported", method: "POST", as: ServerAPI.AssetStatus.self)
+    /// Reports the compact copy saved, with the files this iPhone compressed itself so the server
+    /// recognises them later.
+    func imported(_ assetID: String, deviceCopies: [ServerAPI.CopyHash] = []) async throws {
+        _ = try await send("assets/\(assetID)/imported", method: "POST", json: ServerAPI.ImportedRequest(deviceCopies: deviceCopies),
+                           as: ServerAPI.AssetStatus.self)
     }
 
     func verify(_ assetID: String) async throws -> ServerAPI.Verification {
         try await send("assets/\(assetID)/verify", method: "POST", as: ServerAPI.Verification.self)
+    }
+
+    /// Which of these SHA-256s are compact copies or originals of items on the server.
+    func lookupCopies(_ hashes: [String]) async throws -> [ServerAPI.CopyLookupResponse.Match] {
+        try await send("copies/lookup", method: "POST", json: ServerAPI.CopyLookupRequest(sha256: hashes),
+                       as: ServerAPI.CopyLookupResponse.self).matches
     }
 
     /// Uploads `file` from wherever the server says it left off, in chunks.

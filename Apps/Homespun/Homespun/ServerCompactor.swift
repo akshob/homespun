@@ -112,6 +112,7 @@ struct ServerCompactor: Compacting {
         let compactDirectory = work.appendingPathComponent("compact", isDirectory: true)
         try FileManager.default.createDirectory(at: compactDirectory, withIntermediateDirectories: true)
         var plan = PhotoLibrary.ImportPlan(asset: asset)
+        var deviceCopies: [ServerAPI.CopyHash] = []
         for compact in status.compact {
             let url = try await client.download(compact, assetID: assetID, to: compactDirectory)
             let type: PHAssetResourceType = switch compact.role {
@@ -135,6 +136,8 @@ struct ServerCompactor: Compacting {
                 throw PhotoLibrary.Failure.livePhotoInvalid(reason)
             }
             plan.resources.append((.pairedVideo, output))
+            let digests = try await Task.detached { try Fingerprint.digests(of: output) }.value
+            deviceCopies.append(.init(role: .pairedVideo, sha256: digests.sha256, sha1: digests.sha1))
         } else if let still = plan.resources.first(where: { $0.0 == .photo })?.1,
                   let motion = plan.resources.first(where: { $0.0 == .pairedVideo })?.1 {
             // A Mac server compressed the motion; check the pair before importing it.
@@ -150,7 +153,7 @@ struct ServerCompactor: Compacting {
         let identifier = try await PhotoLibrary.save(plan)
         try await ledger.record(original: localIdentifier, compact: identifier, originalBytes: originalBytes,
                                 compactBytes: compactBytes, serverAssetID: assetID)
-        try? await client.imported(assetID)
+        try? await client.imported(assetID, deviceCopies: deviceCopies)
         return .saved(compactIdentifier: identifier, originalBytes: originalBytes, compactBytes: compactBytes)
     }
 }

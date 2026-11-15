@@ -80,11 +80,24 @@ public final class JobRunner: Service, Sendable {
     private func compressStored(_ assetID: String) async throws {
         guard let asset = try await catalog.asset(assetID) else { return }
         let resources = try await catalog.resources(assetID)
-        guard resources.allSatisfy({ $0.state == .verified && $0.storedPath != nil }) else {
+        guard resources.allSatisfy({ $0.state == .verified && ($0.storedPath != nil || $0.externalPath != nil) }) else {
             throw Compactor.Unprocessable(description: "originals are incomplete")
         }
         var sources: [Role: URL] = [:]
-        for resource in resources { sources[resource.role] = storage.root.appendingPathComponent(resource.storedPath!) }
+        for resource in resources {
+            if let path = resource.externalPath {
+                // Kept where it was before Homespun, so it may have changed since: check it first.
+                let url = URL(fileURLWithPath: path)
+                let check = try? await detached { (try Fingerprint.sha256(of: url), try Self.size(of: url)) }
+                guard check?.0 == resource.sha256, check?.1 == resource.size else {
+                    try await catalog.markResource(assetID, role: resource.role, state: .mismatch)
+                    throw Compactor.Unprocessable(description: "The original at \(path) is missing or changed.")
+                }
+                sources[resource.role] = url
+            } else {
+                sources[resource.role] = storage.root.appendingPathComponent(resource.storedPath!)
+            }
+        }
         try await compactAndStore(asset, resources: resources, sources: sources)
     }
 

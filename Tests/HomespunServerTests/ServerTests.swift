@@ -373,6 +373,21 @@ final class FakeConnector: Connector, @unchecked Sendable {
                 && live.deviceCompresses == liveDeviceCompresses, "\(live.message ?? "")")
         #expect(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("data/originals/undated/IMG_0001.MOV").path))
 
+        // The phone reports the motion it compressed itself, so the copy is recognised later
+        // (after a reinstall, say); only files the server left to the phone count.
+        let phoneMotion = Fingerprint.sha256(of: Data("motion compressed on the phone".utf8))
+        let fakeStill = Fingerprint.sha256(of: Data("not the server's still".utf8))
+        #expect(try await client.call("/api/v1/assets/\(still.sha256)/imported", .post, token: token,
+                                      json: ServerAPI.ImportedRequest(deviceCopies: [.init(role: .photo, sha256: "nope")]))
+            .status == .badRequest)
+        let imported = try await client.call("/api/v1/assets/\(still.sha256)/imported", .post, token: token, json: ServerAPI.ImportedRequest(
+            deviceCopies: [.init(role: .pairedVideo, sha256: phoneMotion), .init(role: .photo, sha256: fakeStill)]))
+        #expect(try imported.decode(ServerAPI.AssetStatus.self).state == .imported)
+        let known = try await client.call("/api/v1/copies/lookup", .post, token: token,
+                                          json: ServerAPI.CopyLookupRequest(sha256: [phoneMotion, fakeStill]))
+            .decode(ServerAPI.CopyLookupResponse.self).matches
+        #expect(known.map(\.sha256) == (liveDeviceCompresses.contains(.pairedVideo) ? [phoneMotion] : []))
+
         let movie = try descriptor(.video, media.movie)
         _ = try await client.call("/api/v1/assets", .post, token: token,
                                   json: ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [movie]))
@@ -955,3 +970,41 @@ final class ProblemLog: @unchecked Sendable {
     func add(_ line: String) { lock.withLock { stored.append(line) } }
     var lines: [String] { lock.withLock { stored } }
 }
+
+@Test(.enabled(if: ffmpegAvailable)) func phoneBacksUpAnOriginalImportedInPlace() async throws {
+    let fixture = try await Fixture()
+    let media = try await Media.make(in: fixture.directory)
+    // A manifest saved on Windows: byte order mark and CRLF line endings.
+    let manifest = fixture.directory.appendingPathComponent("library.jsonl")
+    let items = try [media.photo, media.movie].map { url in
+        String(decoding: try ServerAPI.encoder.encode(ServerAPI.ImportItem(
+            kind: url == media.movie ? .video : .photo, captureDate: nil,
+            originals: [.init(role: url == media.movie ? .video : .photo, path: url.path)], copies: [])), as: UTF8.self)
+    }
+    try Data(("\u{FEFF}" + items.joined(separator: "\r\n") + "\r\n").utf8).write(to: manifest)
+    let summary = try await LibraryImport(catalog: fixture.server.catalog).run(manifest: manifest) { _ in }
+    #expect(summary.imported == 2 && summary.problems == 0)
+
+    try await fixture.test { client, token in
+        // The original is still on the phone and has no compact copy: backing it up makes one,
+        // from the file where it is, with nothing to upload.
+        let photo = try descriptor(.photo, media.photo)
+        let registered = try await client.call("/api/v1/assets", .post, token: token,
+                                               json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [photo]))
+        #expect(try registered.decode(ServerAPI.AssetStatus.self).state == .queued)
+        try await fixture.server.drainJobs()
+        let ready = try await client.call("/api/v1/assets/\(photo.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(ready.state == .ready && ready.compact.first?.role == .photo, "\(ready.message ?? "")")
+        #expect(try FileManager.default.subpathsOfDirectory(atPath: fixture.directory.appendingPathComponent("data/originals").path).isEmpty)
+
+        // One that changed since the import is not compressed.
+        let movie = try descriptor(.video, media.movie)
+        try (Data(contentsOf: media.movie) + Data("x".utf8)).write(to: media.movie)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [movie]))
+        try await fixture.server.drainJobs()
+        let failed = try await client.call("/api/v1/assets/\(movie.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(failed.state == .failed && failed.message?.contains("missing or changed") == true)
+    }
+}
+

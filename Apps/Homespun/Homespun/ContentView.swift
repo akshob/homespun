@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var job: CompactJob
     private let premium: Premium
     private let automatic: AutomaticMode
+    private let copyFinder: CopyFinder
     @State private var library = LibraryModel()
     @State private var access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @State private var filter = LibraryState.Filter.all
@@ -50,6 +51,7 @@ struct ContentView: View {
         _job = State(initialValue: model.job)
         premium = model.premium
         automatic = model.automatic
+        copyFinder = model.copyFinder
     }
 
     var body: some View {
@@ -91,7 +93,8 @@ struct ContentView: View {
             .sheet(item: $sheet, onDismiss: sheetDismissed) { sheet in
                 switch sheet {
                 case .settings:
-                    SettingsView(settings: settings, premium: premium, automatic: automatic)
+                    SettingsView(settings: settings, premium: premium, automatic: automatic, copyFinder: copyFinder,
+                                 ledger: job.ledger)
                 case .connect:
                     NavigationStack {
                         ConnectView(settings: settings) { self.sheet = nil }
@@ -123,6 +126,12 @@ struct ContentView: View {
                 if !running { Task { await jobFinished() } }
             }
             .onChange(of: settings.onboardingComplete) { _, _ in Task { await refresh() } }
+            .onChange(of: copyFinder.checked) { _, _ in
+                Task {
+                    await refreshGrid()
+                    await refreshRemovable()
+                }
+            }
             .onChange(of: automatic.enabled) { _, on in
                 if on { Task { await runAutomatic() } }
             }

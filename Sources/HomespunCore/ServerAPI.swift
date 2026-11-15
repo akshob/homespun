@@ -467,6 +467,25 @@ public enum ServerAPI {
         public init(matches: [Match]) { self.matches = matches }
     }
 
+    /// A compact file's fingerprint, so the server recognises the copy wherever it turns up.
+    public struct CopyHash: Codable, Equatable, Sendable {
+        public var role: ResourceRole
+        public var sha256: String
+        public var sha1: String?
+        public init(role: ResourceRole, sha256: String, sha1: String? = nil) {
+            self.role = role
+            self.sha256 = sha256
+            self.sha1 = sha1
+        }
+    }
+
+    /// `POST /api/v1/assets/{id}/imported`, optionally with the files the phone compressed
+    /// itself (`deviceCompresses`), whose hashes the server otherwise never sees.
+    public struct ImportedRequest: Codable, Equatable, Sendable {
+        public var deviceCopies: [CopyHash]
+        public init(deviceCopies: [CopyHash]) { self.deviceCopies = deviceCopies }
+    }
+
     /// One line of an import manifest (JSON Lines) for `homespun-server import`: originals kept
     /// elsewhere on the server's disks, and the compact copies already made from them.
     public struct ImportItem: Codable, Equatable, Sendable {
@@ -483,23 +502,12 @@ public enum ServerAPI {
             }
         }
 
-        public struct Copy: Codable, Equatable, Sendable {
-            public var role: ResourceRole
-            public var sha256: String
-            public var sha1: String?
-            public init(role: ResourceRole, sha256: String, sha1: String? = nil) {
-                self.role = role
-                self.sha256 = sha256
-                self.sha1 = sha1
-            }
-        }
-
         public var kind: AssetKind
         public var captureDate: Date?
         public var originals: [Original]
-        public var copies: [Copy]
+        public var copies: [CopyHash]
 
-        public init(kind: AssetKind, captureDate: Date?, originals: [Original], copies: [Copy]) {
+        public init(kind: AssetKind, captureDate: Date?, originals: [Original], copies: [CopyHash]) {
             self.kind = kind
             self.captureDate = captureDate
             self.originals = originals

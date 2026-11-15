@@ -198,6 +198,27 @@ enum PhotoLibrary {
         return found
     }
 
+    /// Every photo and video in the library.
+    static func allIdentifiers() -> [String] {
+        let result = PHAsset.fetchAssets(with: nil)
+        var identifiers: [String] = []
+        identifiers.reserveCapacity(result.count)
+        result.enumerateObjects { asset, _, _ in identifiers.append(asset.localIdentifier) }
+        return identifiers
+    }
+
+    private struct AssetsReference: @unchecked Sendable { let assets: PHFetchResult<PHAsset> }
+
+    /// Adds items to the Homespun album, creating it if needed.
+    static func addToAlbum(_ localIdentifiers: [String]) async throws {
+        guard !localIdentifiers.isEmpty else { return }
+        let album = try await album()
+        let found = AssetsReference(assets: PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: nil))
+        try await PHPhotoLibrary.shared().performChanges {
+            PHAssetCollectionChangeRequest(for: album.collection)?.addAssets(found.assets)
+        }
+    }
+
     /// The identifiers of the items in the Homespun album.
     static func albumMembers() -> Set<String> {
         var members = Set<String>()

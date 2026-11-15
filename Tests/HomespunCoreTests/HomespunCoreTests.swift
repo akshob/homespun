@@ -104,3 +104,27 @@ import Testing
     #expect(mac.contains { $0.commands.contains("brew install ffmpeg") })
     #expect(ServerSetup.installSteps(for: .linux, packageManager: .pacman).first?.commands.first?.hasPrefix("sudo pacman") == true)
 }
+
+@Test func phoneItemsAreClassifiedByTheServersAnswers() {
+    typealias Match = ServerAPI.CopyLookupResponse.Match
+    func match(_ hash: String, _ asset: String, _ role: ServerAPI.ResourceRole, original: Bool = false,
+               verified: Bool = true) -> (String, Match) {
+        (hash, Match(sha256: hash, assetID: asset, role: role, isOriginal: original, originalsVerified: verified,
+                     originalBytes: 900))
+    }
+    let matches = Dictionary(uniqueKeysWithValues: [
+        match("s", "A", .photo), match("m", "A", .pairedVideo, original: true), match("v", "B", .video, original: true),
+        match("x", "C", .photo, verified: false), match("y", "B", .photo),
+    ])
+    // A Live Photo whose motion was kept as is is still a compact copy; an edit doesn't count.
+    #expect(CopyMatching.classify([.photo: "S", .pairedVideo: "m", .adjustmentData: "edit"], matches: matches)
+            == .copy(assetID: "A", originalBytes: 900))
+    #expect(CopyMatching.classify([.video: "v"], matches: matches) == .original(assetID: "B"))
+    #expect(CopyMatching.classify([.photo: "s"], matches: matches) == .copy(assetID: "A", originalBytes: 900))
+    #expect(CopyMatching.classify([.photo: "s", .pairedVideo: "other"], matches: matches) == .partial)
+    #expect(CopyMatching.classify([.photo: "s", .pairedVideo: "v"], matches: matches) == .partial)
+    #expect(CopyMatching.classify([.video: "s"], matches: matches) == .partial)
+    #expect(CopyMatching.classify([.photo: "x"], matches: matches) == .partial)
+    #expect(CopyMatching.classify([.photo: "nothing"], matches: matches) == .unknown)
+    #expect(CopyMatching.classify([.adjustmentData: "s"], matches: matches) == .unknown)
+}
