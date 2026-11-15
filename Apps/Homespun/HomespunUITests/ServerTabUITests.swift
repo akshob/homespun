@@ -1,6 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 
+extension XCUIApplication {
+    /// Scrolls until `element` exists and sits clear of the bottom accessory and tab bar, which
+    /// the list scrolls under (a tap there would land on the accessory).
+    @MainActor @discardableResult func reveal(_ element: XCUIElement) -> Bool {
+        guard scrollTo(element) else { return false }
+        let limit = frame.maxY - 220
+        var tries = 4
+        while element.frame.maxY > limit, tries > 0 {
+            coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
+                .press(forDuration: 0.05, thenDragTo: coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
+            tries -= 1
+        }
+        return element.exists
+    }
+}
+
 /// The Server tab's rows, the devices list, the unpair confirmation, and a finished run in
 /// Activity with its details. Pairs with a running server: pass `HOMESPUN_SERVER` and
 /// `HOMESPUN_PAIRING_CODE` to `xcodebuild test` with a `TEST_RUNNER_` prefix.
@@ -51,20 +67,20 @@ final class ServerTabUITests: XCTestCase {
                      "settings.devices", "settings.notifications", "settings.premium", "settings.help",
                      "server.unpair"].map { app.buttons[$0] }
         for row in lower {
-            XCTAssertTrue(app.scrollTo(row), "no \(row)")
+            XCTAssertTrue(app.reveal(row), "no \(row)")
         }
         attach(app, "Server, scrolled")
         for (row, title) in [("settings.automatic", "Automatic Mode"), ("settings.connectors", "Cloud Copies"),
                              ("settings.compactCopies", "Compact Copies"), ("settings.notifications", "Notifications"),
                              ("settings.help", "Help and About")] {
-            XCTAssertTrue(app.scrollTo(app.buttons[row]), "no \(row)")
+            XCTAssertTrue(app.reveal(app.buttons[row]), "no \(row)")
             app.buttons[row].tap()
             XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 10), "no \(title) page")
             sleep(2)
             attach(app, title)
             app.navigationBars[title].buttons.firstMatch.tap()
         }
-        XCTAssertTrue(app.scrollTo(app.buttons["settings.premium"]))
+        XCTAssertTrue(app.reveal(app.buttons["settings.premium"]))
         app.buttons["settings.premium"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["premium.unlocked"].waitForExistence(timeout: 10), "no Premium page")
         attach(app, "Premium")
@@ -80,7 +96,7 @@ final class ServerTabUITests: XCTestCase {
         app.navigationBars["Devices"].buttons.firstMatch.tap()
 
         // Unpairing asks first; Cancel keeps the pairing.
-        XCTAssertTrue(app.scrollTo(app.buttons["server.unpair"]))
+        XCTAssertTrue(app.reveal(app.buttons["server.unpair"]))
         app.buttons["server.unpair"].tap()
         let alert = app.alerts.firstMatch
         XCTAssertTrue(alert.waitForExistence(timeout: 5), "no confirmation")
@@ -94,7 +110,9 @@ final class ServerTabUITests: XCTestCase {
         // While a backup runs, Activity's Now card has Pause and Stop; Stop asks first.
         app.openTab("Library")
         let notBackedUp = app.gridItems("Not backed up")
-        if notBackedUp.firstMatch.waitForExistence(timeout: 15), notBackedUp.count > 2 {
+        // (Only without an offer to free up space in the accessory, which can sit over the Back Up button.)
+        if notBackedUp.firstMatch.waitForExistence(timeout: 15), notBackedUp.count > 2,
+           !app.buttons["accessory.action"].exists {
             app.buttons["select.start"].tap()
             notBackedUp.allElementsBoundByIndex.last?.tap()
             app.buttons["compact.selected"].tap()

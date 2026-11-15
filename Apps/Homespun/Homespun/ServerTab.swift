@@ -24,7 +24,8 @@ struct ServerTab: View {
     @State private var confirmingSwitch = false
     @State private var askingScope = false
     @State private var locked: PremiumFeature?
-    @AppStorage("server.lastSeen") private var lastSeen: Double = 0
+    /// When the server last answered, for "Last seen" while it can't be reached.
+    @AppStorage("serverLastSeen") private var lastSeen: Double = 0
 
     var body: some View {
         let settings = model.settings
@@ -148,6 +149,9 @@ struct ServerTab: View {
         }
         .refreshable { await refresh() }
         .task(id: settings.serverStatus == .reachable) { await load() }
+        .onChange(of: settings.serverStatus, initial: true) { _, status in
+            if status == .reachable { lastSeen = Date().timeIntervalSince1970 }
+        }
         .alert("Unpair from \(server.name)?", isPresented: $confirmingUnpair) {
             Button("Cancel", role: .cancel) {}
             Button("Unpair", role: .destructive) { unpair() }
@@ -336,7 +340,6 @@ struct ServerTab: View {
             if model.settings.serverStatus == .unknown { await model.settings.refreshServerInfo() }
             return
         }
-        lastSeen = Date().timeIntervalSince1970
         let wantsCloud = model.premium.isUnlocked
         async let storage = try? client.storage()
         async let report = try? client.setup()

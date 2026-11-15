@@ -201,22 +201,22 @@ private struct NowCard: View {
                 .accessibilityValue("\(done) of \(items.count)")
                 .accessibilityIdentifier("activity.now")
                 Spacer(minLength: 4)
-                GlassEffectContainer {
-                    HStack(spacing: 4) {
-                        if job.isPaused {
-                            Button { job.resume() } label: { Label("Continue", systemImage: "play.fill") }
-                                .accessibilityIdentifier("activity.resume")
-                        } else {
-                            Button { job.pause() } label: { Label("Pause", systemImage: "pause.fill") }
-                                .accessibilityIdentifier("activity.pause")
-                        }
-                        Button { confirmingStop = true } label: { Label("Stop", systemImage: "stop.fill") }
-                            .accessibilityIdentifier("activity.stop")
+                // One glass capsule holding both controls.
+                HStack(spacing: 0) {
+                    if job.isPaused {
+                        Button { job.resume() } label: { control("Continue", "play.fill") }
+                            .accessibilityIdentifier("activity.resume")
+                    } else {
+                        Button { job.pause() } label: { control("Pause", "pause.fill") }
+                            .accessibilityIdentifier("activity.pause")
                     }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.glass)
-                    .tint(Theme.label)
+                    Button { confirmingStop = true } label: { control("Stop", "stop.fill") }
+                        .accessibilityIdentifier("activity.stop")
                 }
+                .buttonStyle(.borderless)
+                .foregroundStyle(Theme.label)
+                .padding(.horizontal, 4)
+                .glassEffect(.regular.interactive(), in: .capsule)
             }
             ProgressView(value: fraction).tint(Theme.accent).accessibilityHidden(true)
             if let line = detailLine(items: items, done: done) {
@@ -234,6 +234,15 @@ private struct NowCard: View {
         } message: {
             Text("Items already backed up stay backed up.")
         }
+    }
+
+    /// An icon-only control with a 44 pt target.
+    private func control(_ title: String, _ symbol: String) -> some View {
+        Label { Text(title) } icon: {
+            Image(systemName: symbol).font(.body.weight(.semibold)).frame(width: 44, height: 44)
+        }
+        .labelStyle(.iconOnly)
+        .contentShape(Rectangle())
     }
 
     /// "About 2 min left · 1.4 GB → 0.3 GB".

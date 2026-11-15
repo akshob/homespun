@@ -14,7 +14,8 @@ final class PremiumUITests: XCTestCase {
         server.lifetime = .keepAlways
         add(server)
         let link = app.buttons["automatic.premium"]
-        XCTAssertTrue(link.waitForExistence(timeout: 10) || app.scrollTo(link), "automatic mode isn't offered")
+        _ = link.waitForExistence(timeout: 5)
+        XCTAssertTrue(app.reveal(link), "automatic mode isn't offered")
         link.tap()
         let seeAll = app.buttons["premium.seeAll"]
         XCTAssertTrue(seeAll.waitForExistence(timeout: 10), "no sheet about the locked feature")
