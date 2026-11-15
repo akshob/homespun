@@ -63,7 +63,7 @@ struct ItemViewer: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(ids, id: \.self) { id in
-                    ItemPage(asset: model.library.library.asset(id), isCurrent: id == shown, label: spokenLabel(id)) { zoomed in
+                    ItemViewerPage(asset: model.library.library.asset(id), isCurrent: id == shown, label: spokenLabel(id)) { zoomed in
                         if id == shown { self.zoomed = zoomed }
                     }
                     .containerRelativeFrame([.horizontal, .vertical])
@@ -282,7 +282,7 @@ struct ItemStateLine: View {
 
 /// One item in the viewer: a zoomable photo or Live Photo, or a video. The page on screen loads
 /// at full size; its neighbours at about screen size.
-struct ItemPage: View {
+struct ItemViewerPage: View {
     let asset: PHAsset?
     let isCurrent: Bool
     let label: String
