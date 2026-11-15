@@ -22,15 +22,16 @@ final class ServerModeUITests: XCTestCase {
 
         // A paired iPhone can make a code for another device.
         app.openTab("Server")
-        app.buttons["settings.addDevice"].tap()
+        app.buttons["server.more"].tap()
+        app.buttons["Add Device"].tap()
         XCTAssertTrue(app.staticTexts["addDevice.code"].waitForExistence(timeout: 15), "no code for another device")
         attach(app, "Add another device")
-        app.navigationBars["Add another device"].buttons.firstMatch.tap()
+        app.navigationBars["Add Device"].buttons.firstMatch.tap()
         // It shows where this iPhone's originals go on the server.
         app.buttons["settings.originals"].tap()
         XCTAssertTrue(app.staticTexts["originals.deviceFolder"].waitForExistence(timeout: 15), "no originals folder")
         attach(app, "Originals folder")
-        app.navigationBars["Originals folder"].buttons.firstMatch.tap()
+        app.navigationBars["Originals Folder"].buttons.firstMatch.tap()
         app.openTab("Library")
 
         attach(app, "Grid")

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 
-/// Finds compact copies made elsewhere through Settings, against a server that imported their
+/// Finds compact copies made elsewhere through Server › Existing Library, against a server that imported their
 /// originals (`homespun-test/e2e-copies.sh` sets it up). Needs `HOMESPUN_SERVER`,
 /// `HOMESPUN_PAIRING_CODE` and `HOMESPUN_COPIES` (how many copies the library holds), passed
 /// to `xcodebuild test` with a `TEST_RUNNER_` prefix.
@@ -19,7 +19,10 @@ final class CopyFinderUITests: XCTestCase {
         XCTAssertEqual(app.gridItems("Original at home").count, 0)
 
         app.openTab("Server")
+        app.buttons["settings.existingLibrary"].tap()
         app.buttons["settings.findCopies"].tap()
+        // The sheet explains first, then finds.
+        XCTAssertTrue(app.buttons["copies.start"].waitForExistence(timeout: 10), "no explanation")
         app.buttons["copies.start"].tap()
         let found = app.descendants(matching: .any)["copies.found"]
         XCTAssertTrue(found.waitForExistence(timeout: 120), "the check didn't finish")
@@ -30,9 +33,11 @@ final class CopyFinderUITests: XCTestCase {
         XCTAssertTrue(found.label.contains("Compact copies found, \(expected)") || found.label.contains("\(expected)"),
                       "found: \(found.label)")
 
-        // Checking again finds nothing new to look at.
+        // Running it again checks only what changed.
         app.buttons["copies.start"].tap()
         XCTAssertTrue(found.waitForExistence(timeout: 60))
+        app.buttons["copies.done"].tap()
+        XCTAssertTrue(app.buttons["settings.findCopies"].waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
         app.openTab("Library")
         let backedUp = app.gridItems("Original at home")
