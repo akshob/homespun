@@ -160,17 +160,24 @@ extension XCUIApplication {
 
     /// Swipes up on a scrolling list or page, newest first (a sheet's, before what's under it). On the
     /// open iPhone Duo the screen's middle is the fold, so swiping the lists themselves is what works.
-    @MainActor func swipeUpInContent(attempt: Int = 0) {
+    /// The scrolling lists on screen, hittable ones first. On the open Duo, lists can report not
+    /// hittable although swiping them works (and the app-wide swipe does nothing there).
+    @MainActor var contentLists: [XCUIElement] {
         let lists = (collectionViews.allElementsBoundByIndex + scrollViews.allElementsBoundByIndex
-                     + tables.allElementsBoundByIndex).filter { $0.exists && $0.isHittable && $0.frame.height > 200 }
+                     + tables.allElementsBoundByIndex).filter { $0.exists && $0.frame.height > 200 }
+        let hittable = lists.filter(\.isHittable)
+        return hittable.isEmpty ? lists.filter { frame.intersects($0.frame) } : hittable
+    }
+
+    @MainActor func swipeUpInContent(attempt: Int = 0) {
+        let lists = contentLists
         guard !lists.isEmpty else { return swipeUp() }
         lists.reversed()[attempt % lists.count].swipeUp()
     }
 
     /// Swipes down on a scrolling list a little, newest first (the counterpart of `swipeUpInContent`).
     @MainActor func swipeDownInContent(near element: XCUIElement? = nil) {
-        let lists = (collectionViews.allElementsBoundByIndex + scrollViews.allElementsBoundByIndex
-                     + tables.allElementsBoundByIndex).filter { $0.exists && $0.isHittable && $0.frame.height > 200 }
+        let lists = contentLists
         let x = element.map { $0.frame.midX }
         guard let list = lists.last(where: { list in x.map { list.frame.minX <= $0 && $0 <= list.frame.maxX } ?? true })
         else { return swipeDown() }
@@ -179,10 +186,17 @@ extension XCUIApplication {
     }
 
     /// Scrolls the current screen until the element exists (lists load rows lazily).
+    /// If the swipes carried the list past it (rows above the top are unloaded too), it scrolls back.
     @MainActor @discardableResult func scrollTo(_ element: XCUIElement, swipes: Int = 8) -> Bool {
         var left = swipes
         while !element.exists, left > 0 {
             swipeUpInContent(attempt: swipes - left)
+            left -= 1
+        }
+        if element.waitForExistence(timeout: 2) { return true }
+        left = swipes
+        while !element.exists, left > 0 {
+            if let list = contentLists.last { list.swipeDown() } else { swipeDown() }
             left -= 1
         }
         return element.waitForExistence(timeout: 2)

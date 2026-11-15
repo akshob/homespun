@@ -112,6 +112,6 @@ import Testing
     #expect(state.cells(.readyToFree).map(\.id) == ["copy-kept"])
     #expect(state.cells(.atHome).map(\.id) == ["copy-removed"])
     #expect(state.cells(.needsAttention).map(\.id) == ["broken"])
-    #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 1, 1, 1])
+    #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 0, 1, 1, 1])
 }
 

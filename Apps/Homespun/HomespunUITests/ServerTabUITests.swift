@@ -8,7 +8,7 @@ extension XCUIApplication {
         guard scrollTo(element) else { return false }
         let limit = frame.maxY - 220
         var tries = 4
-        while element.frame.maxY > limit, tries > 0 {
+        while element.exists, element.frame.maxY > limit, tries > 0 {
             swipeUpInContent()
             tries -= 1
         }
@@ -18,7 +18,7 @@ extension XCUIApplication {
             swipeDownInContent(near: element)
             tries -= 1
         }
-        return element.exists
+        return element.exists || scrollTo(element)
     }
 
     /// Opens a tab (`openTab` scrolls up first if the tab bar was minimised).
