@@ -1363,6 +1363,76 @@ final class ProblemLog: @unchecked Sendable {
 /// with `compact` makes the copy, and only then do cloud copies start. A recent item removed on the
 /// phone goes to the server's trash, comes back if it's backed up again, and is deleted after 30 days.
 /// Anything with a compact copy stays when the phone removes it.
+/// Edits all upload files with the same names (`FullSizeRender.heic`), so trashed items must never
+/// share a path: each keeps its own bytes, restoring never overwrites, and a trashed file someone
+/// deleted by hand is uploaded again.
+@Test(.enabled(if: ffmpegAvailable)) func trashedItemsWithTheSameFileNamesKeepTheirOwnFiles() async throws {
+    let fixture = try await Fixture(originals: "originals")
+    let media = try await Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let date = Date(timeIntervalSince1970: 1_714_592_096)
+        let original = try Data(contentsOf: media.photo)
+        var files: [URL] = []
+        for index in 0..<3 {
+            let url = fixture.directory.appendingPathComponent("same-\(index).jpg")
+            try (original + Data(repeating: UInt8(index + 1), count: 64)).write(to: url)
+            files.append(url)
+        }
+        let photos = try files.map { try descriptor(.photo, $0, name: "IMG_0001.JPG") }
+        func register(_ index: Int) async throws -> ServerAPI.AssetStatus {
+            let request = ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: date, resources: [photos[index]], compact: false)
+            return try await client.call("/api/v1/assets", .post, token: token, json: request).decode(ServerAPI.AssetStatus.self)
+        }
+        func backUp(_ index: Int) async throws {
+            _ = try await register(index)
+            _ = try await fixture.upload(client, token: token, asset: photos[index].sha256, role: .photo, file: files[index])
+            try await fixture.server.drainJobs()
+        }
+        func remove(_ index: Int) async throws -> ServerAPI.AssetState {
+            try await client.call("/api/v1/assets/\(photos[index].sha256)/removed", .post, token: token)
+                .decode(ServerAPI.AssetStatus.self).state
+        }
+        let originals = fixture.directory.appendingPathComponent("originals")
+        let month = "Test iPhone/2024/05"
+        func sha(_ path: String) throws -> String { try Fingerprint.digests(of: originals.appendingPathComponent(path)).sha256 }
+        func trashed(_ index: Int) -> String { ".trash/\(photos[index].sha256)/\(month)/IMG_0001.JPG" }
+
+        // A is backed up and cleaned up (not while its disk is away); B then gets the free name and
+        // is cleaned up too.
+        try await backUp(0)
+        let away = fixture.directory.appendingPathComponent("away")
+        try FileManager.default.moveItem(at: originals, to: away)
+        let refused = try await client.call("/api/v1/assets/\(photos[0].sha256)/removed", .post, token: token)
+        #expect(refused.status == .serviceUnavailable)
+        try FileManager.default.moveItem(at: away, to: originals)
+        #expect(try await remove(0) == .trashed)
+        try await backUp(1)
+        #expect(try sha("\(month)/IMG_0001.JPG") == photos[1].sha256)
+        #expect(try await remove(1) == .trashed)
+        #expect(try sha(trashed(0)) == photos[0].sha256 && sha(trashed(1)) == photos[1].sha256)
+
+        // Both recovered: A gets its name back, B can't take it and gets a name of its own.
+        #expect(try await register(0).state == .stored)
+        #expect(try await register(1).state == .stored)
+        #expect(try sha("\(month)/IMG_0001.JPG") == photos[0].sha256)
+        let renamed = "\(month)/IMG_0001_\(photos[1].sha256.prefix(12)).JPG"
+        #expect(try sha(renamed) == photos[1].sha256)
+        let trash = originals.appendingPathComponent(".trash")
+        #expect((try? FileManager.default.contentsOfDirectory(atPath: trash.path))?.isEmpty ?? true)
+
+        // C's trashed file was deleted by hand: backing it up again asks for the file once more.
+        try await backUp(2)
+        #expect(try await remove(2) == .trashed)
+        try FileManager.default.removeItem(at: trash.appendingPathComponent(photos[2].sha256))
+        let again = try await register(2)
+        #expect(again.state == .receiving && again.resources.first?.state == .missing)
+        _ = try await fixture.upload(client, token: token, asset: photos[2].sha256, role: .photo, file: files[2])
+        try await fixture.server.drainJobs()
+        let status = try await client.call("/api/v1/assets/\(photos[2].sha256)", token: token).decode(ServerAPI.AssetStatus.self)
+        #expect(status.state == .stored)
+    }
+}
+
 @Test(.enabled(if: ffmpegAvailable)) func recentItemsWaitForTheirCompactCopyAndCleanedUpOnesGoToTheTrash() async throws {
     let fixture = try await Fixture(originals: "originals")
     let media = try await Media.make(in: fixture.directory)
@@ -1378,7 +1448,7 @@ final class ProblemLog: @unchecked Sendable {
         }
         let originals = fixture.directory.appendingPathComponent("originals")
         let kept = originals.appendingPathComponent("Test iPhone/2024/05/IMG_0001.JPG")
-        let trashed = originals.appendingPathComponent(".trash/Test iPhone/2024/05/IMG_0001.JPG")
+        let trashed = originals.appendingPathComponent(".trash/\(photo.sha256)/Test iPhone/2024/05/IMG_0001.JPG")
 
         // Backed up, no compact copy, no job.
         #expect(try await register(compact: false).state == .receiving)

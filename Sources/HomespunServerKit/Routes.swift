@@ -244,18 +244,17 @@ struct Routes: Sendable {
             }
         }
         let assetID = body.assetID!
+        // Backed up again after it was removed on the phone (recovered from Recently Deleted): its
+        // files come out of the trash first, so files that changed meanwhile are handled like any edit.
+        if mode == .files, let trashed = try await catalog.asset(assetID) {
+            let inTrash = try await catalog.resources(assetID).contains { $0.storedPath.flatMap(Trash.restored) != nil }
+            if trashed.state == .trashed || inTrash { try await trash.restore(trashed) }
+        }
         let outcome = try await catalog.register(body, assetID: assetID, device: context.deviceID ?? "",
                                                  initialState: mode == .files ? .receiving : .verifying)
         guard var asset = try await catalog.asset(assetID) else { throw HTTPError(.internalServerError) }
         if mode == .files {
             try await catalog.setHoldCompact(assetID, !body.wantsCompact)
-            // Backed up again after it was removed on the phone (recovered from Recently Deleted).
-            let inTrash = try await catalog.resources(assetID).contains { $0.storedPath.flatMap(Trash.restored) != nil }
-            if asset.state == .trashed || inTrash {
-                try await trash.restore(asset)
-                // Resources that changed meanwhile still have to be uploaded.
-                if outcome == .changed { try await catalog.setState(assetID, .receiving) }
-            }
             asset = try await catalog.asset(assetID) ?? asset
         }
         let resources = try await catalog.resources(assetID)

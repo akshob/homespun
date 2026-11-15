@@ -620,6 +620,14 @@ public actor Catalog {
         log(date == nil ? "asset_restored" : "asset_trashed", asset: assetID)
     }
 
+    /// A trashed file that's gone: the phone uploads it again.
+    func forgetStored(_ assetID: String, role: Role) throws {
+        try database.execute(
+            "UPDATE resources SET stored_path = NULL, state = 'missing', received_bytes = 0, verified_at = NULL WHERE asset_id = ? AND role = ?",
+            [.text(assetID), .text(role.rawValue)])
+        log("resource_missing", asset: assetID, detail: role.rawValue + " (not in the trash any more)")
+    }
+
     /// Trashed assets whose time is up.
     func trashed(before date: String) throws -> [String] {
         try database.query("SELECT id FROM assets WHERE state = 'trashed' AND trashed_at < ?", [.text(date)])
