@@ -39,7 +39,8 @@ private final class Ownership: @unchecked Sendable {
 @MainActor @Test func premiumFollowsWhatTheAccountOwns() async {
     #expect(Premium(ownBuild: true, owned: { false }, listens: false).isUnlocked)
     let store = Ownership()
-    let premium = Premium(ownBuild: false, owned: { store.lock.withLock { store.owned } }, listens: false)
+    let premium = Premium(ownBuild: false, owned: { store.lock.withLock { store.owned } },
+                          testFlightWithoutProduct: { false }, listens: false)
     await premium.refresh()
     #expect(!premium.isUnlocked)
     store.lock.withLock { store.owned = true }    // bought, restored, or shared by the family
@@ -48,4 +49,15 @@ private final class Ownership: @unchecked Sendable {
     store.lock.withLock { store.owned = false }   // refunded, or Family Sharing ended
     await premium.refresh()
     #expect(!premium.isUnlocked)
+}
+
+@MainActor @Test func testFlightUnlocksPremiumUntilTheProductExists() async {
+    let beta = Premium(ownBuild: false, owned: { false }, testFlightWithoutProduct: { true }, listens: false)
+    await beta.refresh()
+    #expect(beta.isUnlocked && beta.beta && !beta.purchased)
+    // Debug builds are already unlocked and never ask the App Store.
+    let own = Premium(ownBuild: true, owned: { false }, testFlightWithoutProduct: { Issue.record("asked"); return true },
+                      listens: false)
+    await own.refresh()
+    #expect(own.isUnlocked && !own.beta)
 }

@@ -56,6 +56,9 @@ struct PremiumView: View {
             } else if premium.ownBuild {
                 InlineNotice(tone: .success, title: "Unlocked in this build of the app")
                     .accessibilityIdentifier("premium.unlocked")
+            } else if premium.beta {
+                InlineNotice(tone: .success, title: "Unlocked while you test with TestFlight")
+                    .accessibilityIdentifier("premium.unlocked")
             }
             if let message {
                 InlineNotice(tone: .info, title: message).accessibilityIdentifier("premium.message")

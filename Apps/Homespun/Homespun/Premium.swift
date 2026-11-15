@@ -5,7 +5,8 @@ import StoreKit
 
 /// Homespun Premium: a one-time purchase that unlocks automatic mode and cloud copies.
 /// Everything else, including freeing up space, stays free. Builds made in Xcode (Debug)
-/// are unlocked, so the owner's own builds never need a purchase.
+/// are unlocked, so the owner's own builds never need a purchase, and so are TestFlight builds
+/// while the App Store has no Premium product yet.
 @MainActor @Observable
 final class Premium {
     nonisolated static let productID = "photos.homespun.app.premium"
@@ -16,11 +17,16 @@ final class Premium {
     private(set) var loading = false
     /// A Debug build: unlocked without a purchase (`-premiumLocked YES` locks it for testing).
     let ownBuild: Bool
+    /// A TestFlight build while the App Store has no Premium product: unlocked so testers can try
+    /// everything. Once the product exists, TestFlight shows the real (free, sandbox) purchase.
+    private(set) var beta = false
+    private var betaChecked = false
+    private let testFlightWithoutProduct: @Sendable () async -> Bool
     private var updates: Task<Void, Never>?
     /// Whether this Apple Account owns Premium (the App Store, or a stand-in in tests).
     private let owned: @Sendable () async -> Bool
 
-    var isUnlocked: Bool { purchased || ownBuild }
+    var isUnlocked: Bool { purchased || ownBuild || beta }
 
     static var isOwnBuild: Bool {
         #if DEBUG
@@ -31,9 +37,11 @@ final class Premium {
     }
 
     init(ownBuild: Bool = Premium.isOwnBuild, owned: @escaping @Sendable () async -> Bool = Premium.ownedOnAppStore,
+         testFlightWithoutProduct: @escaping @Sendable () async -> Bool = Premium.isTestFlightWithoutProduct,
          listens: Bool = true) {
         self.ownBuild = ownBuild
         self.owned = owned
+        self.testFlightWithoutProduct = testFlightWithoutProduct
         guard listens else { return }
         // Purchases made elsewhere (another device, Family Sharing, Ask to Buy) and refunds.
         updates = Task { [weak self] in
@@ -52,7 +60,21 @@ final class Premium {
         await refresh()
     }
 
-    func refresh() async { purchased = await owned() }
+    func refresh() async {
+        purchased = await owned()
+        // Once per launch: a product added meanwhile shows up the next time the app starts.
+        if !ownBuild, !betaChecked {
+            betaChecked = true
+            beta = await testFlightWithoutProduct()
+        }
+    }
+
+    /// TestFlight (StoreKit's sandbox) and the App Store doesn't know the Premium product. A failed
+    /// request counts as "has a product", so a network problem never unlocks anything.
+    nonisolated static func isTestFlightWithoutProduct() async -> Bool {
+        guard case .verified(let app)? = try? await AppTransaction.shared, app.environment == .sandbox else { return false }
+        return (try? await Product.products(for: [productID]))?.isEmpty ?? false
+    }
 
     /// A verified, unrevoked Premium transaction (bought, restored, or shared with the family).
     nonisolated static func ownedOnAppStore() async -> Bool {

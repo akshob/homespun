@@ -31,6 +31,8 @@ targets:
         # Plain HTTP only to servers on the home network (IP addresses and .local names).
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # Only the system's encryption (HTTPS, Keychain): exempt, so uploads skip the export question.
+        ITSAppUsesNonExemptEncryption: false
         # One window: on iPhone Duo the scene resizes as it folds; a second window adds nothing.
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false

@@ -110,6 +110,8 @@ takes at most 10 originals until you confirm the copies look right.
 - **Cloud copies**: the server's connectors (see below).
 
 Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
+TestFlight builds are unlocked too while the App Store has no Premium product; once it exists,
+TestFlight shows the real purchase (free in the sandbox).
 `Homespun.storekit` is a local App Store for trying the purchase on the simulator.
 
 On a Mac with Xcode:
@@ -120,6 +122,20 @@ cd Apps/Homespun && xcodegen generate && open Homespun.xcodeproj
 ```
 
 The Xcode project is generated from `project.yml` and not committed.
+
+### TestFlight
+
+With an Apple Developer Program membership: register the bundle ID `photos.homespun.app`, create
+the app in App Store Connect, create an App Store Connect API key (Admin) and save it as
+`~/.appstoreconnect/private_keys/AuthKey_<key id>.p8`, put your team in `Local.xcconfig`, then:
+
+```bash
+ASC_KEY_ID=<key id> ASC_ISSUER_ID=<issuer id> Apps/Homespun/scripts/testflight.sh
+```
+
+It archives a Release build (signed in the cloud with the key), uploads it, and gives it a new
+build number. Add yourself to an internal testing group in App Store Connect › TestFlight and
+install it with the TestFlight app; internal builds need no review.
 
 ### Running it on your iPhone
 
