@@ -30,6 +30,7 @@ Homespun always works with a server you run; the app doesn't compress on its own
 | `HomespunTestSupport` | iOS, macOS | Synthetic photos, Live Photos, and videos for tests (not product code) |
 | `HomespunServerKit`, `homespun-server` | Linux, macOS | Hummingbird server: SQLite catalog, pairing, verified uploads, compression jobs, Immich originals |
 | `Apps/Homespun` | iOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package |
+| `services/telemetry` | Cloudflare Workers | Opt-in analytics, MetricKit reports and problem reports from the app (`telemetry.homespun.photos`) |
 
 Live Photo motion is compressed only with AVFoundation (on the phone or a Mac).
 FFmpeg breaks the links between the still and its motion, so iOS no longer treats
@@ -387,6 +388,25 @@ videos Homespun doesn't know yet and asks the server about them (`POST /api/v1/c
 only hashes leave the phone). Copies it finds count as backed up and join the Homespun album;
 an original still on the phone whose copy is found becomes ready to free up. It also restores
 what Homespun knew after reinstalling the app or moving to a new iPhone.
+
+## Analytics and problem reports
+
+The app asks once, during setup (after pairing, before Photos access), whether to share
+anonymous analytics; it can be changed in Server › Share Analytics, which can also delete what
+was shared. Sharing sends rounded counts and short codes (setup steps, pairing, the server's kind
+and version, run sizes, features, error codes) and MetricKit's metrics and crash/hang diagnostics;
+never photos, file names, places, or the server's name or address. Each opt-in gets a new random
+install ID. Report a Problem (Server › Help and About) sends what the person writes, an optional
+email, and diagnostics they can read first; it works without sharing analytics. If Homespun quit
+while on screen, the next launch offers a report once (iOS shows nothing itself when an app
+crashes). Debug builds send only to an endpoint given with `-telemetryEndpoint <url>`.
+
+Everything goes to `services/telemetry`, a Cloudflare Worker (D1, R2, Email Routing for reports);
+see its README for the API, tests, deployment and queries. `PrivacyInfo.xcprivacy` declares the
+collected data. App Store Connect › App Privacy answers to match: Data Not Linked to You: Product
+Interaction, Device ID, Crash Data, Performance Data, Other Diagnostic Data (Analytics; crash and
+diagnostics also App Functionality); Data Linked to You: Email Address and Customer Support (App
+Functionality), only from problem reports; no tracking.
 
 ## Website
 
