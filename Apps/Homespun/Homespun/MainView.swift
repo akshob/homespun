@@ -125,7 +125,8 @@ private struct StatusAccessoryModifier: ViewModifier {
     func body(content: Content) -> some View {
         let status = StatusAccessory.Status(model: model)
         if #available(iOS 26.1, *) {
-            content.tabViewBottomAccessory(isEnabled: status != nil) {
+            // Hidden while an item is open full screen: it would cover the item's toolbar.
+            content.tabViewBottomAccessory(isEnabled: status != nil && !ItemPresence.shared.isOpen) {
                 StatusAccessory(status: status, open: open)
             }
         } else {
