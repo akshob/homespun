@@ -20,6 +20,11 @@ struct SetupScaffold<Content: View, Actions: View>: View {
     @ViewBuilder var content: () -> Content
     @ViewBuilder var actions: () -> Actions
     @AccessibilityFocusState private var titleFocused: Bool
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// At accessibility sizes the actions scroll with the page, after its content, so a bar of
+    /// stacked buttons doesn't cover half the screen (DESIGN §7: everything scrolls).
+    private var actionsInline: Bool { typeSize.isAccessibilitySize }
 
     var body: some View {
         ScrollView {
@@ -47,6 +52,9 @@ struct SetupScaffold<Content: View, Actions: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 content()
+                if actionsInline {
+                    VStack(spacing: 6) { actions() }.padding(.top, 16)
+                }
             }
             .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
             .padding(.horizontal, 20)
@@ -55,10 +63,12 @@ struct SetupScaffold<Content: View, Actions: View>: View {
         .scrollBounceBehavior(.basedOnSize)
         .background(Theme.background)
         .safeAreaBar(edge: .bottom) {
-            VStack(spacing: 6) { actions() }
-                .padding(.horizontal, 20)
-                .padding(.top, 8)
-                .padding(.bottom, 4)
+            if !actionsInline {
+                VStack(spacing: 6) { actions() }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+            }
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -154,6 +164,7 @@ struct PromiseRow: View {
                 .font(.title3)
                 .foregroundStyle(Theme.accent)
                 .frame(width: 28)
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.title3).foregroundStyle(Theme.label)
@@ -199,6 +210,7 @@ struct SetupRow: View {
                     .font(.title3)
                     .foregroundStyle(Theme.accent)
                     .frame(width: 30)
+                    .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                     .accessibilityHidden(true)
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -306,16 +318,21 @@ struct RecommendationCard: View {
     var id: String
     let perform: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
+        // At accessibility sizes the symbol sits above the name, so the words get the whole width.
+        let header = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 12))
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
+                header {
                     Image(systemName: symbol)
                         .font(.title2)
                         .foregroundStyle(Theme.accent)
                         .frame(width: 48, height: 48)
                         .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                     VStack(alignment: .leading, spacing: 2) {
                         ViewThatFits(in: .horizontal) {
                             HStack {
@@ -325,7 +342,7 @@ struct RecommendationCard: View {
                             }
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(name).font(.title3)
-                                if let chip { RecommendedChip(text: chip) }
+                                if let chip { RecommendedChip(text: chip).fixedSize() }
                             }
                         }
                         Text(summary).font(.footnote).foregroundStyle(Theme.secondaryLabel)

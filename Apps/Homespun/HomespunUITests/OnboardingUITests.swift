@@ -150,7 +150,9 @@ final class OnboardingUITests: XCTestCase {
         // Set Up Later: the Library, unpaired, with its Set Up notice.
         app.buttons["setup.later"].tap()
         XCTAssertTrue(app.tabBars.buttons["Library"].waitForExistence(timeout: 15), "no Library after Set Up Later")
-        XCTAssertTrue(app.buttons["connect.open"].waitForExistence(timeout: 10), "no Set Up notice")
+        // With Photos access, the grid has a Set Up notice; without it, the Library asks for access first.
+        let notice = app.buttons["connect.open"], askAccess = app.buttons["Allow Access to Photos"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 10) || askAccess.exists, "no Set Up notice")
         attach("6.11 Set Up Later")
     }
 

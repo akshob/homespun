@@ -99,6 +99,7 @@ struct QuestionPage: View {
                         .font(.title3)
                         .foregroundStyle(Theme.accent)
                         .frame(width: 30)
+                        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(answer.title).font(.body).foregroundStyle(Theme.label)
@@ -111,6 +112,7 @@ struct QuestionPage: View {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                         .font(.title3)
                         .foregroundStyle(selected ? Theme.accent : Theme.tertiaryLabel)
+                        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                         .accessibilityHidden(true)
                 }
                 .padding(.horizontal, 16)

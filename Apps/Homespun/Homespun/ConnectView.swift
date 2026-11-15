@@ -315,7 +315,8 @@ struct OtherWaysPage: View {
                              id: "other.address") { flow.go(.address) }
             }
             if let error { FieldError(text: error).padding(.horizontal, 16) }
-            Text("All three need a code from the server. On a Mac you can also click Allow instead.")
+            Text("\(PairingScanner.isSupported ? "All three need" : "Both need") a code from the server. On a Mac you can "
+                 + "also click Allow instead.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
             SetupCard {
                 SetupLinkRow(symbol: "plus", title: "Set Up a Server", detail: "Tell Homespun what you have at home.",
