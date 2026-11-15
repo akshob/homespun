@@ -1,0 +1,9 @@
+# Only Package.swift, Package.resolved, Sources, and Tests (target folders SwiftPM checks) are used.
+*
+!Package.swift
+!Package.resolved
+!Sources/
+!Tests/
+Tests/**/Fixtures/**
+!Tests/**/Fixtures/README.md
+**/.DS_Store

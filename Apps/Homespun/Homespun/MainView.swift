@@ -8,6 +8,8 @@ import SwiftUI
 struct RootView: View {
     let model: AppModel
     @Environment(\.scenePhase) private var scenePhase
+    /// A session starts when the app comes back from the background (or launches).
+    @State private var wasBackground = true
 
     var body: some View {
         @Bindable var settings = model.settings
@@ -26,7 +28,10 @@ struct RootView: View {
         .onChange(of: model.job.isRunning) { _, running in
             if !running { Task { await model.library.jobFinished() } }
         }
-        .onChange(of: settings.onboardingComplete) { _, _ in Task { await model.library.refresh() } }
+        .onChange(of: settings.onboardingComplete) { _, done in
+            if done { model.library.journey.setupFinished() }
+            Task { await model.library.refresh() }
+        }
         .onChange(of: model.copyFinder.checked) { _, _ in
             Task {
                 await model.library.refreshGrid()
@@ -39,11 +44,17 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                if wasBackground {
+                    wasBackground = false
+                    model.library.journey.sessionStarted()
+                }
                 Task {
                     await model.library.refresh()
                     await model.library.runAutomatic()
                 }
-            case .background: model.automatic.schedule()
+            case .background:
+                wasBackground = true
+                model.automatic.schedule()
             default: break
             }
         }
@@ -57,13 +68,17 @@ struct MainTabView: View {
     let model: AppModel
     @SceneStorage("tab") private var tab = TabID.library
     @State private var sheet: Sheet?
+    @State private var libraryRoute = LibraryRoute.overview
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     enum Sheet: Identifiable {
         case freeUp(only: Set<String>?)
+        case backUp([String])
         case pair(PairingLink)
         var id: String {
             switch self {
             case .freeUp: "freeUp"
+            case .backUp: "backUp"
             case .pair(let link): link.id
             }
         }
@@ -73,11 +88,11 @@ struct MainTabView: View {
         @Bindable var settings = model.settings
         TabView(selection: $tab) {
             Tab("Library", systemImage: "photo.on.rectangle", value: TabID.library) {
-                LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) })
+                LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) }, route: $libraryRoute)
             }
             .accessibilityIdentifier("tab.library")
             Tab("Activity", systemImage: "clock.arrow.circlepath", value: TabID.activity) {
-                ActivityTab(model: model, freeUp: { sheet = .freeUp(only: nil) })
+                ActivityTab(model: model, freeUp: { openFreeUp(nil) })
             }
             .accessibilityIdentifier("tab.activity")
             Tab("Server", systemImage: "server.rack", value: TabID.server) {
@@ -91,6 +106,8 @@ struct MainTabView: View {
             switch sheet {
             case .freeUp(let scope):
                 FreeUpSpaceSheet(controller: model.library, scope: scope)
+            case .backUp(let ids):
+                BackUpSheet(controller: model.library, identifiers: ids) {}
             case .pair(let link):
                 PairConfirmView(settings: model.settings, link: link) {}
             }
@@ -101,11 +118,24 @@ struct MainTabView: View {
         .task { await model.library.start() }
     }
 
+    /// On the open iPhone Duo, Free Up Space is the Library's right page; elsewhere a sheet.
+    private func openFreeUp(_ scope: Set<String>?) {
+        if sizeClass == .regular {
+            tab = .library
+            libraryRoute = .review(scope)
+        } else {
+            sheet = .freeUp(only: scope)
+        }
+    }
+
     private func openFromAccessory(_ action: StatusAccessory.Action) {
         switch action {
-        case .freeUp(let scope): sheet = .freeUp(only: scope)
+        case .freeUp(let scope): openFreeUp(scope)
         case .activity: tab = .activity
         case .server: tab = .server
+        case .backUpNew:
+            let ids = model.library.newItems
+            if ids.count > 200 { sheet = .backUp(ids) } else { model.library.backUp(ids) }
         }
     }
 
@@ -123,81 +153,64 @@ private struct StatusAccessoryModifier: ViewModifier {
     let open: (StatusAccessory.Action) -> Void
 
     func body(content: Content) -> some View {
-        let status = StatusAccessory.Status(model: model)
+        let status = AccessoryLadder.pick(model.library.accessoryInputs)
         if #available(iOS 26.1, *) {
-            content.tabViewBottomAccessory(isEnabled: status != nil) {
-                StatusAccessory(status: status, open: open)
+            // Hidden while an item is open full screen: it would cover the item's toolbar.
+            content.tabViewBottomAccessory(isEnabled: status != nil && !ItemPresence.shared.isOpen) {
+                StatusAccessory(status: status, serverName: model.library.serverName, open: open)
             }
         } else {
-            content.tabViewBottomAccessory { StatusAccessory(status: status, open: open) }
+            content.tabViewBottomAccessory {
+                StatusAccessory(status: status, serverName: model.library.serverName, open: open)
+            }
         }
     }
 }
 
-/// One line about what matters now, above the tab bar: a running backup, then a problem, then
-/// space ready to free up (DESIGN 02·1.1).
+/// One line about what matters now, above the tab bar: the highest state on the ladder
+/// (DESIGN 02·1.1, §16.4).
 struct StatusAccessory: View {
-    enum Action { case freeUp(Set<String>?), activity, server }
+    enum Action { case freeUp(Set<String>?), activity, server, backUpNew }
 
-    enum Status: Equatable {
-        case backingUp(done: Int, total: Int, current: String?)
-        case removing(String)
-        case unreachable(String)
-        case finished(count: Int, bytes: Int, originals: Set<String>)
-        case ready(count: Int, bytes: Int)
-
-        @MainActor init?(model: AppModel) {
-            let job = model.job, library = model.library
-            if case .checking(let message) = library.removal {
-                self = .removing(message)
-            } else if job.isRunning {
-                let open = job.items.filter { $0.state == .waiting || $0.isWorking }
-                let total = job.items.count
-                self = .backingUp(done: total - open.count, total: total,
-                                  current: job.items.first(where: \.isWorking)?.name)
-            } else if model.settings.isPaired, case .unreachable = model.settings.serverStatus {
-                self = .unreachable(model.settings.server?.name ?? "your server")
-            } else if let finished = library.finished {
-                self = .finished(count: finished.count, bytes: finished.bytes, originals: Set(finished.originals))
-            } else if library.ready.count > 0 {
-                self = .ready(count: library.ready.count, bytes: library.ready.bytes)
-            } else {
-                return nil
-            }
-        }
-    }
-
-    let status: Status?
+    let status: AccessoryLadder.State?
+    var serverName = "your computer"
     let open: (Action) -> Void
     @Environment(\.tabViewBottomAccessoryPlacement) private var placement
 
     var body: some View {
-        Group {
-            switch status {
-            case .backingUp(let done, let total, let current):
-                row(icon: "arrow.up.circle", title: "Backing up \(min(done + 1, total)) of \(total)",
-                    detail: current, button: nil) { open(.activity) }
-                    .accessibilityIdentifier("job.progress")
-            case .removing(let message):
-                row(icon: "checkmark.shield", title: "Freeing up space", detail: message, button: nil) {}
-                    .accessibilityIdentifier("remove.progress")
-            case .unreachable(let name):
-                row(icon: "wifi.exclamationmark", title: "Can't reach \(name)",
-                    detail: "Is this iPhone on your home Wi‑Fi?", button: "Retry") { open(.server) }
-            case .finished(let count, let bytes, let originals):
-                row(icon: "checkmark.circle.fill", title: "\(count) backed up",
-                    detail: "Free up \(LibraryController.bytes(bytes)) on this iPhone", button: "Free Up") {
-                    open(.freeUp(originals))
-                }
-                .accessibilityIdentifier("offer.free")
-            case .ready(let count, let bytes):
-                row(icon: "circle.lefthalf.filled", title: "\(count) ready to free up",
-                    detail: "\(LibraryController.bytes(bytes)) on this iPhone", button: "Free Up") { open(.freeUp(nil)) }
-                    .accessibilityIdentifier("remove.originals")
-            case nil:
-                Label("Everything's up to date", systemImage: "checkmark.circle").font(.subheadline)
-                    .foregroundStyle(Theme.secondaryLabel).frame(maxWidth: .infinity)
+        switch status {
+        case .unreachable(let name):
+            row(icon: "wifi.exclamationmark", title: "Can't reach \(name)",
+                detail: "Is this iPhone on your home Wi‑Fi?", button: "Retry") { open(.server) }
+                .accessibilityIdentifier("accessory.unreachable")
+        case .removing(let message):
+            row(icon: "checkmark.shield", title: "Freeing up space", detail: message, button: nil) {}
+                .accessibilityIdentifier("remove.progress")
+        case .backingUp(let done, let total, let current):
+            row(icon: "arrow.up.circle", title: "Backing up \(min(done + 1, total)) of \(total)",
+                detail: current, button: nil) { open(.activity) }
+                .accessibilityIdentifier("job.progress")
+        case .almostFull(let bytes):
+            row(icon: "exclamationmark.triangle.fill", title: "This iPhone is almost full",
+                detail: "Free up \(LibraryController.bytes(bytes)) here", button: "Free Up") { open(.freeUp(nil)) }
+                .accessibilityIdentifier("accessory.almostFull")
+        case .finished(let count, let bytes, let originals):
+            row(icon: "checkmark.circle.fill", title: "\(count) backed up",
+                detail: "Free up \(LibraryController.bytes(bytes)) on this iPhone", button: "Free Up") {
+                open(.freeUp(originals))
             }
+            .accessibilityIdentifier("offer.free")
+        case .ready(let count, let bytes):
+            row(icon: "circle.lefthalf.filled", title: "\(count) ready to free up",
+                detail: "\(LibraryController.bytes(bytes)) on this iPhone", button: "Free Up") { open(.freeUp(nil)) }
+                .accessibilityIdentifier("remove.originals")
+        case .newPhotos(let count):
+            row(icon: "photo.badge.plus", title: "\(count.formatted()) new since your last backup",
+                detail: nil, button: "Back Up") { open(.backUpNew) }
+                .accessibilityIdentifier("accessory.new")
+        case nil:
+            Label("Everything's up to date", systemImage: "checkmark.circle").font(.subheadline)
+                .foregroundStyle(Theme.secondaryLabel).frame(maxWidth: .infinity)
         }
     }
 
@@ -216,6 +229,7 @@ struct StatusAccessory: View {
             if let button {
                 Button(button, action: action).buttonStyle(.glassProminent).tint(Theme.accent).controlSize(.small)
                     .accessibilityIdentifier("accessory.action")
+                    .popoverTip(button == "Free Up" ? FreeUpTip(server: serverName) : nil)
             }
         }
         .padding(.horizontal, 14)

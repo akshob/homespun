@@ -18,6 +18,9 @@ struct SetupChecks {
     var platform = HostPlatform.current()
     /// Linux control group of this process; a systemd service runs in `.../homespun.service`.
     var controlGroup = (try? String(contentsOfFile: "/proc/self/cgroup", encoding: .utf8)) ?? ""
+    var hardware = HostPlatform.hardware
+    /// In a container, Bonjour goes through the host's D-Bus, mounted at this path.
+    var systemBus = "/var/run/dbus/system_bus_socket"
     static var executable: String { HostPlatform.serverCommand }
 
     func report() async -> ServerSetup.Report {
@@ -76,6 +79,11 @@ struct SetupChecks {
                          detail: "The server listens only on this computer.",
                          fix: ["\(Self.executable) install-service --data \(configuration.dataDirectory.path)"])
         }
+        if hardware.kind == .container, !FileManager.default.fileExists(atPath: systemBus) {
+            return Check(id: "discovery", title: "Home network", status: .warning,
+                         detail: "The app can't find this server by itself. Give the container the volume "
+                            + "/var/run/dbus:/var/run/dbus:ro and host networking, as in compose.yaml.")
+        }
         if ServiceAdvertiser.tool != nil {
             return Check(id: "discovery", title: "Home network", status: .ok,
                          detail: "The app can find \"\(configuration.name)\" on your network.")
@@ -111,7 +119,11 @@ struct SetupChecks {
     }
 
     func service() -> Check {
-        runsAsService
+        if hardware.kind == .container {
+            return Check(id: "service", title: "Starts automatically", status: .ok,
+                         detail: "Runs in a container, which Docker starts with the NAS (restart: unless-stopped).")
+        }
+        return runsAsService
             ? Check(id: "service", title: "Starts automatically", status: .ok,
                     detail: platform.os == .macOS ? "Runs as a LaunchAgent." : "Runs as a systemd service.")
             : Check(id: "service", title: "Starts automatically", status: .warning,

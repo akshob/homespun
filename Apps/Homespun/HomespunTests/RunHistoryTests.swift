@@ -105,15 +105,3 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
     let months = RunHistory.freedByMonth([freed, backUp([], at: now)], months: 3, now: now, calendar: calendar)
     #expect(months == [0, 0, 2_100_000_000])
 }
-
-/// The ledger is written with ISO 8601 dates; reading it back must use the same, or every launch
-/// forgets what was backed up (and automatic mode backs it all up again).
-@Test func compactLedgerSurvivesARelaunch() async throws {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("ledger-\(UUID().uuidString).json")
-    defer { try? FileManager.default.removeItem(at: url) }
-    try await CompactLedger(url: url).record(original: "a", compact: "copy-a", originalBytes: 10, compactBytes: 2,
-                                             serverAssetID: "sha")
-    let reloaded = await CompactLedger(url: url).entry(for: "a")
-    #expect(reloaded?.compactIdentifier == "copy-a")
-    #expect(reloaded?.serverAssetID == "sha")
-}

@@ -7,9 +7,33 @@ import SwiftUI
 /// whether the compact copies look right.
 struct FreeUpSpaceSheet: View {
     let controller: LibraryController
-    /// Only these originals (from a selection or a finished backup), or everything ready.
     let scope: Set<String>?
     @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            FreeUpSpacePanel(controller: controller, scope: scope) { dismiss() }
+                .navigationTitle("Free Up Space")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    if !controller.isRemoving {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close", systemImage: "xmark") { dismiss() }.accessibilityIdentifier("remove.close")
+                        }
+                    }
+                }
+        }
+        .presentationDetents(controller.settings.trialConfirmed ? [.medium, .large] : [.large])
+        .interactiveDismissDisabled(controller.isRemoving)
+    }
+}
+
+/// The review, the check, and the result; a sheet on iPhone, the right page of the open book on Duo.
+struct FreeUpSpacePanel: View {
+    let controller: LibraryController
+    /// Only these originals (from a selection or a finished backup), or everything ready.
+    let scope: Set<String>?
+    var close: () -> Void
     @Environment(\.openURL) private var openURL
     @State private var somethingWrong = false
 
@@ -29,32 +53,19 @@ struct FreeUpSpaceSheet: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    switch controller.removal {
-                    case .idle: review
-                    case .checking(let message): checking(message)
-                    case .done(let report): result(report)
-                    }
-                }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .background(Theme.background)
-            .navigationTitle("Free Up Space")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                if !controller.isRemoving {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Close", systemImage: "xmark") { dismiss() }.accessibilityIdentifier("remove.close")
-                    }
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                switch controller.removal {
+                case .idle: review
+                case .checking(let message): checking(message)
+                case .done(let report): result(report)
                 }
             }
-            .safeAreaInset(edge: .bottom) { actions.padding(.horizontal, 24).padding(.bottom, 12) }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .presentationDetents(trial ? [.large] : [.medium, .large])
-        .interactiveDismissDisabled(controller.isRemoving)
+        .background(Theme.background)
+        .safeAreaBar(edge: .bottom) { actions.padding(.horizontal, 24).padding(.bottom, 12) }
     }
 
     // MARK: Review
@@ -171,7 +182,7 @@ struct FreeUpSpaceSheet: View {
                     .primaryAction()
                     .disabled(controller.job.isRunning)
                     .accessibilityIdentifier("remove.confirm")
-                    Button("Not Now") { dismiss() }.accessibilityIdentifier("remove.notNow")
+                    Button("Not Now", action: close).accessibilityIdentifier("remove.notNow")
                 }
             }
         case .checking:
@@ -181,7 +192,7 @@ struct FreeUpSpaceSheet: View {
                 VStack(spacing: 8) {
                     Button {
                         settings.trialConfirmed = true
-                        dismiss()
+                        close()
                     } label: {
                         Text("They Look Right").frame(maxWidth: .infinity)
                     }
@@ -190,7 +201,7 @@ struct FreeUpSpaceSheet: View {
                     Button("Something's Wrong") { somethingWrong = true }
                 }
             } else {
-                Button { dismiss() } label: { Text("Done").frame(maxWidth: .infinity) }
+                Button(action: close) { Text("Done").frame(maxWidth: .infinity) }
                     .primaryAction()
                     .accessibilityIdentifier("remove.dismiss")
             }

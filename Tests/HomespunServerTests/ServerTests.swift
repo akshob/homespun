@@ -1230,6 +1230,26 @@ final class ProblemLog: @unchecked Sendable {
     #expect(Routes.byteRange("bytes=0-1,4-5", size: 100) == nil && Routes.byteRange("items=0-1", size: 100) == nil)
 }
 
+@Test func selfCheckInADockerContainer() async throws {
+    let fixture = try await Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let server = fixture.server
+    var configuration = server.configuration
+    configuration.host = "0.0.0.0"
+    var checks = SetupChecks(configuration: configuration, storage: server.storage, immichState: server.immichState,
+                             catalog: server.catalog)
+    checks.hardware = .init(kind: .container, model: nil)
+    // Docker, not systemd, starts it; and Bonjour needs the host's D-Bus mounted in.
+    #expect(checks.service().status == .ok && checks.service().fix.isEmpty)
+    checks.systemBus = fixture.directory.appendingPathComponent("no-bus").path
+    #expect(checks.discovery().status == .warning && checks.discovery().detail.contains("/var/run/dbus"))
+    checks.systemBus = server.storage.catalog.path
+    #expect(!checks.discovery().detail.contains("/var/run/dbus"))
+    // The app shows commands to run in the container, not the path inside it.
+    let command = "docker exec homespun homespun-server"
+    #expect(HostPlatform.serverCommand(environment: ["HOMESPUN_COMMAND": command]) == command)
+}
+
 @Test(.enabled(if: ffmpegAvailable)) func originalsStreamAndDevicesAreListed() async throws {
     let fixture = try await Fixture()
     let media = try await Media.make(in: fixture.directory)
@@ -1270,4 +1290,18 @@ final class ProblemLog: @unchecked Sendable {
         #expect(try await client.call("/api/v1/info", token: second.token).status == .unauthorized)
         #expect(try await client.call("/api/v1/devices/\(other.id)", .delete, token: token).status == .notFound)
     }
+}
+
+/// The installed server's saved settings never leak into a run with its own data folder: a test
+/// server must not put originals in the real server's originals folder.
+@Test func savedSettingsApplyOnlyToTheInstalledServer() {
+    let saved = "HOMESPUN_DATA=/Volumes/Homespun/.homespun\nHOMESPUN_ORIGINALS=/Volumes/Homespun\nHOMESPUN_PORT=8787\n"
+    // `pair` with nothing given finds the installed server.
+    #expect(ServerCommand.applying(saved: saved, to: [:])
+            == ["HOMESPUN_DATA": "/Volumes/Homespun/.homespun", "HOMESPUN_ORIGINALS": "/Volumes/Homespun", "HOMESPUN_PORT": "8787"])
+    // The same data folder (written differently) is the installed server; what's given wins.
+    #expect(ServerCommand.applying(saved: saved, to: ["HOMESPUN_DATA": "/Volumes/Homespun/.homespun/", "HOMESPUN_PORT": "9000"])
+            == ["HOMESPUN_DATA": "/Volumes/Homespun/.homespun/", "HOMESPUN_ORIGINALS": "/Volumes/Homespun", "HOMESPUN_PORT": "9000"])
+    // Another data folder is another server: nothing is borrowed.
+    #expect(ServerCommand.applying(saved: saved, to: ["HOMESPUN_DATA": "/tmp/test-data"]) == ["HOMESPUN_DATA": "/tmp/test-data"])
 }

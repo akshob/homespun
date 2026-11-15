@@ -30,6 +30,7 @@ final class LibraryController {
     let automatic: AutomaticMode
     let copyFinder: CopyFinder
     let library = LibraryModel()
+    let journey = JourneyLog()
     private(set) var access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     /// The grid has its first contents, so it can open scrolled to the newest items.
     private(set) var loaded = false
@@ -38,6 +39,10 @@ final class LibraryController {
     /// What the last Back Up finished with, until it's freed or dismissed (02·2.3).
     private(set) var finished: Ready?
     private(set) var removal = Removal.idle
+    /// Free space on this iPhone, for "almost full" (T15).
+    private(set) var phoneFreeBytes: Int?
+    /// Not backed up and created since the last backup, with the days since (T19).
+    private(set) var newSinceBackup: (count: Int, days: Int)?
     /// Originals from the current Back Up; offered once the run finishes.
     private var batch = Set<String>()
     private var started = false
@@ -104,6 +109,49 @@ final class LibraryController {
     func refreshGrid() async {
         library.update(ledger: await job.ledger.snapshot(), job: job.states)
         loaded = true
+        let state = library.state
+        TipState.notBackedUp = state.count(.notBackedUp)
+        TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
+        TipState.automaticOn = automatic.enabled
+        TipState.trialDone = settings.trialConfirmed
+        refreshNewSinceBackup()
+    }
+
+    /// The accessory's inputs, for the ladder (DESIGN §16.4).
+    var accessoryInputs: AccessoryLadder.Inputs {
+        var inputs = AccessoryLadder.Inputs()
+        inputs.paired = settings.isPaired
+        if case .unreachable = settings.serverStatus { inputs.unreachable = serverName }
+        if case .checking(let message) = removal { inputs.removing = message }
+        if job.isRunning {
+            let open = job.items.filter { $0.state == .waiting || $0.isWorking }.count
+            inputs.backingUp = (job.items.count - open, job.items.count, job.items.first(where: \.isWorking)?.name)
+        }
+        if let finished { inputs.finished = (finished.count, finished.bytes, Set(finished.originals)) }
+        inputs.readyCount = ready.count
+        inputs.readyBytes = ready.bytes
+        inputs.phoneFreeBytes = phoneFreeBytes
+        inputs.newSinceBackup = automatic.enabled ? nil : newSinceBackup
+        return inputs
+    }
+
+    private func refreshNewSinceBackup() {
+        let values = try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        phoneFreeBytes = values?.volumeAvailableCapacityForImportantUsage.map(Int.init)
+        guard let last = journey.lastBackup else {
+            newSinceBackup = nil
+            return
+        }
+        let created = library.identifiers(createdAfter: last)
+        let count = library.state.cells.reduce(0) { $0 + ($1.canCompact && created.contains($1.id) ? 1 : 0) }
+        newSinceBackup = (count, Calendar.current.dateComponents([.day], from: last, to: .now).day ?? 0)
+    }
+
+    /// The items not backed up that were created since the last backup.
+    var newItems: [String] {
+        guard let last = journey.lastBackup else { return [] }
+        let created = library.identifiers(createdAfter: last)
+        return library.state.cells.filter { $0.canCompact && created.contains($0.id) }.map(\.id)
     }
 
     func refreshReady() async {
@@ -129,7 +177,9 @@ final class LibraryController {
         finished = nil
         if case .done = removal { removal = .idle }
         batch.formUnion(identifiers)
+        journey.backupStarted(manual: true)
         job.enqueue(identifiers)
+        LongRun.shared.begin(items: identifiers.count, server: serverName)
         Announce.say("Backing up \(identifiers.count) \(identifiers.count == 1 ? "item" : "items").")
     }
 
@@ -139,6 +189,7 @@ final class LibraryController {
     }
 
     func jobFinished() async {
+        journey.backupFinished()
         await refreshReady()
         await refreshGrid()
         let backedUp = batch
@@ -166,6 +217,7 @@ final class LibraryController {
     /// Checks each original with the server again, then iOS asks; `only` limits it to these.
     func freeUp(only scope: Set<String>? = nil) async {
         guard !isRemoving, let remover = settings.remover(ledger: job.ledger) else { return }
+        journey.used(.freeUp)
         removal = .checking("Checking with \(serverName)")
         Announce.say("Checking with \(serverName).")
         let report: OriginalRemover.Report

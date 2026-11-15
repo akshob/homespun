@@ -22,9 +22,20 @@ actor CompactLedger {
 
     init(url: URL = CompactLedger.defaultURL) {
         self.url = url
+        entries = Self.load(url)
+    }
+
+    /// Reads the ledger. A file that can't be read is set aside, never overwritten: it's the only
+    /// record of which originals are on the server and where their compact copies are.
+    private static func load(_ url: URL) -> [String: Entry] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        entries = (try? decoder.decode([String: Entry].self, from: Data(contentsOf: url))) ?? [:]
+        if let entries = try? decoder.decode([String: Entry].self, from: data) { return entries }
+        let aside = url.deletingPathExtension()
+            .appendingPathExtension("unreadable-\(Int(Date().timeIntervalSince1970)).json")
+        try? FileManager.default.moveItem(at: url, to: aside)
+        return [:]
     }
 
     func snapshot() -> [String: Entry] { entries }

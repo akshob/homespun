@@ -4,27 +4,51 @@ import XCTest
 /// Steps shared by the workflow tests: pair, select in the Library, back up, and check Activity.
 extension XCUIApplication {
     /// Pairs with the server at `address` using a code from `homespun-server pair`, unless
-    /// already paired, and waits until it's connected.
+    /// already paired, and waits until it's connected. Goes through setup from the Library's Set Up
+    /// notice: Connect Another Way › Enter Address and Code, then Ready, and Not Now on the estimate.
     @MainActor func pair(address: String, code: String, file: StaticString = #filePath, line: UInt = #line) {
         let connect = buttons["connect.open"]
         if connect.waitForExistence(timeout: 5) {
             connect.tap()
-            let start = buttons["onboarding.start"]
-            if start.waitForExistence(timeout: 5) { start.tap() }
+            // The Local Network promises come once, then setup looks on the Wi‑Fi. Every page after
+            // that (still looking, a server found, the question) offers Connect Another Way.
+            let promises = buttons["network.continue"]
+            if promises.waitForExistence(timeout: 5) { promises.tap() }
+            let other = buttons["setup.otherWays"].firstMatch
+            let enter = buttons["other.address"]
+            let deadline = Date().addingTimeInterval(30)
+            while !enter.exists, Date() < deadline {
+                if other.exists, other.isHittable { other.tap() }
+                _ = enter.waitForExistence(timeout: 2)
+            }
+            XCTAssertTrue(enter.exists, "no way to enter an address", file: file, line: line)
+            enter.tap()
             let addressField = textFields["server.address"]
             XCTAssertTrue(addressField.waitForExistence(timeout: 10), file: file, line: line)
-            addressField.tap()
-            addressField.typeText(address)
-            buttons["server.continue"].tap()
-            let codeField = textFields["pair.code"]
-            XCTAssertTrue(codeField.waitForExistence(timeout: 15), "no pairing screen for \(address)", file: file, line: line)
-            codeField.tap()
-            codeField.typeText(code)
+            // Both fields are kept from an earlier try (L6); empty ones show their placeholders.
+            func replace(_ field: XCUIElement, placeholder: String, with text: String) {
+                // At the end of what's there, so deleting removes all of it.
+                field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
+                if let kept = field.value as? String, !kept.isEmpty, kept != placeholder {
+                    field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: kept.count))
+                }
+                field.typeText(text)
+            }
+            replace(addressField, placeholder: "192.168.1.20:8787", with: address)
+            replace(textFields["pair.code"], placeholder: "XXXX-XXXX", with: code)
             buttons["pair.submit"].tap()
-            let next = buttons["onboarding.continue"]
-            if next.waitForExistence(timeout: 30) { next.tap() }
-            let done = buttons["photos.done"]
-            if done.waitForExistence(timeout: 10) { done.tap() }
+            let ready = buttons["ready.continue"]
+            XCTAssertTrue(ready.waitForExistence(timeout: 30), "not paired with \(address)", file: file, line: line)
+            ready.tap()
+            let photos = buttons["photos.continue"]
+            if photos.waitForExistence(timeout: 3) {
+                photos.tap()
+                let full = XCUIApplication(bundleIdentifier: "com.apple.springboard").buttons["Allow Full Access"].firstMatch
+                if full.waitForExistence(timeout: 10) { full.tap() }
+            }
+            // The estimate before the first task; with nothing to back up, setup ends by itself.
+            let notNow = buttons["estimate.notNow"]
+            if notNow.waitForExistence(timeout: 30) { notNow.tap() }
         }
         XCTAssertTrue(isConnected(), "server not reachable", file: file, line: line)
     }

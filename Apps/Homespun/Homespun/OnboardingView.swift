@@ -3,156 +3,265 @@ import HomespunCore
 import Photos
 import SwiftUI
 
-/// The first-run flow: what Homespun does, connecting a server (and checking it), and Photos access.
+/// The first run (DESIGN 01, §5): find or set up the home computer, pair, see where originals go,
+/// then the first task on the 10 newest. Also opened as a sheet from the Library's Set Up notice
+/// (it starts at looking, and closes itself when done) and from the Server tab (pairing only).
 struct OnboardingView: View {
-    enum Step: Hashable { case connect, check, photos }
-
     @Bindable var settings: AppSettings
-    /// Starts the first backup once setup is done.
+    /// Runs the first task once paired.
     var library: LibraryController?
-    @State private var path: [Step] = []
-    /// Closes setup when it was opened from the Library (a sheet); a no-op on first run.
+    /// Starts somewhere other than Welcome (or Looking, from the Library).
+    var start: SetupFlow.Page?
+    /// Ends once paired and checked, with no first task (the Server tab's Connect).
+    var pairOnly = false
+    /// Opens Compare for an original (01·1.13); the Compare button is hidden while this is nil.
+    var onCompare: ((String) -> Void)?
+    /// Called when pairing finishes in `pairOnly` mode.
+    var onPaired: (() -> Void)?
+    @State private var flow: SetupFlow?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        NavigationStack(path: $path) {
-            WelcomeView { path.append(settings.isPaired ? .check : .connect) }
-                .navigationDestination(for: Step.self) { step in
-                    switch step {
-                    case .connect:
-                        ConnectView(settings: settings) { path.append(.check) }
-                            .toolbar {
-                                ToolbarItem(placement: .confirmationAction) {
-                                    Button("Skip") { path.append(.photos) }.accessibilityIdentifier("onboarding.skip")
-                                }
-                            }
-                    case .check:
-                        ServerCheckView(settings: settings) { path.append(.photos) }
-                    case .photos:
-                        PhotosAccessView {
-                            settings.onboardingComplete = true
-                            dismiss()
+        Group {
+            if let flow {
+                SetupNavigation(flow: flow, onCompare: onCompare)
+            } else {
+                Theme.background.ignoresSafeArea()
+            }
+        }
+        .onAppear {
+            guard flow == nil else { return }
+            let flow = SetupFlow(settings: settings, library: library, start: start, pairOnly: pairOnly)
+            flow.onPaired = onPaired
+            // A sheet closes itself; on first run, RootView shows the tabs once setup is complete.
+            flow.close = { [weak flow, dismiss] in if flow?.isSheet == true { dismiss() } }
+            self.flow = flow
+        }
+    }
+}
+
+/// The stack of setup pages.
+private struct SetupNavigation: View {
+    @Bindable var flow: SetupFlow
+    var onCompare: ((String) -> Void)?
+
+    var body: some View {
+        NavigationStack(path: $flow.path) {
+            page(flow.root)
+                .toolbar {
+                    if flow.isSheet {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close", systemImage: "xmark") { flow.close() }
+                                .accessibilityIdentifier("setup.close")
                         }
                     }
                 }
+                .navigationDestination(for: SetupFlow.Page.self) { page($0) }
         }
-        .sheet(item: $settings.pendingLink) { link in
-            PairConfirmView(settings: settings, link: link) {
-                if path.last != .check { path.append(.check) }
-            }
+        .tint(Theme.accent)
+        .sheet(item: $flow.link) { link in
+            PairConfirmView(settings: flow.settings, link: link) { flow.paired(.link) }
+        }
+        // On first run setup handles links opened from other apps; as a sheet, the tabs below do.
+        .modifier(PendingLinkSheet(settings: flow.settings, active: !flow.isSheet) { flow.paired(.link) })
+        .onDisappear { flow.stop() }
+    }
+
+    @ViewBuilder private func page(_ page: SetupFlow.Page) -> some View {
+        switch page {
+        case .welcome: WelcomePage(flow: flow)
+        case .welcomeBack: WelcomeBackPage(flow: flow)
+        case .localNetwork: LocalNetworkPage(flow: flow)
+        case .looking: LookingPage(flow: flow)
+        case .found: FoundPage(flow: flow)
+        case .question: QuestionPage(flow: flow)
+        case .recommendation: AnswerRecommendationPage(flow: flow)
+        case .notShowingUp: NotShowingUpPage(flow: flow)
+        case .noneOfThese: NoneOfThesePage(flow: flow)
+        case .splitRole: SplitRolePage(flow: flow)
+        case .guide(.mac): MacGuidePage(flow: flow)
+        case .guide(.linux): LinuxGuidePage(flow: flow)
+        case .guide(.nas): NASBrandsPage(flow: flow)
+        case .terminalSteps(let os): TerminalStepsPage(flow: flow, os: os)
+        case .nasGuide(let brand): NASGuidePage(flow: flow, brand: brand)
+        case .waiting(let machine): WaitingPage(flow: flow, machine: machine)
+        case .pair(let target): PairPage(flow: flow, target: target)
+        case .otherWays: OtherWaysPage(flow: flow)
+        case .address: AddressPage(flow: flow)
+        case .ready: ReadyPage(flow: flow)
+        case .immich: ImmichIntroPage(flow: flow)
+        case .immichConnect: ImmichConnectPage(flow: flow)
+        case .immichExclude: ImmichExcludePage(flow: flow)
+        case .immichReady: ImmichReadyPage(flow: flow)
+        case .photos: PhotosPromisesPage(flow: flow)
+        case .limitedPhotos: LimitedPhotosPage(flow: flow)
+        case .estimate: EstimatePage(flow: flow)
+        case .firstTask: FirstTaskPage(flow: flow)
+        case .receipt: ReceiptPage(flow: flow, onCompare: onCompare)
+        case .freed: FreedPage(flow: flow)
         }
     }
 }
 
-struct WelcomeView: View {
-    var start: () -> Void
+/// A pairing link opened while setup is up (01·6.5).
+private struct PendingLinkSheet: ViewModifier {
+    @Bindable var settings: AppSettings
+    let active: Bool
+    var paired: () -> Void
+
+    func body(content: Content) -> some View {
+        if active {
+            content.sheet(item: $settings.pendingLink) { link in
+                PairConfirmView(settings: settings, link: link, paired: paired)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+// MARK: 1.1 Welcome
+
+private struct WelcomePage: View {
+    let flow: SetupFlow
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Image(systemName: "photo.stack.fill").font(.system(size: 56)).foregroundStyle(.tint)
-                    Text("Homespun").font(.largeTitle.bold())
-                    Text("Originals at home. Compact copies on your iPhone.").font(.title3).foregroundStyle(.secondary)
-                }
-                Feature(icon: "server.rack", title: "Originals stay full quality",
-                        text: "They're kept on your own computer, a Mac or Linux server, or found in your Immich library.")
-                Feature(icon: "photo.on.rectangle.angled", title: "Compact copies in Photos",
-                        text: "About a fifth of the size, with the same date, place, favorites, and Live Photo motion.")
-                Feature(icon: "checkmark.shield", title: "Nothing is lost",
-                        text: "An original leaves this iPhone only after your server proves it has an identical copy, "
-                            + "and iOS always asks you first.")
+        SetupScaffold(art: AnyView(ThreadArt().padding(.top, 32)), title: "Free up space. Keep every original.") {
+            Text("Homespun keeps your full-quality photos and videos on your own computer, and leaves copies a fifth "
+                 + "of the size in Photos.")
+                .font(.body).foregroundStyle(Theme.secondaryLabel)
+            Label {
+                Text("An original is removed from this iPhone only after your computer proves it has an exact copy.")
+                    .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+            } icon: {
+                Image(systemName: "checkmark.shield").foregroundStyle(Theme.accent)
             }
-            .padding(24)
-        }
-        .safeAreaInset(edge: .bottom) {
-            Button(action: start) {
-                Text("Get started").frame(maxWidth: .infinity)
+        } actions: {
+            Text("First, Homespun looks for its server on this Wi‑Fi.")
+                .font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
+            PrimaryButton(title: "Find My Home Computer", systemImage: "wifi", id: "setup.find") { flow.findHomeComputer() }
+            SecondaryPair {
+                SecondaryButton(title: "Use a Pairing Code", id: "setup.code") { flow.go(.otherWays) }
+            } second: {
+                SecondaryButton(title: "Set Up Later", id: "setup.later") { flow.finish() }
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .padding(24)
-            .background(.bar)
-            .accessibilityIdentifier("onboarding.start")
         }
+        .task { await flow.checkReturning() }
     }
+}
 
-    private struct Feature: View {
-        let icon: String, title: String, text: String
+// MARK: 6.9 Welcome back
 
-        var body: some View {
-            HStack(alignment: .top, spacing: 16) {
-                Image(systemName: icon).font(.title2).foregroundStyle(.tint).frame(width: 36)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title).font(.headline)
-                    Text(text).foregroundStyle(.secondary)
-                }
+private struct WelcomeBackPage: View {
+    let flow: SetupFlow
+    @State private var error: String?
+
+    var body: some View {
+        SetupScaffold(art: AnyView(ThreadArt(end: "macmini").padding(.top, 32)), title: "Welcome back",
+                      subtitle: "This iPhone was paired with \(flow.returningName) before. Reconnect to keep using the "
+                        + "originals already there.") {
+            if let error { FieldError(text: error) }
+        } actions: {
+            PrimaryButton(title: "Reconnect to \(flow.returningName)", id: "setup.reconnect") {
+                do { try flow.reconnect() } catch { self.error = error.localizedDescription }
             }
+            SecondaryButton(title: "Set Up Something Else", id: "setup.somethingElse") { flow.setUpSomethingElse() }
         }
     }
 }
 
-/// Explains why Homespun needs full Photos access, then asks.
-struct PhotosAccessView: View {
-    var done: () -> Void
+// MARK: 1.2 Local Network: three promises
+
+private struct LocalNetworkPage: View {
+    let flow: SetupFlow
+
+    var body: some View {
+        SetupScaffold(symbol: "wifi", title: "Homespun looks on your Wi‑Fi") {
+            VStack(alignment: .leading, spacing: 20) {
+                PromiseRow(symbol: "house", title: "Only on this Wi‑Fi",
+                           detail: "It looks for a computer running Homespun Server, nothing else.")
+                PromiseRow(symbol: "lock.fill", title: "Only with your own computer",
+                           detail: "No account and no cloud. Nothing goes anywhere else.")
+                PromiseRow(symbol: "hand.raised", title: "Nothing pairs until you choose",
+                           detail: "Finding a computer doesn't connect to it.")
+            }
+            .padding(.top, 8)
+        } actions: {
+            ConsequenceLine(text: "Turn it off any time in Settings › Apps › Homespun › Local Network.")
+            PrimaryButton(title: "Continue", id: "network.continue") { flow.localNetworkContinue() }
+        }
+        .navigationBarBackButtonHidden()
+    }
+}
+
+// MARK: 1.8 Photos: three promises
+
+struct PhotosPromisesPage: View {
+    let flow: SetupFlow
+    @State private var asking = false
+
+    var body: some View {
+        SetupScaffold(symbol: "photo.on.rectangle", title: "Homespun reads your library") {
+            VStack(alignment: .leading, spacing: 20) {
+                PromiseRow(symbol: "iphone", title: "On this iPhone first",
+                           detail: "It shows what you could free up before anything is uploaded.")
+                PromiseRow(symbol: "house",
+                           title: flow.settings.isPaired ? "Originals go only to \(flow.serverName)"
+                            : "Originals go only to your own computer",
+                           detail: "Never to Homespun's developer, never to a cloud.")
+                PromiseRow(symbol: "checkmark.shield", title: "Nothing is removed without you",
+                           detail: "iOS asks before any original is deleted.")
+            }
+            .padding(.top, 8)
+        } actions: {
+            ConsequenceLine(text: "Change it any time in Settings › Apps › Homespun › Photos.")
+            PrimaryButton(title: "Continue", busy: asking, id: "photos.continue") {
+                asking = true
+                Task {
+                    let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+                    asking = false
+                    flow.afterPhotos(status)
+                }
+            }
+        }
+        .navigationBarBackButtonHidden()
+    }
+}
+
+// MARK: 6.8 Limited photo access
+
+private struct LimitedPhotosPage: View {
+    let flow: SetupFlow
     @State private var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Image(systemName: "photo.on.rectangle").font(.system(size: 48)).foregroundStyle(.tint)
-                Text("Allow access to your photos").font(.title.bold())
-                Text("Homespun reads the originals you choose, saves compact copies to a Homespun album, and removes "
-                     + "originals only when you ask. To do that, it needs Full Access.")
-                    .foregroundStyle(.secondary)
-                switch status {
-                case .limited:
-                    Text("With limited access, Homespun can't read originals or save copies. Choose Full Access in Settings.")
-                        .foregroundStyle(.orange)
-                case .denied, .restricted:
-                    Text("Access is off. You can turn it on in Settings.").foregroundStyle(.orange)
-                default:
-                    EmptyView()
-                }
+        SetupScaffold(symbol: "photo.on.rectangle", title: "Homespun needs all photos",
+                      subtitle: status == .limited
+                        ? "With limited access, Homespun can't read originals, show what you could free up, or free up "
+                            + "space for photos it can't see."
+                        : "Access to Photos is off, so Homespun can't read originals, show what you could free up, or "
+                            + "free up space.") {
+            EmptyView()
+        } actions: {
+            PrimaryButton(title: "Open Settings", id: "photos.settings") {
+                if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
             }
-            .padding(24)
+            SecondaryButton(title: "Continue Anyway", id: "photos.anyway") { flow.finish() }
         }
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 12) {
-                switch status {
-                case .notDetermined:
-                    Button {
-                        Task {
-                            status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-                            if status == .authorized { done() }
-                        }
-                    } label: { Text("Allow access").frame(maxWidth: .infinity) }
-                    .buttonStyle(.borderedProminent).controlSize(.large)
-                    .accessibilityIdentifier("photos.allow")
-                case .authorized:
-                    Button(action: done) { Text("Done").frame(maxWidth: .infinity) }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                        .accessibilityIdentifier("photos.done")
-                default:
-                    Button {
-                        if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
-                    } label: { Text("Open Settings").frame(maxWidth: .infinity) }
-                    .buttonStyle(.borderedProminent).controlSize(.large)
-                    Button("Continue without access", action: done)
-                }
-            }
-            .padding(24)
-            .background(.bar)
-        }
-        .navigationTitle("")
+        .navigationBarBackButtonHidden()
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            // Back from Settings with Full Access: carry on by itself (L6).
             status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            if status == .authorized, flow.current == .limitedPhotos { flow.go(.estimate) }
         }
     }
 }
 
-/// Confirms a pairing link opened from the Camera app or another app.
+// MARK: 6.5 Pairing link opened
+
+/// Confirms a pairing link opened from the Camera app or another app (01·6.5). Switching servers
+/// must be deliberate, because links can come from any app or web page.
 struct PairConfirmView: View {
     @Bindable var settings: AppSettings
     let link: PairingLink
@@ -160,47 +269,70 @@ struct PairConfirmView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var working = false
     @State private var error: String?
+    @State private var symbol = "server.rack"
+
+    /// The name comes from the link, so it can't be trusted to tell servers apart.
+    private var name: String { link.name ?? link.serverURL.host ?? "this server" }
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 20) {
-                Image(systemName: "server.rack").font(.system(size: 48)).foregroundStyle(.tint)
-                // The name comes from the link, so it can't be trusted to tell servers apart.
-                Text(replacing == nil ? "Pair with \(link.name ?? "this server")?" : "Switch to a different server?")
-                    .font(.title2.bold()).multilineTextAlignment(.center)
-                Text(link.serverURL.host.map { "\($0):\(link.serverURL.port ?? 8787)" } ?? link.serverURL.absoluteString)
-                    .font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
-                if let current = replacing {
-                    // Links can come from any app or web page; switching servers must be deliberate.
-                    Label {
-                        Text("This iPhone is paired with \(current). Pairing replaces it: new items go to this server, "
-                             + "and originals already on \(current) stay there. Only pair with a server you set up.")
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    }
-                    .font(.callout)
-                    .accessibilityIdentifier("pair.replaces")
-                }
-                if let error { Text(error).foregroundStyle(.red).multilineTextAlignment(.center) }
-                Spacer()
-                Button {
-                    Task { await pair() }
-                } label: {
-                    if working {
-                        ProgressView().frame(maxWidth: .infinity)
+            ScrollView {
+                VStack(spacing: 14) {
+                    Image(systemName: symbol).font(.system(size: 40)).foregroundStyle(Theme.accent)
+                        .accessibilityHidden(true)
+                    Text(replacing == nil ? "Pair with \(name)?" : "Switch to \(name)?")
+                        .font(.system(.title2, design: .serif, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                        .accessibilityAddTraits(.isHeader)
+                    Text(link.serverURL.host.map { "\($0):\(link.serverURL.port ?? 8787)" } ?? link.serverURL.absoluteString)
+                        .font(.callout.monospaced()).foregroundStyle(Theme.secondaryLabel)
+                    if let current = replacing {
+                        InlineNotice(tone: .warning, title: "This iPhone is paired with \(current)",
+                                     message: "Pairing replaces it: new items go to this server, and originals already on "
+                                        + "\(current) stay there. Only pair with a server you set up.")
+                            .accessibilityIdentifier("pair.replaces")
                     } else {
-                        Text(replacing.map { "Replace \($0)" } ?? "Pair").frame(maxWidth: .infinity)
+                        Text("Only pair with a server you set up.").foregroundStyle(Theme.secondaryLabel)
                     }
+                    if let error { FieldError(text: error) }
                 }
-                .buttonStyle(.borderedProminent).controlSize(.large)
-                .tint(replacing == nil ? nil : .red)
-                .disabled(working)
-                .accessibilityIdentifier("pair.confirm")
+                .padding(24)
+                .frame(maxWidth: .infinity)
             }
-            .padding(24)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .background(Theme.card)
+            .safeAreaBar(edge: .bottom) {
+                VStack(spacing: 8) {
+                    ConsequenceLine(text: "Pairs this iPhone with \(name). Nothing is uploaded until you choose; unpair "
+                                    + "any time in Server.")
+                    Button {
+                        Task { await pair() }
+                    } label: {
+                        BusyLabel(title: replacing.map { "Replace \($0)" } ?? "Pair", busy: working)
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.glassProminent).controlSize(.large)
+                    .tint(replacing == nil ? Theme.accent : Theme.red)
+                    .allowsHitTesting(!working)
+                    .accessibilityIdentifier("pair.confirm")
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", systemImage: "xmark") { dismiss() }.accessibilityIdentifier("pair.cancel")
+                }
+            }
         }
-        .presentationDetents(replacing == nil ? [.medium] : [.large])
+        .presentationDetents(replacing == nil ? [.medium, .large] : [.large])
+        .task {
+            var client = ServerClient(baseURL: link.serverURL)
+            client.timeout = 4
+            if let options = try? await client.pairingOptions() {
+                let server = SetupAdvisor.Server(id: name, os: options.platform?.os, kind: options.hardware?.kind)
+                symbol = server.symbol
+            }
+        }
     }
 
     /// The server this link would replace, if the iPhone is paired with a different one.
@@ -214,10 +346,11 @@ struct PairConfirmView: View {
         defer { working = false }
         do {
             try await settings.pair(link)
+            Announce.say("Paired with \(settings.server?.name ?? name).")
             dismiss()
             paired()
         } catch {
-            self.error = error.localizedDescription
+            self.error = PairingErrors.describe(error, address: link.serverURL.host ?? name)
         }
     }
 }

@@ -59,10 +59,7 @@ public enum ServerCommand {
         // Settings saved by install-service, so `pair` and `devices` find the running server's data.
         let settingsFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/homespun/server.env")
         if let saved = try? String(contentsOf: settingsFile, encoding: .utf8) {
-            for line in saved.split(separator: "\n") {
-                let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
-                if parts.count == 2, parts[0].hasPrefix("HOMESPUN_"), environment[parts[0]] == nil { environment[parts[0]] = parts[1] }
-            }
+            environment = Self.applying(saved: saved, to: environment)
         }
 
         do {
@@ -160,5 +157,21 @@ public enum ServerCommand {
             return 1
         }
         return 0
+    }
+
+    /// The installed server's saved settings fill in what this run didn't say, but only when this run
+    /// is about that server: no data folder given, or the same one. A run with its own data folder
+    /// (a second server, a test) must never inherit the installed server's originals folder or port.
+    static func applying(saved: String, to environment: [String: String]) -> [String: String] {
+        var settings: [String: String] = [:]
+        for line in saved.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1).map(String.init)
+            if parts.count == 2, parts[0].hasPrefix("HOMESPUN_") { settings[parts[0]] = parts[1] }
+        }
+        if let wanted = environment["HOMESPUN_DATA"], let installed = settings["HOMESPUN_DATA"],
+           URL(fileURLWithPath: wanted).standardizedFileURL.path != URL(fileURLWithPath: installed).standardizedFileURL.path {
+            return environment
+        }
+        return environment.merging(settings) { given, _ in given }
     }
 }
