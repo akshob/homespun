@@ -100,6 +100,8 @@ final class LibraryController {
         access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         library.reload()
         if settings.isPaired { await settings.refreshServerInfo() }
+        // Recent items backed up and then deleted here go to the server's trash, never compacted.
+        if settings.serverStatus == .reachable { await automatic.reportRemoved(settings: settings, ledger: job.ledger) }
         await refreshReady()
         await refreshGrid()
     }
@@ -110,7 +112,7 @@ final class LibraryController {
     }
 
     func refreshGrid() async {
-        library.update(ledger: await job.ledger.snapshot(), job: job.states)
+        library.update(ledger: await job.ledger.snapshot(), job: job.states, backedUp: await backedUpDue())
         loaded = true
         let state = library.state
         TipState.notBackedUp = state.count(.notBackedUp)
@@ -118,6 +120,18 @@ final class LibraryController {
         TipState.automaticOn = automatic.enabled
         TipState.trialDone = settings.trialConfirmed
         refreshNewSinceBackup()
+    }
+
+    /// Items backed up without a compact copy, with when automatic mode makes it (nil: a kept favorite).
+    private func backedUpDue() async -> [String: Date?] {
+        let backedUp = await job.ledger.backedUpSnapshot()
+        guard !backedUp.isEmpty else { return [:] }
+        var due: [String: Date?] = [:]
+        PHAsset.fetchAssets(withLocalIdentifiers: Array(backedUp.keys), options: nil).enumerateObjects { asset, _, _ in
+            due[asset.localIdentifier] = self.automatic.due(created: asset.creationDate, id: asset.localIdentifier,
+                                                            favorite: asset.isFavorite)
+        }
+        return due
     }
 
     /// The accessory's inputs, for the ladder (DESIGN §16.4).
@@ -254,4 +268,26 @@ final class LibraryController {
     }
 
     static func bytes(_ count: Int) -> String { count.formatted(.byteCount(style: .file)) }
+
+    #if DEBUG
+    /// UI tests: deletes the newest item backed up without a compact copy, as a person cleaning up
+    /// recent photos would (iOS asks first), then refreshes, which tells the server.
+    func deleteNewestBackedUpForTesting() async {
+        let ids = Array(await job.ledger.backedUpSnapshot().keys)
+        var newest: (id: String, date: Date)?
+        PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
+            let date = asset.creationDate ?? .distantPast
+            if newest.map({ date > $0.date }) ?? true { newest = (asset.localIdentifier, date) }
+        }
+        guard let newest else { return }
+        try? await Self.delete(newest.id)
+        await refresh()
+        await refreshGrid()
+    }
+
+    private nonisolated static func delete(_ id: String) async throws {
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+        try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
+    }
+    #endif
 }

@@ -14,6 +14,8 @@ enum Badge: Equatable, Sendable {
     /// A Homespun compact copy whose original this iPhone knows nothing more about.
     case compactCopy
     case waiting, working, kept, failed
+    /// Backed up; its compact copy comes when it's old enough (automatic mode keeps recent items).
+    case copyLater
 
     /// Stable text for VoiceOver, the badge guide, filters and UI tests (DESIGN §10.2).
     var label: String {
@@ -26,6 +28,7 @@ enum Badge: Equatable, Sendable {
         case .working: "Backing up"
         case .kept: "Kept as is"
         case .failed: "Needs attention"
+        case .copyLater: "Backed up"
         }
     }
 
@@ -39,6 +42,8 @@ enum Badge: Equatable, Sendable {
         case .working: "Being backed up."
         case .kept: "Kept as is: it couldn't be made smaller, so the original stays."
         case .failed: "Something needs your attention. See Activity."
+        case .copyLater: "The original is safe at home. Its compact copy comes once it's older, so photos you delete "
+            + "before then never come back."
         }
     }
 
@@ -53,12 +58,13 @@ enum Badge: Equatable, Sendable {
         case .working: "arrow.up.circle"
         case .kept: "equal.circle"
         case .failed: "exclamationmark.triangle.fill"
+        case .copyLater: "checkmark.circle"
         }
     }
 
     var color: Color {
         switch self {
-        case .backedUp: Theme.BadgeColor.teal
+        case .backedUp, .copyLater: Theme.BadgeColor.teal
         case .originalOnPhone: Theme.BadgeColor.amber
         case .failed: Theme.BadgeColor.red
         case .working: Theme.BadgeColor.accent
@@ -78,11 +84,14 @@ struct LibraryState: Equatable {
         var original: String?
         /// The original is still on this iPhone and its server copy can be checked for removal.
         var canFree: Bool
+        /// When automatic mode makes the compact copy of an item backed up without one (`.copyLater`);
+        /// nil for a favorite that keeps its original.
+        var compactAfter: Date? = nil
     }
 
     /// The Filter menu's states (DESIGN 02·1.2); its symbols match the badges.
     enum Filter: String, CaseIterable, Identifiable {
-        case all, notBackedUp, readyToFree, atHome, needsAttention
+        case all, notBackedUp, copyLater, readyToFree, atHome, needsAttention
         var id: String { rawValue }
 
         var title: String {
@@ -92,6 +101,7 @@ struct LibraryState: Equatable {
             case .readyToFree: "Ready to Free Up"
             case .atHome: "Original at Home"
             case .needsAttention: "Needs Attention"
+            case .copyLater: "Compact Copy Later"
             }
         }
 
@@ -100,8 +110,9 @@ struct LibraryState: Equatable {
             case .all: "photo.on.rectangle"
             case .notBackedUp: "circle.dashed"
             case .readyToFree: "circle.lefthalf.filled"
-            case .atHome: "checkmark.circle"
+            case .atHome: "checkmark.circle.fill"
             case .needsAttention: "exclamationmark.triangle"
+            case .copyLater: "checkmark.circle"
             }
         }
     }
@@ -125,7 +136,9 @@ struct LibraryState: Equatable {
     /// the library is hidden; the copy is shown with a badge saying where the original is. (A
     /// copy made on this iPhone by the old on-phone mode doesn't hide its original, which still
     /// needs backing up.)
-    init(library: [String], ledger: [String: CompactLedger.Entry], album: Set<String>, job: [String: CompactJob.State]) {
+    /// `backedUp`: items backed up without a compact copy yet, with when it's due (nil: never, a kept favorite).
+    init(library: [String], ledger: [String: CompactLedger.Entry], album: Set<String>, job: [String: CompactJob.State],
+         backedUp: [String: Date?] = [:]) {
         let present = Set(library)
         var originalOf: [String: String] = [:]
         var hidden = Set<String>(), unbackedCopies = Set<String>()
@@ -154,9 +167,10 @@ struct LibraryState: Equatable {
             case .failed?: .failed
             case .unchanged?: .kept
             case .notYet?: .none
-            case .saved?, nil: .none
+            case .backedUp?: .copyLater
+            case .saved?, nil: backedUp[id] != nil ? .copyLater : .none
             }
-            return Cell(id: id, badge: badge, original: nil, canFree: false)
+            return Cell(id: id, badge: badge, original: nil, canFree: false, compactAfter: backedUp[id] ?? nil)
         }
         reindex()
     }
@@ -176,12 +190,12 @@ extension LibraryState.Cell {
         switch badge {
         case .none, .waiting, .working, .kept, .failed: true
         case .originalOnPhone: !canFree
-        case .backedUp, .compactCopy: false
+        case .backedUp, .compactCopy, .copyLater: false
         }
     }
 
-    /// Can be selected to back up.
-    var canCompact: Bool { [.none, .kept, .failed].contains(badge) }
+    /// Can be selected to back up (for an item backed up without a compact copy: to make it now).
+    var canCompact: Bool { [.none, .kept, .failed, .copyLater].contains(badge) }
 
     func matches(_ filter: LibraryState.Filter) -> Bool {
         switch filter {
@@ -190,6 +204,7 @@ extension LibraryState.Cell {
         case .readyToFree: canFree
         case .atHome: badge == .backedUp
         case .needsAttention: badge == .failed
+        case .copyLater: badge == .copyLater
         }
     }
 }
@@ -244,8 +259,8 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     }
 
     /// Works out the badges again (after the ledger or the job changed).
-    func update(ledger: [String: CompactLedger.Entry], job: [String: CompactJob.State]) {
-        let new = LibraryState(library: library, ledger: ledger, album: album, job: job)
+    func update(ledger: [String: CompactLedger.Entry], job: [String: CompactJob.State], backedUp: [String: Date?] = [:]) {
+        let new = LibraryState(library: library, ledger: ledger, album: album, job: job, backedUp: backedUp)
         if new != state { state = new }
     }
 
@@ -458,7 +473,7 @@ struct GridCell: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityName)
-            .accessibilityValue(cell.badge.spoken(server: serverName))
+            .accessibilityValue(cell.badge.spoken(server: serverName, compactAfter: cell.compactAfter))
             .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
             .accessibilityIdentifier("asset")
     }
@@ -531,12 +546,20 @@ struct BadgeView: View {
 
 extension Badge {
     /// The cell's VoiceOver value: the badge plus where the original is (DESIGN §10.2).
-    func spoken(server: String) -> String {
+    func spoken(server: String, compactAfter: Date? = nil) -> String {
         switch self {
         case .originalOnPhone: "Ready to free up. Original on \(server)."
         case .backedUp: "Original at home on \(server)."
+        case .copyLater: "Backed up. Original on \(server); " + Self.compactLater(compactAfter) + "."
         default: label
         }
+    }
+
+    /// "compact copy after December 15", or for a kept favorite, "favorites keep their original".
+    static func compactLater(_ date: Date?) -> String {
+        guard let date else { return "favorites keep their original" }
+        return date <= Date() ? "compact copy on the next run"
+            : "compact copy after " + date.formatted(.dateTime.month(.wide).day())
     }
 }
 
@@ -548,7 +571,8 @@ struct BadgeLegendView: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach([Badge.none, .originalOnPhone, .backedUp, .waiting, .working, .failed, .kept, .compactCopy], id: \.label) { badge in
+                ForEach([Badge.none, .copyLater, .originalOnPhone, .backedUp, .waiting, .working, .failed, .kept, .compactCopy],
+                        id: \.label) { badge in
                     HStack(alignment: .top, spacing: 14) {
                         Group {
                             if badge == .none {
@@ -571,4 +595,9 @@ struct BadgeLegendView: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
         }
     }
+}
+
+extension String {
+    /// The same text with its first letter capitalised ("compact copy…" → "Compact copy…").
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }

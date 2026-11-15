@@ -116,7 +116,14 @@ struct MainTabView: View {
         .onChange(of: settings.pendingLink, initial: true) { _, link in
             if let link { sheet = .pair(link) }
         }
-        .task { await model.library.start() }
+        .task {
+            await model.library.start()
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-deleteNewestBackedUp") {
+                await model.library.deleteNewestBackedUpForTesting()
+            }
+            #endif
+        }
     }
 
     /// On the open iPhone Duo, Free Up Space is the Library's right page; elsewhere a sheet.

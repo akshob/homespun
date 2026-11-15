@@ -33,6 +33,17 @@ final class AutomaticMode {
         var pending: Set<String> = []
         /// Tell the user when an overnight run made space ready to free up.
         var notifies = true
+        /// When compact copies are made: recent items are backed up first, compacted later.
+        var schedule = CompactSchedule.standard
+        /// When this iPhone first had an item (Photos reported it added), so an old photo saved
+        /// today counts as recent.
+        var firstSeen: [String: Date] = [:]
+        /// Where reading Photos' deletions continues from (separate from `token`: removals are also
+        /// checked when the app comes to the foreground).
+        var removalToken: Data?
+        /// Items Photos reported deleted (and when), not told to the server yet. Kept a few days even
+        /// if not backed up yet: an item deleted while its upload runs is reported once it's done.
+        var removed: [String: Date] = [:]
 
         init() {}
 
@@ -47,6 +58,10 @@ final class AutomaticMode {
             lastSummary = try values.decodeIfPresent(String.self, forKey: .lastSummary)
             pending = try values.decodeIfPresent(Set<String>.self, forKey: .pending) ?? []
             notifies = try values.decodeIfPresent(Bool.self, forKey: .notifies) ?? true
+            schedule = try values.decodeIfPresent(CompactSchedule.self, forKey: .schedule) ?? .standard
+            firstSeen = try values.decodeIfPresent([String: Date].self, forKey: .firstSeen) ?? [:]
+            removalToken = try values.decodeIfPresent(Data.self, forKey: .removalToken)
+            removed = try values.decodeIfPresent([String: Date].self, forKey: .removed) ?? [:]
         }
     }
 
@@ -75,6 +90,7 @@ final class AutomaticMode {
         state.enabled = true
         state.since = existing ? .distantPast : Date()
         state.token = Self.archive(PHPhotoLibrary.shared().currentChangeToken)
+        if state.removalToken == nil { state.removalToken = state.token }
         state.attempts = [:]
         state.settled = []
         state.pending = []
@@ -88,6 +104,20 @@ final class AutomaticMode {
         guard everything != backsUpEverything else { return }
         state.since = everything ? .distantPast : Date()
         save()
+    }
+
+    var compactSchedule: CompactSchedule { state.schedule }
+
+    /// The slider: shorter compacts more on the next run; longer only affects items not compacted yet.
+    func setCompactSchedule(_ schedule: CompactSchedule) {
+        guard schedule != state.schedule else { return }
+        state.schedule = schedule
+        save()
+    }
+
+    /// When an item's compact copy is due under the current schedule (nil: a kept favorite).
+    func due(created: Date?, id: String, favorite: Bool) -> Date? {
+        state.schedule.due(created: created, firstSeen: state.firstSeen[id], favorite: favorite)
     }
 
     func setNotifies(_ on: Bool) {
@@ -152,24 +182,81 @@ final class AutomaticMode {
         }
     }
 
-    private func candidates(ledger: [String: CompactLedger.Entry], added: Set<String>) -> [String] {
+    /// Items Photos deleted since `token` (nil: none read yet). `read` is false if the changes
+    /// couldn't be read; an expired or foreign token (a restored backup) reads as nothing deleted.
+    private static func deleted(since token: Data?) -> (ids: Set<String>, read: Bool) {
+        guard let token = token.flatMap(unarchive) else { return ([], true) }
+        var ids = Set<String>()
+        do {
+            for change in try PHPhotoLibrary.shared().fetchPersistentChanges(since: token) {
+                ids.formUnion(try change.changeDetails(for: .asset).deletedLocalIdentifiers)
+            }
+            return (ids, true)
+        } catch let error as PHPhotosError where error.code == .persistentChangeTokenExpired {
+            return ([], true)
+        } catch {
+            return ([], false)
+        }
+    }
+
+    /// What this run does: compact copies for items whose time came (backed up already or not),
+    /// and backing up recent ones (files mode only; in Immich mode they wait).
+    private func plan(ledger: [String: CompactLedger.Entry], backedUp: [String: CompactLedger.BackedUp],
+                      added: Set<String>, backsUp: Bool) -> AutomaticPlan {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "(mediaType == %d OR mediaType == %d) AND creationDate >= %@",
                                         PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue, state.since as NSDate)
-        var assets: [(id: String, created: Date?)] = []
+        var assets: [AutomaticCandidate] = []
         var seen = Set<String>()
         PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
-            assets.append((asset.localIdentifier, asset.creationDate))
+            assets.append(AutomaticCandidate(id: asset.localIdentifier, created: asset.creationDate, favorite: asset.isFavorite))
             seen.insert(asset.localIdentifier)
         }
-        let late = Array(added.subtracting(seen))
+        // Added later with older dates, and backed up earlier: wherever their dates fall.
+        let late = Array(added.union(backedUp.keys).subtracting(seen))
         if !late.isEmpty {
             PHAsset.fetchAssets(withLocalIdentifiers: late, options: nil).enumerateObjects { asset, _, _ in
-                if [.image, .video].contains(asset.mediaType) { assets.append((asset.localIdentifier, asset.creationDate)) }
+                if [.image, .video].contains(asset.mediaType) {
+                    assets.append(AutomaticCandidate(id: asset.localIdentifier, created: asset.creationDate,
+                                                     favorite: asset.isFavorite))
+                }
             }
         }
-        return Self.pick(assets, since: state.since, added: added, ledger: ledger, album: PhotoLibrary.albumMembers(),
-                         attempts: state.attempts, settled: state.settled)
+        let eligible = Set(Self.pick(assets.map { ($0.id, $0.created) }, since: state.since,
+                                     added: added.union(backedUp.keys), ledger: ledger, album: PhotoLibrary.albumMembers(),
+                                     attempts: state.attempts, settled: state.settled, limit: .max))
+        return AutomaticPlan.make(assets.filter { eligible.contains($0.id) }, backedUp: Set(backedUp.keys),
+                                  firstSeen: state.firstSeen, schedule: state.schedule, now: Date(), backsUp: backsUp,
+                                  limit: Self.batch)
+    }
+
+    /// Recent items backed up without a compact copy that the person deleted on this iPhone (cleaned
+    /// them up): the server moves their originals to its trash, and they're never compacted. Only
+    /// what Photos reports as deleted counts, and only while it still can't be found (hidden items
+    /// included): an item Homespun merely can't see (hidden, limited access, a restored backup with
+    /// other identifiers) is never reported. Needs Full Access.
+    func reportRemoved(settings: AppSettings, ledger: CompactLedger) async {
+        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized, let client = settings.client else { return }
+        let backedUp = await ledger.backedUpSnapshot()
+        let token = PHPhotoLibrary.shared().currentChangeToken
+        let deleted = Self.deleted(since: state.removalToken)
+        let before = state, now = Date()
+        for id in deleted.ids where state.removed[id] == nil { state.removed[id] = now }
+        if deleted.read { state.removalToken = Self.archive(token) }
+        // Recovered from Recently Deleted (or never gone): nothing to tell.
+        for id in PhotoLibrary.existing(Array(state.removed.keys), includeHidden: true) { state.removed[id] = nil }
+        state.removed = state.removed.filter { id, date in backedUp[id] != nil || now.timeIntervalSince(date) < 7 * 86_400 }
+        var reported: [String] = []
+        for id in state.removed.keys {
+            guard let entry = backedUp[id] else { continue }
+            // Not reachable now: told next time.
+            guard (try? await client.removedOnDevice(entry.serverAssetID)) != nil else { continue }
+            reported.append(id)
+            state.firstSeen[id] = nil
+        }
+        for id in reported { state.removed[id] = nil }
+        try? await ledger.forgetBackedUp(reported)
+        if state.removed != before.removed || state.removalToken != before.removalToken || !reported.isEmpty { save() }
     }
 
     // MARK: Running
@@ -183,6 +270,8 @@ final class AutomaticMode {
         var newlyRemovable = 0
         /// Not done yet for a reason that may pass (for example, not in Immich yet).
         var notYet = 0
+        /// Recent items backed up now, compacted later.
+        var backedUp = 0
         var skipped: String?
     }
 
@@ -214,9 +303,14 @@ final class AutomaticMode {
         let token = PHPhotoLibrary.shared().currentChangeToken
         let inserted = Self.inserted(since: state.token)
         state.pending.formUnion(inserted.ids)
-        let picked = candidates(ledger: await job.ledger.snapshot(), added: state.pending)
+        let now = Date()
+        for id in inserted.ids where state.firstSeen[id] == nil { state.firstSeen[id] = now }
+        await reportRemoved(settings: settings, ledger: job.ledger)
+        let plan = plan(ledger: await job.ledger.snapshot(), backedUp: await job.ledger.backedUpSnapshot(),
+                        added: state.pending, backsUp: settings.server?.mode != .immich)
+        let picked = plan.compact + plan.backUp
         if !picked.isEmpty {
-            job.enqueue(picked, trigger: .automatic)
+            job.enqueue(picked, trigger: .automatic, backUpOnly: Set(plan.backUp))
             // Wait for these items (the job may also hold items the user picked).
             func busy() -> Bool {
                 let states = job.states
@@ -229,6 +323,7 @@ final class AutomaticMode {
             for id in picked {
                 switch states[id] {
                 case .saved?: summary.compacted += 1
+                case .backedUp?: summary.backedUp += 1
                 case .unchanged?:
                     summary.kept += 1
                     state.settled.insert(id)
@@ -247,14 +342,17 @@ final class AutomaticMode {
                 }
             }
         }
-        // Forget added items that are done, gone, or given up on.
-        let ledger = await job.ledger.snapshot()
+        // Forget added items that are done, gone, backed up (they're tracked there), or given up on.
+        let ledger = await job.ledger.snapshot(), backedUp = await job.ledger.backedUpSnapshot()
         let copies = Set(ledger.values.map(\.compactIdentifier)), album = PhotoLibrary.albumMembers()
-        let existing = PhotoLibrary.existing(Array(state.pending))
+        let existing = PhotoLibrary.existing(Array(state.pending), includeHidden: true)
         state.pending = state.pending.filter { id in
-            existing.contains(id) && ledger[id]?.serverAssetID == nil && !copies.contains(id) && !album.contains(id)
-                && !state.settled.contains(id) && (state.attempts[id] ?? 0) < Self.maximumAttempts
+            existing.contains(id) && ledger[id]?.serverAssetID == nil && backedUp[id] == nil && !copies.contains(id)
+                && !album.contains(id) && !state.settled.contains(id) && (state.attempts[id] ?? 0) < Self.maximumAttempts
         }
+        // First-seen dates matter only until the compact copy (and never beyond the longest cutoff).
+        let oldest = now.addingTimeInterval(-Double((CompactSchedule.stops.last ?? 90) + 10) * 86_400)
+        state.firstSeen = state.firstSeen.filter { id, date in ledger[id] == nil && date > oldest }
         if inserted.read { state.token = Self.archive(token) }
         let after = Set(await remover?.candidates().map(\.original) ?? [])
         summary.removable = after.count
@@ -275,6 +373,7 @@ final class AutomaticMode {
         if let skipped = summary.skipped { return "Skipped: \(skipped)" }
         var parts: [String] = []
         if summary.compacted > 0 { parts.append("\(summary.compacted) backed up and compacted") }
+        if summary.backedUp > 0 { parts.append("\(summary.backedUp) backed up, compact copies later") }
         if summary.kept > 0 { parts.append("\(summary.kept) kept as is") }
         if summary.notYet > 0 { parts.append("\(summary.notYet) to try again later") }
         if summary.failed > 0 { parts.append("\(summary.failed) didn't work") }

@@ -31,6 +31,7 @@ struct RunDetailView: View {
                 if run.kind == .backUp {
                     Section("What happened") {
                         count("Backed up", run.count(.saved), symbol: "checkmark.circle.fill", tint: Theme.teal)
+                        count("Backed up, compact copy later", run.count(.backedUp), symbol: "checkmark.circle", tint: Theme.teal)
                         count("Need attention", run.count(.failed) + run.count(.notYet),
                               symbol: "exclamationmark.triangle.fill", tint: Theme.red)
                         count("Kept as is", run.count(.kept), symbol: "equal.circle", tint: Theme.secondaryLabel)
@@ -183,6 +184,7 @@ struct RunItemRow: View {
         case .failed: "failed"
         case .waiting: "waiting"
         case .freed: "freed"
+        case .backedUp: "backedUp"
         }
     }
 
@@ -201,6 +203,7 @@ struct RunItemRow: View {
         case .failed: return "Failed" + reason
         case .waiting: return "Waiting"
         case .freed: return "Moved to Recently Deleted"
+        case .backedUp: return "Backed up · compact copy later"
         }
     }
 
@@ -213,6 +216,7 @@ struct RunItemRow: View {
             case .kept: BadgeView(badge: .kept, size: 18)
             case .failed: BadgeView(badge: .failed, size: 18)
             case .waiting: BadgeView(badge: .waiting, size: 18)
+            case .backedUp: BadgeView(badge: .copyLater, size: 18)
             case .notYet:
                 Image(systemName: "hourglass").font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Theme.BadgeColor.grey)

@@ -28,7 +28,8 @@ enum ItemText {
     }
 
     /// The sentence beside the badge, under the photo: what the badge means for this item.
-    static func sentence(_ badge: Badge, server: String, immich: Bool, job: CompactJob.State? = nil) -> String {
+    static func sentence(_ badge: Badge, server: String, immich: Bool, job: CompactJob.State? = nil,
+                         compactAfter: Date? = nil) -> String {
         let home = immich ? "in Immich" : "on \(server)"
         switch badge {
         case .originalOnPhone: return "Ready to free up · original \(home)"
@@ -43,6 +44,7 @@ enum ItemText {
         case .kept: return "Kept as is · the original stays on this iPhone"
         case .failed: return "Needs attention · couldn't back up"
         case .compactCopy: return "Compact copy · made by Homespun"
+        case .copyLater: return "Backed up · " + Badge.compactLater(compactAfter)
         }
     }
 
@@ -57,6 +59,8 @@ enum ItemAction: Equatable {
     case freeUp(original: String)
     case backUp
     case tryAgain
+    /// Backed up, compact copy later: make it now instead.
+    case compactNow
     case none
 
     static func `for`(_ cell: LibraryState.Cell) -> ItemAction {
@@ -64,6 +68,7 @@ enum ItemAction: Equatable {
         switch cell.badge {
         case .none: return .backUp
         case .failed: return .tryAgain
+        case .copyLater: return .compactNow
         default: return .none
         }
     }

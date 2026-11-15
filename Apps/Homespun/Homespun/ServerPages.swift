@@ -1,12 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 import HomespunCore
+import Photos
 import SwiftUI
 import UserNotifications
+
+/// The slider's live count: "2,310 get compact copies now · 121 wait".
+struct CompactPreview: Equatable {
+    var days: Int
+    var now: Int
+    var wait: Int
+    var favorites: Int
+
+    var line: String {
+        var parts = ["\(now.formatted()) get compact copies now"]
+        if wait > 0 {
+            let since = Date().addingTimeInterval(-Double(days) * 86_400).formatted(.dateTime.month(.abbreviated).day())
+            parts.append("\(wait.formatted()) wait (newer than \(since))")
+        }
+        if favorites > 0 { parts.append("\(favorites.formatted()) favorite\(favorites == 1 ? "" : "s") kept as they are") }
+        return parts.joined(separator: " · ")
+    }
+}
 
 /// Automatic mode's settings with its status (DESIGN 05·2.1–2.2).
 struct AutomaticModeView: View {
     let model: AppModel
     @State private var askingScope = false
+    /// The slider's position while dragging (saved when it settles), and its live count.
+    @State private var stop: Double?
+    @State private var preview: CompactPreview?
 
     var body: some View {
         let automatic = model.automatic, settings = model.settings
@@ -45,6 +67,7 @@ struct AutomaticModeView: View {
             }
             .disabled(!enabled)
             .listRowBackground(Theme.card)
+            compactSection(automatic, enabled: enabled)
             Section {
                 Toggle(isOn: Binding(get: { automatic.state.notifies }, set: { automatic.setNotifies($0) })) {
                     Label("Tell Me When Space Can Be Freed", systemImage: "bell")
@@ -74,7 +97,93 @@ struct AutomaticModeView: View {
         } message: {
             Text(Self.scopeMessage(count: model.library.library.state.count(.notBackedUp)))
         }
+        .task(id: automatic.compactSchedule) { await updatePreview(automatic.compactSchedule) }
     }
+
+    // MARK: Compact copies
+
+    /// When compact copies are made (DESIGN 05·2.1, revised 15 Nov): a slider with five stops.
+    @ViewBuilder private func compactSection(_ automatic: AutomaticMode, enabled: Bool) -> some View {
+        let schedule = automatic.compactSchedule
+        let position = stop ?? Double(schedule.stop)
+        let shown = CompactSchedule.stops[Int(position.rounded())]
+        Section {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Make compact copies")
+                    Spacer()
+                    Text(CompactSchedule.label(days: shown)).font(.headline).foregroundStyle(Theme.accent)
+                        .contentTransition(.numericText())
+                }
+                Slider(value: Binding(get: { position }, set: { stop = $0 }),
+                       in: 0...Double(CompactSchedule.stops.count - 1), step: 1) { editing in
+                    guard !editing, let stop else { return }
+                    var changed = schedule
+                    changed.stop = Int(stop.rounded())
+                    automatic.setCompactSchedule(changed)
+                    self.stop = nil
+                }
+                .tint(Theme.accent)
+                .accessibilityLabel("Make compact copies")
+                .accessibilityValue(CompactSchedule.label(days: shown))
+                .accessibilityIdentifier("automatic.cutoff")
+                HStack {
+                    ForEach(Array(["Now", "1 wk", "1 mo", "2 mo", "3 mo"].enumerated()), id: \.offset) { index, mark in
+                        Text(mark)
+                        if index < 4 { Spacer() }
+                    }
+                }
+                .font(.caption).foregroundStyle(Theme.secondaryLabel)
+                .accessibilityHidden(true)
+                if let preview, preview.days == shown {
+                    Text(preview.line).font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                        .accessibilityIdentifier("automatic.cutoff.preview")
+                }
+            }
+            .padding(.vertical, 4)
+            Toggle(isOn: Binding(get: { schedule.keepFavorites }, set: { keep in
+                var changed = schedule
+                changed.keepFavorites = keep
+                automatic.setCompactSchedule(changed)
+            })) {
+                Label("Keep Favorites as They Are", systemImage: "heart")
+            }
+            .tint(Theme.accent)
+            .accessibilityIdentifier("automatic.keepFavorites")
+        } header: {
+            Text("Compact copies")
+        } footer: {
+            Text(shown == 0
+                 ? "Each new photo or video gets its compact copy as soon as it's backed up."
+                 : "New photos and videos are backed up right away, and get their compact copies once they're older "
+                    + "than this. Delete one before then and it never comes back as a compact copy; \(model.library.serverName) "
+                    + "keeps its original in its trash for 30 days.")
+        }
+        .disabled(!enabled)
+        .listRowBackground(Theme.card)
+        .onChange(of: stop) { _, value in
+            guard let value else { return }
+            var trial = schedule
+            trial.stop = Int(value.rounded())
+            Task { await updatePreview(trial) }
+        }
+    }
+
+    /// How many items get compact copies now with this schedule, and how many wait.
+    private func updatePreview(_ schedule: CompactSchedule) async {
+        let cells = model.library.library.state.cells.filter { [.none, .copyLater].contains($0.badge) }.map(\.id)
+        let automatic = model.automatic
+        try? await Task.sleep(for: .milliseconds(150))
+        guard !Task.isCancelled else { return }
+        var now = 0, wait = 0, kept = 0
+        PHAsset.fetchAssets(withLocalIdentifiers: cells, options: nil).enumerateObjects { asset, _, _ in
+            let due = schedule.due(created: asset.creationDate, firstSeen: automatic.state.firstSeen[asset.localIdentifier],
+                                   favorite: asset.isFavorite)
+            if let due { if due <= Date() { now += 1 } else { wait += 1 } } else { kept += 1 }
+        }
+        preview = CompactPreview(days: schedule.days, now: now, wait: wait, favorites: kept)
+    }
+
 
     private func scopeRow(_ title: String, detail: String?, selected: Bool,
                           action: @escaping () -> Void) -> some View {

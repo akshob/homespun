@@ -18,6 +18,8 @@ final class RunHistory {
             case saved, kept, notYet, failed, waiting
             /// Removed from this iPhone by Free Up Space.
             case freed
+            /// Backed up; its compact copy comes when it's old enough (automatic mode).
+            case backedUp
         }
 
         var id = UUID()

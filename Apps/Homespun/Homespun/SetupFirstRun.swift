@@ -324,6 +324,7 @@ struct FirstTaskPage: View {
         case .unchanged?: .kept
         case .notYet?: .waiting
         case .failed?: .failed
+        case .backedUp?: .copyLater
         }
     }
 

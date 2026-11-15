@@ -103,7 +103,8 @@ struct ItemViewer: View {
         let date = asset?.creationDate?.formatted(date: .long, time: .shortened)
         let head = [kind, date].compactMap(\.self).joined(separator: ", ")
         guard let cell = cell(id) else { return head }
-        return head + ". " + ItemText.spoken(ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell)))
+        return head + ". " + ItemText.spoken(ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell),
+                                                             compactAfter: cell.compactAfter))
     }
 
     // MARK: State line
@@ -122,7 +123,8 @@ struct ItemViewer: View {
             let action = ItemAction.for(cell)
             VStack(alignment: .leading, spacing: 0) {
                 ItemStateLine(badge: cell.badge,
-                              sentence: ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell)),
+                              sentence: ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell),
+                                                          compactAfter: cell.compactAfter),
                               blocked: action == .backUp || action == .tryAgain ? model.library.backUpBlockedReason : nil,
                               scrim: top < below)
                     .padding(.top, top)
@@ -178,6 +180,14 @@ struct ItemViewer: View {
             .buttonStyle(.glassProminent).tint(Theme.accent)
             .disabled(blocked != nil)
             .accessibilityHint(blocked ?? "Copies the original to \(server). Nothing is removed from this iPhone.")
+            .accessibilityIdentifier("item.action")
+        case .compactNow:
+            Button { model.library.backUp([cell.id]) } label: {
+                TitleAndIcon(title: "Make Compact Copy", systemImage: "arrow.down.right.and.arrow.up.left")
+            }
+            .buttonStyle(.glassProminent).tint(Theme.accent)
+            .disabled(blocked != nil)
+            .accessibilityHint(blocked ?? "Makes its compact copy now instead of waiting. Nothing is removed from this iPhone.")
             .accessibilityIdentifier("item.action")
         case .none:
             EmptyView()

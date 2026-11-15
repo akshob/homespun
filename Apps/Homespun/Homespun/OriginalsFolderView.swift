@@ -84,6 +84,21 @@ struct OriginalsFolderView: View {
                          + "existing library stay where they are and aren't moved.")
                 }
                 .listRowBackground(Theme.card)
+                if let count = info.trashCount, count > 0 {
+                    Section {
+                        LabeledContent {
+                            Text("\(count.formatted()) · \(Self.bytes(info.trashBytes ?? 0))")
+                        } label: {
+                            Label("Trash", systemImage: "trash")
+                        }
+                        .accessibilityIdentifier("originals.trash")
+                    } footer: {
+                        Text("Recent photos and videos you deleted on a phone before their compact copy. Their originals "
+                             + "wait in the folder's .trash for 30 days, then the server deletes them. Recover one in "
+                             + "Photos and it comes back.")
+                    }
+                    .listRowBackground(Theme.card)
+                }
             } else if let error {
                 Section {
                     InlineNotice(tone: .error, title: "Couldn't read the originals folder", message: error)

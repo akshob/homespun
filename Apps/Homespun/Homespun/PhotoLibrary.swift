@@ -11,11 +11,21 @@ enum CompactOutcome: Equatable, Sendable {
     case unchanged(String)
     /// Not done yet, for a reason that may pass (for example, not in Immich yet). Try again later.
     case notYet(String)
+    /// Backed up; the compact copy comes later (a recent item, for automatic mode).
+    case backedUp(originalBytes: Int)
 }
 
-/// Makes and saves a compact copy of one library item.
+/// Makes and saves a compact copy of one library item, or (`compactNow` false) only backs its
+/// originals up.
 protocol Compacting: Sendable {
-    func compact(_ localIdentifier: String, progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome
+    func compact(_ localIdentifier: String, compactNow: Bool,
+                 progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome
+}
+
+extension Compacting {
+    func compact(_ localIdentifier: String, progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome {
+        try await compact(localIdentifier, compactNow: true, progress: progress)
+    }
 }
 
 /// PhotoKit work shared by on-phone and server modes.
@@ -188,11 +198,14 @@ enum PhotoLibrary {
 
     private final class IdentifierBox: @unchecked Sendable { var value: String? }
 
-    /// Which of these items are still in the library, in one fetch.
-    static func existing(_ localIdentifiers: [String]) -> Set<String> {
+    /// Which of these items are still in the library, in one fetch. `includeHidden`: hidden items
+    /// count as there (they are, the person only hid them).
+    static func existing(_ localIdentifiers: [String], includeHidden: Bool = false) -> Set<String> {
         guard !localIdentifiers.isEmpty else { return [] }
         var found = Set<String>()
-        PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: nil).enumerateObjects { asset, _, _ in
+        let options = PHFetchOptions()
+        options.includeHiddenAssets = includeHidden
+        PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: options).enumerateObjects { asset, _, _ in
             found.insert(asset.localIdentifier)
         }
         return found

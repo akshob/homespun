@@ -143,6 +143,11 @@ struct ItemDetailsSheet: View {
             let step: String? = if case .working(let step)? = job { step } else { nil }
             row("arrow.up.circle", "Backing up to \(server)", step ?? "Waiting to start")
             row("iphone", "Original on this iPhone", "Only here until it's backed up.")
+        case .copyLater:
+            row("checkmark.shield", "Original on \(server)", "Backed up · checked (SHA-256)")
+            row("clock", "Compact copy later", Badge.compactLater(cell.compactAfter).capitalizedFirst
+                + ". Delete it here before then and it never comes back; the server keeps its original 30 days.")
+            row("iphone", "Original still on this iPhone", "Free Up Space can remove it once the compact copy is in Photos.")
         case .none, .kept, .failed:
             row("iphone", "Only on this iPhone", model.settings.isPaired
                 ? "Not backed up yet. Back Up keeps the original on \(server)."

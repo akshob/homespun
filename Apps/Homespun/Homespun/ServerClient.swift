@@ -136,6 +136,18 @@ struct ServerClient: Sendable {
         try await send("assets/\(assetID)/verify", method: "POST", as: ServerAPI.Verification.self)
     }
 
+    /// A recent item was removed on this iPhone before its compact copy: the server moves its
+    /// originals to its trash (30 days). Returns false if the server keeps it (it has a copy).
+    @discardableResult
+    func removedOnDevice(_ assetID: String) async throws -> Bool {
+        do {
+            _ = try await send("assets/\(assetID)/removed", method: "POST", as: ServerAPI.AssetStatus.self)
+            return true
+        } catch let failure as Failure where failure.code == ServerAPI.ErrorCode.keptOriginal || failure.status == 404 {
+            return false
+        }
+    }
+
     /// Devices paired with the server.
     func devices() async throws -> [ServerAPI.DeviceInfo] { try await send("devices", as: [ServerAPI.DeviceInfo].self) }
 

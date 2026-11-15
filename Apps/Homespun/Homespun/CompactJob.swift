@@ -15,6 +15,8 @@ final class CompactJob {
         /// Not done yet for a reason that may pass; automatic mode tries again later.
         case notYet(String)
         case failed(String)
+        /// Backed up; its compact copy comes later (a recent item, automatic mode).
+        case backedUp(originalBytes: Int)
 
         /// The state without its message or sizes; enough for the grid's badges.
         var phase: Phase {
@@ -25,11 +27,12 @@ final class CompactJob {
             case .unchanged: .unchanged
             case .notYet: .notYet
             case .failed: .failed
+            case .backedUp: .backedUp
             }
         }
     }
 
-    enum Phase: Equatable { case waiting, working, saved, unchanged, notYet, failed }
+    enum Phase: Equatable { case waiting, working, saved, unchanged, notYet, failed, backedUp }
 
     struct Item: Identifiable {
         let id = UUID()
@@ -38,6 +41,8 @@ final class CompactJob {
         var symbol: String
         var state: State
         var trigger: RunHistory.Trigger = .manual
+        /// Back the originals up but don't make the compact copy yet (a recent item).
+        var backUpOnly = false
 
         var isWorking: Bool { if case .working = state { true } else { false } }
         var isLive: Bool { symbol == PhotoLibrary.Kind.livePhoto.symbol }
@@ -78,7 +83,8 @@ final class CompactJob {
     /// Queues items oldest first, skipping any already waiting or working. One fetch for all of
     /// them, so selecting a whole library is quick; file names are filled in as each starts.
     /// Without a `trigger`, items picked during setup count as the first task, later ones as manual.
-    func enqueue(_ assetIdentifiers: [String], trigger: RunHistory.Trigger? = nil) {
+    /// `backUpOnly`: of these, the recent items automatic mode backs up now and compacts later.
+    func enqueue(_ assetIdentifiers: [String], trigger: RunHistory.Trigger? = nil, backUpOnly: Set<String> = []) {
         let trigger = trigger ?? (settings.onboardingComplete ? .manual : .firstTask)
         var assets: [String: PHAsset] = [:]
         PHAsset.fetchAssets(withLocalIdentifiers: assetIdentifiers, options: nil).enumerateObjects { asset, _, _ in
@@ -95,7 +101,8 @@ final class CompactJob {
             }
             let date = asset.creationDate?.formatted(date: .abbreviated, time: .shortened)
             added.append(Item(assetIdentifier: identifier, name: date.map { "\(kind.name), \($0)" } ?? kind.name,
-                              symbol: kind.symbol, state: .waiting, trigger: trigger))
+                              symbol: kind.symbol, state: .waiting, trigger: trigger,
+                              backUpOnly: backUpOnly.contains(identifier)))
         }
         guard !added.isEmpty else { return }
         // A new run starts: Activity's Now card counts from here.
@@ -170,7 +177,8 @@ final class CompactJob {
                 guard let compactor = settings.compactor(ledger: ledger) else {
                     throw ServerClient.Failure(status: 0, message: "Connect your Homespun Server first.")
                 }
-                let outcome = try await compactor.compact(items[index].assetIdentifier) { [weak self] message in
+                let outcome = try await compactor.compact(items[index].assetIdentifier,
+                                                          compactNow: !items[index].backUpOnly) { [weak self] message in
                     Task { @MainActor in self?.report(message, for: id) }
                 }
                 switch outcome {
@@ -179,6 +187,7 @@ final class CompactJob {
                     state = .saved(originalBytes: original, compactBytes: compact)
                 case .unchanged(let reason): state = .unchanged(reason)
                 case .notYet(let reason): state = .notYet(reason)
+                case .backedUp(let original): state = .backedUp(originalBytes: original)
                 }
             } catch {
                 state = .failed(error.localizedDescription)
@@ -218,6 +227,9 @@ final class CompactJob {
         case .failed(let reason):
             entry.result = .failed
             entry.reason = reason
+        case .backedUp(let original):
+            entry.result = .backedUp
+            entry.originalBytes = original
         }
         return entry
     }

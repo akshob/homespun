@@ -99,6 +99,14 @@ takes at most 10 originals until you confirm the copies look right.
   processing task iOS runs when it chooses, usually overnight while charging. Removing
   originals still waits for you; a notification says when there is space to free up. Items
   added later with older dates (synced, saved) are found through Photos' change history.
+  - **Compact copies later**: originals go home right away, but compact copies are made only
+    once an item is older than a cutoff you set with a slider (Right Away, 1 Week, 1 Month
+    (default), 2 Months, 3 Months), counted from when it was taken or added, whichever is later.
+    Until then the item shows "Backed up" and the server keeps it as `stored`, sending nothing
+    back. Favorites can be kept as they are. Backing up by hand compacts right away.
+  - **Cleaned-up items**: a waiting item you delete on the iPhone (Photos reports the deletion)
+    moves to the server's trash, `<originals>/.trash/<item>/`, and is deleted after 30 days;
+    recovering it on the iPhone puts it back. Anything with a compact copy is never trashed.
 - **Cloud copies**: the server's connectors (see below).
 
 Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
@@ -293,7 +301,8 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/homespun
 
 ### Cloud copies (connectors)
 
-The server can also copy each original somewhere else once it has stored and checked it, as
+The server can also copy each original somewhere else once it has stored and checked it (for
+items waiting for their compact copy, once it's made, so cleaned-up photos never go out), as
 an extra backup (Server › Cloud Copies in the app). Copies never count toward removing an
 original from the iPhone; only the server's own verified copy does. Each copy is checked
 where the service allows it, and a full or offline destination is retried later without

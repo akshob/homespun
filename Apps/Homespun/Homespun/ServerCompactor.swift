@@ -56,7 +56,8 @@ struct ServerCompactor: Compacting {
         return exported
     }
 
-    func compact(_ localIdentifier: String, progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome {
+    func compact(_ localIdentifier: String, compactNow: Bool = true,
+                 progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome {
         guard let asset = PhotoLibrary.asset(localIdentifier) else { throw PhotoLibrary.Failure.notFound }
         guard let kind = PhotoLibrary.kind(of: asset) else { throw PhotoLibrary.Failure.unsupported("Audio items are not supported.") }
         if let reason = await PhotoLibrary.skipReason(for: asset, ledger: ledger) { return .unchanged(reason) }
@@ -69,8 +70,11 @@ struct ServerCompactor: Compacting {
         let originalBytes = exported.reduce(0) { $0 + $1.descriptor.size }
 
         progress("Contacting server")
+        // A recent item is backed up now and compacted later. (Immich mode has no backing up of
+        // its own: automatic mode leaves recent items for later there.)
+        let backUpOnly = !compactNow && mode == .files
         let request = ServerAPI.RegisterAssetRequest(kind: kind.api, captureDate: asset.creationDate,
-                                                     resources: exported.map(\.descriptor))
+                                                     resources: exported.map(\.descriptor), compact: compactNow)
         guard let assetID = request.assetID else { throw PhotoLibrary.Failure.missingResource(request.primaryRole.rawValue) }
         var status: ServerAPI.AssetStatus
         do {
@@ -89,6 +93,20 @@ struct ServerCompactor: Compacting {
             status = try await client.status(assetID)
         }
 
+        if backUpOnly {
+            switch status.state {
+            case .held: return .unchanged(status.message ?? "Kept as is")
+            case .failed: throw ServerClient.Failure(status: 0, message: status.message ?? "The server could not keep it.")
+            default:
+                guard status.resources.allSatisfy({ $0.state == .verified }) else {
+                    throw ServerClient.Failure(status: 0, message: "The server is still missing some files; try again.")
+                }
+                try await ledger.recordBackedUp(original: localIdentifier, serverAssetID: assetID, originalBytes: originalBytes)
+                return .backedUp(originalBytes: originalBytes)
+            }
+        }
+
+        var askedAgain = false
         while true {
             switch status.state {
             case .ready, .imported: break
@@ -102,6 +120,16 @@ struct ServerCompactor: Compacting {
             case .verifying: progress(mode == .immich ? "Checking Immich" : "Verifying")
             case .queued: progress("Queued on server")
             case .compressing: progress("Compressing on server")
+            case .stored:
+                // Waiting as a recent item, though it's due now (a register that raced): ask again, once.
+                guard !askedAgain else {
+                    throw ServerClient.Failure(status: 0, message: "The server is keeping it without a compact copy; try again.")
+                }
+                askedAgain = true
+                status = try await client.register(request)
+                continue
+            case .trashed:
+                throw ServerClient.Failure(status: 0, message: "The server has this item in its trash; try again.")
             }
             if status.state == .ready || status.state == .imported { break }
             try await Task.sleep(for: pollInterval)
