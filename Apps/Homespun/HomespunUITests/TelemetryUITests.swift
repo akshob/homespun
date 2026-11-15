@@ -57,7 +57,7 @@ final class TelemetryUITests: XCTestCase {
         let send = app.buttons["report.send"]
         XCTAssertFalse(send.isEnabled, "Send works without a message")
         message.tap()
-        message.typeText("The backup stopped at 2 of 4 items.")
+        message.typeText("Test report from the UI tests: the backup stopped at 2 of 4 items.")
         let email = app.textFields["report.email"]
         email.tap()
         email.typeText("tester@example.com")
@@ -74,7 +74,8 @@ final class TelemetryUITests: XCTestCase {
         send.tap()
         let id = app.staticTexts["report.id"]
         XCTAssertTrue(id.waitForExistence(timeout: 20), "no report number")
-        XCTAssertEqual(id.label, "Report HS-TEST01")
+        // The stub answers HS-TEST01; the real service a new number.
+        XCTAssertTrue(id.label.hasPrefix("Report HS-"), id.label)
         attach(app, "Report sent")
         app.buttons["report.done"].tap()
     }

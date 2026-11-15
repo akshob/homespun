@@ -23,9 +23,12 @@ Never sent or stored: photos, videos, file names, album names, server addresses,
 account identifiers. IP addresses are used only transiently as rate-limit keys and are not
 stored; per-request invocation logs are turned off (`wrangler.jsonc`).
 
-Retention (by time received, enforced by a daily cron): events 400 days, MetricKit payloads 365
-days, reports 730 days. `DELETE /v1/installs/<install>` removes everything for an install
-immediately (the app calls it when the user stops sharing).
+Retention (by time received, enforced by a daily cron): events 400 days, MetricKit metrics 90
+days, MetricKit diagnostics 365 days, reports 730 days. `DELETE /v1/installs/<install>` removes
+everything for an install immediately (the app calls it when the user stops sharing).
+
+The Worker also enforces a hard usage budget so the public app key can't run up a bill; see
+[Budget](#budget).
 
 ## API (v1)
 
@@ -42,6 +45,7 @@ not a secret). Errors are `{"error": "<short reason>"}`. Checks run in this orde
 | 415 | `Content-Type` is not `application/json` (parameters such as `; charset=utf-8` are fine) |
 | 413 | Body over the endpoint's limit |
 | 400 | Invalid UTF-8/JSON, or a schema violation (the reason names the first problem, e.g. `events[3].props: "foo" is not allowed for "setup.step"`) |
+| 503 | `{"error": "busy"}`: a daily budget is used up (events, or reports past the D1 write cap); `Retry-After` is the seconds until the next UTC day |
 
 Unknown fields are rejected everywhere (400), so nothing unexpected is ever stored.
 
@@ -73,6 +77,8 @@ Strings in `app` and `device` may not contain control characters.
   matching `^[A-Za-z0-9._:-]*$`. Floats, nulls, objects and arrays are rejected.
 - If any event is invalid the whole batch is rejected (400) and nothing is stored. Each event
   becomes one row in `events`.
+- 503 `{"error": "busy"}` when the batch would pass the day's event cap or 90% of the D1 write
+  budget. Nothing is stored; the app keeps its queue and retries later.
 
 Allowlist (edit [`src/allowlist.ts`](src/allowlist.ts)):
 
@@ -113,6 +119,13 @@ The request JSON is stored verbatim in R2 at `metrics/YYYY/MM/DD/<install>/<id>.
 `firstCrash` holds whichever of those fields the first crash's `diagnosticMetaData` has, and is
 absent when there is none.
 
+Refusals are still 202, and the app does not retry them:
+
+- `{"accepted": 0, "reason": "limit"}`: the install already sent 3 metrics or 20 diagnostics
+  payloads this UTC day (guards against a buggy app).
+- `{"accepted": 0, "reason": "budget"}`: storing it would pass 90% of an R2 cap or of the D1 write
+  cap.
+
 ### `POST /v1/reports` (≤ 2 MB) → 201 `{"id": "HS-7KQ2MX"}`
 
 ```json
@@ -132,11 +145,15 @@ absent when there is none.
   the message on one line>`, and a plain-text body with the message, app and device info, the
   email, the R2 key, and the pretty-printed diagnostics (first 20,000 characters). If sending
   fails, the report is still stored, the failure is logged, and the response is still 201.
+- Reports may use the R2 budget up to 100%. Past it (or if the R2 write fails) the report is kept
+  in D1 only (`r2_key` is `''`), still emailed with the truncated diagnostics, and still 201.
+  Past `REPORT_EMAILS_MAX_DAY` emails in a UTC day, reports are stored but not emailed (logged).
+  Only past 100% of the D1 write cap is a report refused, with 503 `{"error": "busy"}`.
 
 ### `DELETE /v1/installs/<install>` → 204
 
 Deletes all events, payloads (rows and R2 objects) and reports (rows and R2 objects) of the
-install. Also 204 when nothing exists. 400 if `<install>` is not a lowercase UUID.
+install, and releases their bytes from the budget. Never refused by the budget. Also 204 when nothing exists. 400 if `<install>` is not a lowercase UUID.
 
 ### `GET /v1/health` → 200 `{"ok": true}`
 
@@ -144,9 +161,99 @@ No key needed.
 
 ### Scheduled (daily, 03:17 UTC)
 
-Deletes events received more than 400 days ago, payloads older than 365 days and reports older
-than 730 days (R2 objects first, then rows). Work is chunked to stay within Workers Free limits;
-leftovers are removed on the next run.
+1. Deletes metrics received more than 90 days ago, diagnostics older than 365 days, reports older
+   than 730 days (R2 objects first, then rows) and events older than 400 days. One run spends at
+   most a quarter of the daily D1 write cap on deletes and stays within Workers Free limits;
+   leftovers are removed on later runs.
+2. Deletes daily `usage` counters older than 40 days and monthly ones older than 13 months, and
+   sets `r2.bytes` to the sum of `size` in `payloads` and `reports` (corrects any drift).
+3. Sends budget alerts (see [Budget](#budget)).
+
+## Budget
+
+The app key is public, so anyone could post data. R2 bills beyond its free tier, and D1 and
+Workers on the free plans simply stop working when a daily limit is reached (which would also
+break bug reports). So the Worker counts its own usage in the D1 `usage` table and refuses work
+before any free tier runs out.
+
+Free tiers this is sized for:
+
+| Service | Free tier | Beyond it |
+| --- | --- | --- |
+| R2 storage | 10 GB-month | $0.015 per GB-month |
+| R2 Class A operations (writes) | 1M per month | $4.50 per million |
+| R2 Class B operations (reads) | 10M per month | $0.36 per million |
+| D1 | 100k rows written and 5M rows read per day, 5 GB | stops until 00:00 UTC |
+| Workers | 100k requests per day | stops until 00:00 UTC |
+
+Caps, as string vars in `wrangler.jsonc` (digits only; anything else falls back to the default):
+
+| Var | Default | Counter in `usage` | Why |
+| --- | --- | --- | --- |
+| `R2_MAX_BYTES` | 8000000000 | `r2.bytes` (stored now) | 80% of 10 GB |
+| `R2_MAX_PUTS_MONTH` | 800000 | `r2.puts.YYYY-MM` | 80% of 1M Class A |
+| `R2_MAX_PUTS_DAY` | 25000 | `r2.puts.YYYY-MM-DD` | About a month's cap / 31, so one day can't use up the month |
+| `R2_MAX_BYTES_DAY` | 250000000 | `r2.bytes.YYYY-MM-DD` (added that day) | The same for bytes |
+| `EVENTS_MAX_DAY` | 20000 | `events.YYYY-MM-DD` | Each event row with its 3 indexes is about 4 D1 rows written |
+| `REPORT_EMAILS_MAX_DAY` | 50 | `emails.YYYY-MM-DD` | Keeps a report flood out of the inbox |
+| `D1_MAX_WRITES_DAY` | 80000 | `d1.writes.YYYY-MM-DD` (estimate) | 80% of D1's 100k rows written per day |
+
+The caps sit at 80% because counting is approximate: concurrent requests can overshoot a little,
+and D1 rows written are estimated (4 per row inserted or deleted, 1 per counter). Days and
+months are UTC. The D1 write cap covers what the event cap alone can't: a flood of metrics
+uploads (about 9 rows written each) would otherwise exhaust D1 within the R2 caps.
+
+What is refused, and when:
+
+- **Metrics and diagnostics**: 202 `{"accepted": 0, "reason": "budget"}` once storing one would
+  pass 90% of any R2 cap or of the D1 write cap, so reports keep the last 10%. Also
+  `"reason": "limit"` after 3 metrics or 20 diagnostics payloads per install per UTC day.
+- **Events**: 503 `{"error": "busy"}` once the day's events would pass `EVENTS_MAX_DAY` or the
+  D1 writes 90% of their cap. The app keeps its queue and sends it later.
+- **Reports**: use R2 up to 100% of the R2 caps; past that they are kept in D1 only and still
+  emailed (the email carries the first 20,000 characters of the diagnostics) with 201. Past
+  `REPORT_EMAILS_MAX_DAY` they are stored but not emailed. They are refused (503) only past 100%
+  of the D1 write cap.
+- **Deletes** (`DELETE /v1/installs/…`, retention) are never refused. They lower `r2.bytes` by
+  the deleted sizes (R2 deletes are free).
+
+Refused requests write nothing, except one marker per day (`events.full.…`, `d1.full.…`,
+`r2.full.…`) for the alerts.
+
+**Alerts.** After the daily cleanup the Worker emails `REPORT_TO` (from
+`Homespun Telemetry <reports@homespun.photos>`; not counted as report emails):
+
+- when stored R2 bytes or this month's R2 writes cross 50%, 75% or 90% of their caps, once per
+  threshold and month (remembered as `alert.storage.75.YYYY-MM`, `alert.writes.90.YYYY-MM`),
+  e.g. `[Homespun telemetry] R2 storage at 76% of its budget`;
+- once a day if the previous day hit the event cap, the report email cap, 90% of the D1 write
+  cap, or an R2 cap (`[Homespun telemetry] Daily caps reached on 2026-11-14`).
+
+Each alert lists all current counters and caps.
+
+**Typical usage.** MetricKit delivers about one metrics payload per install per day, 10–30 KB.
+1,000 sharing installs make about 30k R2 writes a month (3% of the free tier) and keep 1–3 GB
+with the 90-day metrics retention. Diagnostics and reports are rare. In D1 that is about 9k rows
+written a day for payloads, plus about 4 per event (10 events per install per day would be 40k).
+The Worker never reads R2, so there are no Class B operations in normal operation; only your own
+downloads with `wrangler r2 object get` count.
+
+Things the budget can't cover:
+
+- Workers Free allows 100k requests a day. A flood can use them up, and then every request,
+  including reports, fails until 00:00 UTC. It costs nothing; Workers Paid would avoid it.
+- Every request reads about 10 `usage` rows, which stays far below D1's 5M rows read per day.
+  Your own queries count too: a query over the whole `events` table reads every row.
+- Sustained growth: retention deletes cost D1 writes too, so at about 10k events a day for over
+  a year (inserts plus the deletes 400 days later) D1 Free is too small. Move to Workers Paid and
+  raise the caps.
+
+**Changing caps.** Edit the vars in `wrangler.jsonc` and run `npx wrangler deploy`. (Vars changed
+in the dashboard are replaced by the next deploy.) To see the counters:
+
+```bash
+npx wrangler d1 execute homespun-telemetry --remote --command "SELECT * FROM usage ORDER BY key"
+```
 
 ## Develop and test
 
@@ -189,8 +296,9 @@ npx wrangler dev --test-scheduled   # then: curl 'localhost:8787/cdn-cgi/handler
    `wrangler.jsonc` (it is not secret; commit it).
 4. **R2.** Enable R2 once in the dashboard if you never have, then
    `npx wrangler r2 bucket create homespun-telemetry`.
-5. **Schema.** `npx wrangler d1 migrations apply homespun-telemetry --remote`
-   (also run this before deploying any future migration).
+5. **Schema.** `npx wrangler d1 migrations apply homespun-telemetry --remote` applies every
+   migration not yet applied (`0001_init.sql`, `0002_budget.sql`, …). Run it before deploying
+   code that needs a new migration.
 6. **Secret.** `npx wrangler secret put REPORT_TO` and enter the verified inbox address. Wrangler
    offers to create the Worker if it does not exist yet. (`wrangler.jsonc` lists `REPORT_TO` as
    required, so deploys fail until it is set; alternatively pass `--secrets-file` to the first
@@ -244,19 +352,24 @@ SELECT json_extract(summary, '$.firstCrash.exceptionType') AS exception,
 FROM payloads WHERE kind = 'diagnostics' AND json_extract(summary, '$.crashDiagnostics') > 0
 GROUP BY 1, 2, 3 ORDER BY n DESC LIMIT 20;
 
+-- Budget counters, and what R2 holds by kind
+SELECT * FROM usage ORDER BY key;
+SELECT kind, count(*) AS payloads, sum(size) AS bytes FROM payloads GROUP BY kind;
+
 -- Latest reports, and marking one handled
 SELECT id, received, app_version, channel, model, email, substr(message, 1, 80) AS message
 FROM reports ORDER BY received DESC LIMIT 20;
 UPDATE reports SET status = 'done' WHERE id = 'HS-7KQ2MX';
 ```
 
-Fetch a stored payload or report with
+Reports kept without R2 have `r2_key = ''`. Fetch a stored payload or report with
 `npx wrangler r2 object get homespun-telemetry/<r2_key> --remote --file out.json`.
 
 ## Layout
 
 - `src/index.ts`: routing, key check, rate limits, cron entry point.
 - `src/allowlist.ts`: the event allowlist.
+- `src/budget.ts`: caps, `usage` counters and the refusal rules; `src/alerts.ts`: budget emails.
 - `src/events.ts`, `src/payloads.ts`, `src/reports.ts`, `src/installs.ts`, `src/retention.ts`:
   one file per endpoint or job; `src/validate.ts` and `src/http.ts` hold the shared checks.
 - `migrations/`: D1 schema (`wrangler d1 migrations`).

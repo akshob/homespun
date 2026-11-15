@@ -36,6 +36,8 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 export interface JsonBody {
 	/** The body exactly as received (stored verbatim in R2). */
 	text: string;
+	/** Size of the body in bytes. */
+	bytes: number;
 	value: Record<string, unknown>;
 }
 
@@ -63,7 +65,7 @@ export async function readJsonBody(request: Request, maxBytes: number): Promise<
 		badRequest("body is not valid JSON");
 	}
 	if (!isObject(value)) badRequest("body must be a JSON object");
-	return { text, value };
+	return { text, bytes: bytes.byteLength, value };
 }
 
 /** Reads the stream, failing with 413 as soon as it exceeds `maxBytes` (Content-Length may be absent). */

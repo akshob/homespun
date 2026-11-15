@@ -8,8 +8,18 @@
 	// Keep our own console logs, but not per-request invocation logs (they include client metadata).
 	"observability": { "logs": { "enabled": true, "invocation_logs": false } },
 
-	// Public noise filter sent by the app as `X-Homespun-Key`. Not a secret.
-	"vars": { "APP_KEY": "homespun-app-v1" },
+	"vars": {
+		// Public noise filter sent by the app as `X-Homespun-Key`. Not a secret.
+		"APP_KEY": "homespun-app-v1",
+		// Hard usage caps (digits only), 80% of the free tiers by default. See README "Budget".
+		"R2_MAX_BYTES": "8000000000",
+		"R2_MAX_PUTS_MONTH": "800000",
+		"R2_MAX_PUTS_DAY": "25000",
+		"R2_MAX_BYTES_DAY": "250000000",
+		"EVENTS_MAX_DAY": "20000",
+		"REPORT_EMAILS_MAX_DAY": "50",
+		"D1_MAX_WRITES_DAY": "80000"
+	},
 
 	// Bug reports are emailed here. Set with `wrangler secret put REPORT_TO`; never commit it.
 	"secrets": { "required": ["REPORT_TO"] },
@@ -18,7 +28,7 @@
 		{
 			"binding": "DB",
 			"database_name": "homespun-telemetry",
-			// Replace with the id printed by `wrangler d1 create homespun-telemetry`.
+			// From `wrangler d1 create homespun-telemetry`.
 			"database_id": "de9ae496-7913-4875-9040-8baf16fac540",
 			"migrations_dir": "migrations"
 		}
@@ -37,8 +47,8 @@
 
 	// Uncomment to serve at https://telemetry.homespun.photos. The homespun.photos zone must be in
 	// the same account; Wrangler creates the DNS record and certificate. See README.md.
-	// "routes": [{ "pattern": "telemetry.homespun.photos", "custom_domain": true }],
+	"routes": [{ "pattern": "telemetry.homespun.photos", "custom_domain": true }],
 
-	// Daily retention cleanup (UTC).
+	// Daily retention cleanup, usage reconciliation and budget alerts (UTC).
 	"triggers": { "crons": ["17 3 * * *"] }
 }

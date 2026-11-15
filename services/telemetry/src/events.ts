@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { EVENT_ALLOWLIST } from "./allowlist";
+import { Budget, busy, LOW_PRIORITY_PERCENT, WRITES_PER_ROW, withWrites, type Flag } from "./budget";
 import { badRequest, isObject, json } from "./http";
 import { onlyKeys, parseApp, parseDevice, parseInstall, parseTime, quoted } from "./validate";
 
@@ -19,7 +20,10 @@ interface ParsedEvent {
 	props: string;
 }
 
-/** POST /v1/events: validates the whole batch first, then stores one row per event. */
+/**
+ * POST /v1/events: validates the whole batch first, then stores one row per event. Past the daily
+ * event cap (or 90% of the D1 write budget) answers 503 so the app keeps its queue for later.
+ */
 export async function handleEvents(body: Record<string, unknown>, env: Env): Promise<Response> {
 	onlyKeys(body, ["install", "app", "device", "events"], "body");
 	const install = parseInstall(body.install);
@@ -31,10 +35,21 @@ export async function handleEvents(body: Record<string, unknown>, env: Env): Pro
 	}
 	const parsed = events.map((event, index) => parseEvent(event, `events[${index}]`));
 
-	const received = new Date().toISOString();
+	const now = new Date();
+	const budget = await Budget.load(env, now);
+	const deltas = withWrites({ dayEvents: parsed.length }, parsed.length * WRITES_PER_ROW);
+	const refused: Flag[] = [];
+	if (!budget.allows({ dayEvents: parsed.length })) refused.push("events");
+	if (!budget.allows({ dayWrites: deltas.dayWrites }, LOW_PRIORITY_PERCENT)) refused.push("d1");
+	if (refused.length > 0) {
+		await budget.markRefused(env.DB, refused);
+		throw busy(now);
+	}
+
+	const received = now.toISOString();
 	const insert = env.DB.prepare(INSERT_EVENT);
-	await env.DB.batch(
-		parsed.map((event) =>
+	await env.DB.batch([
+		...parsed.map((event) =>
 			insert.bind(
 				install,
 				event.time,
@@ -49,7 +64,8 @@ export async function handleEvents(body: Record<string, unknown>, env: Env): Pro
 				device.family,
 			),
 		),
-	);
+		budget.add(env.DB, deltas),
+	]);
 	return json({ accepted: parsed.length }, 202);
 }
 

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { Budget, busy, r2Put, WRITES_PER_ROW, withWrites, type Deltas } from "./budget";
 import { badRequest, isObject, json, type JsonBody } from "./http";
 import { isInstall, onlyKeys, parseApp, parseDevice, type AppInfo, type DeviceInfo } from "./validate";
 
@@ -19,13 +20,15 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 const ID_ATTEMPTS = 5;
 
 const INSERT_REPORT = `INSERT INTO reports
-	(id, install, received, app_version, build, channel, model, os, email, message, r2_key, status)
-	VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'new')`;
+	(id, install, received, app_version, build, channel, model, os, email, message, r2_key, size, status)
+	VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'new')`;
 
 interface Report {
 	id: string;
 	received: string;
+	/** "" when the report is kept in D1 only; `notInR2` says why. */
 	r2Key: string;
+	notInR2?: string;
 	install: string | null;
 	app: AppInfo;
 	device: DeviceInfo;
@@ -34,7 +37,11 @@ interface Report {
 	diagnostics: Record<string, unknown> | null;
 }
 
-/** POST /v1/reports: stores the report (R2 + D1), then emails it. Email failures are only logged. */
+/**
+ * POST /v1/reports: stores the report (R2 + D1), then emails it. Reports may use the whole R2
+ * budget; past it they are kept in D1 only (the email still carries the diagnostics, truncated).
+ * Past the daily email cap they are stored but not emailed. Email failures are only logged.
+ */
 export async function handleReport(body: JsonBody, env: Env): Promise<Response> {
 	const { value } = body;
 	onlyKeys(value, ["install", "app", "device", "message", "email", "diagnostics"], "body");
@@ -47,7 +54,17 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 	const diagnostics = value.diagnostics ?? null;
 	if (diagnostics !== null && !isObject(diagnostics)) badRequest("diagnostics: must be an object");
 
-	const received = new Date().toISOString();
+	const now = new Date();
+	const budget = await Budget.load(env, now);
+	// Worst case: the row, a fallback update, and the R2 and email counters.
+	const mostWrites = withWrites({ ...r2Put(body.bytes), dayEmails: 1 }, WRITES_PER_ROW + 1).dayWrites!;
+	if (!budget.allows({ dayWrites: mostWrites })) {
+		await budget.markRefused(env.DB, ["d1"]);
+		throw busy(now);
+	}
+	const useR2 = budget.allows(r2Put(body.bytes));
+
+	const received = now.toISOString();
 	const id = await insertWithUniqueId(env, (candidate) =>
 		env.DB.prepare(INSERT_REPORT).bind(
 			candidate,
@@ -60,19 +77,50 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 			device.os,
 			email,
 			message,
-			reportKey(candidate),
+			useR2 ? reportKey(candidate) : "",
+			useR2 ? body.bytes : 0,
 		),
 	);
-	const r2Key = reportKey(id);
-	try {
-		await env.BUCKET.put(r2Key, body.text, { httpMetadata: { contentType: "application/json" } });
-	} catch (error) {
-		await env.DB.prepare("DELETE FROM reports WHERE id = ?1").bind(id).run().catch(() => {});
-		throw error;
+
+	const updates: D1PreparedStatement[] = [];
+	const deltas: Deltas = {};
+	let r2Key = "";
+	let notInR2: string | undefined;
+	if (useR2) {
+		try {
+			await env.BUCKET.put(reportKey(id), body.text, { httpMetadata: { contentType: "application/json" } });
+			r2Key = reportKey(id);
+			Object.assign(deltas, r2Put(body.bytes));
+		} catch (error) {
+			console.error(`report ${id}: R2 write failed, keeping it in D1 only: ${describe(error)}`);
+			notInR2 = "the R2 write failed";
+			updates.push(env.DB.prepare("UPDATE reports SET r2_key = '', size = 0 WHERE id = ?1").bind(id));
+		}
+	} else {
+		console.warn(`report ${id}: R2 budget reached, keeping it in D1 only`);
+		notInR2 = "the R2 budget is used up";
+		updates.push(...budget.flag(env.DB, ["r2"]));
 	}
 
-	await sendReportEmail(env, { id, received, r2Key, install, app, device, message, email, diagnostics });
+	if (budget.allows({ dayEmails: 1 })) {
+		const report = { id, received, r2Key, notInR2, install, app, device, message, email, diagnostics };
+		if (await sendReportEmail(env, report)) deltas.dayEmails = 1;
+	} else {
+		console.warn(`report ${id}: not emailed, the daily cap of ${budget.cap("dayEmails")} report emails is reached`);
+	}
+
+	try {
+		await env.DB.batch([...updates, budget.add(env.DB, withWrites(deltas, WRITES_PER_ROW + updates.length))]);
+	} catch (error) {
+		// The report is stored (and maybe emailed); a retry by the app would only duplicate it.
+		console.error(`report ${id}: usage update failed: ${describe(error)}`);
+	}
 	return json({ id }, 201);
+}
+
+function describe(error: unknown): string {
+	const code = isObject(error) && typeof error.code === "string" ? `${error.code}: ` : "";
+	return `${code}${error instanceof Error ? error.message : String(error)}`;
 }
 
 export function reportKey(id: string): string {
@@ -129,11 +177,12 @@ function parseEmail(value: unknown): string | null {
 	return email;
 }
 
-async function sendReportEmail(env: Env, report: Report): Promise<void> {
+/** Returns whether a send was attempted (it counts against the daily cap even if it failed). */
+async function sendReportEmail(env: Env, report: Report): Promise<boolean> {
 	const to = env.REPORT_TO?.trim();
 	if (!to || !env.MAIL) {
 		console.warn(`report ${report.id}: email skipped, REPORT_TO or MAIL is not configured`);
-		return;
+		return false;
 	}
 	try {
 		await env.MAIL.send({
@@ -144,9 +193,9 @@ async function sendReportEmail(env: Env, report: Report): Promise<void> {
 			text: reportText(report),
 		});
 	} catch (error) {
-		const code = isObject(error) && typeof error.code === "string" ? `${error.code}: ` : "";
-		console.error(`report ${report.id}: email failed: ${code}${error instanceof Error ? error.message : String(error)}`);
+		console.error(`report ${report.id}: email failed: ${describe(error)}`);
 	}
+	return true;
 }
 
 export function reportSubject(id: string, message: string): string {
@@ -166,8 +215,12 @@ function reportText(report: Report): string {
 		`Install:  ${report.install ?? "(none)"}`,
 		`App:      ${app.version} (${app.build}), ${app.channel}`,
 		`Device:   ${device.model} (${device.family}), OS ${device.os}`,
-		`Stored:   R2 ${report.r2Key}`,
-		`          wrangler r2 object get homespun-telemetry/${report.r2Key} --remote --file ${report.id}.json`,
+		...(report.r2Key
+			? [
+					`Stored:   R2 ${report.r2Key}`,
+					`          wrangler r2 object get homespun-telemetry/${report.r2Key} --remote --file ${report.id}.json`,
+				]
+			: [`Stored:   D1 only, without the diagnostics (${report.notInR2})`]),
 		"",
 	];
 	if (report.diagnostics === null) {
@@ -180,9 +233,9 @@ function reportText(report: Report): string {
 			let shown = pretty.slice(0, EMAIL_DIAGNOSTICS_LIMIT);
 			if (/[\ud800-\udbff]$/.test(shown)) shown = shown.slice(0, -1);
 			lines.push(
-				`Diagnostics (first ${EMAIL_DIAGNOSTICS_LIMIT} of ${pretty.length} characters; the full JSON is in R2):`,
+				`Diagnostics (first ${EMAIL_DIAGNOSTICS_LIMIT} of ${pretty.length} characters${report.r2Key ? "; the full JSON is in R2" : ""}):`,
 				shown,
-				`[truncated, see ${report.r2Key}]`,
+				report.r2Key ? `[truncated, see ${report.r2Key}]` : "[truncated; the rest was not kept]",
 			);
 		}
 	}
