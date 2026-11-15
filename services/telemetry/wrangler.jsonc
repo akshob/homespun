@@ -19,7 +19,7 @@
 			"binding": "DB",
 			"database_name": "homespun-telemetry",
 			// Replace with the id printed by `wrangler d1 create homespun-telemetry`.
-			"database_id": "00000000-0000-0000-0000-000000000000",
+			"database_id": "de9ae496-7913-4875-9040-8baf16fac540",
 			"migrations_dir": "migrations"
 		}
 	],
