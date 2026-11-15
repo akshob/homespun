@@ -106,9 +106,20 @@ struct LibraryState: Equatable {
         }
     }
 
-    var cells: [Cell] = []
+    var cells: [Cell] = [] { didSet { reindex() } }
+    /// Where each cell is, so a grid cell finds its current state by id.
+    private(set) var positions: [String: Int] = [:]
 
-    init(cells: [Cell] = []) { self.cells = cells }
+    init(cells: [Cell] = []) {
+        self.cells = cells
+        reindex()
+    }
+
+    func cell(_ id: String) -> Cell? { positions[id].map { cells[$0] } }
+
+    private mutating func reindex() {
+        positions = Dictionary(cells.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
 
     /// `library` in display order (oldest first). An original backed up with a compact copy in
     /// the library is hidden; the copy is shown with a badge saying where the original is. (A
@@ -147,6 +158,7 @@ struct LibraryState: Equatable {
             }
             return Cell(id: id, badge: badge, original: nil, canFree: false)
         }
+        reindex()
     }
 
     func cells(_ filter: Filter) -> [Cell] {
@@ -407,17 +419,22 @@ final class GridSelection {
 }
 
 struct GridCell: View {
-    let cell: LibraryState.Cell
-    let asset: PHAsset?
-    let manager: PHCachingImageManager
+    /// What the grid had when it laid this cell out; the cell reads its current state from `library`
+    /// itself, so a new badge shows at once (a lazy grid doesn't reliably rebuild a cell when a
+    /// value passed down to it changes).
+    let initial: LibraryState.Cell
+    let library: LibraryModel
     let selection: GridSelection
     var serverName = "your server"
     @State private var image: UIImage?
     @State private var request: PHImageRequestID?
     @Environment(\.dynamicTypeSize) private var typeSize
 
+    private var cell: LibraryState.Cell { library.state.cell(initial.id) ?? initial }
+    private var asset: PHAsset? { library.asset(initial.id) }
+    private var manager: PHCachingImageManager { library.thumbnails }
     private var selecting: Bool { selection.active }
-    private var selected: Bool { selection.active && selection.ids.contains(cell.id) }
+    private var selected: Bool { selection.active && selection.ids.contains(initial.id) }
 
     var body: some View {
         let selected = selected

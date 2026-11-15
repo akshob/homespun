@@ -54,9 +54,16 @@ extension XCUIApplication {
     }
 
     /// Opens a tab by its title.
+    /// Scrolling down minimises the tab bar (the Library opens at the newest items), so a tab
+    /// may need a scroll up before it can be tapped; tries a few times until it's selected.
     @MainActor func openTab(_ title: String) {
         let tab = tabBars.buttons[title]
-        if tab.waitForExistence(timeout: 10) { tab.tap() }
+        _ = tab.waitForExistence(timeout: 10)
+        for _ in 0..<3 where !(tab.exists && tab.isSelected) {
+            if !(tab.exists && tab.isHittable) { swipeDown() }
+            if tab.exists, tab.isHittable { tab.tap() }
+            _ = tab.waitForExistence(timeout: 2)
+        }
     }
 
     /// Scrolls the current screen until the element exists (lists load rows lazily).

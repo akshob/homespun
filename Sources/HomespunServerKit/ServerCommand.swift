@@ -142,7 +142,7 @@ public enum ServerCommand {
                 if summary.problems > 0 {
                     print("Fix the problems above and run the same command again; finished items are skipped.")
                 } else if !dryRun {
-                    print("Done. On your iPhone, open Homespun and find compact copies made elsewhere (Settings).")
+                    print("Done. On your iPhone, open Homespun and find compact copies made elsewhere (Server tab).")
                 }
                 return summary.problems > 0 ? 1 : 0
             case "revoke" where arguments.count == 2:

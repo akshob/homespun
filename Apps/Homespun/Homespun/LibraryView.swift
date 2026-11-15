@@ -167,8 +167,7 @@ struct LibraryView: View {
                     ForEach(sections) { section in
                         Section {
                             ForEach(section.cells) { cell in
-                                GridCell(cell: cell, asset: controller.library.asset(cell.id),
-                                         manager: controller.library.thumbnails, selection: selection,
+                                GridCell(initial: cell, library: controller.library, selection: selection,
                                          serverName: controller.serverName)
                                     .onTapGesture { tapped(cell) }
                                     .contextMenu { if !selecting { menu(for: cell) } }
