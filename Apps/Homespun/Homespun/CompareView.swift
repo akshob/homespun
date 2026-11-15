@@ -313,6 +313,7 @@ struct CompareView: View {
 
     private func pill(_ text: String) -> some View {
         Text(text).font(.footnote.weight(.medium)).foregroundStyle(Theme.label)
+            .lineLimit(1).minimumScaleFactor(0.8)
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Theme.card.opacity(0.92), in: Capsule())
     }

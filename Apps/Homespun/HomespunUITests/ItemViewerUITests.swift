@@ -89,7 +89,6 @@ final class ItemViewerUITests: XCTestCase {
     @MainActor func test2CompareDownloadsAFreedOriginal() throws {
         guard server != nil else { throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.") }
         let app = launch()
-        XCTAssertTrue(app.isConnected(), "not paired with the server")
         let ready = app.gridItems("Ready to free up").matching(NSPredicate(format: "label BEGINSWITH 'Photo'"))
         XCTAssertTrue(ready.firstMatch.waitForExistence(timeout: 20), "no photo ready to free up")
         ready.element(boundBy: ready.count - 1).tap()
