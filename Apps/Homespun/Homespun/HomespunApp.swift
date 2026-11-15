@@ -3,7 +3,10 @@ import SwiftUI
 
 @main
 struct HomespunApp: App {
-    init() { AppModel.registerBackgroundRun() }
+    init() {
+        AppModel.registerBackgroundRun()
+        Journey.configureTips()
+    }
 
     var body: some Scene {
         WindowGroup { RootView(model: .shared) }

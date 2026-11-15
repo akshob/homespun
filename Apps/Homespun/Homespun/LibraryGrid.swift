@@ -293,6 +293,13 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     @ObservationIgnored private var mediaCache: [Media: Set<String>] = [:]
 
+    /// Items created after a date (for "new since the last backup").
+    func identifiers(createdAfter date: Date) -> Set<String> {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "creationDate > %@", date as NSDate)
+        return Set(Self.identifiers(PHAsset.fetchAssets(with: options)))
+    }
+
     /// The items of one kind, read once and kept until the library changes.
     func identifiers(_ media: Media) -> Set<String>? {
         guard media != .all else { return nil }

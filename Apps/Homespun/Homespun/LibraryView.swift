@@ -256,7 +256,7 @@ struct LibraryView: View {
                         }
                         .accessibilityIdentifier("selection.free")
                     }
-                    Button("Badge Guide", systemImage: "info.circle") { sheet = .legend }
+                    Button("Badge Guide", systemImage: "info.circle") { openLegend() }
                 } label: {
                     Label("More", systemImage: "ellipsis")
                 }
@@ -275,9 +275,16 @@ struct LibraryView: View {
             }
         } else if controller.access.allowsReading {
             ToolbarItemGroup(placement: .primaryAction) {
-                Button("Select", systemImage: "checkmark.circle") { selecting = true }
-                    .accessibilityIdentifier("select.start")
+                Button("Select", systemImage: "checkmark.circle") {
+                    selecting = true
+                    controller.journey.used(.select)
+                }
+                .accessibilityIdentifier("select.start")
+                .popoverTip(SelectTip())
                 filterMenu
+                    .popoverTip(BadgeTip()) { action in
+                        if action.id == "guide" { openLegend() }
+                    }
             }
             ToolbarItem(placement: .primaryAction) { moreMenu }
             if isBook {
@@ -328,7 +335,7 @@ struct LibraryView: View {
                 Text("Small").tag(6)
             }
             .pickerStyle(.menu)
-            Button("Badge Guide", systemImage: "info.circle") { sheet = .legend }
+            Button("Badge Guide", systemImage: "info.circle") { openLegend() }
                 .accessibilityIdentifier("legend.open")
         } label: {
             Label("More", systemImage: "ellipsis")
@@ -417,6 +424,11 @@ struct LibraryView: View {
         guard let index = sizes.firstIndex(of: columns) else { return columns = 4 }
         if magnification > 1.25, index > 0 { withAnimation { columns = sizes[index - 1] } }
         if magnification < 0.8, index < sizes.count - 1 { withAnimation { columns = sizes[index + 1] } }
+    }
+
+    private func openLegend() {
+        controller.journey.used(.badgeGuide)
+        sheet = .legend
     }
 
     private func measure(_ proxy: GeometryProxy) {
