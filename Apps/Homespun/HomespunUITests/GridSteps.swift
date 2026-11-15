@@ -118,8 +118,11 @@ extension XCUIApplication {
     @MainActor func checkActivity(file: StaticString = #filePath, line: UInt = #line) -> [String] {
         // The grid opens scrolled to the newest items, which minimises the tab bar; scrolling up
         // brings its tabs back.
-        if !tabBars.buttons["Activity"].waitForExistence(timeout: 3) { swipeDown() }
-        openTab("Activity")
+        for _ in 0..<3 where !navigationBars["Activity"].exists {
+            if !(tabBars.buttons["Activity"].exists && tabBars.buttons["Activity"].isHittable) { swipeDown() }
+            openTab("Activity")
+            _ = navigationBars["Activity"].waitForExistence(timeout: 3)
+        }
         let run = descendants(matching: .any).matching(identifier: "activity.run").firstMatch
         XCTAssertTrue(run.waitForExistence(timeout: 20), "no run in Activity", file: file, line: line)
         run.tap()

@@ -18,8 +18,11 @@ extension XCUIApplication {
 
     /// Opens a tab, first scrolling up if scrolling down minimised the tab bar.
     @MainActor func showTab(_ title: String) {
-        if !tabBars.buttons[title].waitForExistence(timeout: 3) { swipeDown() }
-        openTab(title)
+        for _ in 0..<3 where !(tabBars.buttons[title].exists && tabBars.buttons[title].isSelected) {
+            if !(tabBars.buttons[title].exists && tabBars.buttons[title].isHittable) { swipeDown() }
+            openTab(title)
+            sleep(1)
+        }
     }
 }
 
