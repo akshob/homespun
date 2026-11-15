@@ -8,6 +8,8 @@ import SwiftUI
 struct LibraryView: View {
     let model: AppModel
     var freeUp: (Set<String>?) -> Void
+    /// The right page's screen when the display is wide enough for a book (iPhone Duo open).
+    @Binding var route: LibraryRoute
     @State private var filter = LibraryState.Filter.all
     @State private var media = LibraryModel.Media.all
     @State private var selecting = false
@@ -16,9 +18,14 @@ struct LibraryView: View {
     @State private var sheet: Sheet?
     @State private var path: [String] = []
     @State private var pinch: CGFloat = 1
+    /// The grid's density: 2 (large), 4 (medium) or 6 (small) columns on an iPhone.
     @AppStorage("gridColumns") private var columns = 4
+    @SceneStorage("library.showsPage") private var showsPage = true
+    @State private var gridSize = CGSize.zero
+    @State private var gridFold: CGRect?
     @Environment(\.openURL) private var openURL
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     enum Sheet: Identifiable {
         case backUp([String]), legend, setup
@@ -36,7 +43,18 @@ struct LibraryView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            content
+            Group {
+                if isBook {
+                    Book(showsSecond: showsPage) {
+                        content
+                    } second: {
+                        LibraryRightPage(model: model, route: $route, selected: selected, backUp: backUp,
+                                         showAll: { filter = $0 }, openItem: { path.append($0) })
+                    }
+                } else {
+                    content
+                }
+            }
                 .background(Theme.background)
                 .navigationTitle(selecting ? selectionTitle : "Library")
                 .navigationSubtitle(subtitle)
@@ -44,7 +62,7 @@ struct LibraryView: View {
                 .toolbar { toolbar }
                 .toolbar(selecting ? .hidden : .automatic, for: .tabBar)
                 .navigationDestination(for: String.self) { id in
-                    ItemViewer(model: model, ids: visibleIDs, start: id, freeUp: freeUp)
+                    ItemViewer(model: model, ids: visibleIDs, start: id, freeUp: openFreeUp)
                 }
                 .sheet(item: $sheet) { sheet in
                     switch sheet {
@@ -54,7 +72,18 @@ struct LibraryView: View {
                     }
                 }
                 .task(id: selected) { await measureSelection() }
+                .onChange(of: selecting) { _, on in
+                    if isBook { route = on ? .selection : .overview }
+                }
         }
+    }
+
+    /// Two pages: the grid on the left, the next level on the right (DUO §8).
+    private var isBook: Bool { sizeClass == .regular && controller.access.allowsReading }
+
+    /// Free Up Space as the right page in a book, a sheet otherwise.
+    private func openFreeUp(_ scope: Set<String>?) {
+        if isBook, showsPage { route = .review(scope) } else { freeUp(scope) }
     }
 
     // MARK: Content
@@ -90,16 +119,36 @@ struct LibraryView: View {
 
     private var visibleIDs: [String] { cells.map(\.id) }
 
-    private var gridColumns: Int {
-        typeSize.isAccessibilitySize ? min(columns, 2) : columns
+    /// Even columns; across both pages of an open iPhone Duo, the fold is the gutter between the
+    /// two halves, never inside a cell (DUO §8, §11).
+    private var gridLayout: (items: [GridItem], leading: CGFloat) {
+        let accessibility = typeSize.isAccessibilitySize
+        if sizeClass == .regular, let gridFold, gridSize.width > 0 {
+            let split = BookSplit.make(size: gridSize, fold: gridFold)
+            if split.axis == .horizontal, split.gutter.width > BookSplit.plainGutter {
+                let perPage = GridColumns.count(width: split.second.width, density: columns, accessibility: accessibility)
+                let cell = (split.second.width - CGFloat(perPage - 1) * 2) / CGFloat(perPage)
+                let leading = split.first.width - (CGFloat(perPage) * cell + CGFloat(perPage - 1) * 2)
+                if cell > 30, leading >= 0 {
+                    let items = (0..<(perPage * 2)).map { index in
+                        GridItem(.fixed(cell), spacing: index == perPage - 1 ? split.gutter.width : 2)
+                    }
+                    return (items, leading)
+                }
+            }
+        }
+        let count = GridColumns.count(width: gridSize.width > 0 ? gridSize.width : 402, density: columns,
+                                      accessibility: accessibility)
+        return (Array(repeating: GridItem(.flexible(), spacing: 2), count: count), 0)
     }
 
     private var grid: some View {
         let cells = cells
+        let layout = gridLayout
         return ScrollView {
             VStack(spacing: 12) {
                 notice
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: gridColumns), spacing: 2) {
+                LazyVGrid(columns: layout.items, spacing: 2) {
                     ForEach(cells) { cell in
                         GridCell(cell: cell, asset: controller.library.asset(cell.id), manager: controller.library.thumbnails,
                                  selecting: selecting, selected: selected.contains(cell.id), serverName: controller.serverName)
@@ -107,7 +156,16 @@ struct LibraryView: View {
                             .contextMenu { menu(for: cell) }
                     }
                 }
+                .padding(.leading, layout.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if cells.isEmpty { empty }
+            }
+        }
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { measure(proxy) }
+                    .onChange(of: proxy.size) { _, _ in measure(proxy) }
             }
         }
         .modifier(OpensAtNewest())
@@ -194,7 +252,7 @@ struct LibraryView: View {
                     if !freeable.isEmpty {
                         Button("Free Up Space (\(freeable.count))", systemImage: "trash") {
                             endSelecting()
-                            freeUp(freeable)
+                            openFreeUp(freeable)
                         }
                         .accessibilityIdentifier("selection.free")
                     }
@@ -222,6 +280,14 @@ struct LibraryView: View {
                 filterMenu
             }
             ToolbarItem(placement: .primaryAction) { moreMenu }
+            if isBook {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(showsPage ? "Hide Page" : "Show Page", systemImage: "sidebar.trailing") {
+                        withAnimation { showsPage.toggle() }
+                    }
+                    .accessibilityIdentifier("library.togglePage")
+                }
+            }
         }
     }
 
@@ -272,13 +338,15 @@ struct LibraryView: View {
 
     @ViewBuilder private func menu(for cell: LibraryState.Cell) -> some View {
         if cell.canFree, let original = cell.original {
-            Button("Free Up Space", systemImage: "trash") { freeUp([original]) }
+            Button("Free Up Space", systemImage: "trash") { openFreeUp([original]) }
         }
         if cell.canCompact, settings.isPaired {
             Button("Back Up", systemImage: "arrow.up.circle") { backUp([cell.id]) }
                 .disabled(controller.backUpBlockedReason != nil)
         }
-        Button("Show Details", systemImage: "info.circle") { path.append(cell.id) }
+        Button("Show Details", systemImage: "info.circle") {
+            if isBook, showsPage { route = .item(cell.id) } else { path.append(cell.id) }
+        }
         Text(cell.badge.label)
     }
 
@@ -299,7 +367,7 @@ struct LibraryView: View {
 
     private func tapped(_ cell: LibraryState.Cell) {
         guard selecting else {
-            path.append(cell.id)
+            if isBook, showsPage { route = .item(cell.id) } else { path.append(cell.id) }
             return
         }
         guard cell.canCompact || cell.canFree else { return }
@@ -349,6 +417,11 @@ struct LibraryView: View {
         guard let index = sizes.firstIndex(of: columns) else { return columns = 4 }
         if magnification > 1.25, index > 0 { withAnimation { columns = sizes[index - 1] } }
         if magnification < 0.8, index < sizes.count - 1 { withAnimation { columns = sizes[index + 1] } }
+    }
+
+    private func measure(_ proxy: GeometryProxy) {
+        gridSize = proxy.size
+        gridFold = Book<EmptyView, EmptyView>.fold(in: proxy)
     }
 
     private func openSettings() {

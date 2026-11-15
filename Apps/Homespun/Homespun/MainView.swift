@@ -57,6 +57,8 @@ struct MainTabView: View {
     let model: AppModel
     @SceneStorage("tab") private var tab = TabID.library
     @State private var sheet: Sheet?
+    @State private var libraryRoute = LibraryRoute.overview
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     enum Sheet: Identifiable {
         case freeUp(only: Set<String>?)
@@ -73,11 +75,11 @@ struct MainTabView: View {
         @Bindable var settings = model.settings
         TabView(selection: $tab) {
             Tab("Library", systemImage: "photo.on.rectangle", value: TabID.library) {
-                LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) })
+                LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) }, route: $libraryRoute)
             }
             .accessibilityIdentifier("tab.library")
             Tab("Activity", systemImage: "clock.arrow.circlepath", value: TabID.activity) {
-                ActivityTab(model: model, freeUp: { sheet = .freeUp(only: nil) })
+                ActivityTab(model: model, freeUp: { openFreeUp(nil) })
             }
             .accessibilityIdentifier("tab.activity")
             Tab("Server", systemImage: "server.rack", value: TabID.server) {
@@ -101,9 +103,19 @@ struct MainTabView: View {
         .task { await model.library.start() }
     }
 
+    /// On the open iPhone Duo, Free Up Space is the Library's right page; elsewhere a sheet.
+    private func openFreeUp(_ scope: Set<String>?) {
+        if sizeClass == .regular {
+            tab = .library
+            libraryRoute = .review(scope)
+        } else {
+            sheet = .freeUp(only: scope)
+        }
+    }
+
     private func openFromAccessory(_ action: StatusAccessory.Action) {
         switch action {
-        case .freeUp(let scope): sheet = .freeUp(only: scope)
+        case .freeUp(let scope): openFreeUp(scope)
         case .activity: tab = .activity
         case .server: tab = .server
         }

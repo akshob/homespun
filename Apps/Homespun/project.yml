@@ -30,6 +30,9 @@ targets:
         # Plain HTTP only to servers on the home network (IP addresses and .local names).
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # One window: on iPhone Duo the scene resizes as it folds; a second window adds nothing.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
     dependencies:
       - package: HomespunPackage
         product: HomespunCore
@@ -46,7 +49,6 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Homespun
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Homespun reads the photos and videos you choose so it can store the originals on your server and make compact copies."
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Homespun saves compact copies of your photos and videos to your library."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Homespun finds and connects to your Homespun Server on your home network."
