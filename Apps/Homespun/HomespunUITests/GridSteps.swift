@@ -56,9 +56,66 @@ extension XCUIApplication {
     /// Opens a tab by its title.
     /// Scrolling down minimises the tab bar (the Library opens at the newest items), so a tab
     /// may need a scroll up before it can be tapped; tries a few times until it's selected.
+    /// A tab: in the tab bar (iPhone), or in iPhone Duo's vertical bar strip, where it's a radio
+    /// button on the inner display and a plain button on the cover.
+    @MainActor func tab(_ title: String) -> XCUIElement {
+        let strip = buttons.matching(NSPredicate(format: "identifier == %@ OR (label == %@ AND identifier BEGINSWITH 'tab.')",
+                                                 "tab." + title.lowercased(), title)).firstMatch
+        for candidate in [tabBars.buttons[title], radioButtons[title], strip] where candidate.exists { return candidate }
+        return tabBars.buttons[title]
+    }
+
+    /// Waits for a tab, wherever the device puts tabs.
+    @MainActor func hasTab(_ title: String, timeout: TimeInterval = 15) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if tab(title).exists { return true }
+            usleep(250_000)
+        } while Date() < deadline
+        return false
+    }
+
+    /// A screen's title: a navigation bar on an iPhone; on iPhone Duo, where bar items move to the
+    /// strip, a header with the title as its label.
+    @MainActor func screenTitle(_ title: String) -> XCUIElement {
+        let bar = navigationBars.matching(NSPredicate(format: "identifier ==[c] %@", title)).firstMatch
+        if bar.exists { return bar }
+        let header = descendants(matching: .any).matching(NSPredicate(format: "label ==[c] %@ AND elementType != %d",
+                                                                      title, XCUIElement.ElementType.button.rawValue)).firstMatch
+        return header.exists ? header : bar
+    }
+
+    /// Waits for a screen's title, wherever the device shows it.
+    @MainActor func hasScreen(_ title: String, timeout: TimeInterval = 10) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if screenTitle(title).exists { return true }
+            usleep(250_000)
+        } while Date() < deadline
+        return false
+    }
+
+    /// Goes back one screen: the navigation bar's Back on an iPhone, the strip's on iPhone Duo. On the
+    /// open Duo's right page a page opened from the left has no Back (the left page is still there),
+    /// so this does nothing.
+    @MainActor func goBack(from title: String? = nil) {
+        let bar = title.map { screenTitle($0) }.flatMap { $0.elementType == .navigationBar ? $0 : nil }
+            ?? navigationBars.firstMatch
+        let inBar = bar.buttons.firstMatch
+        let strip = descendants(matching: .any)["BackButton"]
+        if strip.exists, strip.isHittable { strip.tap() } else if inBar.exists, inBar.isHittable { inBar.tap() }
+    }
+
+    /// The automatic mode control: a switch on an iPhone, a checkbox on iPhone Duo's inner display.
+    @MainActor var automaticToggle: XCUIElement { descendants(matching: .any)["automatic.toggle"] }
+
+    /// The open Duo shows the Library as a book: what you open goes to the right page.
+    @MainActor var isBook: Bool { descendants(matching: .any)["library.page"].exists }
+
+    /// On iPhone Duo the tabs are in the vertical bar strip, where they're radio buttons.
     @MainActor func openTab(_ title: String) {
-        let tab = tabBars.buttons[title]
-        _ = tab.waitForExistence(timeout: 10)
+        _ = hasTab(title, timeout: 10)
+        let tab = tab(title)
         for _ in 0..<3 where !(tab.exists && tab.isSelected) {
             if !(tab.exists && tab.isHittable) { swipeDown() }
             if tab.exists, tab.isHittable { tab.tap() }
@@ -66,11 +123,18 @@ extension XCUIApplication {
         }
     }
 
+    /// Swipes up in the left quarter of the screen: the content on an iPhone, the left page on the
+    /// open iPhone Duo (the middle is the fold).
+    @MainActor func swipeUpOnLeft() {
+        let start = coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.75))
+        start.press(forDuration: 0.05, thenDragTo: coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.3)))
+    }
+
     /// Scrolls the current screen until the element exists (lists load rows lazily).
     @MainActor @discardableResult func scrollTo(_ element: XCUIElement, swipes: Int = 8) -> Bool {
         var left = swipes
         while !element.exists, left > 0 {
-            swipeUp()
+            swipeUpOnLeft()
             left -= 1
         }
         return element.waitForExistence(timeout: 2)
@@ -108,7 +172,7 @@ extension XCUIApplication {
         let all = candidates.allElementsBoundByIndex
         let chosen = Array(all.suffix(min(count, all.count)))
         for item in chosen { item.tap() }
-        XCTAssertTrue(navigationBars["\(chosen.count) Selected"].waitForExistence(timeout: 5), "selection count",
+        XCTAssertTrue(hasScreen("\(chosen.count) Selected", timeout: 5), "selection count",
                       file: file, line: line)
         buttons["compact.selected"].tap()
 
@@ -125,10 +189,10 @@ extension XCUIApplication {
     @MainActor func checkActivity(file: StaticString = #filePath, line: UInt = #line) -> [String] {
         // The grid opens scrolled to the newest items, which minimises the tab bar; scrolling up
         // brings its tabs back.
-        for _ in 0..<3 where !navigationBars["Activity"].exists {
+        for _ in 0..<3 where !screenTitle("Activity").exists {
             if !(tabBars.buttons["Activity"].exists && tabBars.buttons["Activity"].isHittable) { swipeDown() }
             openTab("Activity")
-            _ = navigationBars["Activity"].waitForExistence(timeout: 3)
+            _ = hasScreen("Activity", timeout: 3)
         }
         let run = descendants(matching: .any).matching(identifier: "activity.run").firstMatch
         XCTAssertTrue(run.waitForExistence(timeout: 20), "no run in Activity", file: file, line: line)
@@ -139,7 +203,7 @@ extension XCUIApplication {
         XCTAssertEqual(failed.count, 0, failed.allElementsBoundByIndex.map(\.label).joined(separator: "; "),
                        file: file, line: line)
         let statuses = rows.allElementsBoundByIndex.map(\.identifier)
-        navigationBars.buttons.firstMatch.tap()
+        goBack()
         openTab("Library")
         return statuses
     }

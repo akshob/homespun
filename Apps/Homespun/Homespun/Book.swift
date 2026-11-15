@@ -122,3 +122,53 @@ struct FoldReader: View {
         }
     }
 }
+
+/// A tab's navigation that becomes a book on a wide display (DUO §9.3, §9.4, §11): the list stays on
+/// the left page and what you open shows on the right page, the rest of the path stacked there.
+/// One path drives both, so folding the device keeps your place (the right page's screens are pushed
+/// over the list) and unfolding puts them back on the right page.
+struct BookNavigation<Route: Hashable, Root: View, Destination: View, Placeholder: View>: View {
+    @Binding var path: [Route]
+    @ViewBuilder var root: Root
+    @ViewBuilder var destination: (Route) -> Destination
+    @ViewBuilder var placeholder: Placeholder
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    var body: some View {
+        if sizeClass == .regular {
+            GeometryReader { proxy in
+                if BookSplit.make(size: proxy.size, fold: Book<EmptyView, EmptyView>.fold(in: proxy)).isUsable {
+                    book
+                } else {
+                    stack
+                }
+            }
+        } else {
+            stack
+        }
+    }
+
+    private var stack: some View {
+        NavigationStack(path: $path) {
+            root.navigationDestination(for: Route.self) { destination($0) }
+        }
+    }
+
+    private var book: some View {
+        Book {
+            // The left page never pushes: what it opens goes to the right page.
+            NavigationStack(path: Binding<[Route]>(get: { [] }, set: { new in if !new.isEmpty { path = new } })) {
+                root.navigationDestination(for: Route.self) { destination($0) }
+            }
+        } second: {
+            NavigationStack(path: Binding<[Route]>(get: { Array(path.dropFirst()) },
+                                                   set: { rest in path = Array(path.prefix(1)) + rest })) {
+                Group {
+                    if let first = path.first { destination(first) } else { placeholder }
+                }
+                .navigationDestination(for: Route.self) { destination($0) }
+                .id(path.first)
+            }
+        }
+    }
+}

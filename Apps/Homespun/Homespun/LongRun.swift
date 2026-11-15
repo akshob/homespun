@@ -50,22 +50,33 @@ final class LongRun {
     /// hasn't started (items already backed up stay backed up).
     private func follow(_ box: TaskBox, job: CompactJob) async {
         let task = box.task
+        let expiry = ExpiryBox()
+        // iOS ended it (Stop on the Lock Screen, or out of time): drop what hasn't started and say
+        // so at once, or iOS ends the app. The item in progress finishes when the app runs again.
         task.expirationHandler = {
+            expiry.expired = true
             Task { @MainActor in
                 job.stopWaiting(Set(job.items.filter { $0.state == .waiting }.map(\.assetIdentifier)))
             }
+            task.setTaskCompleted(success: false)
         }
         defer { running = false }
-        while job.isRunning || job.items.contains(where: { $0.state == .waiting }) {
-            let total = job.items.count
-            let done = job.items.filter { $0.state != .waiting && !$0.isWorking }.count
+        while !expiry.expired, job.isRunning || job.items.contains(where: { $0.state == .waiting }) {
+            let items = job.runItems
+            let total = items.count
+            let done = items.filter { $0.state != .waiting && !$0.isWorking }.count
             task.progress.totalUnitCount = Int64(max(total, 1))
             task.progress.completedUnitCount = Int64(done)
             task.updateTitle(task.title, subtitle: "\(done) of \(total)")
             try? await Task.sleep(for: .seconds(1))
         }
+        guard !expiry.expired else { return }
         task.progress.completedUnitCount = task.progress.totalUnitCount
         task.setTaskCompleted(success: true)
+    }
+
+    private final class ExpiryBox: @unchecked Sendable {
+        var expired = false
     }
 
     private final class TaskBox: @unchecked Sendable {

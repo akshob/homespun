@@ -8,7 +8,7 @@ final class PremiumUITests: XCTestCase {
         app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES"]
         app.launch()
         app.openTab("Server")
-        XCTAssertFalse(app.switches["automatic.toggle"].waitForExistence(timeout: 3))
+        XCTAssertFalse(app.automaticToggle.waitForExistence(timeout: 3))
         let server = XCTAttachment(screenshot: app.screenshot())
         server.name = "Server"
         server.lifetime = .keepAlways

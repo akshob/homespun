@@ -241,8 +241,7 @@ struct FirstTaskPage: View {
                         .frame(maxWidth: .infinity)
                         .aspectRatio(1, contentMode: .fit)
                         .overlay(alignment: .topTrailing) {
-                            BadgeView(badge: badge(states[id]), size: 20).padding(4)
-                                .animation(reduceMotion ? nil : .default, value: badge(states[id]))
+                            JobBadge(job: job, id: id, badge: badge).padding(4)
                         }
                 }
             }
@@ -547,5 +546,20 @@ struct FreedPage: View {
             let rest = rest
             restBytes = await Task.detached { Int64(PhotoLibrary.estimatedBytes(rest, sample: 200).bytes) }.value
         }
+    }
+}
+
+/// A tile's badge that reads the job itself, so it changes as the item does (a lazy grid doesn't
+/// reliably rebuild a cell when a value passed down to it changes).
+private struct JobBadge: View {
+    let job: CompactJob
+    let id: String
+    let badge: (CompactJob.State?) -> Badge
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let state = job.items.last { $0.assetIdentifier == id }?.state
+        BadgeView(badge: badge(state), size: 20)
+            .animation(reduceMotion ? nil : .default, value: badge(state))
     }
 }

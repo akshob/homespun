@@ -38,7 +38,7 @@ final class CopyFinderUITests: XCTestCase {
         XCTAssertTrue(found.waitForExistence(timeout: 60))
         app.buttons["copies.done"].tap()
         XCTAssertTrue(app.buttons["settings.findCopies"].waitForExistence(timeout: 5))
-        app.navigationBars.buttons.firstMatch.tap()
+        app.goBack()
         app.openTab("Library")
         let library = XCTAttachment(screenshot: app.screenshot())
         library.name = "Library"

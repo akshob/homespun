@@ -266,8 +266,12 @@ actor OriginalsMover {
         try files.moveItem(at: partial, to: target)
     }
 
-    /// A folder the originals may move to, as an absolute URL.
-    static func validate(_ path: String, current: URL, dataDirectory: URL) throws -> URL {
+    /// A folder the originals may move to, as an absolute URL. In a container, it must be on a volume
+    /// mounted from the host (`mounts`, from /proc/self/mountinfo): anywhere else is the container's
+    /// own disk, which goes away when the container is recreated, with every original in it.
+    static func validate(_ path: String, current: URL, dataDirectory: URL,
+                         container: Bool = HostPlatform.hardware.kind == .container,
+                         mounts: [String] = ContainerMounts.read()) throws -> URL {
         let trimmed = (path.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         guard trimmed.hasPrefix("/") else { throw Failure(description: "Enter a full path, starting with /.") }
         let target = URL(fileURLWithPath: trimmed, isDirectory: true).standardizedFileURL
@@ -284,6 +288,11 @@ actor OriginalsMover {
         let resolved = target.resolvingSymlinksInPath().path
         guard resolved != data, !resolved.hasPrefix(data + "/") else {
             throw Failure(description: "That's inside Homespun Server's own data folder; pick another folder.")
+        }
+        if container, !ContainerMounts.isOnVolume(resolved, mounts: mounts) {
+            throw Failure(description: "\(target.path) isn't on a folder shared with the container, so originals there "
+                + "would be lost when the container is updated. Map a folder from the NAS in compose.yaml "
+                + "(volumes) and move them there.")
         }
         var isDirectory: ObjCBool = false
         if FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory) {
@@ -368,5 +377,26 @@ extension Optional {
     func asyncMap<T>(_ transform: (Wrapped) async throws -> T) async rethrows -> T? {
         guard let value = self else { return nil }
         return try await transform(value)
+    }
+}
+
+/// The folders mounted into a container from the host (volumes and binds).
+enum ContainerMounts {
+    /// Mount points from /proc/self/mountinfo, except the container's own root and system folders.
+    static func read(_ text: String? = try? String(contentsOfFile: "/proc/self/mountinfo", encoding: .utf8)) -> [String] {
+        guard let text else { return [] }
+        let system = ["/", "/proc", "/sys", "/dev", "/etc/hosts", "/etc/hostname", "/etc/resolv.conf"]
+        return text.split(separator: "\n").compactMap { line in
+            let fields = line.split(separator: " ")
+            guard fields.count > 4 else { return nil }
+            // Field 5 is the mount point, with spaces and the like escaped as octal (\040).
+            let point = String(fields[4]).replacingOccurrences(of: "\\040", with: " ")
+            guard !system.contains(point), !system.dropFirst().contains(where: { point.hasPrefix($0 + "/") }) else { return nil }
+            return point
+        }
+    }
+
+    static func isOnVolume(_ path: String, mounts: [String]) -> Bool {
+        mounts.contains { path == $0 || path.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }
     }
 }

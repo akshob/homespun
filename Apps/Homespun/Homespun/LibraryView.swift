@@ -63,7 +63,7 @@ struct LibraryView: View {
                     Book(showsSecond: showsPage) {
                         content
                     } second: {
-                        LibraryRightPage(model: model, route: $route, selected: selected, backUp: backUp,
+                        LibraryRightPage(model: model, route: $route, selected: selected, ids: visibleIDs, backUp: backUp,
                                          showAll: { filter = $0 }, openItem: { path.append($0) })
                     }
                 } else {
@@ -88,7 +88,8 @@ struct LibraryView: View {
                 }
                 .task(id: selected) { await measureSelection() }
                 .onChange(of: selecting) { _, on in
-                    if isBook { route = on ? .selection : .overview }
+                    guard isBook else { return }
+                    if on { route = .selection } else if route == .selection { route = .overview }
                 }
         }
     }

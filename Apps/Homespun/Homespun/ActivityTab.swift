@@ -15,10 +15,12 @@ struct ActivityTab: View {
         case automatic
     }
 
+    @State private var path: [Route] = []
+
     var body: some View {
         let job = model.job, history = model.history
         let attention = ActivityTab.attention(model)
-        NavigationStack {
+        BookNavigation(path: $path) {
             List {
                 if job.isRunning {
                     Section {
@@ -81,14 +83,17 @@ struct ActivityTab: View {
             }
             .navigationTitle("Activity")
             .navigationSubtitle(subtitle(attention: attention.count))
-            .navigationDestination(for: Route.self) { route in
-                switch route {
-                case .run(let id): RunDetailView(model: model, runID: id)
-                case .liveRun: RunDetailView(model: model, runID: nil)
-                case .attention: NeedsAttentionView(model: model)
-                case .automatic: AutomaticModeView(model: model)
-                }
+        } destination: { route in
+            switch route {
+            case .run(let id): RunDetailView(model: model, runID: id)
+            case .liveRun: RunDetailView(model: model, runID: nil)
+            case .attention: NeedsAttentionView(model: model)
+            case .automatic: AutomaticModeView(model: model)
             }
+        } placeholder: {
+            ContentUnavailableView("Choose a run", systemImage: "clock.arrow.circlepath",
+                                   description: Text("Its items and what changed show here."))
+                .background(Theme.background)
         }
     }
 

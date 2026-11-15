@@ -16,6 +16,8 @@ struct LibraryRightPage: View {
     let model: AppModel
     @Binding var route: LibraryRoute
     let selected: Set<String>
+    /// The items the grid shows, so the open item can swipe to its neighbours.
+    var ids: [String] = []
     var backUp: ([String]) -> Void
     var showAll: (LibraryState.Filter) -> Void
     var openItem: (String) -> Void
@@ -23,10 +25,16 @@ struct LibraryRightPage: View {
     private var controller: LibraryController { model.library }
 
     var body: some View {
-        Group {
+        // One container element: an identifier on a Group would replace its children's own.
+        ZStack {
             switch route {
             case .overview: overview
-            case .item(let id): ItemPage(model: model, id: id, freeUp: { route = .review($0) }, open: openItem)
+            case .item(let id):
+                NavigationStack {
+                    ItemViewer(model: model, ids: ids.contains(id) ? ids : [id], start: id,
+                               freeUp: { route = .review($0) }, close: { route = .overview })
+                }
+                .id(id)
             case .selection: selection
             case .review(let scope):
                 FreeUpSpacePanel(controller: controller, scope: scope) {
@@ -36,6 +44,7 @@ struct LibraryRightPage: View {
             }
         }
         .background(Theme.background)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("library.page")
     }
 
@@ -110,13 +119,13 @@ struct LibraryRightPage: View {
     }
 
     private var runningCard: some View {
-        let job = model.job
-        let open = job.items.filter { $0.state == .waiting || $0.isWorking }.count
-        let done = job.items.count - open
+        let run = model.job.runItems
+        let open = run.filter { $0.state == .waiting || $0.isWorking }.count
+        let done = run.count - open
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Backing up \(min(done + 1, job.items.count)) of \(job.items.count)").font(.headline)
-            ProgressView(value: Double(done), total: Double(max(1, job.items.count))).tint(Theme.accent)
-            if let current = job.items.first(where: \.isWorking) {
+            Text("Backing up \(min(done + 1, run.count)) of \(run.count)").font(.headline)
+            ProgressView(value: Double(done), total: Double(max(1, run.count))).tint(Theme.accent)
+            if let current = run.first(where: \.isWorking) {
                 Text(current.name).font(.subheadline).foregroundStyle(Theme.secondaryLabel).lineLimit(1)
             }
         }
@@ -169,49 +178,6 @@ struct LibraryRightPage: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .card()
-    }
-}
-
-/// The item you tapped, on the right page: the photo, its state, and its one action.
-struct ItemPage: View {
-    let model: AppModel
-    let id: String
-    var freeUp: (Set<String>?) -> Void
-    var open: (String) -> Void
-
-    private var cell: LibraryState.Cell? { model.library.library.state.cells.first { $0.id == id } }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                Thumbnail(identifier: id, manager: model.library.library.thumbnails, side: 330)
-                    .frame(maxWidth: .infinity)
-                    .onTapGesture { open(id) }
-                    .accessibilityLabel("Open full screen")
-                    .accessibilityAddTraits(.isButton)
-                if let asset = PhotoLibrary.asset(id), let date = asset.creationDate {
-                    Text(date.formatted(date: .long, time: .shortened)).font(.headline)
-                }
-                if let cell {
-                    HStack(spacing: 8) {
-                        BadgeView(badge: cell.badge)
-                        Text(cell.badge.spoken(server: model.library.serverName)).font(.subheadline)
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("item.state")
-                    Text(cell.badge.explanation).font(.subheadline).foregroundStyle(Theme.secondaryLabel)
-                    if cell.canFree, let original = cell.original {
-                        Button("Free Up Space") { freeUp([original]) }.primaryAction()
-                    } else if cell.canCompact, model.settings.isPaired {
-                        Button("Back Up") { model.library.backUp([id]) }.primaryAction()
-                            .disabled(model.library.backUpBlockedReason != nil)
-                    }
-                }
-                Button("Open Full Screen", systemImage: "arrow.up.left.and.arrow.down.right") { open(id) }
-                    .buttonStyle(.borderless)
-            }
-            .padding(20)
-        }
     }
 }
 

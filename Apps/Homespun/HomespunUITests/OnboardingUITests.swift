@@ -149,7 +149,7 @@ final class OnboardingUITests: XCTestCase {
 
         // Set Up Later: the Library, unpaired, with its Set Up notice.
         app.buttons["setup.later"].tap()
-        XCTAssertTrue(app.tabBars.buttons["Library"].waitForExistence(timeout: 15), "no Library after Set Up Later")
+        XCTAssertTrue(app.hasTab("Library"), "no Library after Set Up Later")
         // With Photos access, the grid has a Set Up notice; without it, the Library asks for access first.
         let notice = app.buttons["connect.open"], askAccess = app.buttons["Allow Access to Photos"]
         XCTAssertTrue(notice.waitForExistence(timeout: 10) || askAccess.exists, "no Set Up notice")
@@ -232,7 +232,7 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(library.waitForExistence(timeout: 60), "nothing freed")
         attach("1.15 Freed")
         library.tap()
-        XCTAssertTrue(app.tabBars.buttons["Library"].waitForExistence(timeout: 15), "no Library after setup")
+        XCTAssertTrue(app.hasTab("Library"), "no Library after setup")
         attach("1.16 Library")
         XCTAssertTrue(app.isConnected())
         XCTAssertTrue(app.gridItems("Original at home").firstMatch.waitForExistence(timeout: 10), "no originals at home")
@@ -254,6 +254,8 @@ final class OnboardingUITests: XCTestCase {
     // MARK: Helpers
 
     @MainActor private func goBack() {
+        let strip = app.descendants(matching: .any)["BackButton"]
+        if strip.waitForExistence(timeout: 2) { return strip.tap() }
         let back = app.navigationBars.buttons.element(boundBy: 0)
         XCTAssertTrue(back.waitForExistence(timeout: 5), "no Back button")
         back.tap()

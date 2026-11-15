@@ -37,7 +37,8 @@ final class ItemViewerUITests: XCTestCase {
         XCTAssertTrue(state.label.hasPrefix("Ready to free up · original on"), state.label)
         XCTAssertTrue(app.buttons["item.action"].label.contains("Free Up Space"))
         XCTAssertTrue(app.buttons["item.compare"].exists, "no Compare for a copy whose original is here")
-        XCTAssertFalse(app.tabBars.buttons["Library"].isHittable, "the tab bar shows over the viewer")
+        // Full screen on an iPhone; on the open Duo's right page the strip and its tabs stay.
+        if !app.isBook { XCTAssertFalse(app.tabBars.buttons["Library"].isHittable, "the tab bar shows over the viewer") }
         attach(app, "Viewer")
 
         // Details: where it is, and the sizes.
@@ -45,7 +46,8 @@ final class ItemViewerUITests: XCTestCase {
         XCTAssertTrue(row(app, "Original still on this iPhone").waitForExistence(timeout: 10))
         XCTAssertTrue(row(app, "Compact copy in Photos").exists)
         XCTAssertTrue(row(app, "Original on ").exists)
-        XCTAssertTrue(row(app, "Original, ").waitForExistence(timeout: 10), "no sizes")
+        // The sizes may be below the fold of a smaller sheet (the iPhone Duo cover).
+        XCTAssertTrue(row(app, "Original, ").waitForExistence(timeout: 10) || app.scrollTo(row(app, "Original, ")), "no sizes")
         attach(app, "Details")
         app.buttons["details.done"].tap()
 
@@ -67,7 +69,7 @@ final class ItemViewerUITests: XCTestCase {
         app.buttons["Compact Copy"].tap()
         XCTAssertFalse(original.exists)
         attach(app, "Compare, compact copy")
-        app.navigationBars["Compare"].buttons.firstMatch.tap()
+        app.goBack(from: "Compare")
 
         // Swipe back to the item before it: not backed up, with Back Up.
         XCTAssertTrue(state.waitForExistence(timeout: 5))
@@ -127,7 +129,7 @@ final class ItemViewerUITests: XCTestCase {
         let facts = app.staticTexts["compare.originalFacts"]
         XCTAssertTrue(facts.label.contains("MB") || facts.label.contains("KB"), facts.label)
         attach(app, "Compare, original from the server")
-        app.navigationBars["Compare"].buttons.firstMatch.tap()
+        app.goBack(from: "Compare")
         XCTAssertTrue(state.waitForExistence(timeout: 5))
     }
 
@@ -156,8 +158,8 @@ final class ItemViewerUITests: XCTestCase {
             waitForExpectations(timeout: 60)
             sleep(1)
             attach(app, "Review: compare \(index)")
-            app.navigationBars["Compare"].buttons.firstMatch.tap()
-            app.navigationBars.buttons.firstMatch.tap()
+            app.goBack(from: "Compare")
+            app.goBack()
         }
         for demo in ["failed", "kept"] {
             app.terminate()

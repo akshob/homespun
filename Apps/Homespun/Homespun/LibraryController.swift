@@ -124,8 +124,9 @@ final class LibraryController {
         if case .unreachable = settings.serverStatus { inputs.unreachable = serverName }
         if case .checking(let message) = removal { inputs.removing = message }
         if job.isRunning {
-            let open = job.items.filter { $0.state == .waiting || $0.isWorking }.count
-            inputs.backingUp = (job.items.count - open, job.items.count, job.items.first(where: \.isWorking)?.name)
+            let run = job.runItems
+            let open = run.filter { $0.state == .waiting || $0.isWorking }.count
+            inputs.backingUp = (run.count - open, run.count, run.first(where: \.isWorking)?.name)
         }
         if let finished { inputs.finished = (finished.count, finished.bytes, Set(finished.originals)) }
         inputs.readyCount = ready.count

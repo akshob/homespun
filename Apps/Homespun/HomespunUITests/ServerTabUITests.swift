@@ -9,21 +9,15 @@ extension XCUIApplication {
         let limit = frame.maxY - 220
         var tries = 4
         while element.frame.maxY > limit, tries > 0 {
-            coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.6))
-                .press(forDuration: 0.05, thenDragTo: coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
+            coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.6))
+                .press(forDuration: 0.05, thenDragTo: coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.35)))
             tries -= 1
         }
         return element.exists
     }
 
-    /// Opens a tab, first scrolling up if scrolling down minimised the tab bar.
-    @MainActor func showTab(_ title: String) {
-        for _ in 0..<3 where !(tabBars.buttons[title].exists && tabBars.buttons[title].isSelected) {
-            if !(tabBars.buttons[title].exists && tabBars.buttons[title].isHittable) { swipeDown() }
-            openTab(title)
-            sleep(1)
-        }
-    }
+    /// Opens a tab (`openTab` scrolls up first if the tab bar was minimised).
+    @MainActor func showTab(_ title: String) { openTab(title) }
 }
 
 /// The Server tab's rows, the devices list, the unpair confirmation, and a finished run in
@@ -52,16 +46,15 @@ final class ServerTabUITests: XCTestCase {
                              ("settings.existingLibrary", "Existing Library"), ("settings.immich", "Immich")] {
             app.buttons[row].tap()
             // Case-insensitive: Server Check's page belongs to setup.
-            let bar = app.navigationBars.matching(NSPredicate(format: "identifier ==[c] %@", title)).firstMatch
-            XCTAssertTrue(bar.waitForExistence(timeout: 10), "no \(title) page")
+            XCTAssertTrue(app.hasScreen(title), "no \(title) page")
             sleep(2)
             attach(app, title)
             if row == "settings.originals", app.buttons["originals.change"].waitForExistence(timeout: 10) {
                 app.buttons["originals.change"].tap()
-                XCTAssertTrue(app.navigationBars["Change Folder"].waitForExistence(timeout: 10))
+                XCTAssertTrue(app.hasScreen("Change Folder"))
                 sleep(2)
                 attach(app, "Change Folder")
-                app.navigationBars["Change Folder"].buttons.firstMatch.tap()
+                app.goBack(from: "Change Folder")
             }
             if row == "settings.existingLibrary" {
                 app.buttons["settings.findCopies"].tap()
@@ -69,10 +62,10 @@ final class ServerTabUITests: XCTestCase {
                 attach(app, "Find Compact Copies")
                 app.buttons["copies.close"].tap()
             }
-            bar.buttons.firstMatch.tap()
+            app.goBack(from: title)
         }
         // Debug builds have Premium, so automatic mode is a switch.
-        let lower = [app.switches["automatic.toggle"]] + ["settings.connectors", "settings.compactCopies",
+        let lower = [app.automaticToggle] + ["settings.connectors", "settings.compactCopies",
                      "settings.devices", "settings.notifications", "settings.premium", "settings.help",
                      "server.unpair"].map { app.buttons[$0] }
         for row in lower {
@@ -84,16 +77,16 @@ final class ServerTabUITests: XCTestCase {
                              ("settings.help", "Help and About")] {
             XCTAssertTrue(app.reveal(app.buttons[row]), "no \(row)")
             app.buttons[row].tap()
-            XCTAssertTrue(app.navigationBars[title].waitForExistence(timeout: 10), "no \(title) page")
+            XCTAssertTrue(app.hasScreen(title), "no \(title) page")
             sleep(2)
             attach(app, title)
-            app.navigationBars[title].buttons.firstMatch.tap()
+            app.goBack(from: title)
         }
         XCTAssertTrue(app.reveal(app.buttons["settings.premium"]))
         app.buttons["settings.premium"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["premium.unlocked"].waitForExistence(timeout: 10), "no Premium page")
         attach(app, "Premium")
-        app.navigationBars.buttons.firstMatch.tap()
+        app.goBack()
 
         // Devices lists this iPhone.
         app.buttons["settings.devices"].tap()
@@ -102,7 +95,7 @@ final class ServerTabUITests: XCTestCase {
         XCTAssertTrue(this.label.contains("This iPhone"), this.label)
         XCTAssertTrue(app.buttons["settings.addDevice"].exists)
         attach(app, "Devices")
-        app.navigationBars["Devices"].buttons.firstMatch.tap()
+        app.goBack(from: "Devices")
 
         // Unpairing asks first; Cancel keeps the pairing.
         XCTAssertTrue(app.reveal(app.buttons["server.unpair"]))
@@ -154,7 +147,7 @@ final class ServerTabUITests: XCTestCase {
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10), "no items in the run")
         XCTAssertGreaterThan(app.descendants(matching: .any).matching(identifier: "status.saved").count, 0)
         attach(app, "Run details")
-        app.navigationBars.buttons.firstMatch.tap()
+        app.goBack()
         XCTAssertTrue(run.waitForExistence(timeout: 5))
     }
 

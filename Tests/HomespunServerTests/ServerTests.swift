@@ -1305,3 +1305,39 @@ final class ProblemLog: @unchecked Sendable {
     // Another data folder is another server: nothing is borrowed.
     #expect(ServerCommand.applying(saved: saved, to: ["HOMESPUN_DATA": "/tmp/test-data"]) == ["HOMESPUN_DATA": "/tmp/test-data"])
 }
+
+/// In a container, originals may only move to a folder mounted from the host: anything else is
+/// the container's own disk and disappears when it's recreated.
+@Test func containerMovesOnlyToMountedFolders() throws {
+    let mountinfo = """
+        600 500 0:50 / / rw,relatime - overlay overlay rw
+        601 600 0:52 / /proc rw - proc proc rw
+        610 600 8:1 /volume1/docker/homespun/data /data rw - ext4 /dev/sda1 rw
+        611 600 8:1 /volume1/photo/Homespun /originals rw - ext4 /dev/sda1 rw
+        612 600 8:1 /volume1/photo /photos rw - ext4 /dev/sda1 rw
+        613 600 8:1 /volume1/Photo\\040Library /photo\\040library rw - ext4 /dev/sda1 rw
+        614 600 0:60 / /etc/hosts rw - ext4 /dev/sda1 rw
+        """
+    let mounts = ContainerMounts.read(mountinfo)
+    #expect(mounts == ["/data", "/originals", "/photos", "/photo library"])
+    #expect(ContainerMounts.isOnVolume("/photos/Homespun", mounts: mounts))
+    #expect(ContainerMounts.isOnVolume("/photo library/Homespun", mounts: mounts))
+    #expect(!ContainerMounts.isOnVolume("/tmp/Homespun", mounts: mounts))
+    #expect(!ContainerMounts.isOnVolume("/photosx", mounts: mounts))
+
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let current = root.appendingPathComponent("originals"), data = root.appendingPathComponent("data")
+    try FileManager.default.createDirectory(at: current, withIntermediateDirectories: true)
+    let elsewhere = root.appendingPathComponent("elsewhere").path
+    // Not a container: any folder will do. A container: only one on a mounted volume.
+    #expect(throws: Never.self) {
+        try OriginalsMover.validate(elsewhere, current: current, dataDirectory: data, container: false, mounts: [])
+    }
+    #expect(throws: (any Error).self) {
+        try OriginalsMover.validate(elsewhere, current: current, dataDirectory: data, container: true, mounts: ["/volume"])
+    }
+    #expect(throws: Never.self) {
+        try OriginalsMover.validate(elsewhere, current: current, dataDirectory: data, container: true, mounts: [root.path])
+    }
+}

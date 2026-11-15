@@ -16,12 +16,15 @@ final class LibraryUITests: XCTestCase {
         // One tap selects one cell, and the cell itself says so.
         let first = app.gridItems("Not backed up").firstMatch
         first.tap()
-        XCTAssertTrue(app.navigationBars["1 Selected"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.hasScreen("1 Selected", timeout: 5))
         XCTAssertEqual(selectedCells(app).count, 1, "the tapped cell doesn't show it's selected")
 
-        // Select All selects every selectable cell on screen.
+        // Select All selects every selectable item, including those the lazy grid hasn't loaded
+        // (more of them on a smaller screen), and every cell on screen shows it.
         app.buttons["select.all"].tap()
-        XCTAssertTrue(app.navigationBars["\(selectable) Selected"].waitForExistence(timeout: 5))
+        let title = app.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES '^[0-9]+ Selected$'")).firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "no selection count")
+        XCTAssertGreaterThanOrEqual(Int(title.label.split(separator: " ")[0]) ?? 0, selectable)
         let shown = app.gridItems("Not backed up").allElementsBoundByIndex.filter(\.isHittable)
         XCTAssertFalse(shown.isEmpty)
         XCTAssertTrue(shown.allSatisfy(\.isSelected), "Select All didn't mark every cell")
@@ -29,7 +32,7 @@ final class LibraryUITests: XCTestCase {
 
         // Deselect All clears the cells too.
         app.buttons["select.all"].tap()
-        XCTAssertTrue(app.navigationBars["Select Items"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.hasScreen("Select Items", timeout: 5))
         XCTAssertEqual(selectedCells(app).count, 0, "cells still look selected")
         app.buttons["select.done"].tap()
         XCTAssertTrue(app.buttons["select.start"].waitForExistence(timeout: 5))

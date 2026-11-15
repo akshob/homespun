@@ -29,7 +29,7 @@ struct ServerTab: View {
 
     var body: some View {
         let settings = model.settings
-        NavigationStack(path: $path) {
+        BookNavigation(path: $path) {
             Group {
                 if let server = settings.server, settings.isPaired {
                     paired(server)
@@ -37,7 +37,12 @@ struct ServerTab: View {
                     unpaired
                 }
             }
-            .navigationDestination(for: Route.self) { destination($0) }
+        } destination: { route in
+            destination(route)
+        } placeholder: {
+            ContentUnavailableView("Choose a setting", systemImage: "server.rack",
+                                   description: Text("What you open on the left shows here."))
+                .background(Theme.background)
         }
         .sheet(isPresented: $settingUp) { OnboardingView(settings: settings, library: model.library) }
         .sheet(item: $locked) { feature in

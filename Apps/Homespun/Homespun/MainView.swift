@@ -69,6 +69,7 @@ struct MainTabView: View {
     @SceneStorage("tab") private var tab = TabID.library
     @State private var sheet: Sheet?
     @State private var libraryRoute = LibraryRoute.overview
+    @SceneStorage("library.showsPage") private var showsPage = true
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     enum Sheet: Identifiable {
@@ -120,7 +121,7 @@ struct MainTabView: View {
 
     /// On the open iPhone Duo, Free Up Space is the Library's right page; elsewhere a sheet.
     private func openFreeUp(_ scope: Set<String>?) {
-        if sizeClass == .regular {
+        if sizeClass == .regular, showsPage, model.library.access.allowsReading {
             tab = .library
             libraryRoute = .review(scope)
         } else {

@@ -12,17 +12,21 @@ struct ItemViewer: View {
     let ids: [String]
     let start: String
     var freeUp: (Set<String>?) -> Void
+    /// On the right page of the open iPhone Duo: the tabs stay, and Close returns to the Overview.
+    var close: (() -> Void)?
     @State private var current: String?
     @State private var zoomed = false
     @State private var showDetails = false
     @State private var comparing: String?
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
-    init(model: AppModel, ids: [String], start: String, freeUp: @escaping (Set<String>?) -> Void) {
+    init(model: AppModel, ids: [String], start: String, freeUp: @escaping (Set<String>?) -> Void,
+         close: (() -> Void)? = nil) {
         self.model = model
         self.ids = ids
         self.start = start
         self.freeUp = freeUp
+        self.close = close
         _current = State(initialValue: start)
     }
 
@@ -43,8 +47,15 @@ struct ItemViewer: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
-        .toolbar(.hidden, for: .tabBar)
-        .toolbar { toolbar(cell) }
+        .toolbar(close == nil ? .hidden : .automatic, for: .tabBar)
+        .toolbar {
+            if let close {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close", systemImage: "xmark", action: close).accessibilityIdentifier("item.close")
+                }
+            }
+            toolbar(cell)
+        }
         .itemScreen()
         .onChange(of: current) { _, _ in zoomed = false }
         .sheet(isPresented: $showDetails) {

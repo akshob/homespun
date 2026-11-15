@@ -26,12 +26,12 @@ final class ServerModeUITests: XCTestCase {
         app.buttons["Add Device"].tap()
         XCTAssertTrue(app.staticTexts["addDevice.code"].waitForExistence(timeout: 15), "no code for another device")
         attach(app, "Add another device")
-        app.navigationBars["Add Device"].buttons.firstMatch.tap()
+        app.goBack(from: "Add Device")
         // It shows where this iPhone's originals go on the server.
         app.buttons["settings.originals"].tap()
         XCTAssertTrue(app.staticTexts["originals.deviceFolder"].waitForExistence(timeout: 15), "no originals folder")
         attach(app, "Originals folder")
-        app.navigationBars["Originals Folder"].buttons.firstMatch.tap()
+        app.goBack(from: "Originals Folder")
         app.openTab("Library")
 
         attach(app, "Grid")
@@ -89,9 +89,10 @@ final class ServerModeUITests: XCTestCase {
         let before = app.gridItems("Ready to free up").count + app.gridItems("Original at home").count
 
         app.openTab("Server")
-        let toggle = app.switches["automatic.toggle"]
+        let toggle = app.automaticToggle
         XCTAssertTrue(app.scrollTo(toggle), "automatic mode isn't offered")
-        toggle.switches.firstMatch.tap()
+        // A switch's knob on an iPhone; the checkbox itself on iPhone Duo's inner display.
+        if toggle.switches.firstMatch.exists { toggle.switches.firstMatch.tap() } else { toggle.tap() }
         app.buttons["Everything not backed up yet"].firstMatch.tap()
         // iOS asks once whether Homespun may send notifications.
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
