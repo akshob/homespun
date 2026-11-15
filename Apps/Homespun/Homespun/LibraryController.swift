@@ -179,6 +179,7 @@ final class LibraryController {
         batch.formUnion(identifiers)
         journey.backupStarted(manual: true)
         job.enqueue(identifiers)
+        LongRun.shared.begin(items: identifiers.count, server: serverName)
         Announce.say("Backing up \(identifiers.count) \(identifiers.count == 1 ? "item" : "items").")
     }
 

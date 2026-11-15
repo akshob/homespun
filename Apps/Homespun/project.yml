@@ -26,7 +26,8 @@ targets:
         NSBonjourServices: [_homespun._tcp]
         # Automatic mode (Premium) runs as a background processing task.
         UIBackgroundModes: [processing]
-        BGTaskSchedulerPermittedIdentifiers: [photos.homespun.app.automatic]
+        # Backups the person starts continue in the background with the system's progress.
+        BGTaskSchedulerPermittedIdentifiers: [photos.homespun.app.automatic, "$(PRODUCT_BUNDLE_IDENTIFIER).backup.*"]
         # Plain HTTP only to servers on the home network (IP addresses and .local names).
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

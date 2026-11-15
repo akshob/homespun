@@ -5,6 +5,7 @@ import SwiftUI
 struct HomespunApp: App {
     init() {
         AppModel.registerBackgroundRun()
+        LongRun.register()
         Journey.configureTips()
     }
 
