@@ -224,7 +224,9 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: true)]
         options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d",
                                         PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
-        setAssets(PHAsset.fetchAssets(with: options), ids: nil)
+        let fetched = PHAsset.fetchAssets(with: options)
+        setAssets(fetched, ids: nil)
+        readMonths(fetched)
         albumAssets = PhotoLibrary.albumAssets()
         album = Set(Self.identifiers(albumAssets))
     }
@@ -243,6 +245,14 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         var changed = false
         if let assets, let details = change.changeDetails(for: assets) {
             setAssets(details.fetchResultAfterChanges, ids: Self.applying(details, to: library))
+            if details.hasIncrementalChanges {
+                for asset in details.insertedObjects + details.changedObjects {
+                    months[asset.localIdentifier] = Self.monthKey(asset.creationDate)
+                }
+                monthsVersion += 1
+            } else {
+                readMonths(details.fetchResultAfterChanges)
+            }
             changed = true
         }
         if let albumAssets, let details = change.changeDetails(for: albumAssets) {
@@ -292,6 +302,37 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     }
 
     @ObservationIgnored private var mediaCache: [Media: Set<String>] = [:]
+    /// Each item's capture month (year × 12 + month - 1), read in the background after a reload.
+    @ObservationIgnored private var months: [String: Int] = [:]
+    /// Bumped when `months` changes, so the grid regroups.
+    private(set) var monthsVersion = 0
+
+    func month(of id: String) -> Int? { months[id] }
+
+    nonisolated static func monthKey(_ date: Date?) -> Int? {
+        guard let date else { return nil }
+        let parts = Calendar.current.dateComponents([.year, .month], from: date)
+        guard let year = parts.year, let month = parts.month else { return nil }
+        return year * 12 + month - 1
+    }
+
+    private struct FetchBox: @unchecked Sendable { let result: PHFetchResult<PHAsset> }
+
+    private func readMonths(_ fetched: PHFetchResult<PHAsset>) {
+        let box = FetchBox(result: fetched)
+        Task {
+            let found = await Task.detached(priority: .utility) {
+                var found: [String: Int] = [:]
+                found.reserveCapacity(box.result.count)
+                box.result.enumerateObjects { asset, _, _ in
+                    if let key = LibraryModel.monthKey(asset.creationDate) { found[asset.localIdentifier] = key }
+                }
+                return found
+            }.value
+            months = found
+            monthsVersion += 1
+        }
+    }
 
     /// Items created after a date (for "new since the last backup").
     func identifiers(createdAfter date: Date) -> Set<String> {

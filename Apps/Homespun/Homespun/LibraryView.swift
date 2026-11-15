@@ -23,6 +23,8 @@ struct LibraryView: View {
     @SceneStorage("library.showsPage") private var showsPage = true
     @State private var gridSize = CGSize.zero
     @State private var gridFold: CGRect?
+    /// Where the visible cells are, for drag-to-select (not observed: it changes as cells appear).
+    @State private var frames = CellFrames()
     /// Drag-to-select: where the drag started, whether it selects or deselects, and the selection before it.
     @State private var dragAnchor: Int?
     @State private var dragSelects = true
@@ -153,14 +155,26 @@ struct LibraryView: View {
             VStack(spacing: 12) {
                 notice
                 LazyVGrid(columns: layout.items, spacing: 2) {
-                    ForEach(cells) { cell in
-                        GridCell(cell: cell, asset: controller.library.asset(cell.id), manager: controller.library.thumbnails,
-                                 selecting: selecting, selected: selected.contains(cell.id), serverName: controller.serverName)
-                            .onTapGesture { tapped(cell) }
-                            .contextMenu { if !selecting { menu(for: cell) } }
+                    ForEach(sections) { section in
+                        Section {
+                            ForEach(section.cells) { cell in
+                                GridCell(cell: cell, asset: controller.library.asset(cell.id),
+                                         manager: controller.library.thumbnails, selecting: selecting,
+                                         selected: selected.contains(cell.id), serverName: controller.serverName)
+                                    .onTapGesture { tapped(cell) }
+                                    .contextMenu { if !selecting { menu(for: cell) } }
+                                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("grid")) } action: {
+                                        frames.rects[cell.id] = $0
+                                    }
+                                    .onDisappear { frames.rects[cell.id] = nil }
+                            }
+                        } header: {
+                            monthHeader(section)
+                        }
                     }
                 }
-                .gesture(dragToSelect(cells, layout: layout), including: selecting ? .all : .subviews)
+                .coordinateSpace(.named("grid"))
+                .gesture(dragToSelect(cells), including: selecting ? .all : .subviews)
                 .padding(.leading, layout.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if cells.isEmpty { empty }
@@ -388,17 +402,17 @@ struct LibraryView: View {
     }
 
     /// Touch and hold, then drag across cells to select (or deselect) a run, like Photos.
-    private func dragToSelect(_ cells: [LibraryState.Cell], layout: (items: [GridItem], leading: CGFloat)) -> some Gesture {
+    private func dragToSelect(_ cells: [LibraryState.Cell]) -> some Gesture {
         LongPressGesture(minimumDuration: 0.25)
-            .sequenced(before: DragGesture(minimumDistance: 0))
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("grid")))
             .onChanged { value in
-                guard case .second(true, let drag?) = value else { return }
-                let geometry = GridGeometry(width: gridSize.width - layout.leading, items: layout.items)
-                guard let index = geometry.index(at: drag.location, count: cells.count) else { return }
+                guard case .second(true, let drag?) = value,
+                      let id = frames.id(at: drag.location),
+                      let index = cells.firstIndex(where: { $0.id == id }) else { return }
                 if dragAnchor == nil {
                     dragAnchor = index
                     dragBase = selected
-                    dragSelects = !selected.contains(cells[index].id)
+                    dragSelects = !selected.contains(id)
                 }
                 guard let anchor = dragAnchor else { return }
                 let run = cells[min(anchor, index)...max(anchor, index)].filter { $0.canCompact || $0.canFree }.map(\.id)
@@ -408,6 +422,51 @@ struct LibraryView: View {
                 if dragAnchor != nil { Announce.say("\(selected.count) selected") }
                 dragAnchor = nil
             }
+    }
+
+    // MARK: Months
+
+    struct MonthSection: Identifiable {
+        var id: Int
+        var cells: [LibraryState.Cell]
+    }
+
+    /// The cells grouped by capture month, in order (items without a date go with their neighbours).
+    private var sections: [MonthSection] {
+        _ = controller.library.monthsVersion
+        var result: [MonthSection] = []
+        for cell in cells {
+            let key = controller.library.month(of: cell.id) ?? result.last?.id ?? 0
+            if result.last?.id == key { result[result.count - 1].cells.append(cell) } else {
+                result.append(MonthSection(id: key, cells: [cell]))
+            }
+        }
+        return result
+    }
+
+    private func monthHeader(_ section: MonthSection) -> some View {
+        let date = Calendar.current.date(from: DateComponents(year: section.id / 12, month: section.id % 12 + 1)) ?? .now
+        let open = section.cells.filter(\.isNotBackedUp).count
+        let selectable = section.cells.filter { $0.canCompact || $0.canFree }.map(\.id)
+        return HStack(alignment: .firstTextBaseline) {
+            Text(section.id == 0 ? "Undated" : date.formatted(.dateTime.month(.wide).year())).font(.headline)
+            if filter == .notBackedUp || (filter == .all && open > 0 && settings.isPaired) {
+                Text("\(open) not backed up").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+            }
+            Spacer()
+            if selecting, !selectable.isEmpty {
+                let all = selectable.allSatisfy { selected.contains($0) }
+                Button(all ? "Deselect" : "Select All") {
+                    if all { selected.subtract(selectable) } else { selected.formUnion(selectable) }
+                }
+                .font(.subheadline.weight(.semibold))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 14)
+        .padding(.bottom, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isHeader)
     }
 
     private func toggleSelectAll() {
@@ -469,33 +528,13 @@ struct LibraryView: View {
     }
 }
 
-/// Where cells are in a uniform grid of square cells with 2 pt rows, from its column items, so a
-/// point maps to an index without measuring thousands of cells.
-struct GridGeometry {
-    var starts: [CGFloat] = []
-    var cell: CGFloat = 0
+/// The frames of the cells on screen, in the grid's coordinates; a plain store so updating it
+/// doesn't redraw the grid.
+final class CellFrames {
+    var rects: [String: CGRect] = [:]
 
-    init(width: CGFloat, items: [GridItem]) {
-        guard !items.isEmpty, width > 0 else { return }
-        if case .fixed(let size) = items[0].size {
-            cell = size
-            var x: CGFloat = 0
-            for item in items {
-                starts.append(x)
-                x += size + (item.spacing ?? 2)
-            }
-        } else {
-            let spacing = items[0].spacing ?? 2
-            cell = (width - CGFloat(items.count - 1) * spacing) / CGFloat(items.count)
-            starts = items.indices.map { CGFloat($0) * (cell + spacing) }
-        }
-    }
-
-    func index(at point: CGPoint, count: Int) -> Int? {
-        guard cell > 0, point.y >= 0, let column = starts.lastIndex(where: { $0 <= point.x }) else { return nil }
-        let row = Int(point.y / (cell + 2))
-        let index = row * starts.count + column
-        return index < count ? index : nil
+    func id(at point: CGPoint) -> String? {
+        rects.first { $0.value.contains(point) }?.key
     }
 }
 

@@ -51,21 +51,10 @@ import Testing
     }
 }
 
-/// Drag-to-select maps a point to a cell from the grid's columns, flexible or around the fold.
-@Test func gridGeometryFindsTheCellUnderAPoint() {
-    // An iPhone: 4 flexible columns in 402 pt → 99 pt cells, 2 pt gaps.
-    let phone = GridGeometry(width: 402, items: Array(repeating: GridItem(.flexible(), spacing: 2), count: 4))
-    #expect(phone.cell == 99)
-    #expect(phone.index(at: CGPoint(x: 10, y: 10), count: 100) == 0)
-    #expect(phone.index(at: CGPoint(x: 310, y: 10), count: 100) == 3)
-    #expect(phone.index(at: CGPoint(x: 120, y: 205), count: 100) == 9) // row 2, column 1
-    #expect(phone.index(at: CGPoint(x: 120, y: 205), count: 9) == nil)  // past the end
-    #expect(phone.index(at: CGPoint(x: 120, y: -4), count: 100) == nil)
-    // The open Duo's full grid: 4 + 4 fixed columns with the 40 pt fold gutter after the 4th.
-    let items = (0..<8).map { GridItem(.fixed(91.375), spacing: $0 == 3 ? 40 : 2) }
-    let duo = GridGeometry(width: 783, items: items)
-    let fifth: CGFloat = 4 * 91.375 + 3 * 2 + 40
-    #expect(duo.starts[4] == fifth)
-    #expect(duo.index(at: CGPoint(x: duo.starts[4] + 5, y: 1), count: 100) == 4)
-    #expect(duo.index(at: CGPoint(x: duo.starts[7] + 5, y: 95), count: 100) == 15)
+/// Drag-to-select finds the cell under a finger among the cells on screen.
+@Test func cellFramesFindTheCellUnderAPoint() {
+    let frames = CellFrames()
+    frames.rects = ["a": CGRect(x: 0, y: 0, width: 99, height: 99), "b": CGRect(x: 101, y: 0, width: 99, height: 99)]
+    #expect(frames.id(at: CGPoint(x: 150, y: 50)) == "b")
+    #expect(frames.id(at: CGPoint(x: 100, y: 50)) == nil) // the gap
 }
