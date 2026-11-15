@@ -40,6 +40,10 @@ final class CopyFinderUITests: XCTestCase {
         XCTAssertTrue(app.buttons["settings.findCopies"].waitForExistence(timeout: 5))
         app.navigationBars.buttons.firstMatch.tap()
         app.openTab("Library")
+        let library = XCTAttachment(screenshot: app.screenshot())
+        library.name = "Library"
+        library.lifetime = .keepAlways
+        add(library)
         let backedUp = app.gridItems("Original at home")
         XCTAssertTrue(backedUp.firstMatch.waitForExistence(timeout: 10))
         XCTAssertEqual(backedUp.count, expected, "grid doesn't show the copies as backed up")

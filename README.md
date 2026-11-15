@@ -80,7 +80,7 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 On first launch the app explains what it does, connects to a server (tap one found on the
 network: a Mac asks you to click Allow on its screen, a Linux server gives you a code; or use a
 QR code, link, or address), shows the server's self-check, and asks for Photos access. A paired
-iPhone can add another device from Settings › Add another device (a QR code and one-time code).
+iPhone can add another device from Server › Devices › Add Another Device (a QR code and one-time code).
 
 The main screen is the whole library as a grid, oldest first like Photos. Tap photos to select
 them (or "Select all not backed up"), then Compact; afterwards Homespun offers to free up space
@@ -226,7 +226,7 @@ says otherwise, so the catalog and originals can live apart: for example `--data
 (`diskutil apfs addVolume disk3 APFS Homespun` adds one that shares the disk's free space). The
 server never creates a folder whose parent is missing, so a disk that isn't connected isn't
 silently replaced by a folder on the startup disk; the self-check says so instead. To change
-the folder later, use the app (Settings › Originals folder › Change folder): the server copies
+the folder later, use the app (Server › Originals Folder › Change Folder): the server copies
 every original there, checks each one, holds new backups for a moment while it switches, and
 only then removes the old copies. A move interrupted by a restart picks up where it left off.
 
@@ -294,7 +294,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/homespun
 ### Cloud copies (connectors)
 
 The server can also copy each original somewhere else once it has stored and checked it, as
-an extra backup (Settings › Cloud copies in the app). Copies never count toward removing an
+an extra backup (Server › Cloud Copies in the app). Copies never count toward removing an
 original from the iPhone; only the server's own verified copy does. Each copy is checked
 where the service allows it, and a full or offline destination is retried later without
 holding up compact copies.
@@ -357,7 +357,7 @@ as it is on the phone (Photos keeps imported files byte for byte, though it may 
 An original may carry `"sha256"` and `"sha1"` (as recorded when it was fetched, or as a cloud
 service reports it) to make sure it hasn't changed.
 
-Then, in the app, open Settings › Find compact copies made elsewhere. It hashes the photos and
+Then, in the app, open Server › Existing Library › Find Compact Copies. It hashes the photos and
 videos Homespun doesn't know yet and asks the server about them (`POST /api/v1/copies/lookup`;
 only hashes leave the phone). Copies it finds count as backed up and join the Homespun album;
 an original still on the phone whose copy is found becomes ready to free up. It also restores
