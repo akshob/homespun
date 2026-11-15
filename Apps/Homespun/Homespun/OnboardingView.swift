@@ -44,6 +44,8 @@ struct OnboardingView: View {
 private struct SetupNavigation: View {
     @Bindable var flow: SetupFlow
     var onCompare: ((String) -> Void)?
+    /// The compact copy the receipt's Compare opened (when the caller doesn't handle it).
+    @State private var comparing: String?
 
     var body: some View {
         NavigationStack(path: $flow.path) {
@@ -57,6 +59,17 @@ private struct SetupNavigation: View {
                     }
                 }
                 .navigationDestination(for: SetupFlow.Page.self) { page($0) }
+        }
+        .sheet(item: Binding(get: { comparing.map(ComparedItem.init) }, set: { comparing = $0?.id })) { item in
+            NavigationStack {
+                CompareView(model: .shared, compactIdentifier: item.id)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { comparing = nil }.accessibilityIdentifier("compare.done")
+                        }
+                    }
+            }
+            .onAppear { AppModel.shared.library.journey.used(.compare) }
         }
         .tint(Theme.accent)
         .sheet(item: $flow.link) { link in
@@ -97,7 +110,7 @@ private struct SetupNavigation: View {
         case .limitedPhotos: LimitedPhotosPage(flow: flow)
         case .estimate: EstimatePage(flow: flow)
         case .firstTask: FirstTaskPage(flow: flow)
-        case .receipt: ReceiptPage(flow: flow, onCompare: onCompare)
+        case .receipt: ReceiptPage(flow: flow, onCompare: onCompare ?? { comparing = $0 })
         case .freed: FreedPage(flow: flow)
         }
     }
@@ -357,4 +370,8 @@ struct PairConfirmView: View {
 
 extension PairingLink: @retroactive Identifiable {
     public var id: String { url.absoluteString }
+}
+
+private struct ComparedItem: Identifiable {
+    let id: String
 }

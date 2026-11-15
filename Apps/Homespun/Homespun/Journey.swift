@@ -22,6 +22,8 @@ final class JourneyLog {
     /// The session in which setup finished: no tips then.
     private(set) var setupSession: Int?
     var premiumMomentDismissed: Bool { didSet { defaults.set(premiumMomentDismissed, forKey: "journey.premiumDismissed") } }
+    /// Get Started was closed (it stays findable in the Server tab's Help and About).
+    var getStartedClosed: Bool { didSet { defaults.set(getStartedClosed, forKey: "journey.getStartedClosed") } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -34,6 +36,13 @@ final class JourneyLog {
         badgeGuideOpened = defaults.bool(forKey: "journey.badgeGuide")
         setupSession = defaults.object(forKey: "journey.setupSession") as? Int
         premiumMomentDismissed = defaults.bool(forKey: "journey.premiumDismissed")
+        getStartedClosed = defaults.bool(forKey: "journey.getStartedClosed")
+    }
+
+    /// T5: from the session after setup, while nothing has been freed yet and it wasn't closed.
+    func getStartedDue(freedBytes: Int) -> Bool {
+        guard !getStartedClosed, freedBytes == 0 else { return false }
+        return sessions > (setupSession ?? 0)
     }
 
     func sessionStarted() {
@@ -172,6 +181,10 @@ struct CompareTip: Tip {
     var title: Text { Text("Compare") }
     var message: Text? { Text("See the compact copy next to its original.") }
     var image: Image? { Image(systemName: "rectangle.split.2x1") }
+    /// Not in the session that finished setup, whose receipt already offered Compare.
+    var rules: [Rule] {
+        #Rule(TipState.$sessions) { $0 >= 1 }
+    }
     var options: [any TipOption] { [MaxDisplayCount(1)] }
 }
 
@@ -219,5 +232,93 @@ enum AccessoryLadder {
         // 6 · New since the last backup, in manual mode (T19).
         if inputs.paired, let new = inputs.newSinceBackup, new.count >= 50, new.days >= 3 { return .newPhotos(count: new.count) }
         return nil
+    }
+}
+
+/// The one card at the top of Activity, if any (DESIGN T5, T20): Get Started when the first task
+/// was skipped, otherwise the Premium moment once. Get Started outranks the Premium moment.
+struct JourneyCard: View {
+    let model: AppModel
+    @State private var showingPremium = false
+
+    var body: some View {
+        let journey = model.library.journey
+        let settings = model.settings
+        if journey.getStartedDue(freedBytes: settings.freedBytes) {
+            getStarted(journey)
+        } else if Journey.premiumMomentDue(owned: model.premium.isUnlocked, freedBytes: settings.freedBytes,
+                                           manualBackupDays: journey.manualBackupDays,
+                                           dismissed: journey.premiumMomentDismissed) {
+            premiumMoment(journey)
+        }
+    }
+
+    private func getStarted(_ journey: JourneyLog) -> some View {
+        let library = model.library
+        let steps = [
+            ("Back up your 10 newest", library.ready.count > 0 || library.library.state.count(.atHome) > 0),
+            ("Compare one copy", journey.compareUsed),
+            ("Free up their space", model.settings.freedBytes > 0),
+        ]
+        let done = steps.filter(\.1).count
+        return Section {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Get started").font(.headline)
+                    Spacer()
+                    Button("Close", systemImage: "xmark") { journey.getStartedClosed = true }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless).foregroundStyle(Theme.secondaryLabel)
+                        .accessibilityIdentifier("getStarted.close")
+                }
+                Text("Three steps to your first free space.").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                ForEach(steps, id: \.0) { step in
+                    Label(step.0, systemImage: step.1 ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(step.1 ? Theme.teal : Theme.label)
+                        .accessibilityValue(step.1 ? "done" : "")
+                }
+                if done == 0 {
+                    Button("Back Up Your 10 Newest") {
+                        let open = library.library.state.cells.filter(\.canCompact).suffix(10).map(\.id)
+                        library.backUp(Array(open))
+                    }
+                    .buttonStyle(.glassProminent).tint(Theme.accent)
+                    .disabled(library.backUpBlockedReason != nil)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Get started, \(done) of 3 done")
+            .accessibilityIdentifier("activity.getStarted")
+        }
+        .listRowBackground(Theme.card)
+    }
+
+    private func premiumMoment(_ journey: JourneyLog) -> some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top) {
+                    Label("Let new photos back up overnight", systemImage: "moon.stars").font(.headline)
+                    Spacer()
+                    Button("Not Now", systemImage: "xmark") { journey.premiumMomentDismissed = true }
+                        .labelStyle(.iconOnly).buttonStyle(.borderless).foregroundStyle(Theme.secondaryLabel)
+                        .accessibilityIdentifier("premiumMoment.close")
+                }
+                Text("Automatic mode backs up new photos while this iPhone charges, and tells you when there's space to "
+                     + "free up. It's part of Premium.")
+                    .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                Button("See Automatic Mode") { showingPremium = true }
+                    .buttonStyle(.glass)
+                    .accessibilityIdentifier("premiumMoment.open")
+            }
+            .accessibilityIdentifier("activity.premiumMoment")
+        }
+        .listRowBackground(Theme.card)
+        .sheet(isPresented: $showingPremium) {
+            NavigationStack {
+                PremiumView(premium: model.premium, model: model)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("Done") { showingPremium = false } }
+                    }
+            }
+        }
     }
 }

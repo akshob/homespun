@@ -36,6 +36,7 @@ struct ActivityTab: View {
                     }
                     .listRowBackground(Theme.card)
                 }
+                JourneyCard(model: model)
                 readySection
                 if !attention.isEmpty {
                     Section("Needs attention") {

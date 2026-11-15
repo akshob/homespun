@@ -134,9 +134,13 @@ struct ItemViewer: View {
         }
         if let cell, ItemAction.canCompare(cell, immich: immich) {
             ToolbarItem(placement: .bottomBar) {
-                Button("Compare", systemImage: "rectangle.split.2x1") { comparing = cell.id }
-                    .tint(.white)
-                    .accessibilityIdentifier("item.compare")
+                Button("Compare", systemImage: "rectangle.split.2x1") {
+                    model.library.journey.used(.compare)
+                    comparing = cell.id
+                }
+                .tint(.white)
+                .accessibilityIdentifier("item.compare")
+                .popoverTip(CompareTip())
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)

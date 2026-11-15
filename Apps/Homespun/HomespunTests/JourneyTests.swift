@@ -57,3 +57,17 @@ import Testing
     #expect(!Journey.premiumMomentDue(owned: false, freedBytes: 2_000_000_000,
                                       manualBackupDays: [now.addingTimeInterval(-20 * day), now], dismissed: false, now: now))
 }
+
+/// Get Started (T5): never in the session that finished setup, gone once space is freed or it's closed.
+@MainActor @Test func getStartedWaitsForTheNextSessionAndCloses() {
+    let defaults = UserDefaults(suiteName: "journey-\(UUID().uuidString)")!
+    let log = JourneyLog(defaults: defaults)
+    log.sessionStarted()
+    log.setupFinished()
+    #expect(!log.getStartedDue(freedBytes: 0))
+    log.sessionStarted()
+    #expect(log.getStartedDue(freedBytes: 0))
+    #expect(!log.getStartedDue(freedBytes: 84_000_000))
+    log.getStartedClosed = true
+    #expect(!JourneyLog(defaults: defaults).getStartedDue(freedBytes: 0))
+}

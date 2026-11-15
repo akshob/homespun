@@ -266,6 +266,13 @@ struct HelpAboutView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("help.badges")
+                if model.library.journey.getStartedClosed, settings.freedBytes == 0 {
+                    Button { model.library.journey.getStartedClosed = false } label: {
+                        ServerRow(title: "Show Get Started in Activity", symbol: "checklist", value: nil)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("help.getStarted")
+                }
                 Link(destination: URL(string: "https://homespun.photos")!) {
                     ServerRow(title: "homespun.photos", symbol: "safari", value: nil)
                 }

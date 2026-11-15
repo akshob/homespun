@@ -411,7 +411,7 @@ struct ReceiptPage: View {
                         side(entry.compactIdentifier, "Compact copy · \(LibraryController.bytes(entry.compactBytes))")
                     }
                     if let onCompare {
-                        Button("Compare Them", systemImage: "rectangle.split.2x1") { onCompare(first) }
+                        Button("Compare Them", systemImage: "rectangle.split.2x1") { onCompare(entry.compactIdentifier) }
                             .foregroundStyle(Theme.accent)
                             .accessibilityIdentifier("receipt.compare")
                     }
