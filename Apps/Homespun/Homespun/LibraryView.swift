@@ -23,6 +23,10 @@ struct LibraryView: View {
     @SceneStorage("library.showsPage") private var showsPage = true
     @State private var gridSize = CGSize.zero
     @State private var gridFold: CGRect?
+    /// Drag-to-select: where the drag started, whether it selects or deselects, and the selection before it.
+    @State private var dragAnchor: Int?
+    @State private var dragSelects = true
+    @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
     @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -153,9 +157,10 @@ struct LibraryView: View {
                         GridCell(cell: cell, asset: controller.library.asset(cell.id), manager: controller.library.thumbnails,
                                  selecting: selecting, selected: selected.contains(cell.id), serverName: controller.serverName)
                             .onTapGesture { tapped(cell) }
-                            .contextMenu { menu(for: cell) }
+                            .contextMenu { if !selecting { menu(for: cell) } }
                     }
                 }
+                .gesture(dragToSelect(cells, layout: layout), including: selecting ? .all : .subviews)
                 .padding(.leading, layout.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if cells.isEmpty { empty }
@@ -382,6 +387,29 @@ struct LibraryView: View {
         Announce.say(selected.isEmpty ? "None selected" : "\(selected.count) selected")
     }
 
+    /// Touch and hold, then drag across cells to select (or deselect) a run, like Photos.
+    private func dragToSelect(_ cells: [LibraryState.Cell], layout: (items: [GridItem], leading: CGFloat)) -> some Gesture {
+        LongPressGesture(minimumDuration: 0.25)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                guard case .second(true, let drag?) = value else { return }
+                let geometry = GridGeometry(width: gridSize.width - layout.leading, items: layout.items)
+                guard let index = geometry.index(at: drag.location, count: cells.count) else { return }
+                if dragAnchor == nil {
+                    dragAnchor = index
+                    dragBase = selected
+                    dragSelects = !selected.contains(cells[index].id)
+                }
+                guard let anchor = dragAnchor else { return }
+                let run = cells[min(anchor, index)...max(anchor, index)].filter { $0.canCompact || $0.canFree }.map(\.id)
+                selected = dragSelects ? dragBase.union(run) : dragBase.subtracting(run)
+            }
+            .onEnded { _ in
+                if dragAnchor != nil { Announce.say("\(selected.count) selected") }
+                dragAnchor = nil
+            }
+    }
+
     private func toggleSelectAll() {
         if allSelectableSelected {
             selected.removeAll()
@@ -438,6 +466,36 @@ struct LibraryView: View {
 
     private func openSettings() {
         if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+    }
+}
+
+/// Where cells are in a uniform grid of square cells with 2 pt rows, from its column items, so a
+/// point maps to an index without measuring thousands of cells.
+struct GridGeometry {
+    var starts: [CGFloat] = []
+    var cell: CGFloat = 0
+
+    init(width: CGFloat, items: [GridItem]) {
+        guard !items.isEmpty, width > 0 else { return }
+        if case .fixed(let size) = items[0].size {
+            cell = size
+            var x: CGFloat = 0
+            for item in items {
+                starts.append(x)
+                x += size + (item.spacing ?? 2)
+            }
+        } else {
+            let spacing = items[0].spacing ?? 2
+            cell = (width - CGFloat(items.count - 1) * spacing) / CGFloat(items.count)
+            starts = items.indices.map { CGFloat($0) * (cell + spacing) }
+        }
+    }
+
+    func index(at point: CGPoint, count: Int) -> Int? {
+        guard cell > 0, point.y >= 0, let column = starts.lastIndex(where: { $0 <= point.x }) else { return nil }
+        let row = Int(point.y / (cell + 2))
+        let index = row * starts.count + column
+        return index < count ? index : nil
     }
 }
 
