@@ -113,15 +113,26 @@ extension XCUIApplication {
         return chosen.count
     }
 
-    /// Opens Activity and checks every item finished without failing. Returns the statuses.
+    /// Opens Activity's latest run and checks every item finished without failing. Returns the
+    /// statuses, back on Library.
     @MainActor func checkActivity(file: StaticString = #filePath, line: UInt = #line) -> [String] {
-        openTab("Activity")
-        let rows = staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH 'status.'"))
-        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10), "no items in Activity", file: file, line: line)
-        let failed = staticTexts.matching(identifier: "status.failed")
+        // The grid opens scrolled to the newest items, which minimises the tab bar; scrolling up
+        // brings its tabs back.
+        for _ in 0..<3 where !navigationBars["Activity"].exists {
+            if !(tabBars.buttons["Activity"].exists && tabBars.buttons["Activity"].isHittable) { swipeDown() }
+            openTab("Activity")
+            _ = navigationBars["Activity"].waitForExistence(timeout: 3)
+        }
+        let run = descendants(matching: .any).matching(identifier: "activity.run").firstMatch
+        XCTAssertTrue(run.waitForExistence(timeout: 20), "no run in Activity", file: file, line: line)
+        run.tap()
+        let rows = descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'status.'"))
+        XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 10), "no items in the run", file: file, line: line)
+        let failed = descendants(matching: .any).matching(identifier: "status.failed")
         XCTAssertEqual(failed.count, 0, failed.allElementsBoundByIndex.map(\.label).joined(separator: "; "),
                        file: file, line: line)
         let statuses = rows.allElementsBoundByIndex.map(\.identifier)
+        navigationBars.buttons.firstMatch.tap()
         openTab("Library")
         return statuses
     }

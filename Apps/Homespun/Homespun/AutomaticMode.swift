@@ -31,6 +31,8 @@ final class AutomaticMode {
         /// Items Photos reported as added (possibly with older dates) and not handled yet, so
         /// moving the change token on never loses them.
         var pending: Set<String> = []
+        /// Tell the user when an overnight run made space ready to free up.
+        var notifies = true
 
         init() {}
 
@@ -44,6 +46,7 @@ final class AutomaticMode {
             lastRun = try values.decodeIfPresent(Date.self, forKey: .lastRun)
             lastSummary = try values.decodeIfPresent(String.self, forKey: .lastSummary)
             pending = try values.decodeIfPresent(Set<String>.self, forKey: .pending) ?? []
+            notifies = try values.decodeIfPresent(Bool.self, forKey: .notifies) ?? true
         }
     }
 
@@ -52,6 +55,8 @@ final class AutomaticMode {
     private let url: URL
 
     var enabled: Bool { state.enabled }
+    /// Backs up everything not backed up yet, not only items added since it was turned on.
+    var backsUpEverything: Bool { state.since == .distantPast }
 
     init(url: URL = URL.applicationSupportDirectory.appendingPathComponent("Homespun/automatic.json")) {
         self.url = url
@@ -76,6 +81,19 @@ final class AutomaticMode {
         save()
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
         schedule()
+    }
+
+    /// Changes what it backs up without starting over.
+    func setScope(everything: Bool) {
+        guard everything != backsUpEverything else { return }
+        state.since = everything ? .distantPast : Date()
+        save()
+    }
+
+    func setNotifies(_ on: Bool) {
+        state.notifies = on
+        save()
+        if on { Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge]) } }
     }
 
     func disable() {
@@ -198,7 +216,7 @@ final class AutomaticMode {
         state.pending.formUnion(inserted.ids)
         let picked = candidates(ledger: await job.ledger.snapshot(), added: state.pending)
         if !picked.isEmpty {
-            job.enqueue(picked)
+            job.enqueue(picked, trigger: .automatic)
             // Wait for these items (the job may also hold items the user picked).
             func busy() -> Bool {
                 let states = job.states
@@ -241,7 +259,7 @@ final class AutomaticMode {
         let after = Set(await remover?.candidates().map(\.original) ?? [])
         summary.removable = after.count
         summary.newlyRemovable = after.subtracting(before).count
-        if notify, summary.newlyRemovable > 0 { await Self.notify(summary) }
+        if notify, state.notifies, summary.newlyRemovable > 0 { await Self.notify(summary) }
         return finish(summary)
     }
 
@@ -292,11 +310,14 @@ final class AppModel {
     let premium = Premium()
     let automatic = AutomaticMode()
     let copyFinder = CopyFinder()
+    /// Activity › History: backup runs (manual, automatic, the first task) and freed space.
+    let history = RunHistory()
     let library: LibraryController
 
     private init() {
         settings = AppSettings()
         job = CompactJob(settings: settings)
+        job.history = history
         library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
                                     copyFinder: copyFinder)
     }

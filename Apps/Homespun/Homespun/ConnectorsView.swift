@@ -2,40 +2,77 @@
 import HomespunCore
 import SwiftUI
 
-/// The server's connectors: places it copies originals to, such as OneDrive.
+/// The server's connectors: places it copies originals to, such as OneDrive (DESIGN 05·3.1).
 struct ConnectorsView: View {
     let settings: AppSettings
     @State private var connectors: [ServerAPI.ConnectorInfo]?
     @State private var error: String?
 
+    private var server: String { settings.server?.name ?? "Your server" }
+
     var body: some View {
         List {
             Section {
-                Text("Your server can also copy each original somewhere else, as an extra backup. Removing originals "
-                     + "from this iPhone still depends only on your server's own copy.")
-                    .font(.callout).foregroundStyle(.secondary)
+            } header: {
+                Text("\(server) also copies each original to another place, as an extra backup. Freeing up space on "
+                     + "this iPhone still depends only on \(server)'s own copy.")
+                    .font(.body).foregroundStyle(Theme.label).textCase(nil)
             }
             if let connectors {
+                let on = connectors.filter(\.enabled), off = connectors.filter { !$0.enabled }
                 if connectors.isEmpty {
-                    Text("This server has no connectors yet. Update Homespun Server to get them.").foregroundStyle(.secondary)
-                }
-                ForEach(connectors) { connector in
-                    NavigationLink {
-                        ConnectorDetailView(settings: settings, connector: connector) { updated in replace(updated) }
-                    } label: {
-                        ConnectorRow(connector: connector)
+                    Section {
+                        InlineNotice(tone: .info, title: "This server has no connectors yet",
+                                     message: "Update Homespun Server to get them.")
                     }
-                    .accessibilityIdentifier("connector.\(connector.id)")
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets())
                 }
+                if !on.isEmpty {
+                    Section("On") { ForEach(on) { link($0) } }.listRowBackground(Theme.card)
+                }
+                Section("More services") {
+                    ForEach(off) { link($0) }
+                    ForEach(Self.later.filter { name in !connectors.contains { $0.name == name.0 } }, id: \.0) { later in
+                        ConnectorRow(name: later.0, symbol: later.1, detail: "Coming later", tile: Theme.tertiaryLabel)
+                            .opacity(0.7)
+                    }
+                    Link(destination: URL(string: "https://homespun.photos")!) {
+                        ConnectorRow(name: "Your own connector", symbol: "externaldrive",
+                                     detail: "For developers: see homespun.photos", tile: Theme.tertiaryLabel)
+                    }
+                }
+                .listRowBackground(Theme.card)
             } else if let error {
-                Text(error).foregroundStyle(.red)
+                Section {
+                    InlineNotice(tone: .error, title: "Couldn't load cloud copies", message: error) {
+                        Button("Try Again") { Task { await load() } }.tint(Theme.accent)
+                    }
+                }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
             } else {
-                ProgressView().frame(maxWidth: .infinity)
+                Section { ProgressView().frame(maxWidth: .infinity) }.listRowBackground(Color.clear)
             }
         }
-        .navigationTitle("Cloud copies")
+        .homespunList()
+        .navigationTitle("Cloud Copies")
+        .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
         .refreshable { await load() }
+    }
+
+    private static let later = [("Google Photos", "photo"), ("Amazon Photos", "shippingbox")]
+
+    private func link(_ connector: ServerAPI.ConnectorInfo) -> some View {
+        NavigationLink {
+            ConnectorDetailView(settings: settings, connector: connector) { _ in Task { await load() } }
+        } label: {
+            ConnectorRow(name: connector.name, symbol: connector.name.contains("Drive") ? "cloud" : "icloud",
+                         detail: connector.enabled ? "On · " + countsText(connector.counts) : connector.summary,
+                         tile: connector.enabled ? Theme.blue : Theme.secondaryLabel, message: connector.message)
+        }
+        .accessibilityIdentifier("connector.\(connector.id)")
     }
 
     private func load() async {
@@ -47,36 +84,36 @@ struct ConnectorsView: View {
             self.error = error.localizedDescription
         }
     }
-
-    private func replace(_ updated: ServerAPI.ConnectorInfo?) {
-        Task { await load() }
-    }
 }
 
+/// A service: a neutral glyph tile, its name, and its state.
 private struct ConnectorRow: View {
-    let connector: ServerAPI.ConnectorInfo
+    let name: String
+    let symbol: String
+    let detail: String
+    var tile: Color
+    var message: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack {
-                Text(connector.name).font(.headline)
-                Spacer()
-                Text(connector.enabled ? "On" : "Off").font(.caption).foregroundStyle(connector.enabled ? .green : .secondary)
-            }
-            Text(connector.enabled ? countsText(connector.counts) : connector.summary)
-                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            if connector.enabled, let message = connector.message {
-                Text(message).font(.caption).foregroundStyle(.orange).lineLimit(2)
+        HStack(spacing: 14) {
+            Image(systemName: symbol).font(.body.weight(.semibold)).foregroundStyle(.white)
+                .frame(width: 32, height: 32).background(tile, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).foregroundStyle(Theme.label)
+                Text(detail).font(.subheadline).foregroundStyle(Theme.secondaryLabel).lineLimit(2)
+                if let message { Text(message).font(.subheadline).foregroundStyle(Theme.amber).lineLimit(2) }
             }
         }
         .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
     }
 }
 
 private func countsText(_ counts: ServerAPI.ConnectorCounts) -> String {
-    var parts = ["\(counts.copied) copied"]
-    if counts.pending > 0 { parts.append("\(counts.pending) waiting") }
-    if counts.failed > 0 { parts.append("\(counts.failed) failed") }
+    var parts = ["\(counts.copied.formatted()) copied"]
+    if counts.pending > 0 { parts.append("\(counts.pending.formatted()) waiting") }
+    if counts.failed > 0 { parts.append("\(counts.failed.formatted()) failed") }
     return parts.joined(separator: " · ")
 }
 
@@ -102,58 +139,83 @@ struct ConnectorDetailView: View {
     }
 
     var body: some View {
-        Form {
+        List {
             Section {
-                Text(connector.summary).font(.callout)
+                if connector.signsIn {
+                    LabeledContent("Signed in as", value: connector.account ?? "Not signed in")
+                }
                 if connector.enabled {
                     LabeledContent("Copies", value: countsText(connector.counts))
+                } else {
+                    Text(connector.summary).font(.subheadline).foregroundStyle(Theme.secondaryLabel)
                 }
-                if let message = connector.message {
-                    Text(message).font(.callout).foregroundStyle(.orange).accessibilityIdentifier("connector.message")
-                }
-            }
-            if connector.signsIn {
-                Section("Account") {
-                    if let account = connector.account {
-                        LabeledContent("Signed in as", value: account)
-                    }
-                    Button(connector.account == nil ? "Sign in" : "Sign in again") { signingIn = true }
+                if connector.signsIn {
+                    Button(connector.account == nil ? "Sign In" : "Sign In Again") { signingIn = true }
+                        .foregroundStyle(Theme.accent)
                         .accessibilityIdentifier("connector.signIn")
                 }
+            }
+            .listRowBackground(Theme.card)
+            if let message = connector.message {
+                Section {
+                    InlineNotice(tone: .warning, title: message).accessibilityIdentifier("connector.message")
+                }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
             }
             if !connector.fields.isEmpty {
                 Section("Settings") {
                     ForEach(connector.fields, id: \.key) { field in fieldEditor(field) }
                 }
+                .listRowBackground(Theme.card)
             }
             Section {
-                Toggle("Also copy originals already on the server", isOn: $copyExisting)
+                Toggle("Copy Originals Already on the Server", isOn: $copyExisting)
+                    .tint(Theme.accent)
                     .accessibilityIdentifier("connector.copyExisting")
+            } footer: {
+                Text("Each upload is checked with the service's own hash. A full or offline service is retried later.")
+            }
+            .listRowBackground(Theme.card)
+            Section {
                 Button {
                     Task { await save(enable: true) }
                 } label: {
-                    if working { ProgressView() } else { Text(connector.enabled ? "Save" : "Turn on") }
+                    BusyLabel(title: connector.enabled ? "Save" : "Turn On", busy: working)
                 }
+                .foregroundStyle(Theme.accent)
                 .disabled(working || (connector.signsIn && connector.account == nil))
                 .accessibilityIdentifier("connector.save")
                 if connector.enabled {
-                    Button("Turn off") { Task { await save(enable: false) } }.disabled(working)
+                    Button("Turn Off") { Task { await save(enable: false) } }
+                        .foregroundStyle(Theme.accent)
+                        .disabled(working)
                 }
             } footer: {
                 if connector.signsIn && connector.account == nil { Text("Sign in first.") }
             }
+            .listRowBackground(Theme.card)
             if let error {
-                Section { Text(error).foregroundStyle(.red).accessibilityIdentifier("connector.error") }
+                Section {
+                    InlineNotice(tone: .error, title: error).accessibilityIdentifier("connector.error")
+                }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
             }
             if connector.enabled || connector.account != nil || connector.fields.contains(where: \.isSet) {
                 Section {
-                    Button("Remove and sign out", role: .destructive) { Task { await remove() } }
+                    Button("Remove and Sign Out", role: .destructive) { Task { await remove() } }
+                        .foregroundStyle(Theme.red)
+                        .disabled(working)
                 } footer: {
-                    Text("Copies already made stay where they are.")
+                    Text("Copies already made stay in \(connector.name).")
                 }
+                .listRowBackground(Theme.card)
             }
         }
+        .homespunList()
         .navigationTitle(connector.name)
+        .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $signingIn) {
             ConnectorSignInView(settings: settings, connector: connector) { account in
                 connector.account = account
@@ -228,38 +290,56 @@ struct ConnectorSignInView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 18) {
+            VStack(spacing: 20) {
                 if let challenge {
-                    Text(challenge.message ?? "Open the page below, sign in, and enter this code.")
-                        .multilineTextAlignment(.center)
+                    Text(challenge.message ?? "On any device, open the page below, sign in, and enter this code:")
+                        .font(.subheadline).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
                     Text(challenge.userCode)
                         .font(.system(size: 34, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.label)
                         .textSelection(.enabled)
+                        .accessibilityValue(challenge.userCode.map { String($0) }.joined(separator: " "))
                         .accessibilityIdentifier("signIn.code")
-                    Button(copied ? "Copied" : "Copy code") {
+                    Button {
                         UIPasteboard.general.string = challenge.userCode
                         copied = true
+                    } label: {
+                        Label(copied ? "Copied" : "Copy Code", systemImage: copied ? "checkmark" : "doc.on.doc")
                     }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.bordered).tint(Theme.accent)
                     if let url = URL(string: challenge.url) {
-                        Button("Open \(url.host ?? challenge.url)") { openURL(url) }
-                            .buttonStyle(.borderedProminent)
+                        Button { openURL(url) } label: {
+                            Text("Open \(url.host ?? challenge.url)\(url.path)").frame(maxWidth: .infinity)
+                        }
+                        .primaryAction()
                     }
                     HStack(spacing: 8) {
                         ProgressView()
-                        Text("Waiting for you to sign in…").foregroundStyle(.secondary)
+                        Text("Waiting for you to sign in…").foregroundStyle(Theme.secondaryLabel)
                     }
+                    .accessibilityElement(children: .combine)
                 } else if let error {
-                    Text(error).foregroundStyle(.red).multilineTextAlignment(.center)
+                    InlineNotice(tone: .error, title: error)
+                    Button("Try Again") {
+                        self.error = nil
+                        Task { await run() }
+                    }
+                    .tint(Theme.accent)
                 } else {
                     ProgressView()
                 }
                 Spacer()
             }
             .padding(24)
-            .navigationTitle("Sign in to \(connector.name)")
+            .frame(maxWidth: .infinity)
+            .background(Theme.background)
+            .navigationTitle("Sign In to \(connector.name)")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { dismiss() } label: { Label("Close", systemImage: "xmark") }
+                }
+            }
         }
         .task { await run() }
     }

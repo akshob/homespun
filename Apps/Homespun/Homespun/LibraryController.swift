@@ -234,6 +234,7 @@ final class LibraryController {
         removal = .done(report)
         if !report.removed.isEmpty {
             settings.freedBytes += report.freedBytes
+            job.history?.recordFreed(report.removed, bytes: report.freedBytes)
             settings.removalExplained = true
             Announce.say("Freed \(Self.bytes(report.freedBytes)).")
         } else if report.cancelled {
