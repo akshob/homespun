@@ -12,8 +12,7 @@ struct LibraryView: View {
     @Binding var route: LibraryRoute
     @State private var filter = LibraryState.Filter.all
     @State private var media = LibraryModel.Media.all
-    @State private var selecting = false
-    @State private var selected = Set<String>()
+    @State private var selection = GridSelection()
     @State private var selectionBytes: (bytes: Int, exact: Bool)?
     @State private var sheet: Sheet?
     @State private var path: [String] = []
@@ -45,6 +44,16 @@ struct LibraryView: View {
     }
 
     private var controller: LibraryController { model.library }
+
+    private var selecting: Bool {
+        get { selection.active }
+        nonmutating set { selection.active = newValue }
+    }
+
+    private var selected: Set<String> {
+        get { selection.ids }
+        nonmutating set { selection.ids = newValue }
+    }
     private var settings: AppSettings { model.settings }
 
     var body: some View {
@@ -159,8 +168,8 @@ struct LibraryView: View {
                         Section {
                             ForEach(section.cells) { cell in
                                 GridCell(cell: cell, asset: controller.library.asset(cell.id),
-                                         manager: controller.library.thumbnails, selecting: selecting,
-                                         selected: selected.contains(cell.id), serverName: controller.serverName)
+                                         manager: controller.library.thumbnails, selection: selection,
+                                         serverName: controller.serverName)
                                     .onTapGesture { tapped(cell) }
                                     .contextMenu { if !selecting { menu(for: cell) } }
                                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("grid")) } action: {

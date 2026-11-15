@@ -398,19 +398,30 @@ extension PHAuthorizationStatus {
 }
 
 /// One photo in the grid: thumbnail, badge, selection, and video length or Live Photo mark.
+/// Select mode and what's selected. Cells read it themselves, so a change redraws them directly:
+/// a lazy grid doesn't reliably rebuild cells when a value passed down to them changes.
+@MainActor @Observable
+final class GridSelection {
+    var active = false
+    var ids = Set<String>()
+}
+
 struct GridCell: View {
     let cell: LibraryState.Cell
     let asset: PHAsset?
     let manager: PHCachingImageManager
-    var selecting = false
-    let selected: Bool
+    let selection: GridSelection
     var serverName = "your server"
     @State private var image: UIImage?
     @State private var request: PHImageRequestID?
     @Environment(\.dynamicTypeSize) private var typeSize
 
+    private var selecting: Bool { selection.active }
+    private var selected: Bool { selection.active && selection.ids.contains(cell.id) }
+
     var body: some View {
-        Theme.fill
+        let selected = selected
+        return Theme.fill
             .aspectRatio(1, contentMode: .fit)
             .overlay {
                 if let image {
@@ -421,7 +432,7 @@ struct GridCell: View {
             .overlay(alignment: .bottomLeading) { mediaMark }
             .overlay(alignment: .topTrailing) { BadgeView(badge: cell.badge, size: typeSize.isAccessibilitySize ? 28 : 20).padding(6) }
             .overlay { if selected { Color.white.opacity(0.2) } }
-            .overlay(alignment: .bottomTrailing) { if selecting { selectionMark.padding(6) } }
+            .overlay(alignment: .bottomTrailing) { if selecting { selectionMark(selected).padding(6) } }
             .contentShape(Rectangle())
             .onAppear(perform: load)
             .onDisappear {
@@ -435,7 +446,7 @@ struct GridCell: View {
             .accessibilityIdentifier("asset")
     }
 
-    @ViewBuilder private var selectionMark: some View {
+    @ViewBuilder private func selectionMark(_ selected: Bool) -> some View {
         if selected {
             Image(systemName: "checkmark.circle.fill").symbolRenderingMode(.palette)
                 .foregroundStyle(.white, Theme.BadgeColor.accent).font(.title3)

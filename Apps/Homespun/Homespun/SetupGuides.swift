@@ -197,32 +197,42 @@ extension NASBrand {
     /// Where originals go on the NAS, as the brand names its folders.
     var folder: String {
         switch self {
-        case .synology, .ugreen: "/volume1/photos"
-        case .qnap: "/share/Photos"
-        case .truenas: "/mnt/tank/photos"
-        case .unraid: "/mnt/user/photos"
-        case .asustor: "/volume1/Photos"
-        case .terramaster: "/Volume1/photos"
-        case .other: "/path/to/photos"
+        case .synology, .ugreen: "/volume1/photos/Homespun"
+        case .qnap: "/share/Photos/Homespun"
+        case .truenas: "/mnt/tank/photos/Homespun"
+        case .unraid: "/mnt/user/photos/Homespun"
+        case .asustor: "/volume1/Photos/Homespun"
+        case .terramaster: "/Volume1/photos/Homespun"
+        case .other: "/path/to/photos/Homespun"
         }
     }
 
-    /// Host networking, so Bonjour from inside the container reaches the iPhone.
+    /// The same as deploy/compose.yaml in the repository, with this brand's folder: host networking
+    /// and the NAS's D-Bus, so Bonjour from inside the container reaches the iPhone. The catalog
+    /// lives next to the project file; originals go in a folder on the photos share.
     var compose: String {
         """
         services:
           homespun:
-            image: ghcr.io/akshob/homespun
+            image: ghcr.io/akshob/homespun-server:latest
+            container_name: homespun
             network_mode: host
-            volumes:
-              - \(folder):/data
+            user: "\(userIDs)"  # your user's IDs: `id` on the NAS
             environment:
-              HOMESPUN_DATA: /data
-              HOMESPUN_HOST: 0.0.0.0
+              HOMESPUN_NAME: Homespun
               HOMESPUN_HARDWARE: \(self == .other ? "NAS" : "\(name) NAS")
+            volumes:
+              - ./data:/data
+              - \(folder):/originals
+              - /var/run/dbus:/var/run/dbus:ro
+            security_opt:
+              - apparmor:unconfined
             restart: unless-stopped
         """
     }
+
+    /// The IDs Homespun writes the folders as: the NAS's first user is usually these.
+    var userIDs: String { self == .synology ? "1026:100" : "1000:100" }
 
     /// The step that shows the compose file.
     var composeStep: Int { 1 }
