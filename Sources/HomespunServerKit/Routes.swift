@@ -51,6 +51,7 @@ struct Routes: Sendable {
     let approvals: PairingApprovals
     let connectors: ConnectorHub
     let locks = UploadLocks()
+    var trash: Trash { Trash(catalog: catalog, originals: originals, storage: storage) }
 
     func info() async -> ServerAPI.ServerInfo {
         .init(name: configuration.name, version: ServerConfiguration.version, mode: await immichState.mode,
@@ -129,6 +130,7 @@ struct Routes: Sendable {
         authenticated.get("assets/:id/compact/:role") { _, context in try await download(context) }
         authenticated.post("assets/:id/imported") { request, context in try await imported(request, context) }
         authenticated.post("assets/:id/verify") { _, context in try json(try await verify(context)) }
+        authenticated.post("assets/:id/removed") { _, context in try json(try await removedOnDevice(context)) }
         authenticated.get("assets/:id/original/:role") { request, context in try await original(request, context) }
         authenticated.get("devices") { _, context in
             try json(try await catalog.devices().filter { $0.revokedAt == nil }.map {
@@ -244,7 +246,18 @@ struct Routes: Sendable {
         let assetID = body.assetID!
         let outcome = try await catalog.register(body, assetID: assetID, device: context.deviceID ?? "",
                                                  initialState: mode == .files ? .receiving : .verifying)
-        guard let asset = try await catalog.asset(assetID) else { throw HTTPError(.internalServerError) }
+        guard var asset = try await catalog.asset(assetID) else { throw HTTPError(.internalServerError) }
+        if mode == .files {
+            try await catalog.setHoldCompact(assetID, !body.wantsCompact)
+            // Backed up again after it was removed on the phone (recovered from Recently Deleted).
+            let inTrash = try await catalog.resources(assetID).contains { $0.storedPath.flatMap(Trash.restored) != nil }
+            if asset.state == .trashed || inTrash {
+                try await trash.restore(asset)
+                // Resources that changed meanwhile still have to be uploaded.
+                if outcome == .changed { try await catalog.setState(assetID, .receiving) }
+            }
+            asset = try await catalog.asset(assetID) ?? asset
+        }
         let resources = try await catalog.resources(assetID)
         switch mode {
         case .files:
@@ -265,10 +278,11 @@ struct Routes: Sendable {
             let importedWithoutCopy = asset.state == .imported && !hasCompact
                 && resources.contains { $0.externalPath != nil || $0.importedFrom != nil }
             if asset.state == .receiving || importedWithoutCopy, resources.allSatisfy({ $0.state == .verified }) {
-                try await catalog.setState(assetID, .queued)
-                try await catalog.enqueue(JobRunner.compress, assetID: assetID)
                 // Imported originals were checked at import; enabling a connector copies them.
-                if !importedWithoutCopy { try await connectors.originalsVerified(assetID) }
+                try await originalsComplete(asset, copyToConnectors: !importedWithoutCopy)
+            } else if asset.state == .stored, !asset.holdCompact {
+                // Its time came: the phone wants the compact copy now.
+                try await originalsComplete(asset, copyToConnectors: true)
             }
         case .immich:
             // Registering again re-checks Immich, for example after the Immich app backed the item up.
@@ -405,10 +419,40 @@ struct Routes: Sendable {
                                            storedPath: OriginalsStore.relative(destination, to: root))
         }
         if try await catalog.resources(asset.id).allSatisfy({ $0.state == .verified }) {
-            try await catalog.setState(asset.id, .queued)
-            try await catalog.enqueue(JobRunner.compress, assetID: asset.id)
-            try await connectors.originalsVerified(asset.id)
+            try await originalsComplete(try await catalog.asset(asset.id) ?? asset, copyToConnectors: true)
         }
+    }
+
+    /// Every original is in and checked: make the compact copy, unless the phone asked to wait
+    /// (a recent item). Cloud copies wait too, so a photo cleaned up on the phone never reaches one.
+    private func originalsComplete(_ asset: AssetRecord, copyToConnectors: Bool) async throws {
+        if asset.holdCompact {
+            try await catalog.setState(asset.id, .stored)
+            return
+        }
+        try await catalog.setState(asset.id, .queued)
+        try await catalog.enqueue(JobRunner.compress, assetID: asset.id)
+        if copyToConnectors { try await connectors.originalsVerified(asset.id) }
+    }
+
+    /// `POST /api/v1/assets/{id}/removed`: the phone no longer has this recent item (the person
+    /// deleted it before its compact copy was due). Its originals go to the server's trash. Items
+    /// with a compact copy, or kept as is, stay: freeing up space removes originals on purpose.
+    func removedOnDevice(_ context: HomespunRequestContext) async throws -> ServerAPI.AssetStatus {
+        let assetID = try assetID(context)
+        guard await immichState.mode == .files else {
+            throw HTTPError(.conflict, message: "Originals are in Immich; Homespun Server doesn't keep them.")
+        }
+        guard let asset = try await catalog.asset(assetID) else { throw HTTPError(.notFound) }
+        switch asset.state {
+        case .stored, .receiving: try await trash.remove(asset)
+        case .trashed: break
+        default:
+            throw APIError(.conflict, code: ServerAPI.ErrorCode.keptOriginal,
+                           message: "This original stays on the server: it already has a compact copy or was kept as is.")
+        }
+        guard let status = try await catalog.status(assetID) else { throw HTTPError(.notFound) }
+        return status
     }
 
     private func resourceStatus(_ assetID: String, _ role: Role) async throws -> ServerAPI.ResourceStatus {
@@ -485,13 +529,15 @@ struct Routes: Sendable {
 
     func storageInfo(_ context: HomespunRequestContext) async throws -> ServerAPI.StorageInfo {
         let root = await originals.root
-        let stored = try await catalog.storedOriginals()
+        let stored = try await catalog.storedOriginals().filter { Trash.restored($0.path) == nil }
         let folder = try await context.deviceID.asyncMap { try await catalog.folder(forDevice: $0) } ?? nil
         let space = OriginalsStore.space(at: root.path)
+        let trashed = try await catalog.trashTotals()
         return ServerAPI.StorageInfo(
             originalsFolder: root.path, deviceFolder: folder.map { root.appendingPathComponent($0).path },
             freeBytes: space.free, capacityBytes: space.capacity, storedCount: stored.count,
-            storedBytes: stored.reduce(Int64(0)) { $0 + Int64($1.size) }, move: await mover.status)
+            storedBytes: stored.reduce(Int64(0)) { $0 + Int64($1.size) }, move: await mover.status,
+            trashCount: trashed.count, trashBytes: trashed.bytes)
     }
 
     // MARK: Compact copies

@@ -352,12 +352,19 @@ public enum ServerAPI {
         public var kind: AssetKind
         public var captureDate: Date?
         public var resources: [ResourceDescriptor]
+        /// False: back the originals up but don't make a compact copy yet (the item is recent); the
+        /// asset waits as `stored` until it's registered again with this true (or left out, as older
+        /// apps do). Files mode only.
+        public var compact: Bool?
 
-        public init(kind: AssetKind, captureDate: Date?, resources: [ResourceDescriptor]) {
+        public init(kind: AssetKind, captureDate: Date?, resources: [ResourceDescriptor], compact: Bool? = nil) {
             self.kind = kind
             self.captureDate = captureDate
             self.resources = resources
+            self.compact = compact
         }
+
+        public var wantsCompact: Bool { compact ?? true }
 
         /// The role whose SHA-256 is the asset ID.
         public var primaryRole: ResourceRole { kind == .video ? .video : .photo }
@@ -381,6 +388,11 @@ public enum ServerAPI {
         /// Nothing smaller can be made yet; `message` says why. The original stays as is.
         case held
         case failed
+        /// Backed up; no compact copy until the app asks (registering again with `compact` true).
+        case stored
+        /// Removed on the phone while it waited as `stored`: the originals are in the server's trash
+        /// until `trashedUntil`, then deleted. Backing it up again restores them.
+        case trashed
     }
 
     public enum ResourceState: String, Codable, Sendable {
@@ -432,9 +444,12 @@ public enum ServerAPI {
         public var compact: [CompactResource]
         /// Roles the app compresses itself (Live Photo motion needs AVFoundation).
         public var deviceCompresses: [ResourceRole]
+        /// When a trashed asset's originals are deleted.
+        public var trashedUntil: Date?
 
         public init(assetID: String, kind: AssetKind, state: AssetState, message: String?,
-                    resources: [ResourceStatus], compact: [CompactResource], deviceCompresses: [ResourceRole]) {
+                    resources: [ResourceStatus], compact: [CompactResource], deviceCompresses: [ResourceRole],
+                    trashedUntil: Date? = nil) {
             self.assetID = assetID
             self.kind = kind
             self.state = state
@@ -442,10 +457,11 @@ public enum ServerAPI {
             self.resources = resources
             self.compact = compact
             self.deviceCompresses = deviceCompresses
+            self.trashedUntil = trashedUntil
         }
 
         enum CodingKeys: String, CodingKey {
-            case assetID = "assetId", kind, state, message, resources, compact, deviceCompresses
+            case assetID = "assetId", kind, state, message, resources, compact, deviceCompresses, trashedUntil
         }
     }
 
@@ -586,9 +602,12 @@ public enum ServerAPI {
         public var storedCount: Int
         public var storedBytes: Int64
         public var move: MoveStatus?
+        /// Originals of items removed on a phone before their compact copy, waiting to be deleted.
+        public var trashCount: Int?
+        public var trashBytes: Int64?
 
         public init(originalsFolder: String, deviceFolder: String?, freeBytes: Int64?, capacityBytes: Int64?,
-                    storedCount: Int, storedBytes: Int64, move: MoveStatus?) {
+                    storedCount: Int, storedBytes: Int64, move: MoveStatus?, trashCount: Int? = nil, trashBytes: Int64? = nil) {
             self.originalsFolder = originalsFolder
             self.deviceFolder = deviceFolder
             self.freeBytes = freeBytes
@@ -596,6 +615,8 @@ public enum ServerAPI {
             self.storedCount = storedCount
             self.storedBytes = storedBytes
             self.move = move
+            self.trashCount = trashCount
+            self.trashBytes = trashBytes
         }
     }
 
@@ -693,5 +714,7 @@ public enum ServerAPI {
     public enum ErrorCode {
         /// The registered file is a compact copy this server made, not an original.
         public static let compactCopy = "compact_copy"
+        /// `removed` for an item whose original the server keeps (it has a compact copy, or was kept as is).
+        public static let keptOriginal = "kept_original"
     }
 }

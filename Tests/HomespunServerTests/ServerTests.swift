@@ -327,31 +327,48 @@ final class FakeConnector: Connector, @unchecked Sendable {
         #expect(try await connectors().first?.counts == .init(copied: 1))
         #expect(try await client.call("/api/v1/assets/\(second)", token: token).decode(ServerAPI.AssetStatus.self).state == .ready)
 
+        // A recent item waiting for its compact copy isn't copied until it gets one.
+        let recentPhoto = fixture.directory.appendingPathComponent("IMG_0004.JPG")
+        try (Data(contentsOf: media.photo) + Data("a recent photo".utf8)).write(to: recentPhoto)
+        let recent = try descriptor(.photo, recentPhoto)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [recent],
+                                                                       compact: false))
+        _ = try await fixture.upload(client, token: token, asset: recent.sha256, role: .photo, file: recentPhoto)
+        try await fixture.server.drainJobs()
+        #expect(fake.lock.withLock { fake.copies.count } == 1)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [recent],
+                                                                       compact: true))
+        try await fixture.server.drainJobs()
+        #expect(fake.lock.withLock { fake.copies.map(\.assetID) }.contains(recent.sha256))
+        #expect(try await connectors().first?.counts == .init(copied: 2))
+
         // A full destination waits without failing; a refusal is final and shown in the app.
         fake.lock.withLock { fake.behaviour = .retryLater }
         let thirdPhoto = fixture.directory.appendingPathComponent("IMG_0003.JPG")
         try (Data(contentsOf: media.photo) + Data("another photo".utf8)).write(to: thirdPhoto)
         let third = try await add(thirdPhoto, .photo, .photo)
         fakeInfo = try #require(try await connectors().first)
-        #expect(fakeInfo.counts == .init(copied: 1, pending: 1) && fakeInfo.message == "The fake cloud is full.")
+        #expect(fakeInfo.counts == .init(copied: 2, pending: 1) && fakeInfo.message == "The fake cloud is full.")
         #expect(try await client.call("/api/v1/assets/\(third)", token: token).decode(ServerAPI.AssetStatus.self).state == .ready)
         // Copying what's already on the server skips copies already made (the waiting one stays waiting).
         fake.lock.withLock { fake.behaviour = .fail }
         #expect(try await update(.init(copyExisting: true)).status == .ok)
         try await fixture.server.drainJobs()
         fakeInfo = try #require(try await connectors().first)
-        #expect(fakeInfo.counts == .init(copied: 1, pending: 1, failed: 1) && fakeInfo.message == "The fake cloud refused it.")
+        #expect(fakeInfo.counts == .init(copied: 2, pending: 1, failed: 1) && fakeInfo.message == "The fake cloud refused it.")
 
         // Asking again retries the failed one; removing forgets the settings but keeps copies made.
         fake.lock.withLock { fake.behaviour = .copy }
         #expect(try await update(.init(copyExisting: true)).status == .ok)
         try await fixture.server.drainJobs()
-        #expect(Set(fake.lock.withLock { fake.copies.map(\.assetID) }) == [first, second])
-        #expect(try await connectors().first?.counts == .init(copied: 2, pending: 1))
+        #expect(Set(fake.lock.withLock { fake.copies.map(\.assetID) }) == [first, second, recent.sha256])
+        #expect(try await connectors().first?.counts == .init(copied: 3, pending: 1))
         #expect(try await client.call("/api/v1/connectors/fake", .delete, token: token).status == .noContent)
         fakeInfo = try #require(try await connectors().first)
         #expect(!fakeInfo.enabled && fakeInfo.account == nil && fakeInfo.fields.allSatisfy { !$0.isSet })
-        #expect(fakeInfo.counts == .init(copied: 2))
+        #expect(fakeInfo.counts == .init(copied: 3))
         #expect(try await client.call("/api/v1/connectors/nope", .put, token: token, json: ServerAPI.ConnectorUpdate(enabled: true))
             .status == .unprocessableContent)
     }
@@ -1339,5 +1356,80 @@ final class ProblemLog: @unchecked Sendable {
     }
     #expect(throws: Never.self) {
         try OriginalsMover.validate(elsewhere, current: current, dataDirectory: data, container: true, mounts: [root.path])
+    }
+}
+
+/// Automatic mode backs a recent item up without a compact copy (`stored`); registering it again
+/// with `compact` makes the copy, and only then do cloud copies start. A recent item removed on the
+/// phone goes to the server's trash, comes back if it's backed up again, and is deleted after 30 days.
+/// Anything with a compact copy stays when the phone removes it.
+@Test(.enabled(if: ffmpegAvailable)) func recentItemsWaitForTheirCompactCopyAndCleanedUpOnesGoToTheTrash() async throws {
+    let fixture = try await Fixture(originals: "originals")
+    let media = try await Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let photo = try descriptor(.photo, media.photo)
+        let date = Date(timeIntervalSince1970: 1_714_592_096)
+        func register(compact: Bool?) async throws -> ServerAPI.AssetStatus {
+            let request = ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: date, resources: [photo], compact: compact)
+            return try await client.call("/api/v1/assets", .post, token: token, json: request).decode(ServerAPI.AssetStatus.self)
+        }
+        func status() async throws -> ServerAPI.AssetStatus {
+            try await client.call("/api/v1/assets/\(photo.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
+        }
+        let originals = fixture.directory.appendingPathComponent("originals")
+        let kept = originals.appendingPathComponent("Test iPhone/2024/05/IMG_0001.JPG")
+        let trashed = originals.appendingPathComponent(".trash/Test iPhone/2024/05/IMG_0001.JPG")
+
+        // Backed up, no compact copy, no job.
+        #expect(try await register(compact: false).state == .receiving)
+        _ = try await fixture.upload(client, token: token, asset: photo.sha256, role: .photo, file: media.photo)
+        try await fixture.server.drainJobs()
+        var current = try await status()
+        #expect(current.state == .stored && current.compact.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: kept.path))
+        // Registering again as recent changes nothing.
+        #expect(try await register(compact: false).state == .stored)
+
+        // Removed on the phone: into the trash, out of the stored totals, with a date.
+        let removed = try await client.call("/api/v1/assets/\(photo.sha256)/removed", .post, token: token)
+            .decode(ServerAPI.AssetStatus.self)
+        #expect(removed.state == .trashed)
+        let until = try #require(removed.trashedUntil)
+        #expect(abs(until.timeIntervalSinceNow - 30 * 86_400) < 120)
+        #expect(!FileManager.default.fileExists(atPath: kept.path) && FileManager.default.fileExists(atPath: trashed.path))
+        let storage = try await client.call("/api/v1/storage", token: token).decode(ServerAPI.StorageInfo.self)
+        #expect(storage.storedCount == 0 && storage.trashCount == 1 && storage.trashBytes == Int64(photo.size))
+        // Not yet: the trash keeps it 30 days.
+        #expect(try await fixture.server.emptyTrash() == 0)
+
+        // Recovered on the phone and backed up again: out of the trash, waiting again.
+        #expect(try await register(compact: false).state == .stored)
+        #expect(FileManager.default.fileExists(atPath: kept.path) && !FileManager.default.fileExists(atPath: trashed.path))
+
+        // Its time came: the compact copy is made now.
+        #expect(try await register(compact: true).state == .queued)
+        try await fixture.server.drainJobs()
+        current = try await status()
+        #expect(current.state == .ready && !current.compact.isEmpty)
+        #expect(try await client.call("/api/v1/assets/\(photo.sha256)/imported", .post, token: token).status == .ok)
+        // Freeing up space removes the original on the phone on purpose: the server keeps it.
+        let refused = try await client.call("/api/v1/assets/\(photo.sha256)/removed", .post, token: token)
+        #expect(refused.status == .conflict)
+        #expect(try refused.decode(ServerAPI.ErrorBody.self).error.code == ServerAPI.ErrorCode.keptOriginal)
+        #expect(try await status().state == .imported && FileManager.default.fileExists(atPath: kept.path))
+
+        // A second recent item, cleaned up on the phone, is deleted 30 days later.
+        let video = try descriptor(.video, media.movie)
+        let request = ServerAPI.RegisterAssetRequest(kind: .video, captureDate: date, resources: [video], compact: false)
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: request)
+        _ = try await fixture.upload(client, token: token, asset: video.sha256, role: .video, file: media.movie)
+        #expect(try await client.call("/api/v1/assets/\(video.sha256)/removed", .post, token: token)
+            .decode(ServerAPI.AssetStatus.self).state == .trashed)
+        #expect(try await fixture.server.emptyTrash(now: Date().addingTimeInterval(31 * 86_400)) == 1)
+        #expect(try await client.call("/api/v1/assets/\(video.sha256)", token: token).status == .notFound)
+        let left = try FileManager.default.subpathsOfDirectory(atPath: originals.appendingPathComponent(".trash").path)
+            .filter { !$0.hasSuffix("/") && $0.contains(".") }
+        #expect(left.isEmpty, "\(left)")
+        #expect(FileManager.default.fileExists(atPath: kept.path))
     }
 }

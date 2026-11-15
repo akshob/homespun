@@ -190,4 +190,9 @@ public struct HomespunServer: Sendable {
         try await runner.drain()
         try await copier.drain()
     }
+
+    /// Deletes what has been in the trash for 30 days (the job runner does this hourly).
+    func emptyTrash(now: Date = Date()) async throws -> Int {
+        try await Trash(catalog: catalog, originals: originals, storage: storage).empty(now: now, logger: logger)
+    }
 }

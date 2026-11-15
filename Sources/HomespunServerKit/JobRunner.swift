@@ -39,7 +39,14 @@ public final class JobRunner: Service, Sendable {
 
     public func run() async throws {
         await cancelWhenGracefulShutdown {
+            var lastEmptied = ContinuousClock.now - .seconds(3600)
             while !Task.isCancelled {
+                // About once an hour, the main runner deletes originals that have been in the trash 30 days.
+                if !self.connectors, ContinuousClock.now - lastEmptied >= .seconds(3600) {
+                    lastEmptied = .now
+                    _ = try? await Trash(catalog: self.catalog, originals: self.originals, storage: self.storage)
+                        .empty(logger: self.logger)
+                }
                 if (try? await self.runNext()) == true { continue }
                 try? await Task.sleep(for: self.pollInterval)
             }

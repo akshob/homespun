@@ -53,6 +53,9 @@ struct AssetRecord: Equatable, Sendable {
     var state: ServerAPI.AssetState
     var message: String?
     var deviceCompresses: [Role]
+    /// The phone asked to back it up without a compact copy for now.
+    var holdCompact = false
+    var trashedAt: String?
 }
 
 struct Job: Equatable, Sendable {
@@ -210,6 +213,12 @@ public actor Catalog {
         INSERT INTO settings (key, value) SELECT 'originals.legacy', '1'
             WHERE EXISTS (SELECT 1 FROM resources WHERE stored_path IS NOT NULL);
         ALTER TABLE devices ADD COLUMN folder TEXT;
+        """,
+        // Recent items are backed up first and compacted later (`hold_compact`); those removed on the
+        // phone meanwhile wait in the server's trash (`trashed_at`).
+        """
+        ALTER TABLE assets ADD COLUMN hold_compact INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE assets ADD COLUMN trashed_at TEXT;
         """,
     ]
 
@@ -589,7 +598,52 @@ public actor Catalog {
             state: ServerAPI.AssetState(rawValue: row["state"]?.string ?? "") ?? .failed,
             message: row["message"]?.string,
             deviceCompresses: (row["device_compresses"]?.string ?? "").split(separator: ",")
-                .compactMap { Role(rawValue: String($0)) })
+                .compactMap { Role(rawValue: String($0)) },
+            holdCompact: (row["hold_compact"]?.int ?? 0) != 0, trashedAt: row["trashed_at"]?.string)
+    }
+
+    /// Whether the phone wants a compact copy now (`false`: back it up, compact it later).
+    func setHoldCompact(_ assetID: String, _ hold: Bool) throws {
+        try database.execute("UPDATE assets SET hold_compact = ? WHERE id = ?", [.integer(hold ? 1 : 0), .text(assetID)])
+    }
+
+    /// Moves an asset to or out of the trash: its stored paths change, and so does its state.
+    func setTrashed(_ assetID: String, paths: [Role: String], at date: String?, state: ServerAPI.AssetState) throws {
+        try database.transaction {
+            for (role, path) in paths {
+                try database.execute("UPDATE resources SET stored_path = ? WHERE asset_id = ? AND role = ?",
+                                     [.text(path), .text(assetID), .text(role.rawValue)])
+            }
+            try database.execute("UPDATE assets SET state = ?, message = NULL, trashed_at = ?, updated_at = ? WHERE id = ?",
+                                 [.text(state.rawValue), date.sqlValue, .text(Timestamp.string()), .text(assetID)])
+        }
+        log(date == nil ? "asset_restored" : "asset_trashed", asset: assetID)
+    }
+
+    /// Trashed assets whose time is up.
+    func trashed(before date: String) throws -> [String] {
+        try database.query("SELECT id FROM assets WHERE state = 'trashed' AND trashed_at < ?", [.text(date)])
+            .compactMap { $0["id"]?.string }
+    }
+
+    /// Everything waiting in the trash: count and bytes.
+    func trashTotals() throws -> (count: Int, bytes: Int64) {
+        let row = try database.query("""
+            SELECT COUNT(DISTINCT a.id) AS count, COALESCE(SUM(r.size), 0) AS bytes FROM assets a
+            LEFT JOIN resources r ON r.asset_id = a.id WHERE a.state = 'trashed'
+            """).first
+        return (row?["count"]?.int ?? 0, Int64(row?["bytes"]?.int ?? 0))
+    }
+
+    /// Forgets an asset whose trash time is up (its files are already deleted).
+    func deleteAsset(_ assetID: String) throws {
+        try database.transaction {
+            try database.execute("DELETE FROM jobs WHERE asset_id = ?", [.text(assetID)])
+            try database.execute("DELETE FROM connector_copies WHERE asset_id = ?", [.text(assetID)])
+            try database.execute("DELETE FROM compact WHERE asset_id = ?", [.text(assetID)])
+            try database.execute("DELETE FROM assets WHERE id = ?", [.text(assetID)])
+        }
+        log("asset_deleted", asset: assetID, detail: "removed on the phone; trash emptied")
     }
 
     func resources(_ assetID: String) throws -> [ResourceRecord] {
@@ -614,6 +668,8 @@ public actor Catalog {
     func status(_ assetID: String) throws -> ServerAPI.AssetStatus? {
         guard let asset = try asset(assetID) else { return nil }
         let ready = asset.state == .ready || asset.state == .imported
+        let trashedUntil = asset.state == .trashed
+            ? Timestamp.date(asset.trashedAt).map { $0.addingTimeInterval(Trash.keep) } : nil
         return ServerAPI.AssetStatus(
             assetID: assetID, kind: asset.kind, state: asset.state, message: asset.message,
             resources: try resources(assetID).map {
@@ -623,7 +679,7 @@ public actor Catalog {
             compact: ready ? try compact(assetID).map {
                 ServerAPI.CompactResource(role: $0.role, filename: $0.filename, size: $0.size, sha256: $0.sha256)
             } : [],
-            deviceCompresses: ready ? asset.deviceCompresses : [])
+            deviceCompresses: ready ? asset.deviceCompresses : [], trashedUntil: trashedUntil)
     }
 
     func setReceived(_ assetID: String, role: Role, bytes: Int) throws {
@@ -730,6 +786,8 @@ public actor Catalog {
             SELECT a.id AS id FROM assets a
             WHERE EXISTS (SELECT 1 FROM resources r WHERE r.asset_id = a.id)
               AND NOT EXISTS (SELECT 1 FROM resources r WHERE r.asset_id = a.id AND r.state != 'verified')
+              -- Recent items waiting for their compact copy (or cleaned up) reach the cloud later, if at all.
+              AND a.state NOT IN ('stored', 'trashed')
             ORDER BY a.capture_date, a.created_at
             """).compactMap { $0["id"]?.string }
     }
