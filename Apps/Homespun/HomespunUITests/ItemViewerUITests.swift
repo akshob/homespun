@@ -14,7 +14,7 @@ final class ItemViewerUITests: XCTestCase {
 
     @MainActor private func launch(_ arguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES"] + arguments
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"] + arguments
         app.launch()
         return app
     }
@@ -31,9 +31,8 @@ final class ItemViewerUITests: XCTestCase {
         // The older of the two opens; the item before it isn't backed up.
         let ready = app.gridItems("Ready to free up")
         XCTAssertTrue(ready.firstMatch.waitForExistence(timeout: 20), "nothing ready to free up")
-        ready.element(boundBy: 0).tap()
         let state = app.staticTexts["item.state"]
-        XCTAssertTrue(state.waitForExistence(timeout: 10), "no state line")
+        XCTAssertTrue(open(ready.element(boundBy: 0), app), "no state line")
         XCTAssertTrue(state.label.hasPrefix("Ready to free up · original on"), state.label)
         XCTAssertTrue(app.buttons["item.action"].label.contains("Free Up Space"))
         XCTAssertTrue(app.buttons["item.compare"].exists, "no Compare for a copy whose original is here")
@@ -183,6 +182,8 @@ final class ItemViewerUITests: XCTestCase {
     @MainActor private func open(_ item: XCUIElement, _ app: XCUIApplication) -> Bool {
         let state = app.staticTexts["item.state"]
         for _ in 0..<3 {
+            // Clear of the status accessory and tab bar, which the newest items scroll under.
+            app.reveal(item)
             if item.exists { item.tap() }
             if state.waitForExistence(timeout: 8) { return true }
         }

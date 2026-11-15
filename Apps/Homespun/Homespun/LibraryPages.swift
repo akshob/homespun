@@ -22,6 +22,9 @@ struct LibraryRightPage: View {
     var showAll: (LibraryState.Filter) -> Void
     var openItem: (String) -> Void
 
+    /// Where Free Up Space returns: the item it was opened from, if any.
+    @State private var returnRoute: LibraryRoute?
+
     private var controller: LibraryController { model.library }
 
     var body: some View {
@@ -32,14 +35,18 @@ struct LibraryRightPage: View {
             case .item(let id):
                 NavigationStack {
                     ItemViewer(model: model, ids: ids.contains(id) ? ids : [id], start: id,
-                               freeUp: { route = .review($0) }, close: { route = .overview })
+                               freeUp: { scope in
+                                   returnRoute = route
+                                   route = .review(scope)
+                               }, close: { route = .overview })
                 }
                 .id(id)
             case .selection: selection
             case .review(let scope):
                 FreeUpSpacePanel(controller: controller, scope: scope) {
                     controller.dismissRemoval()
-                    route = .overview
+                    route = returnRoute ?? .overview
+                    returnRoute = nil
                 }
             }
         }

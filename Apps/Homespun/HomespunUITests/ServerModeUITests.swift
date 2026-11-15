@@ -14,7 +14,7 @@ final class ServerModeUITests: XCTestCase {
             throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         app.launch()
 
         app.pair(address: address, code: code)
@@ -65,10 +65,18 @@ final class ServerModeUITests: XCTestCase {
         XCTAssertTrue(summary.waitForExistence(timeout: 60))
         attach(app, "Removed")
         XCTAssertTrue(summary.label.contains("Freed"), summary.label)
-        let looksRight = app.buttons["trial.confirm"]
-        XCTAssertTrue(looksRight.waitForExistence(timeout: 5), "trial check not offered")
-        looksRight.tap()
-        XCTAssertFalse(looksRight.waitForExistence(timeout: 2))
+        // The first time, Homespun asks whether the copies look right; once that's answered (by an
+        // earlier test on this simulator), the result just has Done.
+        let looksRight = app.buttons["trial.confirm"], done = app.buttons["remove.dismiss"]
+        let deadline = Date().addingTimeInterval(10)
+        while !looksRight.exists, !done.exists, Date() < deadline { usleep(250_000) }
+        if looksRight.exists {
+            looksRight.tap()
+            XCTAssertFalse(looksRight.waitForExistence(timeout: 2))
+        } else {
+            XCTAssertTrue(done.exists, "neither the trial check nor Done")
+            done.tap()
+        }
         // The removed originals' copies now show their originals at home.
         XCTAssertTrue(app.gridItems("Original at home").firstMatch.waitForExistence(timeout: 10), "no items marked at home")
         attach(app, "Backed up")
@@ -81,7 +89,7 @@ final class ServerModeUITests: XCTestCase {
             throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         app.launch()
         XCTAssertTrue(app.isConnected(), "not paired with the server")
         let remaining = app.gridItems("Not backed up")

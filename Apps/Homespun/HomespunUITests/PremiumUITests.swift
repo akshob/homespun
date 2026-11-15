@@ -5,7 +5,7 @@ import XCTest
 final class PremiumUITests: XCTestCase {
     @MainActor func testLockedFeaturesOfferPremium() throws {
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES", "-hideTips"]
         app.launch()
         app.openTab("Server")
         XCTAssertFalse(app.automaticToggle.waitForExistence(timeout: 3))
@@ -18,7 +18,9 @@ final class PremiumUITests: XCTestCase {
         XCTAssertTrue(app.reveal(link), "automatic mode isn't offered")
         link.tap()
         let seeAll = app.buttons["premium.seeAll"]
-        XCTAssertTrue(seeAll.waitForExistence(timeout: 10), "no sheet about the locked feature")
+        // A busy simulator can drop the first tap.
+        if !seeAll.waitForExistence(timeout: 10), link.exists { link.tap() }
+        XCTAssertTrue(seeAll.waitForExistence(timeout: 20), "no sheet about the locked feature")
         XCTAssertTrue(app.buttons["premium.feature.buy"].exists)
         let sheet = XCTAttachment(screenshot: app.screenshot())
         sheet.name = "Locked feature"

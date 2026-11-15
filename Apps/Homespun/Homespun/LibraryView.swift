@@ -61,7 +61,7 @@ struct LibraryView: View {
             Group {
                 if isBook {
                     Book(showsSecond: showsPage) {
-                        content
+                        content.safeAreaInset(edge: .top, spacing: 0) { paneHeader }
                     } second: {
                         LibraryRightPage(model: model, route: $route, selected: selected, ids: visibleIDs, backUp: backUp,
                                          showAll: { filter = $0 }, openItem: { path.append($0) })
@@ -88,6 +88,7 @@ struct LibraryView: View {
                 }
                 .task(id: selected) { await measureSelection() }
                 .onChange(of: selecting) { _, on in
+                    controller.isSelecting = on
                     guard isBook else { return }
                     if on { route = .selection } else if route == .selection { route = .overview }
                 }
@@ -302,17 +303,13 @@ struct LibraryView: View {
                 .accessibilityHint(controller.backUpBlockedReason ?? "")
             }
         } else if controller.access.allowsReading {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button("Select", systemImage: "checkmark.circle") {
-                    selecting = true
-                    controller.journey.used(.select)
+            // In the book they're the left page's own controls (the pane header), so the strip
+            // keeps room for what the right page opens.
+            if !isBook {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    selectButton
+                    filterButton
                 }
-                .accessibilityIdentifier("select.start")
-                .popoverTip(SelectTip())
-                filterMenu
-                    .popoverTip(BadgeTip()) { action in
-                        if action.id == "guide" { openLegend() }
-                    }
             }
             ToolbarItem(placement: .primaryAction) { moreMenu }
             if isBook {
@@ -323,6 +320,43 @@ struct LibraryView: View {
                     .accessibilityIdentifier("library.togglePage")
                 }
             }
+        }
+    }
+
+    private var selectButton: some View {
+        Button("Select", systemImage: "checkmark.circle") {
+            selecting = true
+            controller.journey.used(.select)
+        }
+        .accessibilityIdentifier("select.start")
+        .popoverTip(SelectTip())
+    }
+
+    private var filterButton: some View {
+        filterMenu
+            .popoverTip(BadgeTip()) { action in
+                if action.id == "guide" { openLegend() }
+            }
+    }
+
+    /// The left page's header on the open iPhone Duo: Select and Filter in one glass capsule.
+    @ViewBuilder private var paneHeader: some View {
+        if isBook, !selecting, controller.access.allowsReading {
+            HStack {
+                Spacer()
+                GlassEffectContainer {
+                    HStack(spacing: 4) {
+                        selectButton
+                        filterButton
+                    }
+                    .labelStyle(.iconOnly)
+                    .font(.title3)
+                    .padding(.horizontal, 6)
+                    .glassEffect(.regular.interactive(), in: .capsule)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
         }
     }
 

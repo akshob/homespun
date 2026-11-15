@@ -9,8 +9,7 @@ extension XCUIApplication {
         let limit = frame.maxY - 220
         var tries = 4
         while element.frame.maxY > limit, tries > 0 {
-            coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.6))
-                .press(forDuration: 0.05, thenDragTo: coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.35)))
+            swipeUpInContent()
             tries -= 1
         }
         return element.exists
@@ -30,7 +29,7 @@ final class ServerTabUITests: XCTestCase {
             throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         app.launch()
         app.pair(address: address, code: code)
 
@@ -158,7 +157,7 @@ final class ServerTabUITests: XCTestCase {
             throw XCTSkip("Stop the server and set HOMESPUN_UNREACHABLE=1 to run this.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         app.launch()
         app.showTab("Server")
         let status = app.descendants(matching: .any)["server.status"]

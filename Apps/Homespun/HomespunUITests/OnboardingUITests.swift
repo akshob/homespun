@@ -19,6 +19,7 @@ final class OnboardingUITests: XCTestCase {
         app = XCUIApplication()
         // Other Homespun servers on the Mac's network stay out of it: only these are found.
         app.launchEnvironment["HOMESPUN_DISCOVER_ONLY"] = discover.joined(separator: ",")
+        app.launchArguments += ["-hideTips"]
         app.launch()
 
         let find = app.buttons["setup.find"]

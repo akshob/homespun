@@ -156,8 +156,10 @@ private struct StatusAccessoryModifier: ViewModifier {
     func body(content: Content) -> some View {
         let status = AccessoryLadder.pick(model.library.accessoryInputs)
         if #available(iOS 26.1, *) {
-            // Hidden while an item is open full screen: it would cover the item's toolbar.
-            content.tabViewBottomAccessory(isEnabled: status != nil && !ItemPresence.shared.isOpen) {
+            // Hidden while an item is open full screen or the Library is selecting: it would cover
+            // their bottom toolbar (the item's actions, Select mode's Back Up).
+            content.tabViewBottomAccessory(isEnabled: status != nil && !ItemPresence.shared.isOpen
+                                           && !model.library.isSelecting) {
                 StatusAccessory(status: status, serverName: model.library.serverName, open: open)
             }
         } else {

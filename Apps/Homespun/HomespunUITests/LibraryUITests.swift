@@ -14,7 +14,9 @@ final class LibraryUITests: XCTestCase {
         XCTAssertGreaterThan(selectable, 0)
 
         // One tap selects one cell, and the cell itself says so.
-        let first = app.gridItems("Not backed up").firstMatch
+        guard let first = app.gridItems("Not backed up").allElementsBoundByIndex.last(where: { app.isOnScreen($0) }) else {
+            return XCTFail("no item on screen to select")
+        }
         first.tap()
         XCTAssertTrue(app.hasScreen("1 Selected", timeout: 5))
         XCTAssertEqual(selectedCells(app).count, 1, "the tapped cell doesn't show it's selected")
@@ -25,7 +27,7 @@ final class LibraryUITests: XCTestCase {
         let title = app.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES '^[0-9]+ Selected$'")).firstMatch
         XCTAssertTrue(title.waitForExistence(timeout: 5), "no selection count")
         XCTAssertGreaterThanOrEqual(Int(title.label.split(separator: " ")[0]) ?? 0, selectable)
-        let shown = app.gridItems("Not backed up").allElementsBoundByIndex.filter(\.isHittable)
+        let shown = app.gridItems("Not backed up").allElementsBoundByIndex.filter { app.isOnScreen($0) }
         XCTAssertFalse(shown.isEmpty)
         XCTAssertTrue(shown.allSatisfy(\.isSelected), "Select All didn't mark every cell")
         attach(app, "Selected all")

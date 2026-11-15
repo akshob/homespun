@@ -156,8 +156,9 @@ struct BookNavigation<Route: Hashable, Root: View, Destination: View, Placeholde
 
     private var book: some View {
         Book {
-            // The left page never pushes: what it opens goes to the right page.
-            NavigationStack(path: Binding<[Route]>(get: { [] }, set: { new in if !new.isEmpty { path = new } })) {
+            // The left page never pushes: what it opens goes to the right page, starting it afresh
+            // (the stack may hand over what it opened before, too; only the newest counts).
+            NavigationStack(path: Binding<[Route]>(get: { [] }, set: { new in if let last = new.last { path = [last] } })) {
                 root.navigationDestination(for: Route.self) { destination($0) }
             }
         } second: {

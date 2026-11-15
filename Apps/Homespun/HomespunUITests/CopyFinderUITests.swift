@@ -13,7 +13,7 @@ final class CopyFinderUITests: XCTestCase {
             throw XCTSkip("Set HOMESPUN_SERVER, HOMESPUN_PAIRING_CODE and HOMESPUN_COPIES to run against a server.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         app.launch()
         app.pair(address: address, code: code)
         XCTAssertEqual(app.gridItems("Original at home").count, 0)

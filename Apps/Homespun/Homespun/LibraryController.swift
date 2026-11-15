@@ -39,6 +39,9 @@ final class LibraryController {
     /// What the last Back Up finished with, until it's freed or dismissed (02·2.3).
     private(set) var finished: Ready?
     private(set) var removal = Removal.idle
+    /// The Library is in Select mode: the status accessory steps aside so it doesn't cover
+    /// Select mode's Back Up.
+    var isSelecting = false
     /// Free space on this iPhone, for "almost full" (T15).
     private(set) var phoneFreeBytes: Int?
     /// Not backed up and created since the last backup, with the days since (T19).
