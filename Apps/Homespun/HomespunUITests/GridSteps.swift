@@ -92,6 +92,9 @@ extension XCUIApplication {
     /// Opens Activity's latest run and checks every item finished without failing. Returns the
     /// statuses, back on Library.
     @MainActor func checkActivity(file: StaticString = #filePath, line: UInt = #line) -> [String] {
+        // The grid opens scrolled to the newest items, which minimises the tab bar; scrolling up
+        // brings its tabs back.
+        if !tabBars.buttons["Activity"].waitForExistence(timeout: 3) { swipeDown() }
         openTab("Activity")
         let run = descendants(matching: .any).matching(identifier: "activity.run").firstMatch
         XCTAssertTrue(run.waitForExistence(timeout: 20), "no run in Activity", file: file, line: line)

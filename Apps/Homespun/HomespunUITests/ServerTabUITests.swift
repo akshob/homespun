@@ -15,6 +15,12 @@ extension XCUIApplication {
         }
         return element.exists
     }
+
+    /// Opens a tab, first scrolling up if scrolling down minimised the tab bar.
+    @MainActor func showTab(_ title: String) {
+        if !tabBars.buttons[title].waitForExistence(timeout: 3) { swipeDown() }
+        openTab(title)
+    }
 }
 
 /// The Server tab's rows, the devices list, the unpair confirmation, and a finished run in
@@ -32,7 +38,7 @@ final class ServerTabUITests: XCTestCase {
         app.pair(address: address, code: code)
 
         // The status card and the rows, top to bottom.
-        app.openTab("Server")
+        app.showTab("Server")
         XCTAssertTrue(app.descendants(matching: .any)["server.status"].waitForExistence(timeout: 10))
         for row in ["settings.check", "settings.originals", "settings.existingLibrary", "settings.immich"] {
             XCTAssertTrue(app.buttons[row].waitForExistence(timeout: 5), "no \(row)")
@@ -108,7 +114,7 @@ final class ServerTabUITests: XCTestCase {
         for _ in 0..<4 { app.swipeDown() }
 
         // While a backup runs, Activity's Now card has Pause and Stop; Stop asks first.
-        app.openTab("Library")
+        app.showTab("Library")
         let notBackedUp = app.gridItems("Not backed up")
         // (Only without an offer to free up space in the accessory, which can sit over the Back Up button.)
         if notBackedUp.firstMatch.waitForExistence(timeout: 15), notBackedUp.count > 2,
@@ -116,9 +122,9 @@ final class ServerTabUITests: XCTestCase {
             app.buttons["select.start"].tap()
             notBackedUp.allElementsBoundByIndex.last?.tap()
             app.buttons["compact.selected"].tap()
-            app.openTab("Activity")
+            app.showTab("Activity")
             let now = app.descendants(matching: .any)["activity.now"]
-            if now.waitForExistence(timeout: 10) {
+            if now.waitForExistence(timeout: 20) {
                 attach(app, "Activity, backing up")
                 app.buttons["activity.stop"].tap()
                 let stop = app.alerts.firstMatch
@@ -132,10 +138,11 @@ final class ServerTabUITests: XCTestCase {
         }
 
         // Back up two items (unless an earlier test backed everything up), then Activity shows the run.
+        app.showTab("Library")
         if app.gridItems("Not backed up").firstMatch.waitForExistence(timeout: 15) {
             _ = app.compactNewest(2)
         }
-        app.openTab("Activity")
+        app.showTab("Activity")
         let run = app.descendants(matching: .any).matching(identifier: "activity.run").firstMatch
         XCTAssertTrue(run.waitForExistence(timeout: 20), "no finished run in Activity")
         attach(app, "Activity")
@@ -157,7 +164,7 @@ final class ServerTabUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES"]
         app.launch()
-        app.openTab("Server")
+        app.showTab("Server")
         let status = app.descendants(matching: .any)["server.status"]
         let unreachable = NSPredicate(format: "label CONTAINS[c] \"Can't reach\"")
         let deadline = Date().addingTimeInterval(30)
@@ -165,7 +172,7 @@ final class ServerTabUITests: XCTestCase {
         XCTAssertTrue(unreachable.evaluate(with: status), status.label)
         XCTAssertTrue(app.buttons["server.retry"].waitForExistence(timeout: 5))
         attach(app, "Can't reach")
-        app.openTab("Activity")
+        app.showTab("Activity")
         attach(app, "Activity, can't reach")
     }
 
