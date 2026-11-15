@@ -11,6 +11,8 @@ struct OnboardingView: View {
     /// Starts the first backup once setup is done.
     var library: LibraryController?
     @State private var path: [Step] = []
+    /// Closes setup when it was opened from the Library (a sheet); a no-op on first run.
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -27,7 +29,10 @@ struct OnboardingView: View {
                     case .check:
                         ServerCheckView(settings: settings) { path.append(.photos) }
                     case .photos:
-                        PhotosAccessView { settings.onboardingComplete = true }
+                        PhotosAccessView {
+                            settings.onboardingComplete = true
+                            dismiss()
+                        }
                     }
                 }
         }

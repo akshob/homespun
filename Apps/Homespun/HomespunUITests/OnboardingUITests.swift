@@ -66,8 +66,8 @@ final class OnboardingUITests: XCTestCase {
         }
 
         let paired = environment["HOMESPUN_PAIR_LINK"] != nil
-        XCTAssertTrue(app.buttons[paired ? "server.card" : "connect.open"].waitForExistence(timeout: 15), "main screen")
-        if paired { XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 15)) }
+        XCTAssertTrue(app.tabBars.buttons["Library"].waitForExistence(timeout: 15), "main screen")
+        if paired { XCTAssertTrue(app.isConnected()) } else { XCTAssertTrue(app.buttons["connect.open"].exists) }
         attach(app, "6 Main")
 
         // A link to another server (from any app or page) warns before replacing this one.
@@ -79,7 +79,7 @@ final class OnboardingUITests: XCTestCase {
             XCTAssertTrue(app.buttons["pair.confirm"].label.hasPrefix("Replace"))
             attach(app, "7 Replace warning")
             app.buttons["Cancel"].tap()
-            XCTAssertTrue(app.staticTexts["Connected"].waitForExistence(timeout: 10), "pairing changed after cancel")
+            XCTAssertTrue(app.isConnected(timeout: 10), "pairing changed after cancel")
         }
     }
 

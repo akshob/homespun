@@ -98,7 +98,7 @@ struct InlineNotice<Actions: View>: View {
         .padding(14)
         .background(tone.background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(tone.stroke))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: Actions.self == EmptyView.self ? .combine : .contain)
     }
 }
 

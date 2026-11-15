@@ -16,9 +16,9 @@ final class CopyFinderUITests: XCTestCase {
         app.launchArguments += ["-onboardingComplete", "YES"]
         app.launch()
         app.pair(address: address, code: code)
-        XCTAssertEqual(app.gridItems("Backed up").count, 0)
+        XCTAssertEqual(app.gridItems("Original at home").count, 0)
 
-        app.buttons["server.card"].tap()
+        app.openTab("Server")
         app.buttons["settings.findCopies"].tap()
         app.buttons["copies.start"].tap()
         let found = app.descendants(matching: .any)["copies.found"]
@@ -34,8 +34,8 @@ final class CopyFinderUITests: XCTestCase {
         app.buttons["copies.start"].tap()
         XCTAssertTrue(found.waitForExistence(timeout: 60))
         app.navigationBars.buttons.firstMatch.tap()
-        app.buttons["Done"].tap()
-        let backedUp = app.gridItems("Backed up")
+        app.openTab("Library")
+        let backedUp = app.gridItems("Original at home")
         XCTAssertTrue(backedUp.firstMatch.waitForExistence(timeout: 10))
         XCTAssertEqual(backedUp.count, expected, "grid doesn't show the copies as backed up")
     }

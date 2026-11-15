@@ -20,6 +20,8 @@ struct SettingsView: View {
                 if let server = settings.server, settings.isPaired {
                     Section("Server") {
                         LabeledContent("Name", value: server.name)
+                        LabeledContent("Status", value: statusText)
+                            .accessibilityIdentifier("server.status")
                         LabeledContent("Originals", value: server.mode == .immich ? "In Immich" : "On the server")
                         LabeledContent("Address", value: settings.serverURL.flatMap { url in
                             url.host.map { "\($0):\(url.port ?? 80)" } } ?? "")
@@ -126,6 +128,14 @@ struct SettingsView: View {
 }
 
 extension SettingsView {
+    var statusText: String {
+        switch settings.serverStatus {
+        case .reachable: "Connected"
+        case .unreachable: "Can't reach it"
+        case .checking, .unknown: "Checking…"
+        }
+    }
+
     /// A settings row for a Premium feature, marked when it isn't unlocked.
     func premiumLabel(_ title: String) -> some View {
         HStack {

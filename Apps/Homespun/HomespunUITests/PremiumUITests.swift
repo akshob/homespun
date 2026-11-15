@@ -7,7 +7,7 @@ final class PremiumUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES"]
         app.launch()
-        app.buttons["settings"].tap()
+        app.openTab("Server")
         XCTAssertFalse(app.switches["automatic.toggle"].waitForExistence(timeout: 3))
         let link = app.buttons["automatic.premium"]
         XCTAssertTrue(link.waitForExistence(timeout: 10))
