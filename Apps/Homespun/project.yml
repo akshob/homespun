@@ -49,6 +49,8 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Homespun
+        # Homespun/AppIcon.icon (Icon Composer): a thread wound into a house.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Homespun reads your photos and videos to back up the originals to your own computer, make compact copies, and show what you can free up."
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Homespun saves compact copies of your photos and videos to your library."
