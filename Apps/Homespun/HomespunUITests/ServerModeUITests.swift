@@ -89,7 +89,7 @@ final class ServerModeUITests: XCTestCase {
 
         app.openTab("Server")
         let toggle = app.switches["automatic.toggle"]
-        XCTAssertTrue(toggle.waitForExistence(timeout: 10), "automatic mode isn't offered")
+        XCTAssertTrue(app.scrollTo(toggle), "automatic mode isn't offered")
         toggle.switches.firstMatch.tap()
         app.buttons["Everything not backed up yet"].firstMatch.tap()
         // iOS asks once whether Homespun may send notifications.

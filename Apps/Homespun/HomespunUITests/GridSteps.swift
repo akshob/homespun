@@ -35,6 +35,16 @@ extension XCUIApplication {
         if tab.waitForExistence(timeout: 10) { tab.tap() }
     }
 
+    /// Scrolls the current screen until the element exists (lists load rows lazily).
+    @MainActor @discardableResult func scrollTo(_ element: XCUIElement, swipes: Int = 8) -> Bool {
+        var left = swipes
+        while !element.exists, left > 0 {
+            swipeUp()
+            left -= 1
+        }
+        return element.waitForExistence(timeout: 2)
+    }
+
     /// Whether the Server tab says the server is connected (waits a little), back on Library.
     @MainActor func isConnected(timeout: TimeInterval = 20) -> Bool {
         openTab("Server")
