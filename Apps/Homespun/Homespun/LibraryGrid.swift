@@ -15,52 +15,54 @@ enum Badge: Equatable, Sendable {
     case compactCopy
     case waiting, working, kept, failed
 
-    /// Stable text for VoiceOver and UI tests.
+    /// Stable text for VoiceOver, the badge guide, filters and UI tests (DESIGN §10.2).
     var label: String {
         switch self {
         case .none: "Not backed up"
-        case .backedUp: "Backed up"
-        case .originalOnPhone: "Original still on this iPhone"
+        case .backedUp: "Original at home"
+        case .originalOnPhone: "Ready to free up"
         case .compactCopy: "Compact copy"
         case .waiting: "Waiting"
-        case .working: "Working"
+        case .working: "Backing up"
         case .kept: "Kept as is"
-        case .failed: "Failed"
+        case .failed: "Needs attention"
         }
     }
 
     var explanation: String {
         switch self {
-        case .none: "Only on this iPhone. Select it to back it up and make a compact copy."
-        case .backedUp: "A compact copy. The full-quality original is on your server, not on this iPhone."
-        case .originalOnPhone: "A compact copy. The original is still on this iPhone too; free up space to remove it."
+        case .none: "Only on this iPhone. Back it up to keep the original at home and a compact copy here."
+        case .backedUp: "A compact copy. The full-quality original is at home on your server, not on this iPhone."
+        case .originalOnPhone: "Backed up, and the original is still on this iPhone too. Free up space to remove it."
         case .compactCopy: "A Homespun compact copy."
-        case .waiting: "Waiting to be compacted."
-        case .working: "Being backed up and compacted."
-        case .kept: "Kept as is, for example because it couldn't be made smaller."
-        case .failed: "Something went wrong; see Activity."
+        case .waiting: "Waiting to be backed up."
+        case .working: "Being backed up."
+        case .kept: "Kept as is: it couldn't be made smaller, so the original stays."
+        case .failed: "Something needs your attention. See Activity."
         }
     }
 
+    /// Shapes carry the meaning, not only colour.
     var symbol: String? {
         switch self {
         case .none: nil
-        case .backedUp: "checkmark"
-        case .originalOnPhone: "square.on.square"
-        case .compactCopy: "arrow.down.right.and.arrow.up.left"
+        case .backedUp: "checkmark.circle.fill"
+        case .originalOnPhone: "circle.lefthalf.filled"
+        case .compactCopy: "square.on.square"
         case .waiting: "clock"
-        case .working: nil
-        case .kept: "equal"
-        case .failed: "exclamationmark"
+        case .working: "arrow.up.circle"
+        case .kept: "equal.circle"
+        case .failed: "exclamationmark.triangle.fill"
         }
     }
 
     var color: Color {
         switch self {
-        case .backedUp: .green
-        case .originalOnPhone: .orange
-        case .failed: .red
-        default: .gray
+        case .backedUp: Theme.BadgeColor.teal
+        case .originalOnPhone: Theme.BadgeColor.amber
+        case .failed: Theme.BadgeColor.red
+        case .working: Theme.BadgeColor.accent
+        default: Theme.BadgeColor.grey
         }
     }
 }
@@ -78,9 +80,30 @@ struct LibraryState: Equatable {
         var canFree: Bool
     }
 
+    /// The Filter menu's states (DESIGN 02·1.2); its symbols match the badges.
     enum Filter: String, CaseIterable, Identifiable {
-        case all = "All", notBackedUp = "Not backed up", backedUp = "Backed up"
+        case all, notBackedUp, readyToFree, atHome, needsAttention
         var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .all: "All Items"
+            case .notBackedUp: "Not Backed Up"
+            case .readyToFree: "Ready to Free Up"
+            case .atHome: "Original at Home"
+            case .needsAttention: "Needs Attention"
+            }
+        }
+
+        var symbol: String {
+            switch self {
+            case .all: "photo.on.rectangle"
+            case .notBackedUp: "circle.dashed"
+            case .readyToFree: "circle.lefthalf.filled"
+            case .atHome: "checkmark.circle"
+            case .needsAttention: "exclamationmark.triangle"
+            }
+        }
     }
 
     var cells: [Cell] = []
@@ -127,11 +150,11 @@ struct LibraryState: Equatable {
     }
 
     func cells(_ filter: Filter) -> [Cell] {
-        switch filter {
-        case .all: cells
-        case .notBackedUp: cells.filter(\.isNotBackedUp)
-        case .backedUp: cells.filter { !$0.isNotBackedUp }
-        }
+        filter == .all ? cells : cells.filter { $0.matches(filter) }
+    }
+
+    func count(_ filter: Filter) -> Int {
+        filter == .all ? cells.count : cells.reduce(0) { $0 + ($1.matches(filter) ? 1 : 0) }
     }
 }
 
@@ -145,8 +168,18 @@ extension LibraryState.Cell {
         }
     }
 
-    /// Can be selected to compact.
+    /// Can be selected to back up.
     var canCompact: Bool { [.none, .kept, .failed].contains(badge) }
+
+    func matches(_ filter: LibraryState.Filter) -> Bool {
+        switch filter {
+        case .all: true
+        case .notBackedUp: isNotBackedUp && badge != .failed
+        case .readyToFree: canFree
+        case .atHome: badge == .backedUp
+        case .needsAttention: badge == .failed
+        }
+    }
 }
 
 /// Every photo and video in the library, oldest first like Photos, kept up to date. Photos
@@ -236,8 +269,50 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         }
     }
 
+    /// Photos, videos or Live Photos only (the Filter menu's second part).
+    enum Media: String, CaseIterable, Identifiable {
+        case all, photos, videos, livePhotos
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .all: "Photos and Videos"
+            case .photos: "Photos"
+            case .videos: "Videos"
+            case .livePhotos: "Live Photos"
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .all: "square.grid.2x2"
+            case .photos: "photo"
+            case .videos: "video"
+            case .livePhotos: "livephoto"
+            }
+        }
+    }
+
+    @ObservationIgnored private var mediaCache: [Media: Set<String>] = [:]
+
+    /// The items of one kind, read once and kept until the library changes.
+    func identifiers(_ media: Media) -> Set<String>? {
+        guard media != .all else { return nil }
+        if let cached = mediaCache[media] { return cached }
+        let options = PHFetchOptions()
+        options.predicate = switch media {
+        case .videos: NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
+        case .livePhotos: NSPredicate(format: "mediaType == %d AND (mediaSubtypes & %d) != 0", PHAssetMediaType.image.rawValue,
+                                      PHAssetMediaSubtype.photoLive.rawValue)
+        default: NSPredicate(format: "mediaType == %d AND (mediaSubtypes & %d) == 0", PHAssetMediaType.image.rawValue,
+                             PHAssetMediaSubtype.photoLive.rawValue)
+        }
+        let found = Set(Self.identifiers(PHAsset.fetchAssets(with: options)))
+        mediaCache[media] = found
+        return found
+    }
+
     private func setAssets(_ fetched: PHFetchResult<PHAsset>, ids: [String]?) {
         let ids = ids ?? Self.identifiers(fetched)
+        mediaCache = [:]
         assets = fetched
         library = ids
         index = Dictionary(ids.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first })
@@ -279,12 +354,15 @@ struct GridCell: View {
     let cell: LibraryState.Cell
     let asset: PHAsset?
     let manager: PHCachingImageManager
+    var selecting = false
     let selected: Bool
+    var serverName = "your server"
     @State private var image: UIImage?
     @State private var request: PHImageRequestID?
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        Color(.secondarySystemFill)
+        Theme.fill
             .aspectRatio(1, contentMode: .fit)
             .overlay {
                 if let image {
@@ -293,15 +371,9 @@ struct GridCell: View {
             }
             .clipped()
             .overlay(alignment: .bottomLeading) { mediaMark }
-            .overlay(alignment: .bottomTrailing) { badge.padding(4) }
-            .overlay { if selected { Color.white.opacity(0.25) } }
-            .overlay(alignment: .topTrailing) {
-                if selected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .symbolRenderingMode(.palette).foregroundStyle(.white, .blue)
-                        .font(.title3).padding(4)
-                }
-            }
+            .overlay(alignment: .topTrailing) { BadgeView(badge: cell.badge, size: typeSize.isAccessibilitySize ? 28 : 20).padding(6) }
+            .overlay { if selected { Color.white.opacity(0.2) } }
+            .overlay(alignment: .bottomTrailing) { if selecting { selectionMark.padding(6) } }
             .contentShape(Rectangle())
             .onAppear(perform: load)
             .onDisappear {
@@ -310,22 +382,18 @@ struct GridCell: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(accessibilityName)
-            .accessibilityValue(cell.badge.label)
+            .accessibilityValue(cell.badge.spoken(server: serverName))
             .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
             .accessibilityIdentifier("asset")
     }
 
-    @ViewBuilder private var badge: some View {
-        if cell.badge == .working {
-            ProgressView().controlSize(.mini).tint(.white)
-                .frame(width: 20, height: 20).background(Circle().fill(.black.opacity(0.55)))
-        } else if let symbol = cell.badge.symbol {
-            Image(systemName: symbol)
-                .font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                .frame(width: 20, height: 20)
-                .background(Circle().fill(cell.badge.color))
-                .overlay(Circle().stroke(.white, lineWidth: 1.5))
-                .shadow(radius: 1)
+    @ViewBuilder private var selectionMark: some View {
+        if selected {
+            Image(systemName: "checkmark.circle.fill").symbolRenderingMode(.palette)
+                .foregroundStyle(.white, Theme.BadgeColor.accent).font(.title3)
+                .background(Circle().fill(.white).padding(2))
+        } else if cell.canCompact || cell.canFree {
+            Circle().strokeBorder(.white, lineWidth: 1.5).frame(width: 22, height: 22).shadow(radius: 1)
         }
     }
 
@@ -362,25 +430,58 @@ struct GridCell: View {
     }
 }
 
+/// A badge on a white halo: palette symbols that differ by shape, so meaning never rests on colour.
+struct BadgeView: View {
+    let badge: Badge
+    var size: CGFloat = 20
+
+    var body: some View {
+        if badge == .working {
+            ProgressView().controlSize(.mini).tint(Theme.BadgeColor.accent)
+                .frame(width: size, height: size).background(Circle().fill(.white))
+                .shadow(color: .black.opacity(0.25), radius: 1)
+        } else if let symbol = badge.symbol {
+            Image(systemName: symbol)
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(badge.color, badge.color.opacity(0.25))
+                .font(.system(size: size * 0.8, weight: .semibold))
+                .frame(width: size, height: size)
+                .background(Circle().fill(.white).padding(-1.5))
+                .shadow(color: .black.opacity(0.25), radius: 1)
+                .contentTransition(.symbolEffect(.replace))
+        }
+    }
+}
+
+extension Badge {
+    /// The cell's VoiceOver value: the badge plus where the original is (DESIGN §10.2).
+    func spoken(server: String) -> String {
+        switch self {
+        case .originalOnPhone: "Ready to free up. Original on \(server)."
+        case .backedUp: "Original at home on \(server)."
+        default: label
+        }
+    }
+}
+
 /// What each badge means.
 struct BadgeLegendView: View {
+    var serverName = "your server"
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach([Badge.backedUp, .originalOnPhone, .none, .working, .kept, .failed, .compactCopy], id: \.label) { badge in
+                ForEach([Badge.none, .originalOnPhone, .backedUp, .waiting, .working, .failed, .kept, .compactCopy], id: \.label) { badge in
                     HStack(alignment: .top, spacing: 14) {
                         Group {
-                            if let symbol = badge.symbol {
-                                Image(systemName: symbol).font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
-                                    .frame(width: 24, height: 24).background(Circle().fill(badge.color))
-                            } else if badge == .working {
-                                ProgressView().frame(width: 24, height: 24)
-                            } else {
+                            if badge == .none {
                                 Circle().stroke(.secondary, style: StrokeStyle(lineWidth: 1, dash: [3])).frame(width: 24, height: 24)
+                            } else {
+                                BadgeView(badge: badge, size: 24)
                             }
                         }
+                        .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(badge.label).font(.headline)
                             Text(badge.explanation).font(.callout).foregroundStyle(.secondary)

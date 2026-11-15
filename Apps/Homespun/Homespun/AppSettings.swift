@@ -25,6 +25,14 @@ final class AppSettings {
     /// The user checked the first removed batch; until then a removal takes at most `trialLimit`.
     var trialConfirmed: Bool { didSet { defaults.set(trialConfirmed, forKey: "trialConfirmed") } }
     static let trialLimit = 10
+    /// Space freed on this iPhone so far, and since when (Activity's total, the Premium moment).
+    var freedBytes: Int {
+        didSet {
+            defaults.set(freedBytes, forKey: "freedBytes")
+            if freedSince == nil, freedBytes > 0 { freedSince = Date() }
+        }
+    }
+    var freedSince: Date? { didSet { defaults.set(freedSince, forKey: "freedSince") } }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -37,6 +45,8 @@ final class AppSettings {
         onboardingComplete = defaults.bool(forKey: "onboardingComplete")
         removalExplained = defaults.bool(forKey: "removalExplained")
         trialConfirmed = defaults.bool(forKey: "trialConfirmed")
+        freedBytes = defaults.integer(forKey: "freedBytes")
+        freedSince = defaults.object(forKey: "freedSince") as? Date
     }
 
     var client: ServerClient? {

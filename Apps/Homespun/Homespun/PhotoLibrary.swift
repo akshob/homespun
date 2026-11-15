@@ -198,6 +198,22 @@ enum PhotoLibrary {
         return found
     }
 
+    /// About how many bytes these items' files take on this iPhone. Large sets are sampled (reading
+    /// each item's file list is slow), so the answer is an estimate there.
+    static func estimatedBytes(_ localIdentifiers: [String], sample: Int = 300) -> (bytes: Int, exact: Bool) {
+        guard !localIdentifiers.isEmpty else { return (0, true) }
+        let step = max(1, localIdentifiers.count / sample)
+        let chosen = stride(from: 0, to: localIdentifiers.count, by: step).map { localIdentifiers[$0] }
+        var total = 0
+        PHAsset.fetchAssets(withLocalIdentifiers: chosen, options: nil).enumerateObjects { asset, _, _ in
+            for resource in PHAssetResource.assetResources(for: asset) {
+                total += (resource.value(forKey: "fileSize") as? Int) ?? 0
+            }
+        }
+        guard step > 1 else { return (total, true) }
+        return (Int(Double(total) / Double(chosen.count) * Double(localIdentifiers.count)), false)
+    }
+
     /// Every photo and video in the library.
     static func allIdentifiers() -> [String] {
         let result = PHAsset.fetchAssets(with: nil)

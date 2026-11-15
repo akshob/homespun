@@ -9,6 +9,8 @@ struct SettingsView: View {
     let automatic: AutomaticMode
     let copyFinder: CopyFinder
     let ledger: CompactLedger
+    /// In a sheet it has a Done button; as the Server tab it doesn't.
+    var showsDone = true
     @Environment(\.dismiss) private var dismiss
     @State private var askExisting = false
 
@@ -116,7 +118,9 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("Settings")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar {
+                if showsDone { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            }
         }
     }
 }

@@ -286,10 +286,13 @@ final class AppModel {
     let premium = Premium()
     let automatic = AutomaticMode()
     let copyFinder = CopyFinder()
+    let library: LibraryController
 
     private init() {
         settings = AppSettings()
         job = CompactJob(settings: settings)
+        library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
+                                    copyFinder: copyFinder)
     }
 
     /// Registers the background run; must happen before the app finishes launching.

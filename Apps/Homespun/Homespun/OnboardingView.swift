@@ -8,6 +8,8 @@ struct OnboardingView: View {
     enum Step: Hashable { case connect, check, photos }
 
     @Bindable var settings: AppSettings
+    /// Starts the first backup once setup is done.
+    var library: LibraryController?
     @State private var path: [Step] = []
 
     var body: some View {

@@ -6,6 +6,6 @@ struct HomespunApp: App {
     init() { AppModel.registerBackgroundRun() }
 
     var body: some Scene {
-        WindowGroup { ContentView(model: .shared) }
+        WindowGroup { RootView(model: .shared) }
     }
 }

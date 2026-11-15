@@ -106,7 +106,12 @@ import Testing
                        "busy": .working, "broken": .failed])
     let kept = state.cells[0], device = state.cells[2]
     #expect(kept.canFree && kept.original == "orig-kept" && device.canCompact && !device.canFree)
-    #expect(state.cells(.backedUp).map(\.id) == ["copy-kept", "copy-removed", "copy-device", "album-only"])
-    #expect(state.cells(.notBackedUp).map(\.id) == ["orig-device", "orig-gone", "plain", "busy", "broken"])
+    // The Filter menu: needing attention is its own filter, and copies with no known original
+    // show only under All Items.
+    #expect(state.cells(.notBackedUp).map(\.id) == ["orig-device", "orig-gone", "plain", "busy"])
+    #expect(state.cells(.readyToFree).map(\.id) == ["copy-kept"])
+    #expect(state.cells(.atHome).map(\.id) == ["copy-removed"])
+    #expect(state.cells(.needsAttention).map(\.id) == ["broken"])
+    #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 1, 1, 1])
 }
 
