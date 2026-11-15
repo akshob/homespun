@@ -1271,3 +1271,17 @@ final class ProblemLog: @unchecked Sendable {
         #expect(try await client.call("/api/v1/devices/\(other.id)", .delete, token: token).status == .notFound)
     }
 }
+
+/// The installed server's saved settings never leak into a run with its own data folder: a test
+/// server must not put originals in the real server's originals folder.
+@Test func savedSettingsApplyOnlyToTheInstalledServer() {
+    let saved = "HOMESPUN_DATA=/Volumes/Homespun/.homespun\nHOMESPUN_ORIGINALS=/Volumes/Homespun\nHOMESPUN_PORT=8787\n"
+    // `pair` with nothing given finds the installed server.
+    #expect(ServerCommand.applying(saved: saved, to: [:])
+            == ["HOMESPUN_DATA": "/Volumes/Homespun/.homespun", "HOMESPUN_ORIGINALS": "/Volumes/Homespun", "HOMESPUN_PORT": "8787"])
+    // The same data folder (written differently) is the installed server; what's given wins.
+    #expect(ServerCommand.applying(saved: saved, to: ["HOMESPUN_DATA": "/Volumes/Homespun/.homespun/", "HOMESPUN_PORT": "9000"])
+            == ["HOMESPUN_DATA": "/Volumes/Homespun/.homespun/", "HOMESPUN_ORIGINALS": "/Volumes/Homespun", "HOMESPUN_PORT": "9000"])
+    // Another data folder is another server: nothing is borrowed.
+    #expect(ServerCommand.applying(saved: saved, to: ["HOMESPUN_DATA": "/tmp/test-data"]) == ["HOMESPUN_DATA": "/tmp/test-data"])
+}
