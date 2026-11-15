@@ -137,7 +137,10 @@ public enum ServerCommand {
                       : "Importing \(manifest.path), leaving the originals where they are…")
                 let summary = try await LibraryImport(catalog: server.catalog, dryRun: dryRun, jobs: jobs,
                                                       copyInto: copy ? server.originals : nil, folder: folder)
-                    .run(manifest: manifest) { print($0) }
+                    .run(manifest: manifest) { line in
+                        // Unbuffered, so progress shows up as it happens even in a log file.
+                        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+                    }
                 print(LibraryImport.progress(summary, of: summary.items, dryRun: dryRun))
                 if summary.problems > 0 {
                     print("Fix the problems above and run the same command again; finished items are skipped.")
