@@ -2,11 +2,14 @@
 import Foundation
 import HomespunCore
 
-/// `homespun-server import <manifest>`: records originals that already live elsewhere on this
-/// computer (a photo archive, say) without copying them, together with the compact copies made
-/// from them before Homespun, so the app recognises those copies on the phone instead of backing
-/// them up as originals. The originals are read, never moved, changed, or deleted; checking an
-/// item before its removal hashes them again where they are.
+/// `homespun-server import <manifest>`: records originals that already live elsewhere (a photo
+/// archive, say), together with the compact copies made from them before Homespun, so the app
+/// recognises those copies on the phone instead of backing them up as originals.
+///
+/// By default the originals stay where they are: read, never moved, changed, or deleted, and
+/// hashed again where they are whenever an item is checked. With `copyInto`, each is copied into
+/// the originals folder (under `folder`), checked byte for byte, and then kept there like an
+/// uploaded original; the source is still only read.
 struct LibraryImport: Sendable {
     struct Summary: Equatable, Sendable {
         var items = 0
@@ -22,6 +25,8 @@ struct LibraryImport: Sendable {
     let catalog: Catalog
     var dryRun = false
     var jobs = 4
+    var copyInto: OriginalsStore? = nil
+    var folder = "Camera Roll"
 
     /// Imports every line of the manifest (JSON Lines). Bad lines and missing or changed files are
     /// reported through `report` and skipped; running again picks them up once fixed.
@@ -101,27 +106,25 @@ struct LibraryImport: Sendable {
             if let asset = try await catalog.importedAsset(path: original.path, size: size) { known.insert(asset) }
         }
         if known.count == 1, let asset = known.first {
-            let stored = try await catalog.resources(asset).filter { $0.externalPath != nil }
+            let stored = try await catalog.resources(asset).filter { $0.externalPath != nil || $0.importedFrom != nil }
             if stored.count == item.originals.count {
                 for original in item.originals {
-                    let recorded = stored.first { $0.externalPath == original.path }?.sha256
-                    if let expected = original.sha256?.lowercased(), expected != recorded {
-                        throw Problem(description: "\(original.path) no longer matches its recorded SHA-256")
-                    }
+                    let recorded = stored.first { $0.externalPath == original.path || $0.importedFrom == original.path }
+                    try Self.check(original, sha256: recorded?.sha256 ?? "", sha1: recorded?.sha1 ?? "")
                 }
                 return (try await catalog.importExisting(assetID: asset, kind: item.kind, captureDate: item.captureDate,
                                                          originals: [], copies: item.copies), 0)
             }
         }
 
+        if let store = copyInto { return try await copy(item, sizes: sizes, into: store) }
+
         var records: [ResourceRecord] = []
         for (original, size) in zip(item.originals, sizes) {
             let url = URL(fileURLWithPath: original.path)
             let digests = try await detached { try Fingerprint.digests(of: url) }
             guard digests.size == size else { throw Problem(description: "\(original.path) changed while being read") }
-            if let expected = original.sha256?.lowercased(), expected != digests.sha256 {
-                throw Problem(description: "\(original.path) no longer matches its recorded SHA-256")
-            }
+            try Self.check(original, sha256: digests.sha256, sha1: digests.sha1)
             records.append(ResourceRecord(role: original.role, filename: url.lastPathComponent, size: size,
                                           sha256: digests.sha256, sha1: digests.sha1, state: .verified,
                                           receivedBytes: size, verifiedAt: nil, externalPath: original.path))
@@ -131,6 +134,86 @@ struct LibraryImport: Sendable {
         let outcome = try await catalog.importExisting(assetID: assetID, kind: item.kind, captureDate: item.captureDate,
                                                        originals: records, copies: item.copies)
         return (outcome, total)
+    }
+
+    private static func check(_ original: ServerAPI.ImportItem.Original, sha256: String, sha1: String) throws {
+        if let expected = original.sha256?.lowercased(), expected != sha256 {
+            throw Problem(description: "\(original.path) no longer matches its recorded SHA-256")
+        }
+        if let expected = original.sha1?.lowercased(), expected != sha1 {
+            throw Problem(description: "\(original.path) no longer matches its recorded SHA-1")
+        }
+    }
+
+    /// Copies an item's originals into the originals folder, checking each copy on disk.
+    private func copy(_ item: ServerAPI.ImportItem, sizes: [Int], into store: OriginalsStore) async throws -> (ImportOutcome?, Int) {
+        let folder = folder, catalog = catalog
+        return try await store.place { root in
+            guard FileManager.default.fileExists(atPath: root.path) else {
+                throw Problem(description: "the originals folder \(root.path) isn't there (is its disk connected?)")
+            }
+            let total = sizes.reduce(0, +)
+            if let free = OriginalsStore.space(at: root.path).free, free < Int64(total) + (1 << 30) {
+                throw Problem(description: "not enough space in \(root.path) for \(item.originals[0].path)")
+            }
+            var copied: [(original: ServerAPI.ImportItem.Original, partial: URL, sha256: String, sha1: String, size: Int)] = []
+            let staging = root.appendingPathComponent(".homespun-import", isDirectory: true)
+            defer { for file in copied { try? FileManager.default.removeItem(at: file.partial) } }
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            for (original, size) in zip(item.originals, sizes) {
+                let source = URL(fileURLWithPath: original.path)
+                let partial = staging.appendingPathComponent(UUID().uuidString + ".partial")
+                let read = try await detached { try Fingerprint.copy(from: source, to: partial) }
+                copied.append((original, partial, read.sha256, read.sha1, read.size))
+                guard read.size == size, try await detached({ try Fingerprint.sha256(of: partial) }) == read.sha256 else {
+                    throw Problem(description: "the copy of \(original.path) didn't match it; nothing was recorded")
+                }
+                try Self.check(original, sha256: read.sha256, sha1: read.sha1)
+            }
+            let primary: ServerAPI.ResourceRole = item.kind == .video ? .video : .photo
+            let assetID = copied.first { $0.original.role == primary }!.sha256
+            // Already here (uploaded from a phone, say): keep that, just learn the copies.
+            if try await catalog.asset(assetID) != nil {
+                return (try await catalog.importExisting(assetID: assetID, kind: item.kind, captureDate: item.captureDate,
+                                                         originals: [], copies: item.copies), total)
+            }
+            var records: [ResourceRecord] = [], placed: [URL] = []
+            do {
+                for file in copied {
+                    let name = (file.original.path as NSString).lastPathComponent
+                    let destination = OriginalsStore.destination(root: root, folder: folder, filename: name,
+                                                                  sha256: file.sha256, captureDate: item.captureDate)
+                    try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try FileManager.default.moveItem(at: file.partial, to: destination)
+                    placed.append(destination)
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: destination.path)
+                    records.append(ResourceRecord(role: file.original.role, filename: name, size: file.size, sha256: file.sha256,
+                                                  sha1: file.sha1, state: .verified, receivedBytes: file.size,
+                                                  storedPath: OriginalsStore.relative(destination, to: root), verifiedAt: nil,
+                                                  importedFrom: file.original.path))
+                }
+                let outcome = try await catalog.importExisting(assetID: assetID, kind: item.kind, captureDate: item.captureDate,
+                                                               originals: records, copies: item.copies,
+                                                               placedIn: root.standardizedFileURL.path)
+                if outcome == .linked { throw CancellationError() }
+                return (outcome, total)
+            } catch {
+                for url in placed {
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: url.path)
+                    try? FileManager.default.removeItem(at: url)
+                    // And the folders made for it, if nothing else is in them.
+                    var folder = url.deletingLastPathComponent()
+                    while folder.path.hasPrefix(root.path + "/"),
+                          (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.isEmpty == true {
+                        try? FileManager.default.removeItem(at: folder)
+                        folder.deleteLastPathComponent()
+                    }
+                }
+                if error is CancellationError { return (.linked, total) }
+                if let blocked = error as? OriginalsMover.Failure { throw Problem(description: blocked.description) }
+                throw error
+            }
+        }
     }
 
     static func validate(_ item: ServerAPI.ImportItem) throws {
@@ -148,6 +231,7 @@ struct LibraryImport: Sendable {
         }
         for original in item.originals {
             if let sha256 = original.sha256, !Validation.isSHA256(sha256) { throw Problem(description: "bad SHA-256 for \(original.path)") }
+            if let sha1 = original.sha1, !Validation.isSHA1(sha1) { throw Problem(description: "bad SHA-1 for \(original.path)") }
         }
         for copy in item.copies {
             guard Validation.isSHA256(copy.sha256) else { throw Problem(description: "bad compact copy SHA-256") }

@@ -493,12 +493,15 @@ public enum ServerAPI {
             public var role: ResourceRole
             /// An absolute path. The file is read, never moved, changed, or deleted.
             public var path: String
-            /// If given, the file must still have this SHA-256.
+            /// If given, the file must still have this SHA-256 (and SHA-1), for example as recorded
+            /// when it came off the phone or as a cloud service reports it.
             public var sha256: String?
-            public init(role: ResourceRole, path: String, sha256: String? = nil) {
+            public var sha1: String?
+            public init(role: ResourceRole, path: String, sha256: String? = nil, sha1: String? = nil) {
                 self.role = role
                 self.path = path
                 self.sha256 = sha256
+                self.sha1 = sha1
             }
         }
 
@@ -512,6 +515,81 @@ public enum ServerAPI {
             self.captureDate = captureDate
             self.originals = originals
             self.copies = copies
+        }
+    }
+
+    /// `GET /api/v1/storage`: where originals are kept, and a move in progress.
+    public struct StorageInfo: Codable, Equatable, Sendable {
+        /// The originals folder on the server.
+        public var originalsFolder: String
+        /// This phone's folder in it.
+        public var deviceFolder: String?
+        public var freeBytes: Int64?
+        public var capacityBytes: Int64?
+        /// Originals kept in the folder (not counting ones imported in place elsewhere).
+        public var storedCount: Int
+        public var storedBytes: Int64
+        public var move: MoveStatus?
+
+        public init(originalsFolder: String, deviceFolder: String?, freeBytes: Int64?, capacityBytes: Int64?,
+                    storedCount: Int, storedBytes: Int64, move: MoveStatus?) {
+            self.originalsFolder = originalsFolder
+            self.deviceFolder = deviceFolder
+            self.freeBytes = freeBytes
+            self.capacityBytes = capacityBytes
+            self.storedCount = storedCount
+            self.storedBytes = storedBytes
+            self.move = move
+        }
+    }
+
+    /// Moving every original to a new folder (`PUT /api/v1/storage`).
+    public struct MoveStatus: Codable, Equatable, Sendable {
+        public enum State: String, Codable, Sendable { case copying, finishing, done, failed }
+        public var state: State
+        public var from: String
+        public var to: String
+        public var copied: Int
+        public var total: Int
+        public var copiedBytes: Int64
+        public var totalBytes: Int64
+        public var message: String?
+        public var finishedAt: Date?
+
+        public init(state: State, from: String, to: String, copied: Int, total: Int, copiedBytes: Int64, totalBytes: Int64,
+                    message: String? = nil, finishedAt: Date? = nil) {
+            self.state = state
+            self.from = from
+            self.to = to
+            self.copied = copied
+            self.total = total
+            self.copiedBytes = copiedBytes
+            self.totalBytes = totalBytes
+            self.message = message
+            self.finishedAt = finishedAt
+        }
+    }
+
+    public struct MoveOriginalsRequest: Codable, Equatable, Sendable {
+        public var originalsFolder: String
+        public init(originalsFolder: String) { self.originalsFolder = originalsFolder }
+    }
+
+    /// `GET /api/v1/storage/locations`: folders on the server's disks the app can offer.
+    public struct StorageLocation: Codable, Equatable, Sendable, Identifiable {
+        public var path: String
+        public var name: String
+        public var freeBytes: Int64?
+        public var capacityBytes: Int64?
+        public var isCurrent: Bool
+        public var id: String { path }
+
+        public init(path: String, name: String, freeBytes: Int64?, capacityBytes: Int64?, isCurrent: Bool) {
+            self.path = path
+            self.name = name
+            self.freeBytes = freeBytes
+            self.capacityBytes = capacityBytes
+            self.isCurrent = isCurrent
         }
     }
 

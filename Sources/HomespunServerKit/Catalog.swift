@@ -12,6 +12,8 @@ enum Timestamp {
 public struct DeviceRecord: Equatable, Sendable {
     public var id: String
     public var name: String
+    /// The folder its originals go in, under the originals folder: its name when it paired.
+    public var folder: String? = nil
     public var createdAt: String
     public var lastSeenAt: String?
     public var revokedAt: String?
@@ -30,6 +32,8 @@ struct ResourceRecord: Equatable, Sendable {
     var verifiedAt: String?
     /// An original kept outside the data folder (`homespun-server import`): read, never changed.
     var externalPath: String? = nil
+    /// Where an original copied in by `homespun-server import --copy` came from.
+    var importedFrom: String? = nil
 }
 
 struct CompactRecord: Equatable, Sendable {
@@ -194,6 +198,19 @@ public actor Catalog {
         CREATE INDEX resources_external_path ON resources (external_path);
         CREATE INDEX made_copies_asset ON made_copies (asset_id);
         """,
+        // Originals copied in from elsewhere remember where from, so an import can resume.
+        """
+        ALTER TABLE resources ADD COLUMN imported_from TEXT;
+        CREATE INDEX resources_imported_from ON resources (imported_from);
+        """,
+        // The originals folder became a setting of its own: stored paths are relative to it, not
+        // to the data folder, and each phone gets a folder in it.
+        """
+        UPDATE resources SET stored_path = substr(stored_path, 11) WHERE stored_path LIKE 'originals/%';
+        INSERT INTO settings (key, value) SELECT 'originals.legacy', '1'
+            WHERE EXISTS (SELECT 1 FROM resources WHERE stored_path IS NOT NULL);
+        ALTER TABLE devices ADD COLUMN folder TEXT;
+        """,
     ]
 
     static func migrate(_ database: SQLiteDatabase) throws {
@@ -262,8 +279,7 @@ public actor Catalog {
                 }
                 return false
             }
-            try database.execute("INSERT INTO devices (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)",
-                                 [.text(device.id), .text(device.name), .text(tokenHash), .text(now)])
+            try insertDevice(device, tokenHash: tokenHash, at: now)
             try database.execute("UPDATE pairing_codes SET used_at = ?, device_id = ? WHERE code_hash = ?",
                                  [.text(now), .text(device.id), .text(hash)])
             return true
@@ -275,9 +291,76 @@ public actor Catalog {
 
     /// Registers a device someone at the server allowed.
     func addApprovedDevice(_ device: DeviceRecord, tokenHash: String) throws {
-        try database.execute("INSERT INTO devices (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)",
-                             [.text(device.id), .text(device.name), .text(tokenHash), .text(Timestamp.string())])
+        try database.transaction { try insertDevice(device, tokenHash: tokenHash, at: Timestamp.string()) }
         log("device_paired", device: device.id, detail: "\(device.name) (allowed on the server)")
+    }
+
+    private func insertDevice(_ device: DeviceRecord, tokenHash: String, at now: String) throws {
+        try database.execute("INSERT INTO devices (id, name, token_hash, created_at, folder) VALUES (?, ?, ?, ?, ?)",
+                             [.text(device.id), .text(device.name), .text(tokenHash), .text(now),
+                              .text(try uniqueFolder(for: device.name))])
+    }
+
+    /// A folder name for a new phone: its name, made safe, and not one another phone has.
+    private func uniqueFolder(for name: String) throws -> String {
+        let taken = Set(try database.query("SELECT folder FROM devices WHERE folder IS NOT NULL")
+            .compactMap { $0["folder"]?.string?.lowercased() })
+        let base = Storage.sanitized(name)
+        var candidate = base, number = 2
+        while taken.contains(candidate.lowercased()) {
+            candidate = "\(base) \(number)"
+            number += 1
+        }
+        return candidate
+    }
+
+    /// The folder for an item's originals: the phone that sent it, or nil.
+    func folder(forAsset assetID: String) throws -> String? {
+        try database.query("""
+            SELECT d.folder AS folder FROM assets a JOIN devices d ON d.id = a.device_id WHERE a.id = ?
+            """, [.text(assetID)]).first?["folder"]?.string
+    }
+
+    func folder(forDevice deviceID: String) throws -> String? {
+        try database.query("SELECT folder FROM devices WHERE id = ?", [.text(deviceID)]).first?["folder"]?.string
+    }
+
+    /// Phones paired before they had folders get one now.
+    func assignMissingFolders() throws {
+        try database.transaction {
+            for row in try database.query("SELECT id, name FROM devices WHERE folder IS NULL ORDER BY created_at") {
+                guard let id = row["id"]?.string else { continue }
+                try database.execute("UPDATE devices SET folder = ? WHERE id = ?",
+                                     [.text(try uniqueFolder(for: row["name"]?.string ?? "iPhone")), .text(id)])
+            }
+        }
+    }
+
+    /// Makes `root` the originals folder and ends the move, in one transaction, once every stored
+    /// original is among `copied`; otherwise switches nothing and returns those that aren't.
+    func switchOriginals(to root: String, copied: Set<String>) throws -> [String] {
+        try database.transaction {
+            let missing = try database.query("SELECT stored_path FROM resources WHERE stored_path IS NOT NULL")
+                .compactMap { $0["stored_path"]?.string }.filter { !copied.contains($0) }
+            guard missing.isEmpty else { return missing }
+            try setSetting(OriginalsStore.setting, root)
+            try setSetting(OriginalsMover.setting, nil)
+            return []
+        }
+    }
+
+    func storedOriginalCount() throws -> Int {
+        try database.query("SELECT count(*) AS n FROM resources WHERE stored_path IS NOT NULL").first?["n"]?.int ?? 0
+    }
+
+    /// Every original stored in the originals folder (path relative to it), for moving them.
+    func storedOriginals() throws -> [(assetID: String, role: Role, path: String, size: Int, sha256: String)] {
+        try database.query("SELECT asset_id, role, stored_path, size, sha256 FROM resources WHERE stored_path IS NOT NULL ORDER BY rowid")
+            .compactMap { row in
+                guard let asset = row["asset_id"]?.string, let path = row["stored_path"]?.string,
+                      let sha256 = row["sha256"]?.string else { return nil }
+                return (asset, Role(rawValue: row["role"]?.string ?? "") ?? .other, path, row["size"]?.int ?? 0, sha256)
+            }
     }
 
     func device(tokenHash: String) throws -> DeviceRecord? {
@@ -304,7 +387,7 @@ public actor Catalog {
     }
 
     private static func device(_ row: Row) -> DeviceRecord {
-        DeviceRecord(id: row["id"]?.string ?? "", name: row["name"]?.string ?? "",
+        DeviceRecord(id: row["id"]?.string ?? "", name: row["name"]?.string ?? "", folder: row["folder"]?.string,
                      createdAt: row["created_at"]?.string ?? "", lastSeenAt: row["last_seen_at"]?.string,
                      revokedAt: row["revoked_at"]?.string)
     }
@@ -425,10 +508,11 @@ public actor Catalog {
         }
     }
 
-    /// The item an original kept at `path` belongs to, if it was imported before and is the same size.
+    /// The item an original at `path` belongs to, if it was imported (in place or copied) before
+    /// and is the same size.
     func importedAsset(path: String, size: Int) throws -> String? {
-        try database.query("SELECT asset_id FROM resources WHERE external_path = ? AND size = ?",
-                           [.text(path), .integer(Int64(size))]).first?["asset_id"]?.string
+        try database.query("SELECT asset_id FROM resources WHERE (external_path = ? OR imported_from = ?) AND size = ?",
+                           [.text(path), .text(path), .integer(Int64(size))]).first?["asset_id"]?.string
     }
 
     enum ImportOutcome: Equatable { case imported, linked }
@@ -436,10 +520,19 @@ public actor Catalog {
     /// Records an item whose originals stay at their paths and whose compact copies were made
     /// elsewhere (and are already on the phone). An item already here keeps its originals and
     /// only learns the copies.
+    /// `placedIn`: the originals folder the copied originals were put in; refused (nothing
+    /// recorded) if a move is under way or the folder changed since, because those paths are
+    /// relative to it.
     func importExisting(assetID: String, kind: ServerAPI.AssetKind, captureDate: Date?,
-                        originals: [ResourceRecord], copies: [ServerAPI.CopyHash]) throws -> ImportOutcome {
+                        originals: [ResourceRecord], copies: [ServerAPI.CopyHash], placedIn: String? = nil) throws -> ImportOutcome {
         let now = Timestamp.string()
         let outcome: ImportOutcome = try database.transaction {
+            if let placedIn {
+                guard try setting(OriginalsMover.setting) == nil, try setting(OriginalsStore.setting) == placedIn else {
+                    throw OriginalsMover.Failure(description: "the originals folder is being moved or has changed; "
+                                                 + "run the import again when that's done")
+                }
+            }
             let exists = !(try database.query("SELECT id FROM assets WHERE id = ?", [.text(assetID)]).isEmpty)
             if !exists {
                 try database.execute(
@@ -453,12 +546,13 @@ public actor Catalog {
                     try database.execute(
                         """
                         INSERT INTO resources (asset_id, role, filename, size, sha256, sha1, state, received_bytes,
-                                               verified_at, external_path)
-                        VALUES (?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?)
+                                               verified_at, external_path, stored_path, imported_from)
+                        VALUES (?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?, ?)
                         """,
                         [.text(assetID), .text(original.role.rawValue), .text(original.filename),
                          .integer(Int64(original.size)), .text(original.sha256), original.sha1.sqlValue,
-                         .integer(Int64(original.size)), .text(now), original.externalPath.sqlValue])
+                         .integer(Int64(original.size)), .text(now), original.externalPath.sqlValue,
+                         original.storedPath.sqlValue, original.importedFrom.sqlValue])
                 }
             }
             try insertCopies(assetID, copies, at: now)
@@ -506,7 +600,7 @@ public actor Catalog {
                 state: ServerAPI.ResourceState(rawValue: row["state"]?.string ?? "") ?? .missing,
                 receivedBytes: row["received_bytes"]?.int ?? 0, storedPath: row["stored_path"]?.string,
                 immichAssetID: row["immich_asset_id"]?.string, verifiedAt: row["verified_at"]?.string,
-                externalPath: row["external_path"]?.string)
+                externalPath: row["external_path"]?.string, importedFrom: row["imported_from"]?.string)
         }
     }
 

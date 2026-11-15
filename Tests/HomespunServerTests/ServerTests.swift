@@ -105,10 +105,12 @@ struct Fixture {
     let server: HomespunServer
 
     init(immich: ImmichConfiguration? = nil, approver: (any PairingApprover)? = nil,
-         connectors: [any Connector] = []) async throws {
-        directory = try temporaryDirectory()
-        var configuration = ServerConfiguration(dataDirectory: directory.appendingPathComponent("data"),
+         connectors: [any Connector] = [], originals: String? = nil, directory: URL? = nil) async throws {
+        let base = try directory ?? temporaryDirectory()
+        self.directory = base
+        var configuration = ServerConfiguration(dataDirectory: base.appendingPathComponent("data"),
                                                 name: "test", profile: testProfile, immich: immich)
+        configuration.originalsDirectory = originals.map { base.appendingPathComponent($0, isDirectory: true) }
         configuration.maximumChunkBytes = 1 << 20
         server = try await HomespunServer(configuration: configuration, connectors: connectors, approver: approver,
                                           approvalPause: 0.3, builtIn: [])
@@ -197,7 +199,7 @@ struct Fixture {
 
         let uploaded = try await fixture.upload(client, token: token, asset: asset, role: .photo, file: media.photo)
         #expect(uploaded.state == .verified && uploaded.receivedBytes == photo.size)
-        let stored = fixture.directory.appendingPathComponent("data/originals/2024/05/IMG_0001.JPG")
+        let stored = fixture.directory.appendingPathComponent("data/originals/Test iPhone/2024/05/IMG_0001.JPG")
         #expect(try Data(contentsOf: stored) == Data(contentsOf: media.photo))
 
         try await fixture.server.drainJobs()
@@ -371,7 +373,7 @@ final class FakeConnector: Connector, @unchecked Sendable {
         let live = try await client.call("/api/v1/assets/\(still.sha256)", token: token).decode(ServerAPI.AssetStatus.self)
         #expect(live.state == .ready && Set(live.compact.map(\.role)) == Set(liveCompactRoles)
                 && live.deviceCompresses == liveDeviceCompresses, "\(live.message ?? "")")
-        #expect(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("data/originals/undated/IMG_0001.MOV").path))
+        #expect(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("data/originals/Test iPhone/undated/IMG_0001.MOV").path))
 
         // The phone reports the motion it compressed itself, so the copy is recognised later
         // (after a reinstall, say); only files the server left to the phone count.
@@ -419,7 +421,7 @@ final class FakeConnector: Connector, @unchecked Sendable {
                                             body: try Data(contentsOf: media.photo) + Data([0]))
         #expect(tooMuch.status == .contentTooLarge)
         #expect(try await client.call(path + "?offset=0", .put, token: token, body: try Data(contentsOf: media.photo)).status == .ok)
-        let stored = fixture.directory.appendingPathComponent("data/originals/undated/passwd")
+        let stored = fixture.directory.appendingPathComponent("data/originals/Test iPhone/undated/passwd")
         #expect(FileManager.default.fileExists(atPath: stored.path))
 
         let empty = ServerAPI.ResourceDescriptor(role: .photo, filename: "a.jpg", size: 0, sha256: String(repeating: "a", count: 64))
@@ -1008,3 +1010,203 @@ final class ProblemLog: @unchecked Sendable {
     }
 }
 
+
+// MARK: Originals folder
+
+@Test(.enabled(if: ffmpegAvailable)) func originalsGoInAFolderPerPhoneAndMoveFromTheApp() async throws {
+    let fixture = try await Fixture(originals: "Volume")
+    let media = try await Media.make(in: fixture.directory)
+    let volume = fixture.directory.appendingPathComponent("Volume"), moved = fixture.directory.appendingPathComponent("Moved")
+    try await fixture.test { client, _ in
+        // Two phones with the same name get their own folders.
+        let token = try await fixture.pair(client)
+        let photo = try descriptor(.photo, media.photo)
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+            kind: .photo, captureDate: Date(timeIntervalSince1970: 1_714_592_096), resources: [photo]))
+        _ = try await fixture.upload(client, token: token, asset: photo.sha256, role: .photo, file: media.photo)
+        let stored = volume.appendingPathComponent("Test iPhone 2/2024/05/IMG_0001.JPG")
+        #expect(try Data(contentsOf: stored) == Data(contentsOf: media.photo))
+        #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("data/originals").path))
+
+        var storage = try await client.call("/api/v1/storage", token: token).decode(ServerAPI.StorageInfo.self)
+        #expect(storage.originalsFolder == volume.path && storage.deviceFolder == volume.appendingPathComponent("Test iPhone 2").path)
+        #expect(storage.storedCount == 1 && storage.storedBytes == Int64(photo.size) && storage.move == nil)
+        let locations = try await client.call("/api/v1/storage/locations", token: token).decode([ServerAPI.StorageLocation].self)
+        #expect(locations.first { $0.isCurrent }?.path == volume.path)
+
+        func move(_ path: String) async throws -> TestResponse {
+            try await client.call("/api/v1/storage", .put, token: token, json: ServerAPI.MoveOriginalsRequest(originalsFolder: path))
+        }
+        let checkout = fixture.directory.appendingPathComponent("checkout")
+        try FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+        try Data().write(to: checkout.appendingPathComponent("Package.swift"))
+        for bad in ["relative/path", volume.path, fixture.directory.appendingPathComponent("data/inside").path,
+                    fixture.directory.appendingPathComponent("no/such/disk").path, checkout.path] {
+            #expect(try await move(bad).status == .unprocessableContent, "\(bad)")
+        }
+
+        // The same folder by another name is refused.
+        let alias = fixture.directory.appendingPathComponent("Alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: volume)
+        #expect(try await move(alias.path).status == .unprocessableContent)
+
+        // An existing folder is fine, but a different file in the way stops the move and nothing is lost.
+        let blocker = moved.appendingPathComponent("Test iPhone 2/2024/05/IMG_0001.JPG")
+        try FileManager.default.createDirectory(at: blocker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("someone else's file".utf8).write(to: blocker)
+        #expect(try await move(moved.path).status == .accepted)
+        await fixture.server.mover.wait()
+        storage = try await client.call("/api/v1/storage", token: token).decode(ServerAPI.StorageInfo.self)
+        #expect(storage.originalsFolder == volume.path && storage.move?.state == .failed
+                && storage.move?.message?.contains("A different file") == true)
+        #expect(try Data(contentsOf: blocker) == Data("someone else's file".utf8) && FileManager.default.fileExists(atPath: stored.path))
+        #expect(try await client.call("/api/v1/assets/\(photo.sha256)/verify", .post, token: token)
+            .decode(ServerAPI.Verification.self).allVerified)
+        try FileManager.default.removeItem(at: blocker)
+
+        // While a move is under way, import --copy records nothing.
+        try await fixture.server.catalog.setSetting(OriginalsMover.setting, "{}")
+        let source = fixture.directory.appendingPathComponent("elsewhere.jpg")
+        try Data("from elsewhere".utf8).write(to: source)
+        let manifest = fixture.directory.appendingPathComponent("m.jsonl")
+        try String(decoding: try ServerAPI.encoder.encode(ServerAPI.ImportItem(
+            kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: source.path)], copies: [])), as: UTF8.self)
+            .write(to: manifest, atomically: true, encoding: .utf8)
+        let problems = ProblemLog()
+        let blocked = try await LibraryImport(catalog: fixture.server.catalog, copyInto: fixture.server.originals)
+            .run(manifest: manifest) { problems.add($0) }
+        #expect(blocked.problems == 1 && problems.lines.first?.contains("being moved") == true)
+        #expect(!FileManager.default.fileExists(atPath: volume.appendingPathComponent("Camera Roll").path))
+        try await fixture.server.catalog.setSetting(OriginalsMover.setting, nil)
+
+        #expect(try await move(moved.path).status == .accepted)
+        await fixture.server.mover.wait()
+        storage = try await client.call("/api/v1/storage", token: token).decode(ServerAPI.StorageInfo.self)
+        #expect(storage.originalsFolder == moved.path && storage.move?.state == .done && storage.move?.copied == 1)
+        let movedFile = moved.appendingPathComponent("Test iPhone 2/2024/05/IMG_0001.JPG")
+        #expect(try Data(contentsOf: movedFile) == Data(contentsOf: media.photo))
+        #expect((try FileManager.default.attributesOfItem(atPath: movedFile.path)[.posixPermissions] as? NSNumber)?.intValue == 0o440)
+        #expect(!FileManager.default.fileExists(atPath: stored.path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: volume.path).filter { !$0.hasPrefix(".") }.isEmpty)
+        #expect(try await client.call("/api/v1/assets/\(photo.sha256)/verify", .post, token: token)
+            .decode(ServerAPI.Verification.self).allVerified)
+
+        // New originals go to the new folder.
+        let movie = try descriptor(.video, media.movie)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [movie]))
+        _ = try await fixture.upload(client, token: token, asset: movie.sha256, role: .video, file: media.movie)
+        #expect(FileManager.default.fileExists(atPath: moved.appendingPathComponent("Test iPhone 2/undated/IMG_0002.MP4").path))
+    }
+}
+
+@Test func theOriginalsFolderIsKeptOnceOriginalsAreInItAndAMissingDiskIsReported() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let first = try await Fixture(originals: "Volume", directory: directory)
+    let source = directory.appendingPathComponent("photo.jpg")
+    try Data("a photo".utf8).write(to: source)
+    let manifest = directory.appendingPathComponent("m.jsonl")
+    try String(decoding: try ServerAPI.encoder.encode(ServerAPI.ImportItem(
+        kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: source.path)], copies: [])), as: UTF8.self)
+        .write(to: manifest, atomically: true, encoding: .utf8)
+    #expect(try await LibraryImport(catalog: first.server.catalog, copyInto: first.server.originals).run(manifest: manifest) { _ in }
+        .imported == 1)
+    // With originals in it, another --originals doesn't move the folder (stored paths are relative to it).
+    let second = try await Fixture(originals: "Other", directory: directory)
+    #expect(await second.server.originals.root.path == directory.appendingPathComponent("Volume").path)
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("Other").path))
+    // A catalog from before the folder was a setting keeps the data folder's.
+    try await second.server.catalog.setSetting(OriginalsStore.setting, nil)
+    try await second.server.catalog.setSetting("originals.legacy", "1")
+    let legacy = try await Fixture(originals: "Other", directory: directory)
+    #expect(await legacy.server.originals.root.path == directory.appendingPathComponent("data/originals").path)
+
+    // A folder on a disk that isn't there isn't made (it would land on the startup disk).
+    try await legacy.server.catalog.setSetting(OriginalsStore.setting, directory.appendingPathComponent("Unplugged/Homespun").path)
+    let third = try await Fixture(directory: directory)
+    #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("Unplugged").path))
+    // A data folder whose disk isn't there isn't made either.
+    var configuration = ServerConfiguration(dataDirectory: directory.appendingPathComponent("Gone/data"))
+    configuration.originalsDirectory = nil
+    await #expect(throws: Storage.UnsafeLocation.self) { _ = try await HomespunServer(configuration: configuration) }
+    try await third.test { client, token in
+        let report = try await client.call("/api/v1/setup", token: token).decode(ServerSetup.Report.self)
+        #expect(report.checks.first { $0.id == "storage" }?.status == .problem)
+        let photo = ServerAPI.ResourceDescriptor(role: .photo, filename: "a.jpg", size: 5, sha256: Fingerprint.sha256(of: Data("photo".utf8)))
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [photo]))
+        let upload = try await client.call("/api/v1/assets/\(photo.sha256)/resources/photo?offset=0", .put, token: token,
+                                           body: Data("photo".utf8))
+        #expect(upload.status == .serviceUnavailable)
+    }
+}
+
+@Test func importCanCopyOriginalsIntoTheOriginalsFolder() async throws {
+    let fixture = try await Fixture(originals: "Volume")
+    let archive = fixture.directory.appendingPathComponent("archive", isDirectory: true)
+    try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+    let still = archive.appendingPathComponent("IMG_2144.HEIC"), motion = archive.appendingPathComponent("IMG_2144.MOV")
+    try Data(String(repeating: "still", count: 1000).utf8).write(to: still)
+    try Data(String(repeating: "motion", count: 1000).utf8).write(to: motion)
+    let other = archive.appendingPathComponent("IMG_3000.JPG")
+    try Data(String(repeating: "other", count: 1000).utf8).write(to: other)
+    let copyHash = Fingerprint.sha256(of: Data("compact".utf8))
+    func line(_ item: ServerAPI.ImportItem) throws -> String { String(decoding: try ServerAPI.encoder.encode(item), as: UTF8.self) }
+    let manifest = fixture.directory.appendingPathComponent("m.jsonl")
+    try [try line(.init(kind: .livePhoto, captureDate: Date(timeIntervalSince1970: 1_636_061_270),
+                        originals: [.init(role: .photo, path: still.path, sha1: Fingerprint.sha1(of: try Data(contentsOf: still))),
+                                    .init(role: .pairedVideo, path: motion.path, sha256: try Fingerprint.sha256(of: motion))],
+                        copies: [.init(role: .photo, sha256: copyHash)])),
+         try line(.init(kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: other.path,
+                                                                         sha1: String(repeating: "0", count: 40))], copies: []))]
+        .joined(separator: "\n").write(to: manifest, atomically: true, encoding: .utf8)
+    let importer = LibraryImport(catalog: fixture.server.catalog, copyInto: fixture.server.originals)
+    let problems = ProblemLog()
+    let summary = try await importer.run(manifest: manifest) { problems.add($0) }
+    #expect(summary.imported == 1 && summary.problems == 1 && problems.lines.last?.contains("recorded SHA-1") == true)
+
+    let folder = fixture.directory.appendingPathComponent("Volume/Camera Roll/2021/11")
+    #expect(try Set(FileManager.default.contentsOfDirectory(atPath: folder.path)) == ["IMG_2144.HEIC", "IMG_2144.MOV"])
+    #expect(try Data(contentsOf: folder.appendingPathComponent("IMG_2144.HEIC")) == Data(contentsOf: still))
+    // The sources are only read; nothing is left behind from the failed copy.
+    #expect(try FileManager.default.contentsOfDirectory(atPath: archive.path).count == 3)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.directory.appendingPathComponent("Volume/.homespun-import").path).isEmpty)
+    let resources = try await fixture.server.catalog.resources(try Fingerprint.sha256(of: still))
+    #expect(resources.allSatisfy { $0.externalPath == nil && $0.storedPath?.hasPrefix("Camera Roll/2021/11/") == true })
+    #expect(Set(resources.compactMap(\.importedFrom)) == [still.path, motion.path])
+
+    // Again: nothing is copied twice.
+    let again = try await importer.run(manifest: manifest) { _ in }
+    #expect(again.linked == 1 && again.imported == 0)
+    #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).count == 2)
+
+    // Copying an original the phone already backed up keeps the phone's.
+    let relink = try line(.init(kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: other.path)],
+                                copies: [.init(role: .photo, sha256: copyHash)]))
+    try await fixture.test { client, token in
+        let photo = try descriptor(.photo, other)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [photo]))
+        _ = try await fixture.upload(client, token: token, asset: photo.sha256, role: .photo, file: other)
+        try relink.write(to: manifest, atomically: true, encoding: .utf8)
+        let linked = try await importer.run(manifest: manifest) { _ in }
+        #expect(linked.linked == 1)
+        #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("Volume/Camera Roll/undated").path))
+    }
+}
+
+@Test func aMoveWhoseDiskIsMissingWaitsAndChangesNothing() async throws {
+    let fixture = try await Fixture(originals: "Volume")
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let unplugged = fixture.directory.appendingPathComponent("Unplugged/Homespun")
+    let plan = #"{"from":"\#(fixture.directory.appendingPathComponent("Volume").path)","to":"\#(unplugged.path)"}"#
+    try await fixture.server.catalog.setSetting(OriginalsMover.setting, plan)
+    await fixture.server.mover.resume()
+    await fixture.server.mover.wait()
+    let status = try #require(await fixture.server.mover.status)
+    #expect(status.state == .failed && status.message?.contains("isn't there") == true)
+    #expect(!FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("Unplugged").path))
+    #expect(try await fixture.server.catalog.setting(OriginalsMover.setting) == plan)
+    #expect(await fixture.server.originals.root.path == fixture.directory.appendingPathComponent("Volume").path)
+}

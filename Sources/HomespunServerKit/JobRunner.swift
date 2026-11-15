@@ -15,6 +15,7 @@ public final class JobRunner: Service, Sendable {
 
     let catalog: Catalog
     let storage: Storage
+    let originals: OriginalsStore
     let compactor: Compactor
     let immichState: ImmichState
     let hub: ConnectorHub
@@ -23,10 +24,11 @@ public final class JobRunner: Service, Sendable {
     let pollInterval: Duration
     let connectors: Bool
 
-    init(catalog: Catalog, storage: Storage, compactor: Compactor, immichState: ImmichState, hub: ConnectorHub,
-         logger: Logger, pollInterval: Duration = .seconds(1), connectors: Bool = false) {
+    init(catalog: Catalog, storage: Storage, originals: OriginalsStore, compactor: Compactor, immichState: ImmichState,
+         hub: ConnectorHub, logger: Logger, pollInterval: Duration = .seconds(1), connectors: Bool = false) {
         self.catalog = catalog
         self.storage = storage
+        self.originals = originals
         self.compactor = compactor
         self.immichState = immichState
         self.hub = hub
@@ -95,7 +97,10 @@ public final class JobRunner: Service, Sendable {
                 }
                 sources[resource.role] = url
             } else {
-                sources[resource.role] = storage.root.appendingPathComponent(resource.storedPath!)
+                guard let url = await originals.url(resource.storedPath!) else {
+                    throw Compactor.Unprocessable(description: "bad stored path")
+                }
+                sources[resource.role] = url
             }
         }
         try await compactAndStore(asset, resources: resources, sources: sources)
@@ -145,7 +150,7 @@ public final class JobRunner: Service, Sendable {
                     }
                     urls[resource.role] = url
                 } else {
-                    guard let url = storage.resolve(resource.storedPath!) else { throw ConnectorError.failed("bad stored path") }
+                    guard let url = await originals.url(resource.storedPath!) else { throw ConnectorError.failed("bad stored path") }
                     urls[resource.role] = url
                 }
             }

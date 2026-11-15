@@ -12,6 +12,8 @@ struct SetupChecks {
     let storage: Storage
     let immichState: ImmichState
     let catalog: Catalog
+    /// Where originals go (it may be on another disk than the data folder).
+    var originalsFolder: URL? = nil
     var environment = ProcessInfo.processInfo.environment
     var platform = HostPlatform.current()
     /// Linux control group of this process; a systemd service runs in `.../homespun.service`.
@@ -88,7 +90,11 @@ struct SetupChecks {
     }
 
     func storageSpace() -> Check {
-        let path = configuration.dataDirectory.path
+        let path = (originalsFolder ?? configuration.dataDirectory).path
+        guard FileManager.default.fileExists(atPath: path) else {
+            return Check(id: "storage", title: "Storage", status: .problem,
+                         detail: "The originals folder \(path) isn't there. Is its disk connected?")
+        }
         guard let attributes = try? FileManager.default.attributesOfFileSystem(forPath: path),
               let free = (attributes[.systemFreeSize] as? NSNumber)?.int64Value else {
             return Check(id: "storage", title: "Storage", status: .problem, detail: "Can't read \(path).")

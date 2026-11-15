@@ -213,10 +213,21 @@ with the command that fixes it on that server's system. Install what it asks for
 "Check again".
 
 For now the app talks plain HTTP, and only to servers on the home network (IP addresses and
-`.local` names); HTTPS comes later. The server stores originals read-only under
-`originals/YYYY/MM/` (by capture month), checks each upload's SHA-256 before accepting it, and
-lets the app remove an original only after checking its copy again at that moment
-(`POST /api/v1/assets/{id}/verify`).
+`.local` names); HTTPS comes later. The server checks each upload's SHA-256 before accepting it,
+stores originals read-only, and lets the app remove an original only after checking its copy
+again at that moment (`POST /api/v1/assets/{id}/verify`).
+
+Originals go in a folder per phone, by capture month: `<originals>/<phone name>/YYYY/MM/`
+(the phone's name when it paired; renaming the phone later keeps the folder). The originals
+folder is `<data>/originals` unless `install-service --originals DIR` (or `HOMESPUN_ORIGINALS`)
+says otherwise, so the catalog and originals can live apart: for example `--data
+/Volumes/Homespun/.homespun --originals /Volumes/Homespun` on a Mac with a Homespun volume
+(`diskutil apfs addVolume disk3 APFS Homespun` adds one that shares the disk's free space). The
+server never creates a folder whose parent is missing, so a disk that isn't connected isn't
+silently replaced by a folder on the startup disk; the self-check says so instead. To change
+the folder later, use the app (Settings › Originals folder › Change folder): the server copies
+every original there, checks each one, holds new backups for a moment while it switches, and
+only then removes the old copies. A move interrupted by a restart picks up where it left off.
 
 ### Cloud copies (connectors)
 
@@ -265,9 +276,12 @@ homespun-server import library.jsonl             # hashes the originals and reco
 ```
 
 It runs beside a running server, and running it again is safe (finished items are skipped).
-The originals stay where they are: Homespun reads them, never moves, changes, or deletes them,
-and hashes them again where they are whenever the app checks an item. `--jobs N` reads N files
-at a time (default 4). Each line of the manifest is one item:
+By default the originals stay where they are: Homespun reads them, never moves, changes, or
+deletes them, and hashes them again where they are whenever the app checks an item. With
+`--copy`, each is copied into the originals folder under `--folder NAME` (default "Camera
+Roll"), hashed as it's read (once, so a network share is read once) and checked again on disk,
+and then kept like an uploaded original; the source is still only read. `--jobs N` reads N
+files at a time (default 4). Each line of the manifest is one item:
 
 ```json
 {"kind": "live_photo", "capture_date": "2024-03-16T22:58:48Z",
@@ -278,7 +292,8 @@ at a time (default 4). Each line of the manifest is one item:
 
 `kind` is `photo`, `live_photo`, or `video`. `copies` lists the SHA-256 of each compact file
 as it is on the phone (Photos keeps imported files byte for byte, though it may rename them).
-An original may carry `"sha256"` to make sure it hasn't changed.
+An original may carry `"sha256"` and `"sha1"` (as recorded when it was fetched, or as a cloud
+service reports it) to make sure it hasn't changed.
 
 Then, in the app, open Settings › Find compact copies made elsewhere. It hashes the photos and
 videos Homespun doesn't know yet and asks the server about them (`POST /api/v1/copies/lookup`;

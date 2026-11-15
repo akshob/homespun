@@ -15,8 +15,11 @@ public struct ImmichConfiguration: Sendable {
 public struct ServerConfiguration: Sendable {
     public static let version = "0.1.0"
 
-    /// Holds the catalog, originals (files mode), compact copies, and work files.
+    /// Holds the catalog, compact copies, and work files (and originals, unless `originalsDirectory` is set).
     public var dataDirectory: URL
+    /// Where originals go (`HOMESPUN_ORIGINALS`), each phone in its own folder; default `<data>/originals`.
+    /// A folder chosen later from the app wins over this.
+    public var originalsDirectory: URL?
     public var host: String
     public var port: Int
     public var name: String
@@ -65,6 +68,10 @@ public struct ServerConfiguration: Sendable {
             configuration.port = number
         }
         configuration.name = environment["HOMESPUN_NAME"] ?? ProcessInfo.processInfo.hostName
+        if let originals = environment["HOMESPUN_ORIGINALS"], !originals.isEmpty {
+            guard originals.hasPrefix("/") else { throw Failure.invalid("HOMESPUN_ORIGINALS must be an absolute path") }
+            configuration.originalsDirectory = URL(fileURLWithPath: originals, isDirectory: true)
+        }
         configuration.onedriveClientID = environment["HOMESPUN_ONEDRIVE_CLIENT_ID"].flatMap { $0.isEmpty ? nil : $0 }
         if let publicURL = environment["HOMESPUN_PUBLIC_URL"], !publicURL.isEmpty {
             guard PairingLink.serverURL(from: publicURL) != nil else { throw Failure.invalid("bad HOMESPUN_PUBLIC_URL") }
@@ -95,6 +102,7 @@ struct Storage: Sendable {
     public struct UnsafeLocation: Error, CustomStringConvertible { public var description: String }
 
     var catalog: URL { root.appendingPathComponent("homespun.db") }
+    /// The default originals folder.
     var originals: URL { root.appendingPathComponent("originals", isDirectory: true) }
     var staging: URL { root.appendingPathComponent("staging", isDirectory: true) }
     var compactRoot: URL { root.appendingPathComponent("compact", isDirectory: true) }
@@ -103,16 +111,38 @@ struct Storage: Sendable {
     func prepare() throws {
         // Updating or re-cloning source code deletes what isn't part of it, originals included.
         // On macOS, folder names usually ignore case: ~/homespun and ~/Homespun are one folder.
+        try Self.checkNotSourceCode(root)
+        // Never make the folder a missing disk would have had: on a Mac, /Volumes/Homespun made
+        // while the Homespun volume isn't mounted lands on the startup disk instead.
+        if !FileManager.default.fileExists(atPath: root.path) {
+            guard FileManager.default.fileExists(atPath: root.deletingLastPathComponent().path) else {
+                throw UnsafeLocation(description: "\(root.deletingLastPathComponent().path) doesn't exist (is the disk connected?).")
+            }
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        }
+        for directory in [staging, compactRoot, cacheRoot] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+    }
+
+    /// Updating or re-cloning source code deletes what isn't part of it, originals included.
+    static func checkNotSourceCode(_ folder: URL) throws {
         for marker in [".git", "Package.swift"]
-        where FileManager.default.fileExists(atPath: root.appendingPathComponent(marker).path) {
+        where FileManager.default.fileExists(atPath: folder.appendingPathComponent(marker).path) {
             throw UnsafeLocation(description:
-                "\(root.path) holds source code (it has \(marker)), so originals there could be deleted. "
+                "\(folder.path) holds source code (it has \(marker)), so originals there could be deleted. "
                 + "Keep them in another folder, for example ~/Pictures/Homespun. (On a Mac, ~/homespun and "
                 + "~/Homespun are the same folder.)")
         }
-        for directory in [root, originals, staging, compactRoot, cacheRoot] {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        }
+    }
+
+    /// Makes the originals folder if it can be made safely (its parent exists); returns whether it's there.
+    static func prepareOriginals(_ folder: URL) throws -> Bool {
+        try checkNotSourceCode(folder)
+        if FileManager.default.fileExists(atPath: folder.path) { return true }
+        guard FileManager.default.fileExists(atPath: folder.deletingLastPathComponent().path) else { return false }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        return true
     }
 
     func partial(_ assetID: String, _ role: Role) -> URL {
@@ -121,20 +151,6 @@ struct Storage: Sendable {
 
     func compact(_ assetID: String) -> URL { compactRoot.appendingPathComponent(assetID, isDirectory: true) }
     func cache(_ assetID: String) -> URL { cacheRoot.appendingPathComponent(assetID, isDirectory: true) }
-
-    /// `originals/YYYY/MM/<name>`, adding part of the SHA-256 if another file already has the name.
-    func originalDestination(filename: String, sha256: String, captureDate: Date?) -> URL {
-        let parts = captureDate.map { Calendar(identifier: .gregorian).dateComponents(in: TimeZone(identifier: "UTC")!, from: $0) }
-        let folder = parts.map { String(format: "%04d/%02d", $0.year ?? 0, $0.month ?? 0) } ?? "undated"
-        let directory = originals.appendingPathComponent(folder, isDirectory: true)
-        let name = Self.sanitized(filename)
-        var candidate = directory.appendingPathComponent(name)
-        if FileManager.default.fileExists(atPath: candidate.path) {
-            let stem = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
-            candidate = directory.appendingPathComponent("\(stem)_\(sha256.prefix(12))" + (ext.isEmpty ? "" : ".\(ext)"))
-        }
-        return candidate
-    }
 
     /// A safe single path component: no separators, no leading dot, limited characters and length.
     static func sanitized(_ filename: String) -> String {

@@ -15,6 +15,8 @@ public struct HomespunServer: Sendable {
     let hub: ConnectorHub
     let routes: Routes
     let immichState: ImmichState
+    let originals: OriginalsStore
+    let mover: OriginalsMover
     let logger: Logger
 
     /// `connectors`: extra destinations besides the built-in ones (see `Connector`).
@@ -31,17 +33,50 @@ public struct HomespunServer: Sendable {
         storage = Storage(root: configuration.dataDirectory)
         try storage.prepare()
         catalog = try Catalog(path: storage.catalog.path)
+        try await catalog.assignMissingFolders()
+        let root = try await Self.originalsRoot(catalog: catalog, configured: configuration.originalsDirectory,
+                                                default: storage.originals, logger: logger)
+        if try !Storage.prepareOriginals(root) {
+            logger.error("the originals folder \(root.path) isn't available (is its disk connected?)")
+        }
+        originals = OriginalsStore(root: root)
+        mover = OriginalsMover(catalog: catalog, store: originals, dataDirectory: configuration.dataDirectory, logger: logger)
         immichState = try await ImmichState(catalog: catalog, fallback: configuration.immich)
         hub = ConnectorHub(connectors: (builtIn ?? Self.builtInConnectors(configuration)) + connectors,
                            catalog: catalog, storage: storage)
         let compactor = Compactor(profile: configuration.profile)
-        runner = JobRunner(catalog: catalog, storage: storage, compactor: compactor, immichState: immichState, hub: hub,
-                           logger: logger)
-        copier = JobRunner(catalog: catalog, storage: storage, compactor: compactor, immichState: immichState, hub: hub,
-                           logger: logger, pollInterval: .seconds(2), connectors: true)
-        routes = Routes(configuration: configuration, catalog: catalog, storage: storage, immichState: immichState,
+        runner = JobRunner(catalog: catalog, storage: storage, originals: originals, compactor: compactor,
+                           immichState: immichState, hub: hub, logger: logger)
+        copier = JobRunner(catalog: catalog, storage: storage, originals: originals, compactor: compactor,
+                           immichState: immichState, hub: hub, logger: logger, pollInterval: .seconds(2), connectors: true)
+        routes = Routes(configuration: configuration, catalog: catalog, storage: storage, originals: originals, mover: mover,
+                        immichState: immichState,
                         approvals: PairingApprovals(approver: approver, serverName: configuration.name, pause: approvalPause),
                         connectors: hub)
+    }
+
+    /// The originals folder, saved in the catalog because stored paths are relative to it: once
+    /// originals are there, `--originals` can't change it (moving them from the app can).
+    static func originalsRoot(catalog: Catalog, configured: URL?, default fallback: URL, logger: Logger) async throws -> URL {
+        let configured = configured?.standardizedFileURL
+        var root: URL
+        if let saved = try await catalog.setting(OriginalsStore.setting) {
+            root = URL(fileURLWithPath: saved, isDirectory: true)
+        } else if try await catalog.setting("originals.legacy") != nil {
+            root = fallback  // stored before the folder was a setting of its own
+        } else {
+            root = configured ?? fallback
+        }
+        if let configured, configured != root.standardizedFileURL {
+            if try await catalog.storedOriginalCount() == 0 {
+                root = configured
+            } else {
+                logger.notice("originals are in \(root.path); ignoring --originals \(configured.path) (move them from the app)")
+            }
+        }
+        try await catalog.setSetting(OriginalsStore.setting, root.standardizedFileURL.path)
+        try await catalog.setSetting("originals.legacy", nil)
+        return root
     }
 
     /// The connectors every server has.
@@ -60,6 +95,7 @@ public struct HomespunServer: Sendable {
     /// only this releases job leases: nothing holds one before these runners start.
     public func run() async throws {
         try await catalog.releaseLeases()
+        await mover.resume()
         try await application().runService()
     }
 
@@ -108,6 +144,7 @@ public struct HomespunServer: Sendable {
             "HOMESPUN_PORT": String(configuration.port),
             "HOMESPUN_NAME": configuration.name,
         ]
+        if let originals = configuration.originalsDirectory { environment["HOMESPUN_ORIGINALS"] = originals.path }
         if let publicURL = configuration.publicURL { environment["HOMESPUN_PUBLIC_URL"] = publicURL }
         let current = ProcessInfo.processInfo.environment
         for key in ["PATH", "HOMESPUN_IMMICH_URL", "HOMESPUN_IMMICH_API_KEY_FILE", "HOMESPUN_ONEDRIVE_CLIENT_ID"] {

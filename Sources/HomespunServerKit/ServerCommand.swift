@@ -13,14 +13,19 @@ public enum ServerCommand {
                              computer starts (systemd user service on Linux, LaunchAgent on macOS).
           devices            List paired devices.
           revoke <id>        Stop a device from using the server.
-          import <manifest>  Record originals already kept elsewhere on this computer, and the compact
-                             copies made from them before Homespun, so the app recognises those copies.
-                             The originals stay where they are and are never changed. One JSON object
-                             per line (see the README). --dry-run only checks the files; --jobs N
-                             reads N files at a time (default 4).
+          import <manifest>  Record originals already kept elsewhere, and the compact copies made from
+                             them before Homespun, so the app recognises those copies. The originals
+                             are only read, never changed. One JSON object per line (see the README).
+                             --copy copies them into the originals folder, under --folder NAME
+                             (default "Camera Roll"), instead of leaving them where they are.
+                             --dry-run only checks the files; --jobs N reads N files at a time
+                             (default 4).
 
         Options (or environment variables):
-          --data DIR         Where originals, compact copies, and the catalog live (HOMESPUN_DATA).
+          --data DIR         Where the catalog, compact copies, and work files live (HOMESPUN_DATA).
+          --originals DIR    Where originals go, a folder per phone (HOMESPUN_ORIGINALS); default
+                             DIR/originals in the data folder. Once set, change it from the app,
+                             which moves every original there.
           --port N           Port, default 8787 (HOMESPUN_PORT).
           --name NAME        Name shown in the app, default this computer's name (HOMESPUN_NAME).
           HOMESPUN_HOST      Address to listen on; default 127.0.0.1, install-service uses 0.0.0.0.
@@ -34,12 +39,13 @@ public enum ServerCommand {
     public static func run(connectors: [any Connector] = [], commandLine: [String] = CommandLine.arguments) async -> Int32 {
         var arguments = Array(commandLine.dropFirst())
         var environment = ProcessInfo.processInfo.environment
-        let flags = ["--data": "HOMESPUN_DATA", "--port": "HOMESPUN_PORT", "--name": "HOMESPUN_NAME"]
+        let flags = ["--data": "HOMESPUN_DATA", "--originals": "HOMESPUN_ORIGINALS", "--port": "HOMESPUN_PORT",
+                     "--name": "HOMESPUN_NAME"]
         var index = 0
         while index < arguments.count {
             if let key = flags[arguments[index]], index + 1 < arguments.count {
                 var value = arguments[index + 1]
-                if key == "HOMESPUN_DATA" {
+                if key == "HOMESPUN_DATA" || key == "HOMESPUN_ORIGINALS" {
                     value = (value as NSString).expandingTildeInPath
                     if !value.hasPrefix("/") { value = FileManager.default.currentDirectoryPath + "/" + value }
                 }
@@ -75,7 +81,8 @@ public enum ServerCommand {
                 let executable = URL(fileURLWithPath: Bundle.main.executablePath ?? commandLine[0])
                     .resolvingSymlinksInPath().path
                 print(try server.installService(executable: executable))
-                let saved = [("HOMESPUN_DATA", configuration.dataDirectory.path), ("HOMESPUN_HOST", configuration.host),
+                let saved = [("HOMESPUN_DATA", configuration.dataDirectory.path),
+                             ("HOMESPUN_ORIGINALS", configuration.originalsDirectory?.path), ("HOMESPUN_HOST", configuration.host),
                              ("HOMESPUN_PORT", String(configuration.port)), ("HOMESPUN_NAME", configuration.name),
                              ("HOMESPUN_PUBLIC_URL", configuration.publicURL),
                              ("HOMESPUN_ONEDRIVE_CLIENT_ID", configuration.onedriveClientID)]
@@ -96,8 +103,17 @@ public enum ServerCommand {
                 }
             case "import":
                 var rest = Array(arguments.dropFirst()), jobs = 4
-                let dryRun = rest.contains("--dry-run")
-                rest.removeAll { $0 == "--dry-run" }
+                let dryRun = rest.contains("--dry-run"), copy = rest.contains("--copy")
+                rest.removeAll { $0 == "--dry-run" || $0 == "--copy" }
+                var folder = "Camera Roll"
+                if let index = rest.firstIndex(of: "--folder") {
+                    guard index + 1 < rest.count, !rest[index + 1].isEmpty else {
+                        print(usage)
+                        return 2
+                    }
+                    folder = rest[index + 1]
+                    rest.removeSubrange(index...(index + 1))
+                }
                 if let index = rest.firstIndex(of: "--jobs") {
                     guard index + 1 < rest.count, let count = Int(rest[index + 1]), (1...16).contains(count) else {
                         print(usage)
@@ -111,8 +127,16 @@ public enum ServerCommand {
                     return 2
                 }
                 let manifest = URL(fileURLWithPath: (rest[0] as NSString).expandingTildeInPath)
-                print(dryRun ? "Checking \(manifest.path) (nothing is recorded)…" : "Importing \(manifest.path)…")
-                let summary = try await LibraryImport(catalog: server.catalog, dryRun: dryRun, jobs: jobs)
+                if copy, !dryRun, try await server.catalog.setting(OriginalsMover.setting) != nil {
+                    print("The originals folder is being moved; run the import again when that's done.")
+                    return 1
+                }
+                let into = await server.originals.root.appendingPathComponent(Storage.sanitized(folder)).path
+                print(dryRun ? "Checking \(manifest.path) (nothing is recorded)…"
+                      : copy ? "Importing \(manifest.path), copying the originals into \(into)…"
+                      : "Importing \(manifest.path), leaving the originals where they are…")
+                let summary = try await LibraryImport(catalog: server.catalog, dryRun: dryRun, jobs: jobs,
+                                                      copyInto: copy ? server.originals : nil, folder: folder)
                     .run(manifest: manifest) { print($0) }
                 print(LibraryImport.progress(summary, of: summary.items, dryRun: dryRun))
                 if summary.problems > 0 {

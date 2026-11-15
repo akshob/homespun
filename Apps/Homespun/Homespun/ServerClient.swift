@@ -136,6 +136,20 @@ struct ServerClient: Sendable {
         try await send("assets/\(assetID)/verify", method: "POST", as: ServerAPI.Verification.self)
     }
 
+    /// Where originals are kept on the server, and a move in progress.
+    func storage() async throws -> ServerAPI.StorageInfo { try await send("storage", as: ServerAPI.StorageInfo.self) }
+
+    /// Folders on the server's disks the originals could move to.
+    func storageLocations() async throws -> [ServerAPI.StorageLocation] {
+        try await send("storage/locations", as: [ServerAPI.StorageLocation].self)
+    }
+
+    /// Moves every original on the server to `path` (the server copies and checks each one).
+    func moveOriginals(to path: String) async throws -> ServerAPI.StorageInfo {
+        try await send("storage", method: "PUT", json: ServerAPI.MoveOriginalsRequest(originalsFolder: path),
+                       as: ServerAPI.StorageInfo.self)
+    }
+
     /// Which of these SHA-256s are compact copies or originals of items on the server.
     func lookupCopies(_ hashes: [String]) async throws -> [ServerAPI.CopyLookupResponse.Match] {
         try await send("copies/lookup", method: "POST", json: ServerAPI.CopyLookupRequest(sha256: hashes),

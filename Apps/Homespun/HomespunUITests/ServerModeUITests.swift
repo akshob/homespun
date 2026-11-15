@@ -26,6 +26,11 @@ final class ServerModeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["addDevice.code"].waitForExistence(timeout: 15), "no code for another device")
         attach(app, "Add another device")
         app.navigationBars["Add another device"].buttons.firstMatch.tap()
+        // It shows where this iPhone's originals go on the server.
+        app.buttons["settings.originals"].tap()
+        XCTAssertTrue(app.staticTexts["originals.deviceFolder"].waitForExistence(timeout: 15), "no originals folder")
+        attach(app, "Originals folder")
+        app.navigationBars["Originals folder"].buttons.firstMatch.tap()
         XCTAssertTrue(app.buttons["Done"].waitForExistence(timeout: 5))
         app.buttons["Done"].tap()
 

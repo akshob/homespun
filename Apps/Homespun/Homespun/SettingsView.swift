@@ -24,6 +24,8 @@ struct SettingsView: View {
                         if let platform = server.platform { LabeledContent("System", value: platform.name) }
                         NavigationLink("Server check") { ServerCheckView(settings: settings) }
                             .accessibilityIdentifier("settings.check")
+                        NavigationLink("Originals folder") { OriginalsFolderView(settings: settings) }
+                            .accessibilityIdentifier("settings.originals")
                         NavigationLink(server.mode == .immich ? "Immich" : "Connect Immich") {
                             ImmichConnectView(settings: settings)
                         }

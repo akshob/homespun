@@ -45,6 +45,8 @@ struct Routes: Sendable {
     let configuration: ServerConfiguration
     let catalog: Catalog
     let storage: Storage
+    let originals: OriginalsStore
+    let mover: OriginalsMover
     let immichState: ImmichState
     let approvals: PairingApprovals
     let connectors: ConnectorHub
@@ -82,7 +84,20 @@ struct Routes: Sendable {
         }
         authenticated.get("setup") { _, _ in
             try json(await SetupChecks(configuration: configuration, storage: storage, immichState: immichState,
-                                       catalog: catalog).report())
+                                       catalog: catalog, originalsFolder: await originals.root).report())
+        }
+        authenticated.get("storage") { _, context in try json(try await storageInfo(context)) }
+        authenticated.get("storage/locations") { _, _ in
+            try json(OriginalsLocations.suggestions(current: await originals.root))
+        }
+        authenticated.put("storage") { request, context in
+            let body = try await request.decode(as: ServerAPI.MoveOriginalsRequest.self, context: context)
+            do {
+                try await mover.start(to: body.originalsFolder)
+            } catch let failure as OriginalsMover.Failure {
+                throw HTTPError(.unprocessableContent, message: failure.description)
+            }
+            return try json(try await storageInfo(context), status: .accepted)
         }
         authenticated.get("settings/immich") { _, _ in try json(await immichState.settings()) }
         authenticated.put("settings/immich") { request, context in try await connectImmich(request, context) }
@@ -231,7 +246,8 @@ struct Routes: Sendable {
             // Originals imported in place came with compact copies made elsewhere, not here: make
             // one now that the phone backs up an original it still has.
             let hasCompact = !(try await catalog.compact(assetID)).isEmpty
-            let importedWithoutCopy = asset.state == .imported && !hasCompact && resources.contains { $0.externalPath != nil }
+            let importedWithoutCopy = asset.state == .imported && !hasCompact
+                && resources.contains { $0.externalPath != nil || $0.importedFrom != nil }
             if asset.state == .receiving || importedWithoutCopy, resources.allSatisfy({ $0.state == .verified }) {
                 try await catalog.setState(assetID, .queued)
                 try await catalog.enqueue(JobRunner.compress, assetID: assetID)
@@ -358,13 +374,20 @@ struct Routes: Sendable {
             try await catalog.markResource(asset.id, role: resource.role, state: .mismatch)
             throw HTTPError(.unprocessableContent, message: "SHA-256 mismatch; upload \(resource.role.rawValue) again.")
         }
-        let destination = storage.originalDestination(filename: resource.filename, sha256: sha256,
-                                                      captureDate: Timestamp.date(asset.captureDate))
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.moveItem(at: partial, to: destination)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: destination.path)
-        try await catalog.markResource(asset.id, role: resource.role, state: .verified,
-                                       storedPath: storage.relative(destination))
+        let folder = try await catalog.folder(forAsset: asset.id)
+        let catalog = catalog
+        try await originals.place { root in
+            guard FileManager.default.fileExists(atPath: root.path) else {
+                throw HTTPError(.serviceUnavailable, message: "The originals folder \(root.path) isn't available (is its disk connected?).")
+            }
+            let destination = OriginalsStore.destination(root: root, folder: folder, filename: resource.filename, sha256: sha256,
+                                                         captureDate: Timestamp.date(asset.captureDate))
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: partial, to: destination)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: destination.path)
+            try await catalog.markResource(asset.id, role: resource.role, state: .verified,
+                                           storedPath: OriginalsStore.relative(destination, to: root))
+        }
         if try await catalog.resources(asset.id).allSatisfy({ $0.state == .verified }) {
             try await catalog.setState(asset.id, .queued)
             try await catalog.enqueue(JobRunner.compress, assetID: asset.id)
@@ -377,6 +400,19 @@ struct Routes: Sendable {
             throw HTTPError(.notFound)
         }
         return status
+    }
+
+    // MARK: Originals folder
+
+    func storageInfo(_ context: HomespunRequestContext) async throws -> ServerAPI.StorageInfo {
+        let root = await originals.root
+        let stored = try await catalog.storedOriginals()
+        let folder = try await context.deviceID.asyncMap { try await catalog.folder(forDevice: $0) } ?? nil
+        let space = OriginalsStore.space(at: root.path)
+        return ServerAPI.StorageInfo(
+            originalsFolder: root.path, deviceFolder: folder.map { root.appendingPathComponent($0).path },
+            freeBytes: space.free, capacityBytes: space.capacity, storedCount: stored.count,
+            storedBytes: stored.reduce(Int64(0)) { $0 + Int64($1.size) }, move: await mover.status)
     }
 
     // MARK: Compact copies
@@ -431,7 +467,7 @@ struct Routes: Sendable {
                 let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
                 verified = check?.0 == resource.sha256 && check?.1 == resource.size
                 detail = verified ? nil : "the original at \(path) is missing or changed"
-            } else if let path = resource.storedPath, let url = storage.resolve(path) {
+            } else if let path = resource.storedPath, let url = await originals.url(path) {
                 let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
                 verified = check?.0 == resource.sha256 && check?.1 == resource.size
                 detail = verified ? nil : "stored file is missing or changed"
