@@ -1230,6 +1230,26 @@ final class ProblemLog: @unchecked Sendable {
     #expect(Routes.byteRange("bytes=0-1,4-5", size: 100) == nil && Routes.byteRange("items=0-1", size: 100) == nil)
 }
 
+@Test func selfCheckInADockerContainer() async throws {
+    let fixture = try await Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let server = fixture.server
+    var configuration = server.configuration
+    configuration.host = "0.0.0.0"
+    var checks = SetupChecks(configuration: configuration, storage: server.storage, immichState: server.immichState,
+                             catalog: server.catalog)
+    checks.hardware = .init(kind: .container, model: nil)
+    // Docker, not systemd, starts it; and Bonjour needs the host's D-Bus mounted in.
+    #expect(checks.service().status == .ok && checks.service().fix.isEmpty)
+    checks.systemBus = fixture.directory.appendingPathComponent("no-bus").path
+    #expect(checks.discovery().status == .warning && checks.discovery().detail.contains("/var/run/dbus"))
+    checks.systemBus = server.storage.catalog.path
+    #expect(!checks.discovery().detail.contains("/var/run/dbus"))
+    // The app shows commands to run in the container, not the path inside it.
+    let command = "docker exec homespun homespun-server"
+    #expect(HostPlatform.serverCommand(environment: ["HOMESPUN_COMMAND": command]) == command)
+}
+
 @Test(.enabled(if: ffmpegAvailable)) func originalsStreamAndDevicesAreListed() async throws {
     let fixture = try await Fixture()
     let media = try await Media.make(in: fixture.directory)
