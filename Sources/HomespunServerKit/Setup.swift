@@ -68,8 +68,12 @@ extension HostPlatform {
     }
     #endif
 
-    /// This program's path for commands shown to people, with the home folder as `~`.
-    static var serverCommand: String {
+    /// This program's path for commands shown to people, with the home folder as `~`, or
+    /// `HOMESPUN_COMMAND` (the Docker image sets `docker exec homespun homespun-server`).
+    static var serverCommand: String { serverCommand(environment: ProcessInfo.processInfo.environment) }
+
+    static func serverCommand(environment: [String: String]) -> String {
+        if let command = environment["HOMESPUN_COMMAND"], !command.isEmpty { return command }
         let path = Bundle.main.executablePath ?? "homespun-server"
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path

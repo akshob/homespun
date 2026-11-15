@@ -179,7 +179,8 @@ motion, because only AVFoundation keeps the still and its motion paired.
 
 The app's first-run screens walk through setup: "Don't have a server yet? Set one up" shows
 the steps for a Mac or Linux (also at [homespun.photos/setup](https://homespun.photos/setup)).
-Until packages exist, the server is built from source:
+On a NAS, use the Docker image ([Run on a NAS with Docker](#run-on-a-nas-with-docker)).
+Otherwise, until packages exist, the server is built from source:
 
 ```bash
 # Linux (Ubuntu/Debian; the app shows dnf, pacman, and zypper equivalents)
@@ -228,6 +229,67 @@ silently replaced by a folder on the startup disk; the self-check says so instea
 the folder later, use the app (Settings › Originals folder › Change folder): the server copies
 every original there, checks each one, holds new backups for a moment while it switches, and
 only then removes the old copies. A move interrupted by a restart picks up where it left off.
+
+### Run on a NAS with Docker
+
+The image `ghcr.io/akshob/homespun-server` runs Homespun Server on a NAS (Synology, QNAP,
+UGREEN, TrueNAS, Unraid, Asustor, TerraMaster) or any Linux computer with Docker, on amd64 and
+arm64. It holds everything the server needs: libvips, ffmpeg with x265, and the Bonjour tools.
+As with any Linux server, the iPhone compresses Live Photo motion.
+
+1. As your own user (on Synology, in File Station), make a folder for Homespun with a `data`
+   folder in it, for example `docker/homespun/data`, and a folder for originals on your photos
+   share, for example `photo/Homespun`.
+2. Put [`deploy/compose.yaml`](deploy/compose.yaml) in the Homespun folder. In it, set the
+   originals folder, the name the app shows, and `user` to your user's IDs (PUID:PGID), so
+   Homespun can write to both folders. `id` in an SSH session on the NAS shows them; on Synology
+   the first user is usually `1026:100`. The container never runs as root.
+3. Start it: `docker compose up -d` in the Homespun folder. On Synology: Container Manager ›
+   Project › Create, pick the Homespun folder, and use its compose.yaml.
+4. Pair the app: `docker exec homespun homespun-server pair` prints a QR code, a link, and a
+   code. (In Container Manager, open the container's Terminal tab and run
+   `homespun-server pair`.) Other commands work the same way, for example
+   `docker exec homespun homespun-server devices`.
+
+Originals go in `/originals` in the container (a folder per phone, by month, as above); the
+catalog and compact copies go in `/data`. Back up both. The folders must exist before the
+container starts: with compose.yaml, Docker stops with an error instead of making an empty folder,
+so a share that isn't mounted is never silently replaced. To move originals later from the app, first add the new
+place to `volumes` under `/mnt` (for example `/volume2/photos:/mnt/photos`); the app then offers
+it. The server sees only the folders the container is given.
+
+The container uses the NAS's own network (`network_mode: host`), so the pairing link carries the
+NAS's address and the app finds the server with Bonjour. Bonjour goes through the NAS's
+avahi-daemon over D-Bus (the `/var/run/dbus` volume); the self-check in the app says when that is
+missing. D-Bus answers only users the NAS knows, which is one more reason to use your own user's
+IDs. On computers with AppArmor (Ubuntu), Docker's default profile blocks D-Bus, so compose.yaml
+turns it off for this container (`apparmor:unconfined`). Without Bonjour, or on a bridge network,
+enter the address and code in the app instead; on a bridge network, also publish port 8787 and set
+`HOMESPUN_PUBLIC_URL` to the NAS's address.
+
+The image sets `HOMESPUN_DATA=/data`, `HOMESPUN_ORIGINALS=/originals`, `HOMESPUN_HOST=0.0.0.0`,
+and `HOMESPUN_HARDWARE_KIND=container`. Other settings go under `environment`: `HOMESPUN_NAME`,
+`HOMESPUN_PORT`, `HOMESPUN_PUBLIC_URL`, `HOMESPUN_HARDWARE` (the model the app shows, for example
+`Synology DS923+`), and `HOMESPUN_COMMAND` if the container isn't named `homespun` (the app shows
+it in commands, `docker exec homespun homespun-server` by default). Docker checks
+`GET /api/v1/health` every 30 seconds.
+
+To update, pull the new image and recreate the container; the data stays in the folders:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+In Container Manager: stop the project, choose Action › Build (it pulls the new image), then
+start it. `latest` follows the main branch; version tags like `0.2.0` follow releases.
+
+To build the image yourself (`docker buildx` builds both architectures; pushing needs a
+registry you can write to):
+
+```bash
+docker build -t homespun-server .
+docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/homespun-server --push .
+```
 
 ### Cloud copies (connectors)
 
@@ -314,7 +376,7 @@ npx wrangler@4 pages deploy site --project-name homespun --branch main
 ## Roadmap
 
 1. Background uploads and downloads (URLSession background sessions), album membership.
-2. HTTPS for the server (certificate for a homespun.photos name), Docker image.
+2. HTTPS for the server (certificate for a homespun.photos name).
 3. Demo mode, TestFlight, then the App Store.
 
 ## License

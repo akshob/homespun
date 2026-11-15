@@ -1,0 +1,44 @@
+# Homespun Server on a NAS, or any computer with Docker. Instructions:
+# https://github.com/akshob/homespun#run-on-a-nas-with-docker
+#
+# Before the first start, as your own user (on Synology, in File Station):
+#   1. Make a folder for this file, with a folder named "data" in it.
+#   2. Make the originals folder (below) on your photos share.
+#   3. Set `user` below to your user's IDs (PUID:PGID), so Homespun can write to both folders.
+#      `id` in an SSH session on the NAS shows them. On Synology the first user is usually 1026:100.
+# Then start it (`docker compose up -d`, or create a project in Container Manager) and pair the app:
+#   docker exec homespun homespun-server pair
+
+services:
+  homespun:
+    image: ghcr.io/akshob/homespun-server:latest
+    container_name: homespun
+    # The NAS's own network, so the app can find the server (Bonjour) and reach it.
+    network_mode: host
+    user: "1000:1000"  # your user's IDs (PUID:PGID), see above
+    environment:
+      HOMESPUN_NAME: Homespun  # the name the app shows
+      # HOMESPUN_PORT: 8787    # if another app already uses port 8787
+      # HOMESPUN_PUBLIC_URL: 192.168.1.20:8787  # only if the pairing link shows the wrong address
+    volumes:
+      # The catalog and compact copies. Docker stops with an error if a folder is missing,
+      # instead of making an empty one Homespun can't write to (or a share that isn't mounted).
+      - type: bind
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
+      # Originals, a folder per phone. Use a folder on your photos share, for example
+      # /share/Photos/Homespun (QNAP), /mnt/user/photos/Homespun (Unraid), /mnt/tank/photos/Homespun (TrueNAS).
+      - type: bind
+        source: /volume1/photo/Homespun
+        target: /originals
+        bind:
+          create_host_path: false
+      # Bonjour: the server announces itself through the NAS's avahi-daemon, over D-Bus.
+      - /var/run/dbus:/var/run/dbus:ro
+    # On hosts with AppArmor (Ubuntu), Docker's default profile blocks D-Bus, and so Bonjour.
+    # NAS systems don't use AppArmor, and there this changes nothing.
+    security_opt:
+      - apparmor:unconfined
+    restart: unless-stopped
