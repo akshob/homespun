@@ -69,15 +69,21 @@ public enum ServerAPI {
         public var profile: CompressionProfile
         /// Missing from servers older than the setup check.
         public var platform: ServerSetup.Platform?
+        public var hardware: Hardware?
+        /// Free space where originals go.
+        public var freeBytes: Int64?
 
         public init(name: String, version: String, apiVersion: Int = ServerAPI.version, mode: StorageMode,
-                    profile: CompressionProfile, platform: ServerSetup.Platform? = nil) {
+                    profile: CompressionProfile, platform: ServerSetup.Platform? = nil, hardware: Hardware? = nil,
+                    freeBytes: Int64? = nil) {
             self.name = name
             self.version = version
             self.apiVersion = apiVersion
             self.mode = mode
             self.profile = profile
             self.platform = platform
+            self.hardware = hardware
+            self.freeBytes = freeBytes
         }
     }
 
@@ -113,10 +119,60 @@ public enum ServerAPI {
         public var canApprove: Bool
         /// Run on the server to show a pairing code and QR code.
         public var pairCommand: String
-        public init(serverName: String, canApprove: Bool, pairCommand: String) {
+        /// What the server runs on, so the app can recommend among servers before pairing.
+        public var platform: ServerSetup.Platform?
+        public var hardware: Hardware?
+        /// Free space where originals go.
+        public var freeBytes: Int64?
+        public init(serverName: String, canApprove: Bool, pairCommand: String, platform: ServerSetup.Platform? = nil,
+                    hardware: Hardware? = nil, freeBytes: Int64? = nil) {
             self.serverName = serverName
             self.canApprove = canApprove
             self.pairCommand = pairCommand
+            self.platform = platform
+            self.hardware = hardware
+            self.freeBytes = freeBytes
+        }
+    }
+
+    /// The kind of computer a server runs on, for recommending one and wording its trade-offs.
+    public struct Hardware: Codable, Equatable, Sendable {
+        public enum Kind: String, Codable, Sendable {
+            /// Stays on at home: Mac mini, iMac, Mac Studio, a desktop PC.
+            case desktop
+            /// Sleeps when closed.
+            case laptop
+            /// A rack or small server, always on.
+            case server
+            /// Homespun in a container (Docker), usually on a NAS.
+            case container
+        }
+        public var kind: Kind
+        /// For example "Mac mini", "MacBook Air" or "Synology DS923+".
+        public var model: String?
+        public init(kind: Kind, model: String?) {
+            self.kind = kind
+            self.model = model
+        }
+    }
+
+    /// `GET /api/v1/devices`: phones and tablets paired with the server.
+    public struct DeviceInfo: Codable, Equatable, Sendable, Identifiable {
+        public var id: String
+        public var name: String
+        /// Its folder in the originals folder.
+        public var folder: String?
+        public var pairedAt: Date?
+        public var lastSeenAt: Date?
+        /// The device asking.
+        public var isThisDevice: Bool
+        public init(id: String, name: String, folder: String?, pairedAt: Date?, lastSeenAt: Date?, isThisDevice: Bool) {
+            self.id = id
+            self.name = name
+            self.folder = folder
+            self.pairedAt = pairedAt
+            self.lastSeenAt = lastSeenAt
+            self.isThisDevice = isThisDevice
         }
     }
 

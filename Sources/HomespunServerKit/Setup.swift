@@ -22,6 +22,52 @@ enum HostPlatform {
 }
 
 extension HostPlatform {
+    /// The kind of computer this is, read once. `HOMESPUN_HARDWARE_KIND` (desktop, laptop, server,
+    /// container) and `HOMESPUN_HARDWARE` (a model name, e.g. "Synology DS923+") override it, for a
+    /// Docker image to say which NAS it runs on.
+    static let hardware: ServerAPI.Hardware = detectHardware(environment: ProcessInfo.processInfo.environment)
+
+    static func detectHardware(environment: [String: String]) -> ServerAPI.Hardware {
+        let override = environment["HOMESPUN_HARDWARE"].flatMap { $0.isEmpty ? nil : $0 }
+        if let kind = environment["HOMESPUN_HARDWARE_KIND"].flatMap(ServerAPI.Hardware.Kind.init(rawValue:)) {
+            return .init(kind: kind, model: override)
+        }
+        #if os(macOS)
+        let model = macModelName()
+        return .init(kind: model?.hasPrefix("MacBook") == true ? .laptop : .desktop, model: override ?? model)
+        #else
+        let files = FileManager.default
+        let cgroup = (try? String(contentsOfFile: "/proc/1/cgroup", encoding: .utf8)) ?? ""
+        if files.fileExists(atPath: "/.dockerenv") || files.fileExists(atPath: "/run/.containerenv")
+            || ["docker", "containerd", "kubepods", "libpod"].contains(where: cgroup.contains) {
+            return .init(kind: .container, model: override)
+        }
+        func dmi(_ name: String) -> String? {
+            let value = (try? String(contentsOfFile: "/sys/class/dmi/id/\(name)", encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let value, !value.isEmpty, !value.lowercased().contains("to be filled"),
+                  !value.lowercased().contains("default string"), value.lowercased() != "system product name" else { return nil }
+            return value
+        }
+        // SMBIOS chassis types: 8, 9, 10, 14, 31, 32 are portable; 17, 23, 28, 29 are servers.
+        let chassis = Int(dmi("chassis_type") ?? "") ?? 0
+        let kind: ServerAPI.Hardware.Kind = [8, 9, 10, 14, 31, 32].contains(chassis) ? .laptop
+            : [17, 23, 28, 29].contains(chassis) ? .server : .desktop
+        let model = override ?? [dmi("sys_vendor"), dmi("product_name")].compactMap { $0 }.joined(separator: " ")
+        return .init(kind: kind, model: model.isEmpty ? nil : model)
+        #endif
+    }
+
+    #if os(macOS)
+    /// "Mac mini", "MacBook Air", …, from the system profiler (model identifiers like Mac14,3 say little).
+    private static func macModelName() -> String? {
+        guard let text = Tools.output("system_profiler", ["SPHardwareDataType", "-json"]),
+              let json = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+              let items = json["SPHardwareDataType"] as? [[String: Any]] else { return nil }
+        return items.first?["machine_name"] as? String
+    }
+    #endif
+
     /// This program's path for commands shown to people, with the home folder as `~`.
     static var serverCommand: String {
         let path = Bundle.main.executablePath ?? "homespun-server"

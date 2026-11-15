@@ -54,7 +54,8 @@ struct Routes: Sendable {
 
     func info() async -> ServerAPI.ServerInfo {
         .init(name: configuration.name, version: ServerConfiguration.version, mode: await immichState.mode,
-              profile: configuration.profile, platform: HostPlatform.current())
+              profile: configuration.profile, platform: HostPlatform.current(), hardware: HostPlatform.hardware,
+              freeBytes: OriginalsStore.space(at: await originals.root.path).free)
     }
 
     func add(to router: Router<HomespunRequestContext>) {
@@ -63,7 +64,9 @@ struct Routes: Sendable {
         api.post("pair") { request, context in try await pair(request, context) }
         api.get("pair/options") { _, _ in
             try json(ServerAPI.PairingOptions(serverName: configuration.name, canApprove: approvals.canApprove,
-                                              pairCommand: HostPlatform.serverCommand + " pair"))
+                                              pairCommand: HostPlatform.serverCommand + " pair",
+                                              platform: HostPlatform.current(), hardware: HostPlatform.hardware,
+                                              freeBytes: OriginalsStore.space(at: await originals.root.path).free))
         }
         api.post("pair/requests") { request, context in try await requestApproval(request, context) }
         api.get("pair/requests/:id") { request, context in try await approvalStatus(request, context) }
@@ -126,6 +129,19 @@ struct Routes: Sendable {
         authenticated.get("assets/:id/compact/:role") { _, context in try await download(context) }
         authenticated.post("assets/:id/imported") { request, context in try await imported(request, context) }
         authenticated.post("assets/:id/verify") { _, context in try json(try await verify(context)) }
+        authenticated.get("assets/:id/original/:role") { request, context in try await original(request, context) }
+        authenticated.get("devices") { _, context in
+            try json(try await catalog.devices().filter { $0.revokedAt == nil }.map {
+                ServerAPI.DeviceInfo(id: $0.id, name: $0.name, folder: $0.folder, pairedAt: Timestamp.date($0.createdAt),
+                                     lastSeenAt: Timestamp.date($0.lastSeenAt), isThisDevice: $0.id == context.deviceID)
+            })
+        }
+        authenticated.delete("devices/:id") { _, context in
+            guard try await catalog.revoke(deviceID: context.parameters.get("id") ?? "") else {
+                throw HTTPError(.notFound, message: "No such device.")
+            }
+            return Response(status: .noContent)
+        }
         authenticated.post("copies/lookup") { request, context in
             let body = try await request.decode(as: ServerAPI.CopyLookupRequest.self, context: context)
             let hashes = body.sha256.map { $0.lowercased() }
@@ -400,6 +416,69 @@ struct Routes: Sendable {
             throw HTTPError(.notFound)
         }
         return status
+    }
+
+    // MARK: Originals
+
+    /// `GET …/original/{role}`: the original itself, for comparing it with its compact copy (also
+    /// after it left the phone). Supports one `Range`, so a video can be streamed.
+    func original(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
+        let assetID = try assetID(context), role = try role(context)
+        guard let resource = try await catalog.resources(assetID).first(where: { $0.role == role }),
+              resource.state == .verified else { throw HTTPError(.notFound, message: "No such original.") }
+        let url: URL
+        if let path = resource.externalPath {
+            url = URL(fileURLWithPath: path)
+        } else if let stored = resource.storedPath, let resolved = await originals.url(stored) {
+            url = resolved
+        } else {
+            throw HTTPError(.notFound, message: "This original is in Immich; open it there.")
+        }
+        guard (try? JobRunner.size(of: url)) == resource.size else {
+            throw HTTPError(.notFound, message: "The original is missing or changed on the server.")
+        }
+        var headers = HTTPFields()
+        headers[.contentType] = Self.mediaType(resource.filename)
+        headers[.acceptRanges] = "bytes"
+        if let header = request.headers[.range] {
+            guard let range = Self.byteRange(header, size: resource.size) else {
+                headers[.contentRange] = "bytes */\(resource.size)"
+                return Response(status: .rangeNotSatisfiable, headers: headers)
+            }
+            headers[.contentRange] = "bytes \(range.lowerBound)-\(range.upperBound)/\(resource.size)"
+            headers[.contentLength] = String(range.count)
+            return Response(status: .partialContent, headers: headers,
+                            body: try await FileIO().loadFile(path: url.path, range: range, context: context))
+        }
+        headers[.contentLength] = String(resource.size)
+        return Response(status: .ok, headers: headers, body: try await FileIO().loadFile(path: url.path, context: context))
+    }
+
+    /// One `bytes=` range (`a-b`, `a-` or `-n`), clamped to the file; nil if it can't be served.
+    static func byteRange(_ header: String, size: Int) -> ClosedRange<Int>? {
+        guard header.hasPrefix("bytes="), size > 0 else { return nil }
+        let spec = header.dropFirst(6)
+        guard !spec.contains(","), let dash = spec.firstIndex(of: "-") else { return nil }
+        let first = spec[..<dash].trimmingCharacters(in: .whitespaces), last = spec[spec.index(after: dash)...].trimmingCharacters(in: .whitespaces)
+        if first.isEmpty {
+            guard let count = Int(last), count > 0 else { return nil }
+            return max(0, size - count)...(size - 1)
+        }
+        guard let start = Int(first), start < size else { return nil }
+        let end = last.isEmpty ? size - 1 : min(Int(last) ?? -1, size - 1)
+        return end >= start ? start...end : nil
+    }
+
+    static func mediaType(_ filename: String) -> String {
+        switch (filename as NSString).pathExtension.lowercased() {
+        case "jpg", "jpeg": "image/jpeg"
+        case "heic", "heif": "image/heic"
+        case "png": "image/png"
+        case "dng": "image/x-adobe-dng"
+        case "mov": "video/quicktime"
+        case "mp4", "m4v": "video/mp4"
+        default: "application/octet-stream"
+        }
     }
 
     // MARK: Originals folder

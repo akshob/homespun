@@ -1210,3 +1210,64 @@ final class ProblemLog: @unchecked Sendable {
     #expect(try await fixture.server.catalog.setting(OriginalsMover.setting) == plan)
     #expect(await fixture.server.originals.root.path == fixture.directory.appendingPathComponent("Volume").path)
 }
+
+// MARK: Originals, devices and hardware for the app's redesign
+
+@Test func hardwareIsDetectedOrSetByTheDockerImage() {
+    let docker = HostPlatform.detectHardware(environment: ["HOMESPUN_HARDWARE_KIND": "container", "HOMESPUN_HARDWARE": "Synology DS923+"])
+    #expect(docker == .init(kind: .container, model: "Synology DS923+"))
+    let detected = HostPlatform.detectHardware(environment: [:])
+    #if os(macOS)
+    #expect([.desktop, .laptop].contains(detected.kind))
+    #else
+    #expect([.desktop, .laptop, .server, .container].contains(detected.kind))
+    #endif
+    #expect(Routes.byteRange("bytes=0-9", size: 100) == 0...9)
+    #expect(Routes.byteRange("bytes=90-", size: 100) == 90...99)
+    #expect(Routes.byteRange("bytes=-5", size: 100) == 95...99)
+    #expect(Routes.byteRange("bytes=95-500", size: 100) == 95...99)
+    #expect(Routes.byteRange("bytes=100-", size: 100) == nil && Routes.byteRange("bytes=5-1", size: 100) == nil)
+    #expect(Routes.byteRange("bytes=0-1,4-5", size: 100) == nil && Routes.byteRange("items=0-1", size: 100) == nil)
+}
+
+@Test(.enabled(if: ffmpegAvailable)) func originalsStreamAndDevicesAreListed() async throws {
+    let fixture = try await Fixture()
+    let media = try await Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let options = try await client.call("/api/v1/pair/options").decode(ServerAPI.PairingOptions.self)
+        #expect(options.platform != nil && options.hardware != nil && (options.freeBytes ?? 0) > 0)
+        #expect(try await client.call("/api/v1/info", token: token).decode(ServerAPI.ServerInfo.self).hardware != nil)
+
+        let photo = try descriptor(.photo, media.photo)
+        _ = try await client.call("/api/v1/assets", .post, token: token,
+                                  json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [photo]))
+        let path = "/api/v1/assets/\(photo.sha256)/original/photo"
+        #expect(try await client.call(path, token: token).status == .notFound)
+        _ = try await fixture.upload(client, token: token, asset: photo.sha256, role: .photo, file: media.photo)
+        let bytes = try Data(contentsOf: media.photo)
+        let whole = try await client.call(path, token: token)
+        #expect(whole.status == .ok && whole.data == bytes && whole.headers[.contentType] == "image/jpeg")
+        #expect(try await client.call(path).status == .unauthorized)
+        var headers = HTTPFields()
+        headers[.authorization] = "Bearer \(token)"
+        headers[.range] = "bytes=10-19"
+        let part = try await client.execute(uri: path, method: .get, headers: headers)
+        #expect(part.status == .partialContent && Data(part.body.readableBytesView) == bytes[10...19])
+        #expect(part.headers[.contentRange] == "bytes 10-19/\(bytes.count)")
+        headers[.range] = "bytes=\(bytes.count)-"
+        #expect(try await client.execute(uri: path, method: .get, headers: headers).status == .rangeNotSatisfiable)
+        #expect(try await client.call("/api/v1/assets/\(photo.sha256)/original/video", token: token).status == .notFound)
+
+        // Devices: this one and a second; removing the second stops it.
+        let code = try await fixture.server.newPairingCode()
+        let second = try await client.call("/api/v1/pair", .post, json: ServerAPI.PairRequest(code: code, deviceName: "iPad"))
+            .decode(ServerAPI.PairResponse.self)
+        let devices = try await client.call("/api/v1/devices", token: token).decode([ServerAPI.DeviceInfo].self)
+        #expect(devices.count == 2 && devices.filter(\.isThisDevice).map(\.name) == ["Test iPhone"])
+        #expect(Set(devices.compactMap(\.folder)) == ["Test iPhone", "iPad"])
+        let other = try #require(devices.first { !$0.isThisDevice })
+        #expect(try await client.call("/api/v1/devices/\(other.id)", .delete, token: token).status == .noContent)
+        #expect(try await client.call("/api/v1/info", token: second.token).status == .unauthorized)
+        #expect(try await client.call("/api/v1/devices/\(other.id)", .delete, token: token).status == .notFound)
+    }
+}

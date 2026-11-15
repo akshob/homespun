@@ -136,6 +136,33 @@ struct ServerClient: Sendable {
         try await send("assets/\(assetID)/verify", method: "POST", as: ServerAPI.Verification.self)
     }
 
+    /// Devices paired with the server.
+    func devices() async throws -> [ServerAPI.DeviceInfo] { try await send("devices", as: [ServerAPI.DeviceInfo].self) }
+
+    /// Unpairs a device (this one too: it can't use the server afterwards).
+    func removeDevice(_ id: String) async throws {
+        var request = request("devices/\(id)", method: "DELETE")
+        request.timeoutInterval = 15
+        let (data, response) = try await session.data(for: request)
+        _ = try check(data, response, accepting: [204])
+    }
+
+    /// Downloads an original from the server (for comparing it with its compact copy).
+    func downloadOriginal(assetID: String, role: ServerAPI.ResourceRole, to directory: URL, name: String) async throws -> URL {
+        let (temporary, response) = try await session.download(for: request("assets/\(assetID)/original/\(role.rawValue)"))
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else {
+            let data = (try? Data(contentsOf: temporary)) ?? Data()
+            _ = try check(data, response, accepting: [200])
+            throw Failure(status: status, message: "The server didn't send the original.", code: nil)
+        }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: temporary, to: url)
+        return url
+    }
+
     /// Where originals are kept on the server, and a move in progress.
     func storage() async throws -> ServerAPI.StorageInfo { try await send("storage", as: ServerAPI.StorageInfo.self) }
 
