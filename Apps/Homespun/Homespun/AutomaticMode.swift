@@ -84,6 +84,12 @@ final class AutomaticMode {
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskID)
     }
 
+    /// The user chose Keep As Is for an item that couldn't be backed up: it isn't tried again.
+    func keepAsIs(_ id: String) {
+        state.settled.insert(id)
+        save()
+    }
+
     /// Asks iOS for a background run: on power and network, an hour or more from now.
     func schedule() {
         guard state.enabled else { return }

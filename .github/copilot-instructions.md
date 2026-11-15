@@ -107,6 +107,10 @@ cd Apps/Homespun && xcodegen generate   # macOS only
   `TEST_RUNNER_HOMESPUN_SERVER` and `TEST_RUNNER_HOMESPUN_PAIRING_CODE` (optionally
   `TEST_RUNNER_HOMESPUN_PICK`, `TEST_RUNNER_HOMESPUN_REMOVE=1`). Use a fresh simulator whose
   library holds only synthetic media, and a server with a test data directory.
+- `ItemViewerUITests` takes the same two variables and runs in order on one simulator: `test1…`
+  pairs and backs up the 2 newest, `test2…` frees one and compares it with its original
+  downloaded from the server, `test3…` takes review screenshots (Debug builds launched with
+  `-itemDemoState failed` or `kept` show those Details variants on items not backed up).
 - Feed each AVAssetWriter input from its own task; one loop over several inputs can deadlock.
 - `HomespunUITests` selects in the app's own library grid (`GridSteps.swift`: cells have
   identifier `asset` and the badge label as value) and reads item states from `status.<state>`
