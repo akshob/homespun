@@ -91,9 +91,8 @@ final class ItemViewerUITests: XCTestCase {
         let app = launch()
         let ready = app.gridItems("Ready to free up").matching(NSPredicate(format: "label BEGINSWITH 'Photo'"))
         XCTAssertTrue(ready.firstMatch.waitForExistence(timeout: 20), "no photo ready to free up")
-        ready.element(boundBy: ready.count - 1).tap()
         let state = app.staticTexts["item.state"]
-        XCTAssertTrue(state.waitForExistence(timeout: 10))
+        XCTAssertTrue(open(ready.element(boundBy: ready.count - 1), app), "the item didn't open")
 
         app.buttons["item.action"].tap()
         let proceed = app.buttons["remove.confirm"]
@@ -141,8 +140,7 @@ final class ItemViewerUITests: XCTestCase {
         XCTAssertTrue(atHome.firstMatch.waitForExistence(timeout: 20), "nothing at home; run test2 first")
         // Each item at home (a photo and a video after test2), its Details, and Compare.
         for index in 0..<min(atHome.count, 2) {
-            atHome.element(boundBy: index).tap()
-            XCTAssertTrue(app.staticTexts["item.state"].waitForExistence(timeout: 10))
+            XCTAssertTrue(open(atHome.element(boundBy: index), app), "the item didn't open")
             sleep(1)
             attach(app, "Review: viewer \(index)")
             app.buttons["item.details"].tap()
@@ -167,8 +165,7 @@ final class ItemViewerUITests: XCTestCase {
             // The demo state shows in the viewer only; the grid still says Not backed up.
             let item = app.gridItems("Not backed up")
             XCTAssertTrue(item.firstMatch.waitForExistence(timeout: 20), "no \(demo) item")
-            item.firstMatch.tap()
-            XCTAssertTrue(app.staticTexts["item.state"].waitForExistence(timeout: 10))
+            XCTAssertTrue(open(item.firstMatch, app), "the item didn't open")
             attach(app, "Review: viewer, \(demo)")
             app.buttons["item.details"].tap()
             XCTAssertTrue(app.descendants(matching: .any)["details.problem"].waitForExistence(timeout: 10))
@@ -178,6 +175,16 @@ final class ItemViewerUITests: XCTestCase {
             }
             attach(app, "Review: details, \(demo)")
         }
+    }
+
+    /// Taps a grid item until its viewer opens: after a relaunch a tip can take the first tap.
+    @MainActor private func open(_ item: XCUIElement, _ app: XCUIApplication) -> Bool {
+        let state = app.staticTexts["item.state"]
+        for _ in 0..<3 {
+            if item.exists { item.tap() }
+            if state.waitForExistence(timeout: 8) { return true }
+        }
+        return false
     }
 
     /// A Details row, read as one element: its title, then its detail.
