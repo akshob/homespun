@@ -50,9 +50,9 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Homespun
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Homespun reads the photos and videos you choose so it can store the originals on your server and make compact copies."
+        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Homespun reads your photos and videos to back up the originals to your own computer, make compact copies, and show what you can free up."
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Homespun saves compact copies of your photos and videos to your library."
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Homespun finds and connects to your Homespun Server on your home network."
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Homespun finds Homespun Server on your home network, so this iPhone can pair with it."
         INFOPLIST_KEY_NSCameraUsageDescription: "Homespun scans the QR code your server shows when you pair it."
   # Runs inside the app on a simulator whose library holds only synthetic media.
   HomespunTests:
