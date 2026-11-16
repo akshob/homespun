@@ -126,13 +126,12 @@ struct LibraryRightPage: View {
     }
 
     private var runningCard: some View {
-        let run = model.job.runItems
-        let open = run.filter { $0.state == .waiting || $0.isWorking }.count
-        let done = run.count - open
+        let run = model.job.runProgress
+        let done = run.done
         return VStack(alignment: .leading, spacing: 8) {
-            Text("Backing up \(min(done + 1, run.count)) of \(run.count)").font(.headline)
-            ProgressView(value: Double(done), total: Double(max(1, run.count))).tint(Theme.accent)
-            if let current = run.first(where: \.isWorking) {
+            Text("Backing up \(min(done + 1, run.total)) of \(run.total)").font(.headline)
+            ProgressView(value: Double(done), total: Double(max(1, run.total))).tint(Theme.accent)
+            if let current = run.current {
                 Text(current.name).font(.subheadline).foregroundStyle(Theme.secondaryLabel).lineLimit(1)
             }
         }

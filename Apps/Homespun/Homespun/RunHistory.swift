@@ -38,19 +38,71 @@ final class RunHistory {
     struct Run: Codable, Equatable, Sendable, Identifiable {
         enum Kind: String, Codable, Sendable { case backUp, freeUp }
 
-        var id = UUID()
+        var id: UUID
         var kind: Kind
         var trigger: Trigger
         var start: Date
         var end: Date
-        var items: [Item]
+        var items: [Item] { didSet { tally = Tally(items) } }
         /// What Free Up Space freed on this iPhone.
-        var freedBytes = 0
+        var freedBytes: Int
+        /// Counted once (a whole-library run has tens of thousands of items, and Activity's rows
+        /// ask for these on every redraw).
+        private(set) var tally: Tally
 
-        func count(_ result: Item.Result) -> Int { items.reduce(0) { $0 + ($1.result == result ? 1 : 0) } }
+        struct Tally: Equatable, Sendable {
+            var counts: [Item.Result: Int] = [:]
+            var originalBytes = 0
+            var compactBytes = 0
+
+            init(_ items: [Item]) {
+                for item in items {
+                    counts[item.result, default: 0] += 1
+                    if item.result == .saved {
+                        originalBytes += item.originalBytes ?? 0
+                        compactBytes += item.compactBytes ?? 0
+                    }
+                }
+            }
+        }
+
+        init(id: UUID = UUID(), kind: Kind, trigger: Trigger, start: Date, end: Date, items: [Item], freedBytes: Int = 0) {
+            self.id = id
+            self.kind = kind
+            self.trigger = trigger
+            self.start = start
+            self.end = end
+            self.items = items
+            self.freedBytes = freedBytes
+            tally = Tally(items)
+        }
+
+        private enum CodingKeys: String, CodingKey { case id, kind, trigger, start, end, items, freedBytes }
+
+        init(from decoder: any Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(id: try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID(),
+                      kind: try values.decode(Kind.self, forKey: .kind), trigger: try values.decode(Trigger.self, forKey: .trigger),
+                      start: try values.decode(Date.self, forKey: .start), end: try values.decode(Date.self, forKey: .end),
+                      items: try values.decode([Item].self, forKey: .items),
+                      freedBytes: try values.decodeIfPresent(Int.self, forKey: .freedBytes) ?? 0)
+        }
+
+        func encode(to encoder: any Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(id, forKey: .id)
+            try values.encode(kind, forKey: .kind)
+            try values.encode(trigger, forKey: .trigger)
+            try values.encode(start, forKey: .start)
+            try values.encode(end, forKey: .end)
+            try values.encode(items, forKey: .items)
+            try values.encode(freedBytes, forKey: .freedBytes)
+        }
+
+        func count(_ result: Item.Result) -> Int { tally.counts[result] ?? 0 }
         /// The originals backed up, and their compact copies.
-        var originalBytes: Int { items.reduce(0) { $0 + ($1.result == .saved ? $1.originalBytes ?? 0 : 0) } }
-        var compactBytes: Int { items.reduce(0) { $0 + ($1.result == .saved ? $1.compactBytes ?? 0 : 0) } }
+        var originalBytes: Int { tally.originalBytes }
+        var compactBytes: Int { tally.compactBytes }
     }
 
     struct Totals: Equatable {
@@ -64,21 +116,58 @@ final class RunHistory {
     static let keptDays = 90
 
     /// Newest first.
-    private(set) var runs: [Run]
+    private(set) var runs: [Run] = [] { didSet { derive() } }
+    /// Worked out when the runs change, not on every redraw.
+    private(set) var totals = Totals()
+    /// Items whose latest result is a failure or "not yet", newest first: what still needs attention.
+    private(set) var needsAttention: [Item] = []
     private let url: URL
     private let now: () -> Date
+    /// The file has been read (the app reads it in the background at launch).
+    private(set) var loaded = false
 
     static var defaultURL: URL {
         URL.applicationSupportDirectory.appendingPathComponent("Homespun/history.json")
     }
 
-    init(url: URL = RunHistory.defaultURL, now: @escaping () -> Date = Date.init) {
+    /// `load: false` leaves reading the file to `load()` (the app, so launch doesn't wait for it).
+    init(url: URL = RunHistory.defaultURL, now: @escaping () -> Date = Date.init, load: Bool = true) {
         self.url = url
         self.now = now
+        guard load else { return }
+        merge(Self.read(url))
+    }
+
+    /// Reads the file in the background; runs recorded meanwhile are kept.
+    func load() async {
+        guard !loaded else { return }
+        let url = url
+        merge(await Task.detached(priority: .userInitiated) { Self.read(url) }.value)
+    }
+
+    private nonisolated static func read(_ url: URL) -> [Run] {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        runs = ((try? decoder.decode([Run].self, from: Data(contentsOf: url))) ?? []).sorted { $0.end > $1.end }
-        if prune() { save() }
+        return (try? decoder.decode([Run].self, from: Data(contentsOf: url))) ?? []
+    }
+
+    private func merge(_ read: [Run]) {
+        loaded = true
+        let recorded = Set(runs.map(\.id))
+        runs = (runs + read.filter { !recorded.contains($0.id) }).sorted { $0.end > $1.end }
+        // Runs recorded before the file was read weren't written yet.
+        if prune() || !recorded.isEmpty { save() }
+    }
+
+    private func derive() {
+        totals = runs.reduce(into: Totals()) { totals, run in
+            totals.backedUp += run.count(.saved)
+            totals.originalBytes += run.originalBytes
+            totals.compactBytes += run.compactBytes
+            totals.freedBytes += run.freedBytes
+            totals.freedCount += run.kind == .freeUp ? run.items.count : 0
+        }
+        needsAttention = Self.needsAttention(runs)
     }
 
     /// Adds a finished run (a backup with at least one item, or freed space).
@@ -90,7 +179,9 @@ final class RunHistory {
             Telemetry.shared.record(.freeUpFinished(items: run.items.count, bytes: run.freedBytes,
                                                     first: !runs.contains { $0.kind == .freeUp }))
         }
+        var runs = runs
         runs.insert(run, at: runs.firstIndex { $0.end <= run.end } ?? runs.endIndex)
+        self.runs = runs
         prune()
         save()
     }
@@ -102,20 +193,7 @@ final class RunHistory {
                    items: names.map { Item(assetID: "", name: $0, result: .freed) }, freedBytes: bytes))
     }
 
-    var totals: Totals {
-        runs.reduce(into: Totals()) { totals, run in
-            totals.backedUp += run.count(.saved)
-            totals.originalBytes += run.originalBytes
-            totals.compactBytes += run.compactBytes
-            totals.freedBytes += run.freedBytes
-            totals.freedCount += run.kind == .freeUp ? run.items.count : 0
-        }
-    }
-
     var lastBackUp: Run? { runs.first { $0.kind == .backUp } }
-
-    /// Items whose latest result is a failure or "not yet", newest first: what still needs attention.
-    var needsAttention: [Item] { Self.needsAttention(runs) }
 
     nonisolated static func needsAttention(_ runs: [Run]) -> [Item] {
         var seen = Set<String>(), items: [Item] = []
@@ -144,17 +222,43 @@ final class RunHistory {
     /// Drops runs older than 90 days; true if any were dropped.
     @discardableResult private func prune() -> Bool {
         guard let cutoff = Calendar.current.date(byAdding: .day, value: -Self.keptDays, to: now()) else { return false }
-        let count = runs.count
+        guard runs.contains(where: { $0.end < cutoff }) else { return false }
         runs.removeAll { $0.end < cutoff }
-        return runs.count != count
+        return true
     }
 
+    /// Writes in the background (a first backup of a whole library makes a long history); the
+    /// writer keeps only the newest version, in order.
     private func save() {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(runs) else { return }
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: url, options: .atomic)
+        // Writing before the file is read would replace 90 days of runs with the few recorded so far.
+        guard loaded else { return }
+        version &+= 1
+        let runs = runs, url = url, version = version, writer = writer
+        Task.detached(priority: .utility) { await writer.write(runs, version: version, to: url) }
+    }
+
+    @ObservationIgnored private var version = 0
+    @ObservationIgnored private let writer = Writer()
+
+    /// Waits for the history's writes so far (tests).
+    func flush() async { await writer.wait(for: version) }
+
+    private actor Writer {
+        private var written = 0
+
+        func write(_ runs: [Run], version: Int, to url: URL) {
+            guard version > written else { return }
+            defer { written = version }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            guard let data = try? encoder.encode(runs) else { return }
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
+
+        func wait(for version: Int) async {
+            while written < version { try? await Task.sleep(for: .milliseconds(10)) }
+        }
     }
 }
 

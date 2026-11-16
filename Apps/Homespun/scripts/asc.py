@@ -6,6 +6,8 @@
   asc.py testers           creates the internal group "Homespun Team" (all builds, no review needed)
                            and adds every App Store Connect user of the team to it
   asc.py wait [build]      waits until that build (default: the newest) has processed
+  asc.py crashes           testers' crash feedback (TestFlight's "Share" after a crash), with each crash
+                           log saved to ~/homespun-builds/crashes (symbolicate with scripts/symbolicate.py)
 
 Reads ASC_KEY_ID and ASC_ISSUER_ID (or ~/.appstoreconnect/homespun.env) and the key from
 ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8.
@@ -127,6 +129,29 @@ def wait(version=None):
         time.sleep(60)
 
 
+def crashes(limit=10, folder=None):
+    """Testers' crash feedback from TestFlight (when they tap Share after a crash): when, which build
+    and device, their comment; each crash log is saved to `folder` (default ~/homespun-builds/crashes)."""
+    import os
+    folder = folder or os.path.expanduser("~/homespun-builds/crashes")
+    os.makedirs(folder, exist_ok=True)
+    app = app_id()
+    listed = call("GET", f"/apps/{app}/betaFeedbackCrashSubmissions?limit={limit}&sort=-createdDate")
+    for item in listed.get("data", []):
+        a = item["attributes"]
+        print(f"{a.get('createdDate')}  build {a.get('buildBundleId') or ''} {a.get('deviceModel')} "
+              f"iOS {a.get('osVersion')}  {a.get('comment') or ''}".strip())
+        try:
+            log = call("GET", f"/betaFeedbackCrashSubmissions/{item['id']}/crashLog")
+            text = log["data"]["attributes"].get("logText") or ""
+            path = os.path.join(folder, f"{item['id']}.crash")
+            with open(path, "w") as out:
+                out.write(text)
+            print(f"  crash log: {path}")
+        except Exception as error:  # noqa: BLE001 (the log may not be ready yet)
+            print(f"  no crash log yet: {error}")
+
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "builds"
     if command == "builds":
@@ -134,6 +159,8 @@ if __name__ == "__main__":
             print(f"{version}  {state:<12} uploaded {uploaded}")
     elif command == "testers":
         testers()
+    elif command == "crashes":
+        crashes()
     elif command == "wait":
         sys.exit(0 if wait(sys.argv[2] if len(sys.argv) > 2 else None) == "VALID" else 1)
     else:

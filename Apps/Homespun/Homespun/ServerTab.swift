@@ -205,6 +205,7 @@ struct ServerTab: View {
             thisIPhoneSection
         }
         .homespunList()
+        .perfScrollTracking()
         .navigationTitle("Server")
         .task { await loadNotifications() }
     }
@@ -364,7 +365,10 @@ struct ServerTab: View {
     }
 
     private func loadNotifications() async {
-        notifications = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        // Off the main thread: the first call sets up the notification framework.
+        notifications = await Task.detached(priority: .userInitiated) {
+            await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        }.value
     }
 
     private func refresh() async {

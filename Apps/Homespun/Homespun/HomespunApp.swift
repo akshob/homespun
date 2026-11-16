@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct HomespunApp: App {
     init() {
+        PerfMonitor.mainStarted = CACurrentMediaTime()
         AppModel.registerBackgroundRun()
         Journey.configureTips()
         MetricsReceiver.shared.start()

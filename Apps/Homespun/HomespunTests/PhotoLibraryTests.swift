@@ -115,3 +115,22 @@ import Testing
     #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 0, 1, 1, 1])
 }
 
+
+/// The library snapshot (shown at launch before Photos is read) comes back as written: missing
+/// months and media info stay missing, a video keeps its length, an undated item stays undated.
+@Test func librarySnapshotRoundTrips() throws {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("snapshot-\(UUID().uuidString).plist")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let date = Date(timeIntervalSinceReferenceDate: 700_000_000.25)
+    let snapshot = LibrarySnapshot(ids: ["a/L0/001", "b/L0/001", "c/L0/001", "d/L0/001"],
+                                   months: ["a/L0/001": 24_300, "c/L0/001": 24_301],
+                                   media: ["a/L0/001": .init(kind: .photo, seconds: 0, created: date),
+                                           "b/L0/001": .init(kind: .video, seconds: 95, created: date),
+                                           "c/L0/001": .init(kind: .livePhoto, seconds: 0, created: nil)])
+    try snapshot.write(to: url)
+    #expect(LibrarySnapshot.read(from: url) == snapshot)
+    try LibrarySnapshot(ids: [], months: [:], media: [:]).write(to: url)
+    #expect(LibrarySnapshot.read(from: url)?.ids == [])
+    try Data("not a plist".utf8).write(to: url)
+    #expect(LibrarySnapshot.read(from: url) == nil)
+}

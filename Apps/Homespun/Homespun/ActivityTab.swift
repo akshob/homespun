@@ -85,6 +85,7 @@ struct ActivityTab: View {
                 }
             }
             .homespunList()
+            .perfScrollTracking()
             .navigationTitle("Activity")
             .navigationSubtitle(subtitle(attention: attention.count))
         } destination: { route in
@@ -150,9 +151,8 @@ struct ActivityTab: View {
     static func attention(_ model: AppModel) -> [RunHistory.Item] {
         let items = model.history.needsAttention
         guard !items.isEmpty else { return [] }
-        let busy = Set(model.job.items.filter { $0.state == .waiting || $0.isWorking }.map(\.assetIdentifier))
-        let present = PhotoLibrary.existing(items.map(\.assetID))
-        return items.filter { present.contains($0.assetID) && !busy.contains($0.assetID) }
+        let states = model.job.states, library = model.library.library.state
+        return items.filter { library.positions[$0.assetID] != nil && states[$0.assetID]?.isOpen != true }
     }
 }
 
@@ -187,28 +187,26 @@ private struct NowCard: View {
     @State private var confirmingStop = false
 
     var body: some View {
-        let items = job.runItems
-        let open = items.filter { $0.state == .waiting || $0.isWorking }.count
-        let done = items.count - open
-        let current = items.first(where: \.isWorking)
-        let fraction = items.isEmpty ? 0 : Double(done) / Double(items.count)
+        let run = job.runProgress
+        let done = run.done, total = run.total
+        let fraction = total == 0 ? 0 : Double(done) / Double(total)
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 14) {
                 ProgressRing(fraction: fraction)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(job.isPaused ? "Paused · \(done) of \(items.count) backed up"
-                         : "Backing up \(min(done + 1, items.count)) of \(items.count)")
+                    Text(job.isPaused ? "Paused · \(done) of \(total) backed up"
+                         : "Backing up \(min(done + 1, total)) of \(total)")
                         .font(.headline).foregroundStyle(Theme.label)
                     if job.isPaused {
                         Text("Continue picks up where it stopped.").font(.subheadline)
                             .foregroundStyle(Theme.secondaryLabel)
-                    } else if let current, case .working(let message) = current.state {
-                        Text("\(current.name) · \(message)").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                    } else if let current = run.current {
+                        Text("\(current.name) · \(current.message)").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
                             .lineLimit(1).truncationMode(.middle)
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityValue("\(done) of \(items.count)")
+                .accessibilityValue("\(done) of \(total)")
                 .accessibilityIdentifier("activity.now")
                 Spacer(minLength: 4)
                 // One glass capsule holding both controls.
@@ -229,7 +227,7 @@ private struct NowCard: View {
                 .glassEffect(.regular.interactive(), in: .capsule)
             }
             ProgressView(value: fraction).tint(Theme.accent).accessibilityHidden(true)
-            if let line = detailLine(items: items, done: done) {
+            if let line = detailLine(run) {
                 Text(line).font(.footnote).foregroundStyle(Theme.secondaryLabel)
             }
         }
@@ -256,15 +254,15 @@ private struct NowCard: View {
     }
 
     /// "About 2 min left · 1.4 GB → 0.3 GB".
-    private func detailLine(items: [CompactJob.Item], done: Int) -> String? {
+    private func detailLine(_ run: CompactJob.RunProgress) -> String? {
         var parts: [String] = []
-        if !job.isPaused, done > 0, let started = job.runStarted, items.count > done {
-            let left = Date().timeIntervalSince(started) / Double(done) * Double(items.count - done)
+        let done = run.done
+        if !job.isPaused, done > 0, let started = job.runStarted, run.total > done {
+            let left = Date().timeIntervalSince(started) / Double(done) * Double(run.total - done)
             let duration = Duration.seconds(max(left, 60))
             parts.append("About \(duration.formatted(.units(allowed: [.hours, .minutes], width: .abbreviated, maximumUnitCount: 2))) left")
         }
-        var original = 0, compact = 0
-        for item in items { if case .saved(let o, let c) = item.state { original += o; compact += c } }
+        let original = run.originalBytes, compact = run.compactBytes
         if original > 0 { parts.append("\(LibraryController.bytes(original)) → \(LibraryController.bytes(compact))") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

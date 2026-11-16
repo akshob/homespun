@@ -54,7 +54,7 @@ import Testing
 /// Drag-to-select finds the cell under a finger among the cells on screen.
 @Test func cellFramesFindTheCellUnderAPoint() {
     let frames = CellFrames()
-    frames.rects = ["a": CGRect(x: 0, y: 0, width: 99, height: 99), "b": CGRect(x: 101, y: 0, width: 99, height: 99)]
-    #expect(frames.id(at: CGPoint(x: 150, y: 50)) == "b")
-    #expect(frames.id(at: CGPoint(x: 100, y: 50)) == nil) // the gap
+    frames.rects = [0: CGRect(x: 0, y: 0, width: 99, height: 99), 1: CGRect(x: 101, y: 0, width: 99, height: 99)]
+    #expect(frames.position(at: CGPoint(x: 150, y: 50)) == 1)
+    #expect(frames.position(at: CGPoint(x: 100, y: 50)) == nil) // the gap
 }

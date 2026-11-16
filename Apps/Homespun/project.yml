@@ -3,6 +3,11 @@ name: Homespun
 options:
   deploymentTarget:
     iOS: "26.0"
+# Profile: Release's optimisation with testability, for the performance tests only (never shipped).
+configs:
+  Debug: debug
+  Release: release
+  Profile: release
 packages:
   HomespunPackage:
     path: ../..
@@ -14,6 +19,7 @@ targets:
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
+      Profile: Signing.xcconfig
     info:
       path: Homespun/Info.plist
       properties:
@@ -59,6 +65,9 @@ targets:
         INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Homespun saves compact copies of your photos and videos to your library."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Homespun finds Homespun Server on your home network, so this iPhone can pair with it."
         INFOPLIST_KEY_NSCameraUsageDescription: "Homespun scans the QR code your server shows when you pair it."
+      configs:
+        Profile:
+          ENABLE_TESTABILITY: YES
   # Runs inside the app on a simulator whose library holds only synthetic media.
   HomespunTests:
     type: bundle.unit-test
@@ -67,6 +76,7 @@ targets:
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
+      Profile: Signing.xcconfig
     dependencies:
       - target: Homespun
       - package: HomespunPackage
@@ -84,6 +94,7 @@ targets:
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
+      Profile: Signing.xcconfig
     dependencies:
       - target: Homespun
     settings:
@@ -102,3 +113,13 @@ schemes:
       storeKitConfiguration: Homespun.storekit
     test:
       targets: [HomespunTests, HomespunUITests]
+  # The performance tests (homespun-test/perf-ui.sh): no automatic screenshots or UI snapshots,
+  # which make the app walk its accessibility tree on the main thread at every gesture.
+  HomespunPerf:
+    build:
+      targets:
+        Homespun: all
+    test:
+      config: Profile
+      targets: [HomespunTests, HomespunUITests]
+      captureScreenshotsAutomatically: false

@@ -97,8 +97,16 @@ final class LibraryController {
     }
 
     func refresh() async {
-        access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-        library.reload()
+        let now = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        // The whole library is read at launch and when access changes; after that Photos' change
+        // observer keeps it current (re-reading 35,000 items on every return to the app is slow).
+        if !library.loaded || now != access {
+            access = now
+            await library.reload()
+            // The grid shows now, from what's on this iPhone; the server's answer (slow away from
+            // home) updates it after.
+            await refreshGrid()
+        }
         if settings.isPaired { await settings.refreshServerInfo() }
         // Recent items backed up and then deleted here go to the server's trash, never compacted.
         if settings.serverStatus == .reachable { await automatic.reportRemoved(settings: settings, ledger: job.ledger) }
@@ -107,30 +115,37 @@ final class LibraryController {
     }
 
     func requestAccess() async {
-        access = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        // `refresh` sees the new status (against `access`) and reads the library.
+        _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         await refresh()
     }
 
     func refreshGrid() async {
-        library.update(ledger: await job.ledger.snapshot(), job: job.states, backedUp: await backedUpDue())
-        loaded = true
+        await library.update(ledger: await job.ledger.snapshot(), job: job.states, backedUp: await backedUpDue())
+        // Only once the library itself has been read (this also runs when a backup changes things).
+        if library.loaded { loaded = true }
         let state = library.state
         TipState.notBackedUp = state.count(.notBackedUp)
         TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
         TipState.automaticOn = automatic.enabled
         TipState.trialDone = settings.trialConfirmed
-        refreshNewSinceBackup()
+        await refreshNewSinceBackup()
     }
 
     /// Items backed up without a compact copy, with when automatic mode makes it (nil: a kept favorite).
     private func backedUpDue() async -> [String: Date?] {
         let backedUp = await job.ledger.backedUpSnapshot()
         guard !backedUp.isEmpty else { return [:] }
+        let ids = Array(backedUp.keys)
+        let assets = await Task.detached(priority: .userInitiated) { () -> [(String, Date?, Bool)] in
+            var found: [(String, Date?, Bool)] = []
+            PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
+                found.append((asset.localIdentifier, asset.creationDate, asset.isFavorite))
+            }
+            return found
+        }.value
         var due: [String: Date?] = [:]
-        PHAsset.fetchAssets(withLocalIdentifiers: Array(backedUp.keys), options: nil).enumerateObjects { asset, _, _ in
-            due[asset.localIdentifier] = self.automatic.due(created: asset.creationDate, id: asset.localIdentifier,
-                                                            favorite: asset.isFavorite)
-        }
+        for (id, created, favorite) in assets { due[id] = automatic.due(created: created, id: id, favorite: favorite) }
         return due
     }
 
@@ -141,9 +156,8 @@ final class LibraryController {
         if case .unreachable = settings.serverStatus { inputs.unreachable = serverName }
         if case .checking(let message) = removal { inputs.removing = message }
         if job.isRunning {
-            let run = job.runItems
-            let open = run.filter { $0.state == .waiting || $0.isWorking }.count
-            inputs.backingUp = (run.count - open, run.count, run.first(where: \.isWorking)?.name)
+            let run = job.runProgress
+            inputs.backingUp = (run.done, run.total, run.current?.name)
         }
         if let finished { inputs.finished = (finished.count, finished.bytes, Set(finished.originals)) }
         inputs.readyCount = ready.count
@@ -153,23 +167,26 @@ final class LibraryController {
         return inputs
     }
 
-    private func refreshNewSinceBackup() {
-        let values = try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        phoneFreeBytes = values?.volumeAvailableCapacityForImportantUsage.map(Int.init)
+    private func refreshNewSinceBackup() async {
+        phoneFreeBytes = await Task.detached(priority: .utility) {
+            (try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+                .volumeAvailableCapacityForImportantUsage.map(Int.init)
+        }.value
         guard let last = journey.lastBackup else {
             newSinceBackup = nil
             return
         }
-        let created = library.identifiers(createdAfter: last)
-        let count = library.state.cells.reduce(0) { $0 + ($1.canCompact && created.contains($1.id) ? 1 : 0) }
+        let count = await newItems().count
         newSinceBackup = (count, Calendar.current.dateComponents([.day], from: last, to: .now).day ?? 0)
     }
 
-    /// The items not backed up that were created since the last backup.
-    var newItems: [String] {
+    /// The items not backed up that were created since the last backup, in library order.
+    func newItems() async -> [String] {
         guard let last = journey.lastBackup else { return [] }
-        let created = library.identifiers(createdAfter: last)
-        return library.state.cells.filter { $0.canCompact && created.contains($0.id) }.map(\.id)
+        let created = await library.identifiers(createdAfter: last)
+        let state = library.state
+        return created.compactMap { id in state.cell(id).flatMap { $0.canCompact ? (state.positions[id], id) : nil } }
+            .sorted { $0.0 ?? 0 < $1.0 ?? 0 }.map(\.1)
     }
 
     func refreshReady() async {
@@ -196,15 +213,37 @@ final class LibraryController {
         if case .done = removal { removal = .idle }
         batch.formUnion(identifiers)
         journey.backupStarted(manual: true)
-        job.enqueue(identifiers)
-        LongRun.shared.begin(items: identifiers.count, server: serverName)
         Announce.say("Backing up \(identifiers.count) \(identifiers.count == 1 ? "item" : "items").")
+        // Picked now: the first task while setup is still going (it finishes setup right after).
+        let trigger: RunHistory.Trigger = settings.onboardingComplete ? .manual : .firstTask
+        Task {
+            await job.enqueue(identifiers, trigger: trigger)
+            // Once the items are queued, so the system's progress follows them from the start.
+            LongRun.shared.begin(items: identifiers.count, server: serverName)
+        }
     }
 
-    /// The job changed: badges follow, and when it ends, what it backed up is offered for freeing.
-    func jobChanged() async {
-        await refreshGrid()
+    /// The job changed: the items it touched change badge at once; an item that finished (its
+    /// compact copy is in the ledger now) brings a full rebuild once things settle.
+    func jobChanged() {
+        let changes = job.takePhaseChanges()
+        library.apply(job: changes)
+        let finished = changes.values.contains { state in
+            switch state {
+            case .waiting?, .working?: false
+            default: true
+            }
+        }
+        guard finished else { return }
+        pendingRebuild?.cancel()
+        pendingRebuild = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await refreshGrid()
+        }
     }
+
+    @ObservationIgnored private var pendingRebuild: Task<Void, Never>?
 
     func jobFinished() async {
         journey.backupFinished()

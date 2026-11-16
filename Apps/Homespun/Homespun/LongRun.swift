@@ -33,14 +33,8 @@ final class LongRun {
         var failure: NSError?
         do {
             try HSObjC.catching {
-                registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
-                    guard let task = task as? BGContinuedProcessingTask else {
-                        task.setTaskCompleted(success: false)
-                        return
-                    }
-                    let box = TaskBox(task: task)
-                    Task { @MainActor in await LongRun.shared.follow(box, job: AppModel.shared.job) }
-                }
+                registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil,
+                                                             launchHandler: Self.launchHandler())
             }
         } catch {
             failure = error as NSError
@@ -71,6 +65,32 @@ final class LongRun {
         return .started
     }
 
+    /// iOS calls the launch and expiration handlers on its own queue. A closure written in this
+    /// main-actor class would be main-actor code, and Swift stops the app when it runs elsewhere
+    /// (0.1.0 (202611151655) ended this way on a phone, as the system started the task). Made here,
+    /// outside the main actor, they hop to it themselves.
+    nonisolated private static func launchHandler() -> @Sendable (BGTask) -> Void {
+        { task in
+            guard let task = task as? BGContinuedProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let box = TaskBox(task: task)
+            Task { @MainActor in await LongRun.shared.follow(box, job: AppModel.shared.job) }
+        }
+    }
+
+    nonisolated private static func expirationHandler(_ box: TaskBox, expiry: ExpiryBox, job: CompactJob)
+        -> @Sendable () -> Void {
+        {
+            expiry.expired = true
+            Task { @MainActor in
+                job.stopWaiting(Set(job.items.filter { $0.state == .waiting }.map(\.assetIdentifier)))
+            }
+            box.task.setTaskCompleted(success: false)
+        }
+    }
+
     /// Not available here (a simulator, or the system said no): the run carries on while open.
     private static func unavailable(_ step: String, _ error: NSError?) {
         let reason = error?.localizedDescription ?? "the system said no"
@@ -86,18 +106,11 @@ final class LongRun {
         let expiry = ExpiryBox()
         // iOS ended it (Stop on the Lock Screen, or out of time): drop what hasn't started and say
         // so at once, or iOS ends the app. The item in progress finishes when the app runs again.
-        task.expirationHandler = {
-            expiry.expired = true
-            Task { @MainActor in
-                job.stopWaiting(Set(job.items.filter { $0.state == .waiting }.map(\.assetIdentifier)))
-            }
-            task.setTaskCompleted(success: false)
-        }
+        task.expirationHandler = Self.expirationHandler(box, expiry: expiry, job: job)
         defer { running = false }
-        while !expiry.expired, job.isRunning || job.items.contains(where: { $0.state == .waiting }) {
-            let items = job.runItems
-            let total = items.count
-            let done = items.filter { $0.state != .waiting && !$0.isWorking }.count
+        while !expiry.expired, job.isRunning || job.hasWaiting {
+            let total = job.runProgress.total
+            let done = job.runProgress.done
             task.progress.totalUnitCount = Int64(max(total, 1))
             task.progress.completedUnitCount = Int64(done)
             task.updateTitle(task.title, subtitle: "\(done) of \(total)")

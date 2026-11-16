@@ -8,18 +8,16 @@ import SwiftUI
 struct RunDetailView: View {
     let model: AppModel
     let runID: UUID?
+    /// The run in progress, rebuilt when one of its items finishes (not for each progress message).
+    @State private var liveItems: [RunHistory.Item]?
+    /// Which originals are still on this iPhone (looked up in the background; a whole-library run is
+    /// tens of thousands of items).
+    @State private var present: Set<String>?
 
     var body: some View {
         let live = runID == nil
         let run = runID.flatMap { id in model.history.runs.first { $0.id == id } }
-        let jobItems = live ? model.job.runItems : []
-        let items = run?.items ?? jobItems.map { CompactJob.historyItem($0) }
-        let working = Dictionary(jobItems.compactMap { item -> (UUID, String)? in
-            if case .working(let message) = item.state { (item.id, message) } else { nil }
-        }, uniquingKeysWith: { a, _ in a })
-        let workingByAsset = Dictionary(jobItems.compactMap { item in working[item.id].map { (item.assetIdentifier, $0) } },
-                                        uniquingKeysWith: { a, _ in a })
-        let present = PhotoLibrary.existing(items.map(\.assetID).filter { !$0.isEmpty })
+        let items = run?.items ?? liveItems ?? []
         let server = model.library.serverName
         List {
             if let run {
@@ -53,8 +51,8 @@ struct RunDetailView: View {
             if !items.isEmpty {
                 Section(run == nil ? "" : "Items") {
                     ForEach(items) { item in
-                        RunItemRow(item: item, working: workingByAsset[item.assetID],
-                                   present: present.contains(item.assetID), server: server,
+                        RunItemRow(item: item, job: live ? model.job : nil,
+                                   present: present?.contains(item.assetID) ?? true, server: server,
                                    thumbnails: model.library.library.thumbnails)
                     }
                 }
@@ -62,11 +60,19 @@ struct RunDetailView: View {
             }
         }
         .homespunList()
+        .task(id: live ? model.job.phaseVersion : -1) {
+            guard live else { return }
+            liveItems = model.job.runItems.map { CompactJob.historyItem($0) }
+        }
+        .task(id: PresenceKey(run: runID, count: items.count)) {
+            let ids = items.map(\.assetID).filter { !$0.isEmpty }
+            present = await Task.detached(priority: .userInitiated) { PhotoLibrary.existing(ids) }.value
+        }
         .overlay {
             if !live, run == nil {
                 ContentUnavailableView("This run is no longer kept", systemImage: "clock.arrow.circlepath",
                                        description: Text("Activity keeps runs for 90 days."))
-            } else if live, items.isEmpty {
+            } else if live, liveItems?.isEmpty == true {
                 ContentUnavailableView("Nothing running", systemImage: "checkmark.circle",
                                        description: Text("The run finished. It's in History."))
             }
@@ -85,6 +91,11 @@ struct RunDetailView: View {
             .accessibilityElement(children: .combine)
         }
     }
+}
+
+private struct PresenceKey: Hashable {
+    let run: UUID?
+    let count: Int
 }
 
 /// "Done in 2 min" / "Today, 1:12 AM to 1:14 AM", or "Freed 2.1 GB".
@@ -141,12 +152,18 @@ private struct Receipt: View {
 /// One item of a run: its thumbnail and badge, its name, and "12.4 MB → 2.3 MB" or why not.
 struct RunItemRow: View {
     let item: RunHistory.Item
-    /// What it's doing now, while the run is in progress.
-    var working: String?
+    /// The job, while the run is in progress: the item being worked on shows what it's doing.
+    var job: CompactJob?
     /// The original is still on this iPhone.
     var present: Bool
     var server: String
     let thumbnails: PHCachingImageManager
+
+    /// What it's doing now, while the run is in progress.
+    private var working: String? {
+        guard let current = job?.runProgress.current, current.asset == item.assetID else { return nil }
+        return current.message
+    }
 
     var body: some View {
         HStack(spacing: 14) {

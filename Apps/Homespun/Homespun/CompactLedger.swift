@@ -2,8 +2,22 @@
 import Foundation
 
 /// Which originals already have a compact copy, so picking an item twice does not save a
-/// second copy. Stored as JSON in Application Support and replaced atomically.
+/// second copy. Stored in Application Support as a JSON snapshot plus a journal of changes since
+/// (one JSON line each), so recording an item appends a line instead of rewriting a library's
+/// worth of entries; the snapshot is rewritten every `compactEvery` changes. Replaying the journal
+/// is idempotent, so a crash at any point loses nothing that was written.
 actor CompactLedger {
+    /// One journal line: entries set, and originals forgotten.
+    private struct Change: Codable {
+        var set: [String: Entry]?
+        var remove: [String]?
+    }
+
+    static let compactEvery = 1_000
+    private var journalLines = 0
+    /// The journal ends with a whole line (false after a crash or a full disk cut one short: the
+    /// next change starts on a line of its own, or the fragment would swallow it).
+    private var journalEndsClean = true
     struct Entry: Codable, Equatable, Sendable {
         var compactIdentifier: String
         var originalBytes: Int
@@ -21,10 +35,29 @@ actor CompactLedger {
     }
 
     private let url: URL
-    private var entries: [String: Entry]
+    /// Read on first use, on the ledger's own executor: a library's worth of entries (tens of
+    /// thousands) takes too long to decode on the main thread while the app launches.
+    private lazy var entries: [String: Entry] = loadWithJournal()
     /// Kept in a file of its own next to the ledger, so the ledger's format doesn't change.
-    private var backedUp: [String: BackedUp]
+    private lazy var backedUp: [String: BackedUp] = Self.load(backedUpURL)
     private var backedUpURL: URL { url.deletingLastPathComponent().appendingPathComponent("backed-up.json") }
+    private var journalURL: URL { url.deletingPathExtension().appendingPathExtension("journal") }
+
+    /// The snapshot with the journal replayed over it (a torn last line, from a crash mid-write, is skipped).
+    private func loadWithJournal() -> [String: Entry] {
+        var entries: [String: Entry] = Self.load(url)
+        guard let data = try? Data(contentsOf: journalURL), !data.isEmpty else { return entries }
+        journalEndsClean = data.last == UInt8(ascii: "\n")
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        for line in data.split(separator: UInt8(ascii: "\n")) {
+            guard let change = try? decoder.decode(Change.self, from: Data(line)) else { continue }
+            for key in change.remove ?? [] { entries[key] = nil }
+            if let set = change.set { entries.merge(set) { _, latest in latest } }
+            journalLines += 1
+        }
+        return entries
+    }
 
     static var defaultURL: URL {
         URL.applicationSupportDirectory.appendingPathComponent("Homespun/ledger.json")
@@ -32,8 +65,6 @@ actor CompactLedger {
 
     init(url: URL = CompactLedger.defaultURL) {
         self.url = url
-        entries = Self.load(url)
-        backedUp = Self.load(url.deletingLastPathComponent().appendingPathComponent("backed-up.json"))
     }
 
     /// Reads the ledger. A file that can't be read is set aside, never overwritten: it's the only
@@ -59,8 +90,12 @@ actor CompactLedger {
 
     /// Whether this item is a compact copy Homespun saved, wherever it is in Photos now.
     func isCompactCopy(_ identifier: String) -> Bool {
-        entries.values.contains { $0.compactIdentifier == identifier }
+        if compactIdentifiers == nil { compactIdentifiers = Set(entries.values.map(\.compactIdentifier)) }
+        return compactIdentifiers?.contains(identifier) ?? false
     }
+
+    /// Every compact copy's identifier, built when first asked and dropped on changes.
+    private var compactIdentifiers: Set<String>?
 
     /// Originals whose server copy is known, with their entries.
     func serverBacked() -> [(original: String, entry: Entry)] {
@@ -70,9 +105,10 @@ actor CompactLedger {
 
     func record(original: String, compact: String, originalBytes: Int, compactBytes: Int,
                 serverAssetID: String? = nil) throws {
-        entries[original] = Entry(compactIdentifier: compact, originalBytes: originalBytes,
-                                  compactBytes: compactBytes, savedAt: Date(), serverAssetID: serverAssetID)
-        try save()
+        let entry = Entry(compactIdentifier: compact, originalBytes: originalBytes, compactBytes: compactBytes,
+                          savedAt: Date(), serverAssetID: serverAssetID)
+        entries[original] = entry
+        try append(Change(set: [original: entry]))
         if backedUp.removeValue(forKey: original) != nil { try saveBackedUp() }
     }
 
@@ -112,15 +148,48 @@ actor CompactLedger {
         guard !new.isEmpty || !removing.isEmpty else { return }
         for key in removing { entries[key] = nil }
         entries.merge(new) { _, latest in latest }
-        try save()
+        try append(Change(set: new.isEmpty ? nil : new, remove: removing.isEmpty ? nil : removing))
         try forgetBackedUp(Array(new.keys))
     }
 
-    private func save() throws {
+    /// Appends a change to the journal; every `compactEvery` changes, writes the snapshot and
+    /// starts the journal afresh.
+    private func append(_ change: Change) throws {
+        _ = entries
+        compactIdentifiers = nil
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        var line = try encoder.encode(change)
+        line.append(UInt8(ascii: "\n"))
+        if !journalEndsClean { line.insert(UInt8(ascii: "\n"), at: line.startIndex) }
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: journalURL.path) {
+            FileManager.default.createFile(atPath: journalURL.path, contents: nil)
+        }
+        let handle = try FileHandle(forWritingTo: journalURL)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+        do {
+            try handle.write(contentsOf: line)
+        } catch {
+            journalEndsClean = false
+            throw error
+        }
+        journalEndsClean = true
+        journalLines += 1
+        if journalLines >= Self.compactEvery { try compact() }
+    }
+
+    /// Writes every entry to the snapshot (atomically), then empties the journal. A crash between
+    /// the two only replays changes already in the snapshot.
+    func compact() throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         try encoder.encode(entries).write(to: url, options: .atomic)
+        try? FileManager.default.removeItem(at: journalURL)
+        journalLines = 0
+        journalEndsClean = true
     }
 }

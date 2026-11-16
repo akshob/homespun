@@ -170,7 +170,7 @@ final class AutomaticMode {
 
     /// Items Photos added since `token`. `read` is false if the changes couldn't be read, so
     /// the token must not move on. An expired token can't be read again either way.
-    private static func inserted(since token: Data?) -> (ids: Set<String>, read: Bool) {
+    private nonisolated static func inserted(since token: Data?) -> (ids: Set<String>, read: Bool) {
         guard let token = token.flatMap(unarchive) else { return ([], true) }
         var ids = Set<String>()
         do {
@@ -187,7 +187,7 @@ final class AutomaticMode {
 
     /// Items Photos deleted since `token` (nil: none read yet). `read` is false if the changes
     /// couldn't be read; an expired or foreign token (a restored backup) reads as nothing deleted.
-    private static func deleted(since token: Data?) -> (ids: Set<String>, read: Bool) {
+    private nonisolated static func deleted(since token: Data?) -> (ids: Set<String>, read: Bool) {
         guard let token = token.flatMap(unarchive) else { return ([], true) }
         var ids = Set<String>()
         do {
@@ -203,9 +203,11 @@ final class AutomaticMode {
     }
 
     /// What this run does: compact copies for items whose time came (backed up already or not),
-    /// and backing up recent ones (files mode only; in Immich mode they wait).
-    private func plan(ledger: [String: CompactLedger.Entry], backedUp: [String: CompactLedger.BackedUp],
-                      added: Set<String>, backsUp: Bool) -> AutomaticPlan {
+    /// and backing up recent ones (files mode only; in Immich mode they wait). Reads the library
+    /// since the cutoff, so it runs in the background (it's the whole library at first).
+    private nonisolated static func plan(_ state: State, ledger: [String: CompactLedger.Entry],
+                                         backedUp: [String: CompactLedger.BackedUp], added: Set<String>,
+                                         backsUp: Bool) -> AutomaticPlan {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "(mediaType == %d OR mediaType == %d) AND creationDate >= %@",
                                         PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue, state.since as NSDate)
@@ -242,12 +244,15 @@ final class AutomaticMode {
         guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized, let client = settings.client else { return }
         let backedUp = await ledger.backedUpSnapshot()
         let token = PHPhotoLibrary.shared().currentChangeToken
-        let deleted = Self.deleted(since: state.removalToken)
+        let since = state.removalToken
+        let deleted = await Task.detached(priority: .utility) { Self.deleted(since: since) }.value
         let before = state, now = Date()
         for id in deleted.ids where state.removed[id] == nil { state.removed[id] = now }
         if deleted.read { state.removalToken = Self.archive(token) }
         // Recovered from Recently Deleted (or never gone): nothing to tell.
-        for id in PhotoLibrary.existing(Array(state.removed.keys), includeHidden: true) { state.removed[id] = nil }
+        let removed = Array(state.removed.keys)
+        let back = await Task.detached(priority: .utility) { PhotoLibrary.existing(removed, includeHidden: true) }.value
+        for id in back { state.removed[id] = nil }
         state.removed = state.removed.filter { id, date in backedUp[id] != nil || now.timeIntervalSince(date) < 7 * 86_400 }
         var reported: [String] = []
         for id in state.removed.keys {
@@ -304,16 +309,20 @@ final class AutomaticMode {
 
         // The token as of now: items added while this run works are found next time.
         let token = PHPhotoLibrary.shared().currentChangeToken
-        let inserted = Self.inserted(since: state.token)
+        let since = state.token
+        let inserted = await Task.detached(priority: .utility) { Self.inserted(since: since) }.value
         state.pending.formUnion(inserted.ids)
         let now = Date()
         for id in inserted.ids where state.firstSeen[id] == nil { state.firstSeen[id] = now }
         await reportRemoved(settings: settings, ledger: job.ledger)
-        let plan = plan(ledger: await job.ledger.snapshot(), backedUp: await job.ledger.backedUpSnapshot(),
-                        added: state.pending, backsUp: settings.server?.mode != .immich)
+        let planLedger = await job.ledger.snapshot(), planBackedUp = await job.ledger.backedUpSnapshot()
+        let snapshot = state, backsUp = settings.server?.mode != .immich
+        let plan = await Task.detached(priority: .utility) {
+            Self.plan(snapshot, ledger: planLedger, backedUp: planBackedUp, added: snapshot.pending, backsUp: backsUp)
+        }.value
         let picked = plan.compact + plan.backUp
         if !picked.isEmpty {
-            job.enqueue(picked, trigger: .automatic, backUpOnly: Set(plan.backUp))
+            await job.enqueue(picked, trigger: .automatic, backUpOnly: Set(plan.backUp))
             // Wait for these items (the job may also hold items the user picked).
             func busy() -> Bool {
                 let states = job.states
@@ -347,8 +356,11 @@ final class AutomaticMode {
         }
         // Forget added items that are done, gone, backed up (they're tracked there), or given up on.
         let ledger = await job.ledger.snapshot(), backedUp = await job.ledger.backedUpSnapshot()
-        let copies = Set(ledger.values.map(\.compactIdentifier)), album = PhotoLibrary.albumMembers()
-        let existing = PhotoLibrary.existing(Array(state.pending), includeHidden: true)
+        let pending = Array(state.pending)
+        let (copies, album, existing) = await Task.detached(priority: .utility) {
+            (Set(ledger.values.map(\.compactIdentifier)), PhotoLibrary.albumMembers(),
+             PhotoLibrary.existing(pending, includeHidden: true))
+        }.value
         state.pending = state.pending.filter { id in
             existing.contains(id) && ledger[id]?.serverAssetID == nil && backedUp[id] == nil && !copies.contains(id)
                 && !album.contains(id) && !state.settled.contains(id) && (state.attempts[id] ?? 0) < Self.maximumAttempts
@@ -394,11 +406,11 @@ final class AutomaticMode {
         try? await UNUserNotificationCenter.current().add(request)
     }
 
-    private static func archive(_ token: PHPersistentChangeToken) -> Data? {
+    private nonisolated static func archive(_ token: PHPersistentChangeToken) -> Data? {
         try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
     }
 
-    private static func unarchive(_ data: Data) -> PHPersistentChangeToken? {
+    private nonisolated static func unarchive(_ data: Data) -> PHPersistentChangeToken? {
         try? NSKeyedUnarchiver.unarchivedObject(ofClass: PHPersistentChangeToken.self, from: data)
     }
 }
@@ -413,7 +425,7 @@ final class AppModel {
     let automatic = AutomaticMode()
     let copyFinder = CopyFinder()
     /// Activity › History: backup runs (manual, automatic, the first task) and freed space.
-    let history = RunHistory()
+    let history = RunHistory(load: false)
     let library: LibraryController
 
     private init() {
@@ -422,6 +434,8 @@ final class AppModel {
         job.history = history
         library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
                                     copyFinder: copyFinder)
+        let history = history
+        Task { await history.load() }
     }
 
     /// Registers the background run; must happen before the app finishes launching.

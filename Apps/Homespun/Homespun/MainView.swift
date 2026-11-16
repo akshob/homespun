@@ -21,6 +21,7 @@ struct RootView: View {
             }
         }
         .tint(Theme.accent)
+        .overlay(alignment: .topLeading) { PerfMonitorLabel() }
         .modifier(QuitUnexpectedly(model: model))
         .onChange(of: scenePhase, initial: true) { _, phase in
             // From the first moment on screen (onChange alone misses the launch).
@@ -29,7 +30,8 @@ struct RootView: View {
         .onOpenURL { url in
             if let link = PairingLink(url) { settings.pendingLink = link }
         }
-        .onChange(of: model.job.items.map(\.state.phase)) { _, _ in Task { await model.library.jobChanged() } }
+        // Each item's phase, not its progress messages: badges change only when the phase does.
+        .onChange(of: model.job.phaseVersion) { _, _ in model.library.jobChanged() }
         .onChange(of: model.job.isRunning) { _, running in
             if !running {
                 Task {
@@ -104,17 +106,24 @@ struct MainTabView: View {
 
     var body: some View {
         @Bindable var settings = model.settings
-        TabView(selection: $tab) {
+        // The tab span starts as the selection changes (a tab's onAppear runs before onChange).
+        TabView(selection: Binding(get: { tab }, set: { new in
+            if new != tab { PerfMonitor.shared.begin("tab") }
+            tab = new
+        })) {
             Tab("Library", systemImage: "photo.on.rectangle", value: TabID.library) {
                 LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) }, route: $libraryRoute)
+                    .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.library")
             Tab("Activity", systemImage: "clock.arrow.circlepath", value: TabID.activity) {
                 ActivityTab(model: model, freeUp: { openFreeUp(nil) })
+                    .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.activity")
             Tab("Server", systemImage: "server.rack", value: TabID.server) {
                 ServerTab(model: model)
+                    .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.server")
         }
@@ -159,8 +168,10 @@ struct MainTabView: View {
         case .activity: tab = .activity
         case .server: tab = .server
         case .backUpNew:
-            let ids = model.library.newItems
-            if ids.count > 200 { sheet = .backUp(ids) } else { model.library.backUp(ids) }
+            Task {
+                let ids = await model.library.newItems()
+                if ids.count > 200 { sheet = .backUp(ids) } else { model.library.backUp(ids) }
+            }
         }
     }
 

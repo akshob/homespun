@@ -22,7 +22,7 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
     RunHistory.Run(kind: .backUp, trigger: trigger, start: end.addingTimeInterval(-120), end: end, items: items)
 }
 
-@MainActor @Test func runHistoryRecordsRunsNewestFirstAndKeepsThem() {
+@MainActor @Test func runHistoryRecordsRunsNewestFirstAndKeepsThem() async {
     let url = temporaryURL(), clock = Clock()
     defer { try? FileManager.default.removeItem(at: url) }
     let history = RunHistory(url: url, now: { clock.now })
@@ -38,13 +38,14 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
     #expect(history.runs.map(\.trigger) == [.manual, .manual, .automatic])
     #expect(history.lastBackUp?.items.map(\.assetID) == ["c"])
 
+    await history.flush()
     let reloaded = RunHistory(url: url, now: { clock.now })
     #expect(reloaded.runs == history.runs)
     #expect(reloaded.totals == RunHistory.Totals(backedUp: 2, originalBytes: 13_400_000, compactBytes: 2_500_000,
                                                  freedBytes: 12_400_000, freedCount: 1))
 }
 
-@MainActor @Test func runHistoryForgetsRunsAfter90Days() {
+@MainActor @Test func runHistoryForgetsRunsAfter90Days() async {
     let url = temporaryURL(), clock = Clock()
     defer { try? FileManager.default.removeItem(at: url) }
     let history = RunHistory(url: url, now: { clock.now })
@@ -58,6 +59,7 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
     history.record(backUp([item("newer", .saved, original: 1, compact: 1)], at: clock.now))
     #expect(history.runs.flatMap(\.items).map(\.assetID) == ["newer", "new"])
     clock.now += 100 * day
+    await history.flush()
     #expect(RunHistory(url: url, now: { clock.now }).runs.isEmpty)
 }
 
@@ -104,4 +106,60 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
 
     let months = RunHistory.freedByMonth([freed, backUp([], at: now)], months: 3, now: now, calendar: calendar)
     #expect(months == [0, 0, 2_100_000_000])
+}
+
+/// The run's progress and each item's state are kept as items change (Activity, the accessory and
+/// the Lock Screen read them on every progress message); they must match counting the items again.
+@MainActor @Test func runProgressFollowsTheJobsItems() async {
+    let settings = AppSettings(defaults: UserDefaults(suiteName: "run-progress-\(UUID().uuidString)")!)
+    let job = CompactJob(settings: settings, ledger: CompactLedger(url: temporaryURL()))
+    // Items that aren't in the library fail as they're queued.
+    await job.enqueue(["missing-a", "missing-b"], trigger: .manual)
+    #expect(job.runProgress.total == 2 && job.runProgress.done == 2)
+    #expect(job.states["missing-a"]?.phase == .failed && !job.hasWaiting)
+    for _ in 0..<1_000 where job.isRunning { await Task.yield() }
+    #expect(!job.isRunning)
+    // The next run counts from zero; the earlier items keep their states.
+    await job.enqueue(["missing-c"], trigger: .manual)
+    #expect(job.runProgress.total == 1 && job.runProgress.done == 1)
+    #expect(job.states.count == 3)
+    for _ in 0..<1_000 where job.isRunning { await Task.yield() }
+    job.clearFinished()
+    #expect(job.runProgress.total == 0 && job.states.isEmpty)
+}
+
+/// Items are read from Photos before they're queued; Stop meanwhile means they never are.
+@MainActor @Test func stopBeforeItemsAreQueuedDropsThem() async {
+    let settings = AppSettings(defaults: UserDefaults(suiteName: "stop-early-\(UUID().uuidString)")!)
+    let job = CompactJob(settings: settings, ledger: CompactLedger(url: temporaryURL()))
+    async let queued: Void = job.enqueue(["missing-a", "missing-b"], trigger: .manual)
+    for _ in 0..<100_000 where !job.isPreparing { await Task.yield() }
+    #expect(job.isPreparing)
+    job.stopWaiting(["missing-a"])
+    await queued
+    #expect(job.states["missing-a"] == nil && job.states["missing-b"] != nil)
+    async let again: Void = job.enqueue(["missing-c"], trigger: .manual)
+    for _ in 0..<100_000 where !job.isPreparing { await Task.yield() }
+    #expect(job.isPreparing)
+    job.stop()
+    await again
+    #expect(job.states["missing-c"] == nil)
+}
+
+/// The app reads the history in the background at launch; a run finished before that (a
+/// background task) is added to what was in the file, never written over it.
+@MainActor @Test func runsRecordedBeforeTheHistoryIsReadKeepTheFile() async {
+    let url = temporaryURL(), clock = Clock()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let earlier = RunHistory(url: url, now: { clock.now })
+    earlier.record(backUp([item("old", .saved, original: 1, compact: 1)], at: clock.now.addingTimeInterval(-3_600)))
+    await earlier.flush()
+    let history = RunHistory(url: url, now: { clock.now }, load: false)
+    history.record(backUp([item("new", .saved, original: 1, compact: 1)], at: clock.now))
+    await history.flush()
+    #expect(RunHistory(url: url, now: { clock.now }).runs.flatMap(\.items).map(\.assetID) == ["old"])
+    await history.load()
+    #expect(history.runs.flatMap(\.items).map(\.assetID) == ["new", "old"])
+    await history.flush()
+    #expect(RunHistory(url: url, now: { clock.now }).runs.flatMap(\.items).map(\.assetID) == ["new", "old"])
 }

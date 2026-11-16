@@ -561,7 +561,7 @@ private struct JobBadge: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let state = job.items.last { $0.assetIdentifier == id }?.state
+        let state = job.states[id]
         BadgeView(badge: badge(state), size: 20)
             .animation(reduceMotion ? nil : .default, value: badge(state))
     }

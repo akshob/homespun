@@ -13,6 +13,17 @@ struct LibraryView: View {
     @State private var filter = LibraryState.Filter.all
     @State private var media = LibraryModel.Media.all
     @State private var selection = GridSelection()
+    /// The grid's structure for the current filter (built off the main thread); it changes only
+    /// when items come, go or move, so badge changes don't rebuild the grid.
+    @State private var data = GridData()
+    @State private var counts = SectionCounts()
+    @State private var dataReady = false
+    @State private var builtKey: GridKey?
+    @State private var anchor: Anchor?
+    @State private var preheater: ThumbnailPreheater?
+    /// What Back Up and Free Up Space would take from the selection (worked out off the main thread).
+    @State private var selectionParts = SelectionParts()
+    @Environment(\.displayScale) private var displayScale
     @State private var selectionBytes: (bytes: Int, exact: Bool)?
     @State private var sheet: Sheet?
     @State private var path: [String] = []
@@ -86,7 +97,12 @@ struct LibraryView: View {
                     case .setup: OnboardingView(settings: model.settings, library: controller)
                     }
                 }
-                .task(id: selected) { await measureSelection() }
+                .task(id: selection.version) {
+                    await measureSelection()
+                }
+                .task(id: gridKey) { await rebuildData() }
+                .onChange(of: filter) { PerfMonitor.shared.begin("filter") }
+                .onChange(of: media) { PerfMonitor.shared.begin("filter") }
                 .onChange(of: selecting) { _, on in
                     controller.isSelecting = on
                     guard isBook else { return }
@@ -108,7 +124,7 @@ struct LibraryView: View {
     @ViewBuilder private var content: some View {
         switch controller.access {
         case .authorized, .limited:
-            if controller.loaded { grid } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
+            if controller.loaded, dataReady { grid } else { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
         case .notDetermined:
             ContentUnavailableView {
                 Label("See your photos here", systemImage: "photo.on.rectangle.angled")
@@ -128,13 +144,71 @@ struct LibraryView: View {
         }
     }
 
-    private var cells: [LibraryState.Cell] {
-        let state = controller.library.state.cells(filter)
-        guard let kind = controller.library.identifiers(media) else { return state }
-        return state.filter { kind.contains($0.id) }
+    private var visibleIDs: [String] { data.ids }
+
+    private struct GridKey: Equatable {
+        /// The grid shows once the library is loaded: data built before that doesn't count.
+        var loaded: Bool
+        var version: Int
+        var filter: LibraryState.Filter
+        var media: LibraryModel.Media
+        var months: Int
     }
 
-    private var visibleIDs: [String] { cells.map(\.id) }
+    private var gridKey: GridKey {
+        GridKey(loaded: controller.loaded, version: controller.library.state.version, filter: filter, media: media,
+                months: controller.library.monthsVersion)
+    }
+
+    /// Builds the grid's data for the current filter in the background; the grid itself is
+    /// replaced only when its structure changed (otherwise just the month counts update).
+    private func rebuildData() async {
+        // The task runs again whenever the Library comes back on screen; nothing to do if nothing changed.
+        let key = gridKey
+        if dataReady, key == builtKey { return }
+        let state = controller.library.state, filter = filter, months = controller.library.monthsSnapshot
+        let ready = controller.loaded
+        let kind = await controller.library.identifiers(media)
+        let old = data
+        let (new, same) = await Task.detached(priority: .userInitiated) { () -> (GridData, Bool) in
+            let new = GridData(state: state, filter: filter, media: kind, months: months)
+            let same = old.stateVersion >= 0 && new.ids == old.ids
+                && new.sections.map(\.range) == old.sections.map(\.range) && new.sections.map(\.id) == old.sections.map(\.id)
+            return (new, same)
+        }.value
+        guard !Task.isCancelled else { return }
+        counts.update(new)
+        if !same {
+            let old = data
+            data = new
+            releaseInBackground(old)
+        } else {
+            releaseInBackground(new)
+        }
+        if ready {
+            dataReady = true
+            builtKey = key
+        }
+        PerfMonitor.shared.endAfterFrame("filter")
+    }
+
+    /// From the process's start to the grid with its items, once per launch (performance tests).
+    private static var launchRecorded = false
+    private static func recordLaunch() {
+        guard !launchRecorded else { return }
+        launchRecorded = true
+        PerfMonitor.signposter.emitEvent("GridShown")
+        PerfMonitor.shared.record("launch", milliseconds: PerfMonitor.sinceProcessStart)
+        PerfMonitor.shared.record("launchFromMain", milliseconds: (CACurrentMediaTime() - PerfMonitor.mainStarted) * 1000)
+        PerfMonitor.shared.startAutoscrollIfAsked()
+    }
+
+    /// The thumbnail's side in pixels, from the column width (the preheater caches the same size).
+    private var thumbnailPixels: CGFloat {
+        let width = gridSize.width > 0 ? gridSize.width : 402
+        let columns = max(1, gridLayout.items.count)
+        return (width / CGFloat(columns) * displayScale).rounded(.up)
+    }
 
     /// Even columns; across both pages of an open iPhone Duo, the fold is the gutter between the
     /// two halves, never inside a cell (DUO §8, §11).
@@ -160,36 +234,69 @@ struct LibraryView: View {
     }
 
     private var grid: some View {
-        let cells = cells
+        let data = data
         let layout = gridLayout
-        return ScrollView {
+        let pixels = thumbnailPixels
+        let preheater = preheater
+        let shape = GridShape(columns: layout.items.count, leading: layout.leading)
+        return ScrollViewReader { proxy in ScrollView {
             VStack(spacing: 12) {
                 notice
                 LazyVGrid(columns: layout.items, spacing: 2) {
-                    ForEach(sections) { section in
+                    ForEach(data.sections, id: \.key) { section in
                         Section {
-                            ForEach(section.cells) { cell in
+                            // Positions as identities: cheap to compare for 35,000 items; each cell
+                            // follows the item at its position.
+                            ForEach(section.range, id: \.self) { position in
+                                let cell = data.cells[position]
                                 GridCell(initial: cell, library: controller.library, selection: selection,
-                                         serverName: controller.serverName)
+                                         serverName: controller.serverName, pixels: pixels)
                                     .onTapGesture { tapped(cell) }
                                     .contextMenu { if !selecting { menu(for: cell) } }
                                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("grid")) } action: {
-                                        frames.rects[cell.id] = $0
+                                        frames.rects[position] = $0
                                     }
-                                    .onDisappear { frames.rects[cell.id] = nil }
+                                    .onAppear { preheater?.appeared(position) }
+                                    .onDisappear {
+                                        frames.rects[position] = nil
+                                        preheater?.disappeared(position)
+                                    }
                             }
                         } header: {
-                            monthHeader(section)
+                            MonthHeader(section: section, data: data, counts: counts, selection: selection, filter: filter,
+                                        paired: settings.isPaired)
                         }
                     }
                 }
                 .coordinateSpace(.named("grid"))
-                .gesture(dragToSelect(cells), including: selecting ? .all : .subviews)
+                .gesture(HoldToDragSelect(enabled: selecting, changed: { dragSelect(to: $0, data) }, ended: endDragSelect))
                 .padding(.leading, layout.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                if cells.isEmpty { empty }
+                if data.cells.isEmpty { empty }
             }
         }
+        // A new grid when the columns change (the size menu, a pinch, unfolding iPhone Duo): a lazy
+        // grid given new columns measures its rows again from the top of the library down to where
+        // it is, which froze a 35,000-item library for seconds. A new one lays out only what's on
+        // screen, like at launch; it then scrolls back to the item that was in view.
+        .id(shape)
+        .task(id: shape) {
+            defer { PerfMonitor.shared.endAfterFrame("gridSize") }
+            guard let anchor, anchor.shape != shape else { return }
+            self.anchor = Anchor(item: anchor.item, shape: shape)
+            if let position = data.positions[anchor.item] { proxy.scrollTo(position, anchor: .center) }
+        }
+        .onScrollPhaseChange { _, phase in
+            if phase == .idle { anchor = currentAnchor(shape) }
+        }
+        .perfScrollTracking()
+        .onAppear {
+            Self.recordLaunch()
+            if self.preheater == nil { self.preheater = ThumbnailPreheater(library: controller.library) }
+            self.preheater?.configure(order: data.ids, side: pixels)
+        }
+        .onChange(of: data.stateVersion) { self.preheater?.configure(order: self.data.ids, side: thumbnailPixels) }
+        .onChange(of: pixels) { self.preheater?.configure(order: self.data.ids, side: thumbnailPixels) }
         .background {
             GeometryReader { proxy in
                 Color.clear
@@ -200,6 +307,36 @@ struct LibraryView: View {
         .modifier(OpensAtNewest())
         .simultaneousGesture(MagnifyGesture().onEnded { value in resize(value.magnification) })
         .accessibilityIdentifier("grid")
+        }
+    }
+
+    /// The grid's columns: a change makes a new grid.
+    private struct GridShape: Hashable {
+        var columns: Int
+        var leading: CGFloat
+    }
+
+    /// The item in the middle of the screen when scrolling last stopped, so a new grid (other
+    /// columns) shows it too. None at the newest end: a new grid opens there anyway.
+    private struct Anchor: Equatable {
+        var item: String
+        var shape: GridShape
+    }
+
+    private func currentAnchor(_ shape: GridShape) -> Anchor? {
+        let shown = frames.rects.keys.sorted()
+        guard let last = data.cells.indices.last, !shown.isEmpty, !shown.contains(last) else { return nil }
+        let middle = shown[shown.count / 2]
+        return middle < data.cells.count ? Anchor(item: data.cells[middle].id, shape: shape) : nil
+    }
+
+    /// Grid Size and pinching: timed from here to the new grid on screen.
+    private func setColumns(_ new: Int) {
+        guard new != columns else { return }
+        PerfMonitor.shared.begin("gridSize")
+        // What's in view now (the last stop of scrolling may be older).
+        anchor = currentAnchor(GridShape(columns: gridLayout.items.count, leading: gridLayout.leading))
+        columns = new
     }
 
     @ViewBuilder private var notice: some View {
@@ -251,7 +388,7 @@ struct LibraryView: View {
         let state = controller.library.state
         if filter != .all || media != .all {
             let name = filter == .all ? media.title : filter.title
-            return "\(name) · \(cells.count.formatted())"
+            return "\(name) · \(data.cells.count.formatted())"
         }
         guard settings.isPaired else { return "\(state.cells.count.formatted()) items · not connected" }
         if case .unreachable = settings.serverStatus { return "Can't reach \(controller.serverName)" }
@@ -386,12 +523,13 @@ struct LibraryView: View {
         Menu {
             if settings.isPaired {
                 Button("Select All Not Backed Up", systemImage: "checkmark.circle") {
+                    PerfMonitor.shared.begin("selectAll")
                     selecting = true
-                    selected = Set(controller.library.state.cells.filter(\.canCompact).map(\.id))
+                    selected = Set(controller.library.state.cells.lazy.filter(\.canCompact).map(\.id))
                 }
                 .accessibilityIdentifier("select.notBackedUp")
             }
-            Picker("Grid Size", selection: $columns) {
+            Picker("Grid Size", selection: Binding(get: { columns }, set: { setColumns($0) })) {
                 Text("Large").tag(2)
                 Text("Medium").tag(4)
                 Text("Small").tag(6)
@@ -422,20 +560,17 @@ struct LibraryView: View {
     // MARK: Selecting
 
     private var allSelectableSelected: Bool {
-        let selectable = cells.filter { $0.canCompact || $0.canFree }
-        return !selectable.isEmpty && selectable.allSatisfy { selected.contains($0.id) }
+        let selectable = counts.selectable
+        return !selectable.isEmpty && selected.count >= selectable.count && selectable.isSubset(of: selected)
     }
 
-    private var backUpCandidates: [String] {
-        controller.library.state.cells.filter { selected.contains($0.id) && $0.canCompact }.map(\.id)
-    }
+    private var backUpCandidates: [String] { selectionParts.backUp }
 
-    private var freeableInSelection: Set<String> {
-        Set(controller.library.state.cells.filter { selected.contains($0.id) && $0.canFree }.compactMap(\.original))
-    }
+    private var freeableInSelection: Set<String> { selectionParts.freeable }
 
     private func tapped(_ cell: LibraryState.Cell) {
         guard selecting else {
+            PerfMonitor.shared.begin("open")
             if isBook, showsPage { route = .item(cell.id) } else { path.append(cell.id) }
             return
         }
@@ -445,78 +580,30 @@ struct LibraryView: View {
     }
 
     /// Touch and hold, then drag across cells to select (or deselect) a run, like Photos.
-    private func dragToSelect(_ cells: [LibraryState.Cell]) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.25)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("grid")))
-            .onChanged { value in
-                guard case .second(true, let drag?) = value,
-                      let id = frames.id(at: drag.location),
-                      let index = cells.firstIndex(where: { $0.id == id }) else { return }
-                if dragAnchor == nil {
-                    dragAnchor = index
-                    dragBase = selected
-                    dragSelects = !selected.contains(id)
-                }
-                guard let anchor = dragAnchor else { return }
-                let run = cells[min(anchor, index)...max(anchor, index)].filter { $0.canCompact || $0.canFree }.map(\.id)
-                selected = dragSelects ? dragBase.union(run) : dragBase.subtracting(run)
-            }
-            .onEnded { _ in
-                if dragAnchor != nil { Announce.say("\(selected.count) selected") }
-                dragAnchor = nil
-            }
-    }
-
-    // MARK: Months
-
-    struct MonthSection: Identifiable {
-        var id: Int
-        var cells: [LibraryState.Cell]
-    }
-
-    /// The cells grouped by capture month, in order (items without a date go with their neighbours).
-    private var sections: [MonthSection] {
-        _ = controller.library.monthsVersion
-        var result: [MonthSection] = []
-        for cell in cells {
-            let key = controller.library.month(of: cell.id) ?? result.last?.id ?? 0
-            if result.last?.id == key { result[result.count - 1].cells.append(cell) } else {
-                result.append(MonthSection(id: key, cells: [cell]))
-            }
+    private func dragSelect(to location: CGPoint, _ data: GridData) {
+        guard let index = frames.position(at: location), index < data.cells.count else { return }
+        let id = data.cells[index].id
+        if dragAnchor == nil {
+            dragAnchor = index
+            dragBase = selected
+            dragSelects = !selected.contains(id)
         }
-        return result
+        guard let anchor = dragAnchor else { return }
+        let run = data.cells[min(anchor, index)...max(anchor, index)].lazy.map(\.id).filter { counts.selectable.contains($0) }
+        selected = dragSelects ? dragBase.union(run) : dragBase.subtracting(run)
     }
 
-    private func monthHeader(_ section: MonthSection) -> some View {
-        let date = Calendar.current.date(from: DateComponents(year: section.id / 12, month: section.id % 12 + 1)) ?? .now
-        let open = section.cells.filter(\.isNotBackedUp).count
-        let selectable = section.cells.filter { $0.canCompact || $0.canFree }.map(\.id)
-        return HStack(alignment: .firstTextBaseline) {
-            Text(section.id == 0 ? "Undated" : date.formatted(.dateTime.month(.wide).year())).font(.headline)
-            if filter == .notBackedUp || (filter == .all && open > 0 && settings.isPaired) {
-                Text("\(open) not backed up").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
-            }
-            Spacer()
-            if selecting, !selectable.isEmpty {
-                let all = selectable.allSatisfy { selected.contains($0) }
-                Button(all ? "Deselect" : "Select All") {
-                    if all { selected.subtract(selectable) } else { selected.formUnion(selectable) }
-                }
-                .font(.subheadline.weight(.semibold))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 14)
-        .padding(.bottom, 6)
-        .accessibilityElement(children: .contain)
-        .accessibilityAddTraits(.isHeader)
+    private func endDragSelect() {
+        if dragAnchor != nil { Announce.say("\(selected.count) selected") }
+        dragAnchor = nil
     }
 
     private func toggleSelectAll() {
+        PerfMonitor.shared.begin("selectAll")
         if allSelectableSelected {
             selected.removeAll()
         } else {
-            selected = Set(cells.filter { $0.canCompact || $0.canFree }.map(\.id))
+            selected = counts.selectable
         }
     }
 
@@ -539,6 +626,11 @@ struct LibraryView: View {
 
     private func measureSelection() async {
         let ids = Array(selected)
+        // What Back Up and Free Up Space would take, off the main thread (a selection can be the
+        // whole library).
+        let state = controller.library.state, chosen = selected
+        selectionParts = await Task.detached(priority: .userInitiated) { SelectionParts(state: state, selected: chosen) }.value
+        PerfMonitor.shared.endAfterFrame("selectAll")
         guard !ids.isEmpty else {
             selectionBytes = nil
             return
@@ -552,8 +644,8 @@ struct LibraryView: View {
     private func resize(_ magnification: CGFloat) {
         let sizes = [2, 4, 6]
         guard let index = sizes.firstIndex(of: columns) else { return columns = 4 }
-        if magnification > 1.25, index > 0 { withAnimation { columns = sizes[index - 1] } }
-        if magnification < 0.8, index < sizes.count - 1 { withAnimation { columns = sizes[index + 1] } }
+        if magnification > 1.25, index > 0 { setColumns(sizes[index - 1]) }
+        if magnification < 0.8, index < sizes.count - 1 { setColumns(sizes[index + 1]) }
     }
 
     private func openLegend() {
@@ -571,13 +663,123 @@ struct LibraryView: View {
     }
 }
 
-/// The frames of the cells on screen, in the grid's coordinates; a plain store so updating it
-/// doesn't redraw the grid.
+/// The frames of the cells on screen by position, in the grid's coordinates; a plain store so
+/// updating it doesn't redraw the grid.
 final class CellFrames {
-    var rects: [String: CGRect] = [:]
+    var rects: [Int: CGRect] = [:]
 
-    func id(at point: CGPoint) -> String? {
+    func position(at point: CGPoint) -> Int? {
         rects.first { $0.value.contains(point) }?.key
+    }
+}
+
+/// Each month's count of items not backed up, and what Select All selects; kept apart from the
+/// grid's structure so badge changes update the headers alone.
+@MainActor @Observable
+final class SectionCounts {
+    private(set) var open: [Int: Int] = [:]
+    @ObservationIgnored private(set) var selectable: Set<String> = []
+
+    func update(_ data: GridData) {
+        let new = Dictionary(data.sections.map { ($0.id, $0.open) }, uniquingKeysWith: { a, _ in a })
+        if new != open { open = new }
+        let old = selectable
+        selectable = data.selectable
+        releaseInBackground(old)
+    }
+}
+
+/// What a selection holds for Back Up (items to back up, in library order) and for Free Up Space
+/// (originals that can be removed).
+struct SelectionParts: Sendable {
+    var backUp: [String] = []
+    var freeable: Set<String> = []
+
+    init() {}
+
+    init(state: LibraryState, selected: Set<String>) {
+        var positioned: [(Int, String)] = []
+        positioned.reserveCapacity(selected.count)
+        for id in selected {
+            guard let position = state.positions[id] else { continue }
+            let cell = state.cells[position]
+            if cell.canCompact { positioned.append((position, id)) }
+            if cell.canFree, let original = cell.original { freeable.insert(original) }
+        }
+        backUp = positioned.sorted { $0.0 < $1.0 }.map(\.1)
+    }
+}
+
+/// A month's header: its name, how many aren't backed up, and in Select mode its own Select All.
+private struct MonthHeader: View {
+    let section: GridData.Section
+    let data: GridData
+    let counts: SectionCounts
+    let selection: GridSelection
+    let filter: LibraryState.Filter
+    let paired: Bool
+
+    nonisolated(unsafe) private static let style = Date.FormatStyle.dateTime.month(.wide).year()
+
+    var body: some View {
+        let open = counts.open[section.id] ?? section.open
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).font(.headline)
+            if filter == .notBackedUp || (filter == .all && open > 0 && paired) {
+                Text("\(open) not backed up").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+            }
+            Spacer()
+            if selection.active {
+                let selectable = data.cells[section.range].lazy.map(\.id).filter { counts.selectable.contains($0) }
+                if !selectable.isEmpty {
+                    let all = selectable.allSatisfy { selection.ids.contains($0) }
+                    Button(all ? "Deselect" : "Select All") {
+                        if all { selection.ids.subtract(selectable) } else { selection.ids.formUnion(selectable) }
+                    }
+                    .font(.subheadline.weight(.semibold))
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 14)
+        .padding(.bottom, 6)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isHeader)
+    }
+
+    private var title: String {
+        guard section.month > 0 else { return "Undated" }
+        let date = Calendar.current.date(from: DateComponents(year: section.month / 12, month: section.month % 12 + 1)) ?? .now
+        return Self.style.format(date)
+    }
+}
+
+/// Select mode's touch and hold, then drag. A UIKit long press: a finger that moves before the
+/// hold fails it at once, so the grid scrolls as usual; after the hold it has the touch, and the
+/// scroll view stays put while the drag selects. (SwiftUI's long press sequenced before a drag
+/// kept the touches from the scroll view: the grid couldn't scroll in Select mode.)
+struct HoldToDragSelect: UIGestureRecognizerRepresentable {
+    var enabled: Bool
+    var changed: (CGPoint) -> Void
+    var ended: () -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
+        let recognizer = UILongPressGestureRecognizer()
+        recognizer.minimumPressDuration = 0.25
+        recognizer.allowableMovement = 10
+        return recognizer
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UILongPressGestureRecognizer, context: Context) {
+        recognizer.isEnabled = enabled
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {
+        switch recognizer.state {
+        case .began, .changed: changed(context.converter.location(in: .named("grid")))
+        case .ended, .cancelled, .failed: ended()
+        default: break
+        }
     }
 }
 

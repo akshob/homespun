@@ -138,7 +138,10 @@ It archives a Release build without signing (so it works over SSH, where the log
 locked), signs the export with Apple's cloud-managed distribution certificate, uploads it with
 `altool`, and gives it a new build number. `scripts/asc.py` talks to the App Store Connect API
 with the same key: `asc.py testers` creates the internal group "Homespun Team" (every build, no
-review) and adds the team's users, `asc.py wait` waits for processing, `asc.py builds` lists builds.
+review) and adds the team's users, `asc.py wait` waits for processing, `asc.py builds` lists builds,
+`asc.py crashes` fetches testers' crash feedback and crash logs. TestFlight itself asks testers to
+share after a crash (that prompt can't be turned off and appears only in TestFlight builds); Homespun's
+own "quit unexpectedly" prompt on the next launch offers Report a Problem.
 Install with the TestFlight app.
 
 ### Running it on your iPhone
@@ -197,6 +200,28 @@ xcrun simctl boot "$SIM" && xcrun simctl privacy "$SIM" grant photos photos.home
 xcodebuild test -project Homespun.xcodeproj -scheme Homespun -destination "id=$SIM"
 xcrun simctl delete "$SIM"
 ```
+
+#### Performance tests
+
+Libraries run to tens of thousands of items, so the app is tested at that size with budgets
+from Apple's guidance (a tap answered within 100–250 ms, scrolling with at most 10 ms of hitches
+per second). Both suites run in the `Profile` configuration (optimised like a release, plus
+testability) with the `HomespunPerf` scheme:
+
+- `HomespunTests/PerformanceTests` (unit, a synthetic 35,000-item library): building the grid's
+  state and data for each filter, applying job changes, Select All, automatic mode's plan, the
+  ledger (recording an item appends to a journal instead of rewriting the file), the history,
+  and the library snapshot that shows the grid at launch.
+- `HomespunUITests/PerformanceUITests` (a simulator with 35,000 photos): launch to the grid,
+  opening and paging items, filters, Select All, tabs, grid sizes and lists. The app measures
+  itself with `-perfMonitor YES` (frames while scrolling, interaction times, also written to
+  `Documents/perf-monitor.txt`), and with `-perfAutoscroll` scrolls the grid by itself at set
+  speeds: the test runner's gestures make the app walk its accessibility tree on the main thread,
+  so gesture checks use Apple's "warning" line (25 ms/s) and the autoscroll the "good" one.
+
+The scrolling budgets need a large library: fill a simulator with synthetic photos first (the
+maintainers' scripts are `perf-library.sh`, `perf-unit.sh` and `perf-ui.sh`; Instruments traces
+with `xctrace` show where main-thread time goes).
 
 ## Homespun Server
 

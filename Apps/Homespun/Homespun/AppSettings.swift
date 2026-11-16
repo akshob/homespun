@@ -105,6 +105,7 @@ final class AppSettings {
     /// Checks the server answers and picks up changes (for example Immich being connected).
     func refreshServerInfo() async {
         guard var client else { return }
+        let before = serverStatus
         if serverStatus != .reachable { serverStatus = .checking }
         client.timeout = 6
         do {
@@ -112,11 +113,21 @@ final class AppSettings {
             store(info)
             serverStatus = .reachable
             Telemetry.shared.recordServerInfoDaily(info)
+        } catch where Self.isCancellation(error) {
+            // The screen that asked went away (its task was cancelled): nothing was learned. Saying
+            // "Can't reach" here showed a working server as unreachable until the next check.
+            if serverStatus == .checking { serverStatus = before }
         } catch let error as ServerClient.Failure where error.status == 401 {
             serverStatus = .unreachable("The server no longer recognises this iPhone. Pair it again.")
         } catch {
             AppLog.server.notice("server unreachable: \(Telemetry.Event.code(error), privacy: .public)")
             serverStatus = .unreachable("Can't reach \(server?.name ?? "the server"). Make sure this iPhone is on your home network.")
         }
+    }
+
+    nonisolated static func isCancellation(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        let error = error as NSError
+        return error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled
     }
 }

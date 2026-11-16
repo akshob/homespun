@@ -80,6 +80,7 @@ struct ItemViewer: View {
             toolbar(cell)
         }
         .itemScreen()
+        .onAppear { PerfMonitor.shared.endAfterFrame("open") }
         .onChange(of: current) { _, id in
             zoomed = false
             follow(id)
@@ -109,6 +110,7 @@ struct ItemViewer: View {
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.paging)
+        .perfScrollTracking()
         .scrollPosition(id: $current)
         .scrollIndicators(.hidden)
         .scrollDisabled(zoomed)
@@ -124,9 +126,15 @@ struct ItemViewer: View {
 
     /// VoiceOver's label for a page: the kind and date, then the badge sentence (DESIGN 03·1.1).
     private func spokenLabel(_ id: String) -> String {
-        let asset = model.library.library.asset(id)
-        let kind = asset.flatMap(PhotoLibrary.kind)?.name ?? "Item"
-        let date = asset?.creationDate?.formatted(date: .long, time: .shortened)
+        // From what the library read already (asking Photos for each page is slow).
+        let info = model.library.library.info(id)
+        let kind = switch info?.kind {
+        case .photo?: "Photo"
+        case .livePhoto?: "Live Photo"
+        case .video?: "Video"
+        case nil: "Item"
+        }
+        let date = info?.created?.formatted(date: .long, time: .shortened)
         let head = [kind, date].compactMap(\.self).joined(separator: ", ")
         guard let cell = cell(id) else { return head }
         return head + ". " + ItemText.spoken(ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell),
