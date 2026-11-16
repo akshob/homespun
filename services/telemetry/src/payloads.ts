@@ -11,6 +11,7 @@ import {
 	withWrites,
 	type Flag,
 } from "./budget";
+import { sendCrashEmail } from "./crashmail";
 import { badRequest, isObject, json, type JsonBody } from "./http";
 import { onlyKeys, parseApp, parseDevice, parseInstall } from "./validate";
 
@@ -39,6 +40,8 @@ export interface DiagnosticSummary {
  * `<kind>/YYYY/MM/DD/<install>/<id>.json` and indexes it in the `payloads` table.
  * Refused with 202 `{"accepted": 0, "reason": …}` past the per-install daily limit ("limit") or
  * 90% of an R2 or D1 budget ("budget"); the app does not retry these.
+ * Diagnostics with crashes or hangs are also emailed to the owner: the first such payload per
+ * install and UTC day, within the daily crash and email caps.
  */
 export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env): Promise<Response> {
 	const { value } = body;
@@ -48,20 +51,21 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 	const device = parseDevice(value.device);
 	if (value.payload === undefined || value.payload === null) badRequest("payload: required");
 	if (!isObject(value.payload)) badRequest("payload: must be an object");
-	const summary = kind === "diagnostics" ? JSON.stringify(summarizeDiagnostics(value.payload)) : null;
+	const summary = kind === "diagnostics" ? summarizeDiagnostics(value.payload) : null;
 
 	const now = new Date();
 	const budget = new Budget(limitsFrom(env), now);
 	const [today, usage] = await env.DB.batch([
-		env.DB.prepare("SELECT count(*) AS n FROM payloads WHERE install = ?1 AND kind = ?2 AND received >= ?3").bind(
-			install,
-			kind,
-			`${utcDay(now)}T00:00:00.000Z`,
-		),
+		env.DB.prepare(
+			`SELECT count(*) AS n, coalesce(sum(json_extract(summary, '$.crashDiagnostics') > 0
+				OR json_extract(summary, '$.hangDiagnostics') > 0), 0) AS crashing
+			FROM payloads WHERE install = ?1 AND kind = ?2 AND received >= ?3`,
+		).bind(install, kind, `${utcDay(now)}T00:00:00.000Z`),
 		budget.read(env.DB),
 	]);
 	budget.load(usage);
-	if ((today.results[0] as { n: number }).n >= PAYLOADS_PER_INSTALL_DAY[kind]) {
+	const sentToday = today.results[0] as { n: number; crashing: number };
+	if (sentToday.n >= PAYLOADS_PER_INSTALL_DAY[kind]) {
 		return json({ accepted: 0, reason: "limit" }, 202);
 	}
 	const deltas = withWrites(r2Put(body.bytes), WRITES_PER_ROW);
@@ -72,6 +76,15 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 		await budget.markRefused(env.DB, refused);
 		return json({ accepted: 0, reason: "budget" }, 202);
 	}
+
+	// Only the first payload with crashes or hangs per install and day may be emailed.
+	const crashing = summary !== null && (summary.crashDiagnostics > 0 || summary.hangDiagnostics > 0);
+	const emailCrash =
+		crashing &&
+		sentToday.crashing === 0 &&
+		Boolean(env.REPORT_TO?.trim() && env.MAIL) &&
+		budget.allows({ dayEmails: 1, dayCrashEmails: 1 });
+	const counted = emailCrash ? withWrites({ ...r2Put(body.bytes), dayEmails: 1, dayCrashEmails: 1 }, WRITES_PER_ROW) : deltas;
 
 	const id = crypto.randomUUID();
 	const received = now.toISOString();
@@ -91,15 +104,16 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 				device.model,
 				device.os,
 				key,
-				summary,
+				summary === null ? null : JSON.stringify(summary),
 				body.bytes,
 			),
-			budget.add(env.DB, deltas),
+			budget.add(env.DB, counted),
 		]);
 	} catch (error) {
 		await env.BUCKET.delete(key).catch(() => {});
 		throw error;
 	}
+	if (emailCrash) await sendCrashEmail(env, { install, r2Key: key, app, device, payload: value.payload, summary: summary! });
 	return json({ accepted: 1 }, 202);
 }
 

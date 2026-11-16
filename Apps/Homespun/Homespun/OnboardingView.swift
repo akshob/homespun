@@ -204,7 +204,6 @@ private struct LocalNetworkPage: View {
             ConsequenceLine(text: "Turn it off any time in Settings › Apps › Homespun › Local Network.")
             PrimaryButton(title: "Continue", id: "network.continue") { flow.localNetworkContinue() }
         }
-        .navigationBarBackButtonHidden()
     }
 }
 
@@ -238,7 +237,6 @@ struct PhotosPromisesPage: View {
                 }
             }
         }
-        .navigationBarBackButtonHidden()
     }
 }
 
@@ -263,7 +261,6 @@ private struct LimitedPhotosPage: View {
             }
             SecondaryButton(title: "Continue Anyway", id: "photos.anyway") { flow.finish() }
         }
-        .navigationBarBackButtonHidden()
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             // Back from Settings with Full Access: carry on by itself (L6).
             status = PHPhotoLibrary.authorizationStatus(for: .readWrite)

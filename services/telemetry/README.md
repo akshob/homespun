@@ -126,6 +126,9 @@ Refusals are still 202, and the app does not retry them:
 - `{"accepted": 0, "reason": "budget"}`: storing it would pass 90% of an R2 cap or of the D1 write
   cap.
 
+A stored diagnostics payload with crashes or hangs is also emailed to you; see
+[Emails you receive](#emails-you-receive).
+
 ### `POST /v1/reports` (≤ 2 MB) → 201 `{"id": "HS-7KQ2MX"}`
 
 ```json
@@ -169,6 +172,30 @@ No key needed.
    sets `r2.bytes` to the sum of `size` in `payloads` and `reports` (corrects any drift).
 3. Sends budget alerts (see [Budget](#budget)).
 
+## Emails you receive
+
+All go to the `REPORT_TO` secret (a verified Email Routing destination).
+
+- **Bug reports**, from `Homespun Reports <reports@homespun.photos>`, subject
+  `[Homespun HS-XXXXXX] <message>`, with `Reply-To` set to the user's email (see
+  `POST /v1/reports` above).
+- **Crash and hang notices**, from `Homespun Reports <reports@homespun.photos>`, when
+  `POST /v1/diagnostics` stores a payload with crashes or hangs, e.g.
+  `[Homespun crash] 0.1.0 (202611151609) · iPhone19,4 · iOS 27.2.1 · SIGABRT` (`[Homespun hang] …
+  · 3.25 sec` when there are only hangs). Version, build, device and OS come from the first
+  crash's (or hang's) `diagnosticMetaData` when present, otherwise from the request's `app` and
+  `device`. The plain-text body has only: the counts by kind, TestFlight or not, the termination
+  reason, exception type/code and signal (named, e.g. `EXC_CRASH (10)`, `SIGABRT (6)`), the
+  Objective-C exception (`exceptionName: composedMessage (class …)`) if present, the hang
+  duration for hangs, the crashed (or hanging) thread's frames as
+  `binaryName  +offset  (binaryUUID)` (depth-first, at most 60 lines), the R2 key and the install
+  id. Symbolicate the offsets against the build's dSYM. At most one notice per install per UTC
+  day and `CRASH_EMAILS_MAX_DAY` (20) a day in all; they also count against
+  `REPORT_EMAILS_MAX_DAY`. Past those, payloads are stored silently. A failed send never fails the
+  upload.
+- **Budget alerts**, from `Homespun Telemetry <reports@homespun.photos>`; see
+  [Budget](#budget).
+
 ## Budget
 
 The app key is public, so anyone could post data. R2 bills beyond its free tier, and D1 and
@@ -195,7 +222,8 @@ Caps, as string vars in `wrangler.jsonc` (digits only; anything else falls back 
 | `R2_MAX_PUTS_DAY` | 25000 | `r2.puts.YYYY-MM-DD` | About a month's cap / 31, so one day can't use up the month |
 | `R2_MAX_BYTES_DAY` | 250000000 | `r2.bytes.YYYY-MM-DD` (added that day) | The same for bytes |
 | `EVENTS_MAX_DAY` | 20000 | `events.YYYY-MM-DD` | Each event row with its 3 indexes is about 4 D1 rows written |
-| `REPORT_EMAILS_MAX_DAY` | 50 | `emails.YYYY-MM-DD` | Keeps a report flood out of the inbox |
+| `REPORT_EMAILS_MAX_DAY` | 50 | `emails.YYYY-MM-DD` | Keeps a report or crash flood out of the inbox (report and crash emails together) |
+| `CRASH_EMAILS_MAX_DAY` | 20 | `crashmail.YYYY-MM-DD` | Crash and hang notices; also at most one per install per day |
 | `D1_MAX_WRITES_DAY` | 80000 | `d1.writes.YYYY-MM-DD` (estimate) | 80% of D1's 100k rows written per day |
 
 The caps sit at 80% because counting is approximate: concurrent requests can overshoot a little,
@@ -226,8 +254,8 @@ Refused requests write nothing, except one marker per day (`events.full.…`, `d
 - when stored R2 bytes or this month's R2 writes cross 50%, 75% or 90% of their caps, once per
   threshold and month (remembered as `alert.storage.75.YYYY-MM`, `alert.writes.90.YYYY-MM`),
   e.g. `[Homespun telemetry] R2 storage at 76% of its budget`;
-- once a day if the previous day hit the event cap, the report email cap, 90% of the D1 write
-  cap, or an R2 cap (`[Homespun telemetry] Daily caps reached on 2026-11-14`).
+- once a day if the previous day hit the event cap, the report or crash email caps, 90% of the
+  D1 write cap, or an R2 cap (`[Homespun telemetry] Daily caps reached on 2026-11-14`).
 
 Each alert lists all current counters and caps.
 
@@ -369,7 +397,8 @@ Reports kept without R2 have `r2_key = ''`. Fetch a stored payload or report wit
 
 - `src/index.ts`: routing, key check, rate limits, cron entry point.
 - `src/allowlist.ts`: the event allowlist.
-- `src/budget.ts`: caps, `usage` counters and the refusal rules; `src/alerts.ts`: budget emails.
+- `src/budget.ts`: caps, `usage` counters and the refusal rules; `src/alerts.ts`: budget emails;
+  `src/crashmail.ts`: crash and hang notices.
 - `src/events.ts`, `src/payloads.ts`, `src/reports.ts`, `src/installs.ts`, `src/retention.ts`:
   one file per endpoint or job; `src/validate.ts` and `src/http.ts` hold the shared checks.
 - `migrations/`: D1 schema (`wrangler d1 migrations`).

@@ -38,7 +38,6 @@ struct AnalyticsPage: View {
             PrimaryButton(title: "Share Analytics", id: "analytics.share") { flow.afterAnalytics(sharing: true) }
             SecondaryButton(title: "Don't Share", id: "analytics.dontShare") { flow.afterAnalytics(sharing: false) }
         }
-        .navigationBarBackButtonHidden()
     }
 }
 

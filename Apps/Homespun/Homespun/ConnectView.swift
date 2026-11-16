@@ -45,9 +45,11 @@ struct LookingPage: View {
             VStack(alignment: .leading, spacing: 8) {
                 if !discovery.servers.isEmpty {
                     SetupSectionHeader(text: "Found so far")
+                    // The one the next page recommends, marked as soon as it answers.
+                    let recommended = flow.foundAdvice?.recommended.id
                     SetupCard {
                         ForEach(discovery.servers) { found in
-                            FoundRow(found: found)
+                            FoundRow(found: found, recommended: found.isReady && found.advisorServer.id == recommended)
                         }
                     }
                 }
@@ -133,6 +135,7 @@ struct LookingPage: View {
 /// A server found so far: its name, kind and version, with a check once it has answered.
 private struct FoundRow: View {
     let found: ServerDiscovery.Found
+    var recommended = false
 
     var body: some View {
         let server = found.advisorServer
@@ -140,7 +143,17 @@ private struct FoundRow: View {
             Image(systemName: server.symbol).font(.title3).foregroundStyle(Theme.accent).frame(width: 30)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(server.name).font(.body).foregroundStyle(Theme.label)
+                HStack(spacing: 8) {
+                    Text(server.name).font(.body).foregroundStyle(Theme.label)
+                    if recommended {
+                        Text("Recommended")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                            .background(Theme.accent.opacity(0.12), in: Capsule())
+                            .accessibilityIdentifier("discovered.recommended")
+                    }
+                }
                 Text(found.unreachable ? "Not answering" : found.isReady ? server.summary : "Asking…")
                     .font(.footnote).foregroundStyle(Theme.secondaryLabel)
             }
@@ -155,6 +168,7 @@ private struct FoundRow: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .accessibilityElement(children: .combine)
+        .accessibilityValue(recommended ? "Recommended" : "")
         .accessibilityIdentifier("discovered.\(found.name)")
     }
 }

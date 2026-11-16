@@ -106,6 +106,13 @@ final class SetupFlow {
         Telemetry.shared.record(.setupStep(page.analyticsName))
     }
 
+    /// Shows `page` in place of the one on top, so Back skips a step that already happened (the
+    /// first task, once it's done, goes back to the estimate).
+    func replaceTop(with page: Page) {
+        if !path.isEmpty { path.removeLast() }
+        go(page)
+    }
+
     /// Find My Home Computer: the promises page once, then looking (1.2 → 1.4).
     func findHomeComputer() {
         go(localNetworkExplained ? .looking : .localNetwork)

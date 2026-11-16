@@ -71,7 +71,10 @@ export async function sendAlerts(env: Env, now: Date, limits: Limits): Promise<{
 		hit.push("events (batches were refused with 503 and stay queued in the app)");
 	}
 	if (limits.reportEmailsMaxDay > 0 && value(day.dayEmails) >= limits.reportEmailsMaxDay) {
-		hit.push("report emails (later reports were stored but not emailed)");
+		hit.push("report and crash emails (later reports and crashes were stored but not emailed)");
+	}
+	if (limits.crashEmailsMaxDay > 0 && value(day.dayCrashEmails) >= limits.crashEmailsMaxDay) {
+		hit.push("crash emails (later crashes were stored but not emailed)");
 	}
 	if (usage.has(flags.d1)) hit.push("D1 writes (events, metrics or diagnostics were refused)");
 	if (usage.has(flags.r2)) hit.push("R2 (metrics or diagnostics were refused, or reports kept without R2)");
@@ -123,7 +126,8 @@ function usageTable(
 		[`R2 writes on ${day}`, value(keys.dayPuts), limits.r2MaxPutsDay],
 		[`R2 bytes added on ${day}`, value(keys.dayBytes), limits.r2MaxBytesDay, true],
 		[`Events on ${day}`, value(keys.dayEvents), limits.eventsMaxDay],
-		[`Report emails on ${day}`, value(keys.dayEmails), limits.reportEmailsMaxDay],
+		[`Report and crash emails on ${day}`, value(keys.dayEmails), limits.reportEmailsMaxDay],
+		[`Crash emails on ${day}`, value(keys.dayCrashEmails), limits.crashEmailsMaxDay],
 		[`D1 rows written on ${day} (estimate)`, value(keys.dayWrites), limits.d1MaxWritesDay],
 	];
 	const lines = rows.map(([label, used, cap, bytes]) => {

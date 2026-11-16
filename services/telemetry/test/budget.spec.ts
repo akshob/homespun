@@ -65,6 +65,7 @@ describe("limits", () => {
 			r2MaxBytesDay: 250_000_000,
 			eventsMaxDay: 20_000,
 			reportEmailsMaxDay: 50,
+			crashEmailsMaxDay: 20,
 			d1MaxWritesDay: 80_000,
 		});
 		const parsed = limitsFrom({ R2_MAX_BYTES: " 123 ", EVENTS_MAX_DAY: 7, R2_MAX_PUTS_DAY: "0" } as unknown as Env);
@@ -387,7 +388,7 @@ describe("alerts", () => {
 		expect(email.to).toBe("owner@example.com");
 		expect(email.text).toContain("R2 stored now");
 		expect(email.text).toContain("760.0 kB of 1.0 MB (76%)");
-		expect(email.text).toContain("Report emails on");
+		expect(email.text).toContain("Report and crash emails on");
 		expect(email.text).toContain("SELECT * FROM usage ORDER BY key");
 		const month = utcDay(new Date()).slice(0, 7);
 		expect(await usage(`alert.storage.50.${month}`)).toBe(1);
@@ -421,7 +422,7 @@ describe("alerts", () => {
 		expect(mail.sent).toHaveLength(1);
 		expect(mail.sent[0].subject).toBe(`[Homespun telemetry] Daily caps reached on ${yesterday}`);
 		expect(mail.sent[0].text).toContain("- events (batches were refused with 503");
-		expect(mail.sent[0].text).toContain("- report emails (later reports were stored but not emailed)");
+		expect(mail.sent[0].text).toContain("- report and crash emails (later reports and crashes were stored but not emailed)");
 		expect((await cron()).mail.sent).toHaveLength(0);
 	});
 

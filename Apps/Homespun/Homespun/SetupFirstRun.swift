@@ -67,7 +67,6 @@ struct EstimatePage: View {
                 }
             }
         }
-        .navigationBarBackButtonHidden()
         .task { await measure() }
         .sheet(isPresented: $choosingFolder, onDismiss: { Task { storage = try? await settings.client?.storage() } }) {
             NavigationStack {
@@ -160,7 +159,11 @@ struct EstimatePage: View {
             }
         } actions: {
             ConsequenceLine(text: consequence)
-            PrimaryButton(title: tryTitle, systemImage: "arrow.up.circle", id: "estimate.try") { flow.go(.firstTask) }
+            PrimaryButton(title: tryTitle, systemImage: "arrow.up.circle", id: "estimate.try") {
+                flow.taskStarted = nil
+                flow.taskFinished = nil
+                flow.go(.firstTask)
+            }
                 .accessibilityHint(consequence)
             SecondaryButton(title: "Not Now", id: "estimate.notNow") { flow.finish() }
         }
@@ -287,7 +290,8 @@ struct FirstTaskPage: View {
                 .accessibilityIdentifier("first.stop")
             }
         }
-        .navigationBarBackButtonHidden()
+        // Back only once the task has ended (going back mid-task would leave it running unseen).
+        .navigationBarBackButtonHidden(!finished)
         .onAppear { start(again: false) }
         .onChange(of: job.isRunning) { _, running in
             // A stop drops the items that hadn't started: the receipt shows what made it.
@@ -345,7 +349,7 @@ struct FirstTaskPage: View {
         flow.taskFinished = Date()
         if !saved.isEmpty {
             Announce.say(saved.count == 1 ? "Your newest is safe on \(name)." : "Your \(saved.count) newest are safe on \(name).")
-            flow.go(.receipt)
+            flow.replaceTop(with: .receipt)
         } else if flow.taskIDs.isEmpty {
             flow.finish()
         }
@@ -441,7 +445,6 @@ struct ReceiptPage: View {
             SecondaryButton(title: "Not Now", id: "receipt.notNow") { flow.finish() }
                 .disabled(checking != nil)
         }
-        .navigationBarBackButtonHidden()
         .task {
             entries = await library.job.ledger.snapshot()
             sample = safe.first { PhotoLibrary.asset($0)?.mediaType == .image }
@@ -491,7 +494,7 @@ struct ReceiptPage: View {
             outcome = report
         } else {
             flow.freed = report
-            flow.go(.freed)
+            flow.replaceTop(with: .freed)
         }
     }
 }
@@ -541,7 +544,6 @@ struct FreedPage: View {
                 SecondaryButton(title: "Go to Library", id: "freed.library") { flow.finish() }
             }
         }
-        .navigationBarBackButtonHidden()
         .onAppear { Announce.say("Freed \(SetupAdvisor.roughBytes(report.freedBytes)).") }
         .task {
             let rest = rest

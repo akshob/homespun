@@ -14,6 +14,7 @@ export interface Limits {
 	r2MaxBytesDay: number;
 	eventsMaxDay: number;
 	reportEmailsMaxDay: number;
+	crashEmailsMaxDay: number;
 	d1MaxWritesDay: number;
 }
 
@@ -24,6 +25,7 @@ const LIMIT_VARS: Record<keyof Limits, readonly [variable: string, fallback: num
 	r2MaxBytesDay: ["R2_MAX_BYTES_DAY", 250_000_000],
 	eventsMaxDay: ["EVENTS_MAX_DAY", 20_000],
 	reportEmailsMaxDay: ["REPORT_EMAILS_MAX_DAY", 50],
+	crashEmailsMaxDay: ["CRASH_EMAILS_MAX_DAY", 20],
 	d1MaxWritesDay: ["D1_MAX_WRITES_DAY", 80_000],
 };
 
@@ -39,7 +41,15 @@ export const PAYLOADS_PER_INSTALL_DAY = { metrics: 3, diagnostics: 20 } as const
  */
 export const WRITES_PER_ROW = 4;
 
-export type Counter = "storedBytes" | "monthPuts" | "dayPuts" | "dayBytes" | "dayEvents" | "dayEmails" | "dayWrites";
+export type Counter =
+	| "storedBytes"
+	| "monthPuts"
+	| "dayPuts"
+	| "dayBytes"
+	| "dayEvents"
+	| "dayEmails"
+	| "dayCrashEmails"
+	| "dayWrites";
 /** Set once on a day when something was refused, for the daily alert. */
 export type Flag = "events" | "d1" | "r2";
 export type Deltas = Partial<Record<Counter, number>>;
@@ -51,6 +61,7 @@ const CAPS: Record<Counter, keyof Limits> = {
 	dayBytes: "r2MaxBytesDay",
 	dayEvents: "eventsMaxDay",
 	dayEmails: "reportEmailsMaxDay",
+	dayCrashEmails: "crashEmailsMaxDay",
 	dayWrites: "d1MaxWritesDay",
 };
 
@@ -81,6 +92,7 @@ export function usageKeys(date: Date): Record<Counter, string> {
 		dayBytes: `r2.bytes.${day}`,
 		dayEvents: `events.${day}`,
 		dayEmails: `emails.${day}`,
+		dayCrashEmails: `crashmail.${day}`,
 		dayWrites: `d1.writes.${day}`,
 	};
 }

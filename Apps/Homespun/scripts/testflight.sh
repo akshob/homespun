@@ -31,6 +31,8 @@ xcodebuild archive -project Homespun.xcodeproj -scheme Homespun -configuration R
   -destination generic/platform=iOS -archivePath $WORK/Homespun.xcarchive \
   CURRENT_PROJECT_VERSION=$BUILD CODE_SIGNING_ALLOWED=NO | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" | grep -v appintents
 [[ -d $WORK/Homespun.xcarchive ]] || exit 1
+# Keep the symbols: crash reports (MetricKit) are symbolicated with them (scripts/symbolicate.py).
+mkdir -p ~/homespun-builds/$BUILD && cp -R $WORK/Homespun.xcarchive/dSYMs/. ~/homespun-builds/$BUILD/
 
 cat > $WORK/ExportOptions.plist <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

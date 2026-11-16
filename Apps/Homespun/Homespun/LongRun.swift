@@ -18,32 +18,65 @@ final class LongRun {
 
     private var running = false
 
-    /// Registers the handler; must happen before the app finishes launching.
-    nonisolated static func register() {
-        BGTaskScheduler.shared.register(forTaskWithIdentifier: prefix + ".*", using: nil) { task in
-            guard let task = task as? BGContinuedProcessingTask else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            let box = TaskBox(task: task)
-            Task { @MainActor in await LongRun.shared.follow(box, job: AppModel.shared.job) }
-        }
-    }
+    /// Asks iOS to keep this run going in the background, if it's long enough to need it. Never
+    /// stops the run: if iOS says no (or raises), the run simply carries on while Homespun is open.
+    /// Each run registers its own identifier just before it's submitted (continued processing tasks
+    /// are registered when needed; a handler for the wildcard alone, registered at launch, made iOS
+    /// raise "no launch handler" at submit on a device and end the app).
+    enum Outcome: Equatable { case notNeeded, started, unavailable(String) }
 
-    /// Asks iOS to keep this run going in the background, if it's long enough to need it.
-    func begin(items: Int, server: String) {
-        guard items >= Self.minimumItems, !running else { return }
-        let request = BGContinuedProcessingTaskRequest(identifier: Self.prefix + "." + UUID().uuidString.prefix(8),
-                                                       title: "Backing up to \(server)",
+    @discardableResult
+    func begin(items: Int, server: String) -> Outcome {
+        guard items >= Self.minimumItems, !running else { return .notNeeded }
+        let identifier = Self.prefix + "." + UUID().uuidString.prefix(8).lowercased()
+        var registered = false
+        var failure: NSError?
+        do {
+            try HSObjC.catching {
+                registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
+                    guard let task = task as? BGContinuedProcessingTask else {
+                        task.setTaskCompleted(success: false)
+                        return
+                    }
+                    let box = TaskBox(task: task)
+                    Task { @MainActor in await LongRun.shared.follow(box, job: AppModel.shared.job) }
+                }
+            }
+        } catch {
+            failure = error as NSError
+        }
+        guard registered else {
+            Self.unavailable("register", failure)
+            return .unavailable("register: " + (failure?.localizedDescription ?? "refused"))
+        }
+        let request = BGContinuedProcessingTaskRequest(identifier: identifier, title: "Backing up to \(server)",
                                                        subtitle: "\(items) items")
         request.strategy = .fail
         do {
-            try BGTaskScheduler.shared.submit(request)
-            running = true
+            try HSObjC.catching {
+                do {
+                    try BGTaskScheduler.shared.submit(request)
+                } catch {
+                    failure = error as NSError
+                }
+            }
         } catch {
-            // Not available here (a simulator, or the system said no): the run carries on while open.
-            Self.log.info("continued processing not available: \(error.localizedDescription, privacy: .public)")
+            failure = error as NSError
         }
+        if let failure {
+            Self.unavailable("submit", failure)
+            return .unavailable("submit: " + failure.localizedDescription)
+        }
+        running = true
+        return .started
+    }
+
+    /// Not available here (a simulator, or the system said no): the run carries on while open.
+    private static func unavailable(_ step: String, _ error: NSError?) {
+        let reason = error?.localizedDescription ?? "the system said no"
+        log.notice("continued processing \(step, privacy: .public) failed: \(reason, privacy: .public)")
+        AppLog.job.notice("background continuation unavailable (\(step, privacy: .public)): \(reason, privacy: .public)")
+        if let error { Telemetry.shared.record(error: error, where: "longrun.\(step)") }
     }
 
     /// Reports the job's progress to the system until it ends; Stop from the system drops what

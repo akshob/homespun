@@ -40,6 +40,15 @@ final class OnboardingUITests: XCTestCase {
         promises.tap()
         allowAlert("Allow")
 
+        // Back goes all the way to Welcome, and finding starts again from there (no promises twice).
+        XCTAssertTrue(app.staticTexts["Looking on your Wi‑Fi…"].waitForExistence(timeout: 5) || app.buttons["setup.server"].exists,
+                      "not looking")
+        goBack()
+        XCTAssertTrue(find.waitForExistence(timeout: 5), "Back from Looking didn't reach Welcome")
+        attach("Back at Welcome")
+        find.tap()
+        XCTAssertFalse(promises.waitForExistence(timeout: 2), "the Local Network promises came twice")
+
         if !discover.isEmpty {
             try recommendFound(discover)
         } else if link == nil {
@@ -162,6 +171,9 @@ final class OnboardingUITests: XCTestCase {
     @MainActor private func recommendFound(_ names: [String]) throws {
         // Looking settles a couple of seconds after the last server answers.
         if app.descendants(matching: .any)["discovered.\(names[0])"].waitForExistence(timeout: 15) {
+            // The one the next page recommends is marked in the list as soon as it answers.
+            XCTAssertTrue(app.descendants(matching: .any)["discovered.recommended"].waitForExistence(timeout: 10),
+                          "no Recommended badge in Found so far")
             attach("1.4 Looking, found")
         }
         let use = app.buttons["found.use"]
@@ -207,6 +219,11 @@ final class OnboardingUITests: XCTestCase {
         XCTAssertTrue(share.waitForExistence(timeout: 10), "no analytics question after Ready")
         XCTAssertTrue(app.buttons["analytics.dontShare"].exists)
         attach("1.7a Help improve Homespun")
+        // Every setup page can go back: here, to Ready.
+        goBack()
+        XCTAssertTrue(ready.waitForExistence(timeout: 5), "Back from the analytics question didn't reach Ready")
+        ready.tap()
+        XCTAssertTrue(share.waitForExistence(timeout: 10))
         share.tap()
         let photos = app.buttons["photos.continue"]
         if photos.waitForExistence(timeout: 3) {

@@ -21,6 +21,11 @@ struct RootView: View {
             }
         }
         .tint(Theme.accent)
+        .modifier(QuitUnexpectedly(model: model))
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            // From the first moment on screen (onChange alone misses the launch).
+            if phase == .active { SessionMarker.shared.active() }
+        }
         .onOpenURL { url in
             if let link = PairingLink(url) { settings.pendingLink = link }
         }
@@ -49,7 +54,6 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
-                SessionMarker.shared.active()
                 if wasBackground {
                     wasBackground = false
                     model.library.journey.sessionStarted()
@@ -89,10 +93,8 @@ struct MainTabView: View {
         case freeUp(only: Set<String>?)
         case backUp([String])
         case pair(PairingLink)
-        case report
         var id: String {
             switch self {
-            case .report: "report"
             case .freeUp: "freeUp"
             case .backUp: "backUp"
             case .pair(let link): link.id
@@ -118,24 +120,8 @@ struct MainTabView: View {
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         .modifier(StatusAccessoryModifier(model: model, open: openFromAccessory))
-        .alert("Homespun quit unexpectedly", isPresented: Binding(get: { SessionMarker.shared.offersReport && sheet == nil },
-                                                                   set: { if !$0 { SessionMarker.shared.offersReport = false } })) {
-            Button("Report a Problem") { sheet = .report }
-            Button("Not Now", role: .cancel) {}
-        } message: {
-            Text("Telling the developer what you were doing helps fix it.")
-        }
         .sheet(item: $sheet, onDismiss: dismissed) { sheet in
             switch sheet {
-            case .report:
-                NavigationStack {
-                    ReportProblemView(model: model, afterCrash: true)
-                        .toolbar {
-                            ToolbarItem(placement: .cancellationAction) {
-                                Button("Cancel", systemImage: "xmark") { self.sheet = nil }
-                            }
-                        }
-                }
             case .freeUp(let scope):
                 FreeUpSpaceSheet(controller: model.library, scope: scope)
             case .backUp(let ids):
@@ -182,6 +168,33 @@ struct MainTabView: View {
         model.settings.pendingLink = nil
         model.library.dismissRemoval()
         Task { await model.library.refresh() }
+    }
+}
+
+/// After Homespun quit while on screen: asks once whether to report it (in setup, too).
+private struct QuitUnexpectedly: ViewModifier {
+    let model: AppModel
+    @State private var reporting = false
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Homespun quit unexpectedly", isPresented: Binding(get: { SessionMarker.shared.offersReport && !reporting },
+                                                                       set: { if !$0 { SessionMarker.shared.offersReport = false } })) {
+                Button("Report a Problem") { reporting = true }
+                Button("Not Now", role: .cancel) {}
+            } message: {
+                Text("Telling the developer what you were doing helps fix it.")
+            }
+            .sheet(isPresented: $reporting) {
+                NavigationStack {
+                    ReportProblemView(model: model, afterCrash: true)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Cancel", systemImage: "xmark") { reporting = false }
+                            }
+                        }
+                }
+            }
     }
 }
 

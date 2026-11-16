@@ -15,6 +15,9 @@ struct ItemViewer: View {
     /// On the right page of the open iPhone Duo: the tabs stay, and Close returns to the Overview.
     var close: (() -> Void)?
     @State private var current: String?
+    /// Where in `ids` the pages on hand are centred: only a window around the item shown is laid
+    /// out (a library has tens of thousands of items; laying them all out froze the app).
+    @State private var center: Int
     @State private var zoomed = false
     @State private var showDetails = false
     @State private var comparing: String?
@@ -28,6 +31,26 @@ struct ItemViewer: View {
         self.freeUp = freeUp
         self.close = close
         _current = State(initialValue: start)
+        _center = State(initialValue: ids.firstIndex(of: start) ?? 0)
+    }
+
+    /// Pages each side of the one shown; the window moves when the person gets near its edge.
+    static let reach = 40
+
+    private var window: ArraySlice<String> {
+        guard !ids.isEmpty else { return [] }
+        let middle = min(max(center, 0), ids.count - 1)
+        return ids[max(0, middle - Self.reach)...min(ids.count - 1, middle + Self.reach)]
+    }
+
+    /// Recentres the window once the item shown is within a quarter of its edge.
+    private func follow(_ id: String?) {
+        let pages = window
+        guard let id, let offset = pages.firstIndex(of: id) else { return }
+        if offset - pages.startIndex < Self.reach / 4 && pages.startIndex > 0
+            || pages.endIndex - offset <= Self.reach / 4 && pages.endIndex < ids.count {
+            center = offset
+        }
     }
 
     private var shown: String { current ?? start }
@@ -57,7 +80,10 @@ struct ItemViewer: View {
             toolbar(cell)
         }
         .itemScreen()
-        .onChange(of: current) { _, _ in zoomed = false }
+        .onChange(of: current) { _, id in
+            zoomed = false
+            follow(id)
+        }
         .sheet(isPresented: $showDetails) {
             if let cell {
                 ItemDetailsSheet(model: model, cell: cell, job: jobState(cell))
@@ -73,7 +99,7 @@ struct ItemViewer: View {
     private var pager: some View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
-                ForEach(ids, id: \.self) { id in
+                ForEach(Array(window), id: \.self) { id in
                     ItemViewerPage(asset: model.library.library.asset(id), isCurrent: id == shown, label: spokenLabel(id)) { zoomed in
                         if id == shown { self.zoomed = zoomed }
                     }
@@ -90,9 +116,9 @@ struct ItemViewer: View {
         .accessibilityIdentifier("item.viewer")
     }
 
-    /// The cell for an item. A linear search, but only for the few pages on screen.
+    /// The cell for an item (the library state keeps an index by identifier).
     private func cell(_ id: String) -> LibraryState.Cell? {
-        guard let cell = model.library.library.state.cells.first(where: { $0.id == id }) else { return nil }
+        guard let cell = model.library.library.state.cell(id) else { return nil }
         return demo(cell)
     }
 

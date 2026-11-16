@@ -72,15 +72,19 @@ struct ActivityTab: View {
                     }
                     .listRowBackground(Theme.card)
                 }
-            }
-            .homespunList()
-            .overlay {
+                // In the list, under the Get Started card (an overlay was drawn on top of it).
                 if isEmpty {
-                    ContentUnavailableView("Nothing here yet", systemImage: "clock.arrow.circlepath",
-                                           description: Text("Each backup and each time you free up space shows up "
-                                                             + "here, with what changed."))
+                    Section {
+                        ContentUnavailableView("Nothing here yet", systemImage: "clock.arrow.circlepath",
+                                               description: Text("Each backup and each time you free up space shows up "
+                                                                 + "here, with what changed."))
+                            .frame(maxWidth: .infinity)
+                            .accessibilityIdentifier("activity.empty")
+                    }
+                    .listRowBackground(Color.clear)
                 }
             }
+            .homespunList()
             .navigationTitle("Activity")
             .navigationSubtitle(subtitle(attention: attention.count))
         } destination: { route in

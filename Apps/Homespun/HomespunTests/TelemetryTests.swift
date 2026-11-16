@@ -159,3 +159,12 @@ private final class FakeService: @unchecked Sendable {
     SessionMarker(defaults: defaults).active()
     #expect(SessionMarker(defaults: defaults).offersReport)
 }
+
+/// The first task (10 items) asks iOS for background time: whatever iOS answers, or raises, the
+/// app must carry on (0.1.0 ended here on a device when iOS raised at submit).
+@MainActor @Test func askingForBackgroundTimeNeverEndsTheApp() {
+    #expect(LongRun.shared.begin(items: 3, server: "test") == .notNeeded)
+    let outcome = LongRun.shared.begin(items: LongRun.minimumItems, server: "test")
+    print("LongRun on this simulator: \(outcome)")
+    #expect(outcome != .notNeeded)
+}
