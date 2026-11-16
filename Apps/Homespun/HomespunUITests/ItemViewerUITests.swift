@@ -98,7 +98,8 @@ final class ItemViewerUITests: XCTestCase {
         app.buttons["item.action"].tap()
         let proceed = app.buttons["remove.confirm"]
         XCTAssertTrue(proceed.waitForExistence(timeout: 10), "no Free Up Space sheet")
-        XCTAssertEqual(proceed.label, "Free Up 1 Original")
+        // The first time it reads "They Look Right · Free Up 1 Original" (the copies are compared first).
+        XCTAssertTrue(proceed.label.hasSuffix("Free Up 1 Original"), proceed.label)
         proceed.tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let confirmation = [app.alerts.buttons["Delete"], springboard.alerts.buttons["Delete"]]
@@ -107,9 +108,9 @@ final class ItemViewerUITests: XCTestCase {
         guard let delete = confirmation.first(where: \.exists) else { return XCTFail("no deletion confirmation appeared") }
         delete.tap()
         XCTAssertTrue(app.staticTexts["remove.summary"].waitForExistence(timeout: 60))
-        let done = [app.buttons["trial.confirm"], app.buttons["remove.dismiss"]]
-        XCTAssertTrue(done[0].waitForExistence(timeout: 5) || done[1].exists)
-        done.first(where: \.exists)?.tap()
+        let done = app.buttons["remove.dismiss"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        done.tap()
 
         // The same item now has its original only at home.
         XCTAssertTrue(waitFor(state, prefix: "Original at home · on"), state.label)

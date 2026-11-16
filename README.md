@@ -90,8 +90,9 @@ a badge: orange (the original is still on this iPhone; Free up space removes it)
 (backed up: the original is only on the server). Filters show everything, only what isn't backed
 up, or only what is. Compact copies go to a "Homespun" album with the original's date, location,
 and favorite and hidden state; edited items are compressed as they currently look. Before the
-first removal it explains what removal means (including iCloud Photos), and the first removal
-takes at most 10 originals until you confirm the copies look right.
+first removal it explains what removal means (including iCloud Photos) and shows the compact
+copies to compare with their originals (from the server); "They Look Right" frees them up. Setup
+and the Get Started card open the Library to pick a few items to try.
 
 **Premium** (one-time In-App Purchase; everything above stays free):
 

@@ -257,7 +257,7 @@ struct JourneyCard: View {
     private func getStarted(_ journey: JourneyLog) -> some View {
         let library = model.library
         let steps = [
-            ("Back up your 10 newest", library.ready.count > 0 || library.library.state.count(.atHome) > 0),
+            ("Back up a few items", library.ready.count > 0 || library.library.state.count(.atHome) > 0),
             ("Compare one copy", journey.compareUsed),
             ("Free up their space", model.settings.freedBytes > 0),
         ]
@@ -277,13 +277,12 @@ struct JourneyCard: View {
                         .foregroundStyle(step.1 ? Theme.teal : Theme.label)
                         .accessibilityValue(step.1 ? "done" : "")
                 }
-                if done == 0 {
-                    Button("Back Up Your 10 Newest") {
-                        let open = library.library.state.cells.filter(\.canCompact).suffix(10).map(\.id)
-                        library.backUp(Array(open))
-                    }
-                    .buttonStyle(.glassProminent).tint(Theme.accent)
-                    .disabled(library.backUpBlockedReason != nil)
+                // The person picks what to try, in the Library (not while a backup runs).
+                if done == 0, !model.job.isRunning {
+                    Button("Choose Items to Back Up") { library.choosePending = true }
+                        .buttonStyle(.glassProminent).tint(Theme.accent)
+                        .disabled(library.backUpBlockedReason != nil)
+                        .accessibilityIdentifier("getStarted.choose")
                 }
             }
             .accessibilityElement(children: .contain)

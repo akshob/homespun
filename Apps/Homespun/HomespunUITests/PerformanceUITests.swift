@@ -314,6 +314,42 @@ final class PerformanceUITests: XCTestCase {
         }
     }
 
+    /// Swiping down closes an item (like Photos); a sideways swipe still pages.
+    @MainActor func test11SwipeDownClosesAnItem() throws {
+        try launch()
+        guard let item = middleItems().first else { return XCTFail("no items to open") }
+        item.tap()
+        let viewer = app.descendants(matching: .any)["item.viewer"]
+        XCTAssertTrue(viewer.waitForExistence(timeout: 5), "the item didn't open")
+        let pager = area(viewer)
+        pager.point(0.85, 0.5).press(forDuration: 0.01, thenDragTo: pager.point(0.15, 0.5), withVelocity: .fast,
+                                     thenHoldForDuration: 0)
+        sleep(1)
+        XCTAssertTrue(viewer.exists, "a sideways swipe closed the item")
+        pager.point(0.5, 0.3).press(forDuration: 0.05, thenDragTo: pager.point(0.5, 0.85), withVelocity: .default,
+                                    thenHoldForDuration: 0)
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "swiping down didn't close the item")
+        XCTAssertTrue(grid.waitForExistence(timeout: 5))
+    }
+
+    /// Far from the newest items the grid offers Newest; it and a second tap on the Library tab bring
+    /// the newest back (the system's own second tap went to the top, the oldest).
+    @MainActor func test12BackToTheNewest() throws {
+        try launch()
+        let newest = app.descendants(matching: .any)["grid.newest"]
+        XCTAssertFalse(newest.exists, "Newest offered at the newest")
+        flicks(6, up: true)
+        XCTAssertTrue(newest.waitForExistence(timeout: 5), "no Newest after scrolling away")
+        newest.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(newest.waitForNonExistence(timeout: 5), "Newest didn't bring the newest")
+        flicks(6, up: true)
+        XCTAssertTrue(newest.waitForExistence(timeout: 5))
+        app.tab("Library").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(newest.waitForNonExistence(timeout: 5), "tapping Library again didn't bring the newest")
+        // Not the top of the library either (its notice is above the oldest items).
+        XCTAssertFalse(app.isOnScreen(app.buttons["connect.open"]), "tapping Library again went to the oldest")
+    }
+
     /// Xcode's own hitch metric, for the result bundle (reported, not a pass/fail budget).
     @MainActor func test09HitchMetricReport() throws {
         try launch()

@@ -52,6 +52,15 @@ final class ServerModeUITests: XCTestCase {
         let proceed = app.buttons["remove.confirm"]
         XCTAssertTrue(proceed.waitForExistence(timeout: 10), "no Free Up Space sheet")
         attach(app, "Free Up Space")
+        // The first time, the compact copies can be compared with their originals before anything goes.
+        let compare = app.buttons["remove.compare"].firstMatch
+        if compare.waitForExistence(timeout: 5) {
+            compare.tap()
+            XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
+            attach(app, "Compare before freeing up")
+            app.descendants(matching: .any)["compare.close"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            XCTAssertTrue(proceed.waitForExistence(timeout: 5))
+        }
         proceed.tap()
         // iOS asks for confirmation; the alert may belong to the app or to SpringBoard.
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
@@ -65,18 +74,10 @@ final class ServerModeUITests: XCTestCase {
         XCTAssertTrue(summary.waitForExistence(timeout: 60))
         attach(app, "Removed")
         XCTAssertTrue(summary.label.contains("Freed"), summary.label)
-        // The first time, Homespun asks whether the copies look right; once that's answered (by an
-        // earlier test on this simulator), the result just has Done.
-        let looksRight = app.buttons["trial.confirm"], done = app.buttons["remove.dismiss"]
-        let deadline = Date().addingTimeInterval(10)
-        while !looksRight.exists, !done.exists, Date() < deadline { usleep(250_000) }
-        if looksRight.exists {
-            looksRight.tap()
-            XCTAssertFalse(looksRight.waitForExistence(timeout: 2))
-        } else {
-            XCTAssertTrue(done.exists, "neither the trial check nor Done")
-            done.tap()
-        }
+        // The copies were compared before (the first time); the result just has Done.
+        let done = app.buttons["remove.dismiss"]
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "no Done after freeing up")
+        done.tap()
         // The removed originals' copies now show their originals at home.
         XCTAssertTrue(app.gridItems("Original at home").firstMatch.waitForExistence(timeout: 10), "no items marked at home")
         attach(app, "Backed up")

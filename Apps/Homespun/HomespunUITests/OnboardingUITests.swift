@@ -232,18 +232,39 @@ final class OnboardingUITests: XCTestCase {
             allowAlert("Allow Full Access", timeout: 15)
         }
 
-        let tryIt = app.buttons["estimate.try"]
-        XCTAssertTrue(tryIt.waitForExistence(timeout: 60), "no estimate")
+        // Setup ends in the Library, picking what to try from what isn't backed up.
+        let choose = app.buttons["estimate.choose"]
+        XCTAssertTrue(choose.waitForExistence(timeout: 60), "no estimate")
         attach("1.10 What you could free up")
-        tryIt.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["first.status"].waitForExistence(timeout: 10), "not backing up")
-        attach("1.11 Trying it")
+        choose.tap()
+        // (Select mode hides the tab bar.)
+        XCTAssertTrue(app.descendants(matching: .any)["select.done"].waitForExistence(timeout: 15),
+                      "setup didn't end in the Library's Select mode")
+        let candidates = app.gridItems("Not backed up")
+        XCTAssertTrue(candidates.firstMatch.waitForExistence(timeout: 20), "nothing to pick")
+        let picked = Array(candidates.allElementsBoundByIndex.filter { app.isOnScreen($0) }.suffix(2))
+        for item in picked { item.tap() }
+        attach("1.11 Picked")
+        let backUp = app.descendants(matching: .any)["compact.selected"]
+        XCTAssertTrue(backUp.waitForExistence(timeout: 5), "no Back Up for the picked items")
+        backUp.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
 
-        let freeUp = app.buttons["receipt.freeUp"]
-        XCTAssertTrue(freeUp.waitForExistence(timeout: 600), "the first task didn't finish")
-        sleep(2) // The thumbnails load.
+        // Then Free Up Space, comparing a copy with its original before anything is removed.
+        let offer = app.descendants(matching: .any)["offer.free"]
+        XCTAssertTrue(offer.waitForExistence(timeout: 600), "the backup didn't finish")
         attach("1.12 Safe on the server")
-        freeUp.tap()
+        offer.tap()
+        let compare = app.buttons["remove.compare"].firstMatch
+        XCTAssertTrue(compare.waitForExistence(timeout: 10), "no compact copies to compare")
+        attach("3.1 Check the copies first")
+        compare.tap()
+        XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
+        attach("1.13 Compare")
+        app.descendants(matching: .any)["compare.close"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let free = app.buttons["remove.confirm"]
+        XCTAssertTrue(free.waitForExistence(timeout: 5))
+        XCTAssertTrue(free.label.hasPrefix("They Look Right"), free.label)
+        free.tap()
         // The server checks each original again, then iOS asks (the alert may belong to the app or SpringBoard).
         let delete = [app.alerts.buttons["Delete"], springboard.alerts.buttons["Delete"]]
         let deadline = Date().addingTimeInterval(120)
@@ -251,14 +272,18 @@ final class OnboardingUITests: XCTestCase {
         attach(springboard, "1.14 iOS asks")
         guard let button = delete.first(where: \.exists) else { return XCTFail("iOS didn't ask to delete") }
         button.tap()
-
-        let library = app.buttons["freed.library"]
-        XCTAssertTrue(library.waitForExistence(timeout: 60), "nothing freed")
+        XCTAssertTrue(app.staticTexts["remove.summary"].waitForExistence(timeout: 60), "nothing freed")
         attach("1.15 Freed")
-        library.tap()
-        XCTAssertTrue(app.hasTab("Library"), "no Library after setup")
-        attach("1.16 Library")
+        app.buttons["remove.dismiss"].tap()
         XCTAssertTrue(app.isConnected())
+        // Their originals are at home now (the Library still shows what isn't backed up; show everything).
+        if app.descendants(matching: .any)["select.done"].exists {
+            app.descendants(matching: .any)["select.done"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
+        app.descendants(matching: .any)["grid.filter"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let all = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'All Items'")).firstMatch
+        if all.waitForExistence(timeout: 5) { all.tap() }
+        attach("1.16 Library")
         XCTAssertTrue(app.gridItems("Original at home").firstMatch.waitForExistence(timeout: 10), "no originals at home")
 
         // A link to another server (from any app or page) warns before replacing this one.

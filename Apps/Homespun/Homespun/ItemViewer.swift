@@ -21,6 +21,9 @@ struct ItemViewer: View {
     @State private var zoomed = false
     @State private var showDetails = false
     @State private var comparing: String?
+    /// Swipe down to close: how far the item has been dragged.
+    @State private var drag: CGSize = .zero
+    @Environment(\.dismiss) private var dismiss
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
     init(model: AppModel, ids: [String], start: String, freeUp: @escaping (Set<String>?) -> Void,
@@ -59,11 +62,15 @@ struct ItemViewer: View {
 
     var body: some View {
         let cell = cell(shown), asset = model.library.library.asset(shown)
+        let pulled = min(max(drag.height, 0) / 400, 1)
         ZStack {
-            Color.black.ignoresSafeArea()
+            Color.black.opacity(1 - pulled * 0.8).ignoresSafeArea()
             pager.ignoresSafeArea()
-            if let cell, !zoomed { stateLine(cell, asset: asset) }
+                .scaleEffect(1 - pulled * 0.3)
+                .offset(x: drag.width, y: max(drag.height, 0))
+            if let cell, !zoomed, drag == .zero { stateLine(cell, asset: asset) }
         }
+
         .navigationTitle(ItemText.title(asset?.creationDate))
         .navigationSubtitle(ItemText.subtitle(asset?.creationDate, kind: asset.flatMap(PhotoLibrary.kind),
                                               duration: asset?.duration ?? 0))
@@ -108,6 +115,14 @@ struct ItemViewer: View {
                 }
             }
             .scrollTargetLayout()
+            // Inside the pager, to reach its scroll view.
+            .background(SwipeDownToClose(enabled: !zoomed) { drag = $0 } ended: { translation, velocity in
+                if translation.height > 120 || velocity.height > 900 {
+                    if let close { close() } else { dismiss() }
+                } else {
+                    withAnimation(.snappy) { drag = .zero }
+                }
+            })
         }
         .scrollTargetBehavior(.paging)
         .perfScrollTracking()
@@ -451,5 +466,85 @@ private struct ZoomableMedia: UIViewRepresentable {
         let report = onZoom
         view.onZoom = { zoomed in Task { @MainActor in report(zoomed) } }
         if !isCurrent { view.reset() }
+    }
+}
+
+/// Swipe down to close the item, like Photos: a vertical pan on the pager's scroll view (it covers
+/// photos and videos), which the paging and zooming scroll views wait for. A drag that starts
+/// sideways fails it at once, so paging stays immediate; it's off while the item is zoomed in (the
+/// drag pans the photo then).
+struct SwipeDownToClose: UIViewRepresentable {
+    var enabled: Bool
+    var changed: (CGSize) -> Void
+    var ended: (_ translation: CGSize, _ velocity: CGSize) -> Void
+
+    /// Starts only for a drag that's mostly downward; the scroll views' pans wait for it.
+    final class Rules: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
+            guard let pan = gesture as? UIPanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: nil)
+            return velocity.y > 0 && velocity.y > abs(velocity.x) * 1.2
+        }
+
+        func gestureRecognizer(_ gesture: UIGestureRecognizer,
+                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
+            other is UIPanGestureRecognizer && other.view is UIScrollView
+        }
+    }
+
+    final class Probe: UIView {
+        var changed: (CGSize) -> Void = { _ in }
+        var ended: (CGSize, CGSize) -> Void = { _, _ in }
+        private let rules = Rules()
+        private lazy var pan: UIPanGestureRecognizer = {
+            let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
+            pan.delegate = rules
+            pan.maximumNumberOfTouches = 1
+            return pan
+        }()
+
+        var enabled = true {
+            didSet { pan.isEnabled = enabled }
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            var view = superview
+            while let current = view, !(current is UIScrollView) { view = current.superview }
+            guard let scroll = view as? UIScrollView else {
+                pan.view?.removeGestureRecognizer(pan)
+                return
+            }
+            if pan.view !== scroll {
+                pan.view?.removeGestureRecognizer(pan)
+                scroll.addGestureRecognizer(pan)
+            }
+        }
+
+        @objc private func panned(_ pan: UIPanGestureRecognizer) {
+            let translation = pan.translation(in: nil), velocity = pan.velocity(in: nil)
+            switch pan.state {
+            case .changed: changed(CGSize(width: translation.x, height: translation.y))
+            case .ended: ended(CGSize(width: translation.x, height: translation.y), CGSize(width: velocity.x, height: velocity.y))
+            case .cancelled, .failed: ended(.zero, .zero)
+            default: break
+            }
+        }
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        return probe
+    }
+
+    func updateUIView(_ probe: Probe, context: Context) {
+        probe.enabled = enabled
+        probe.changed = changed
+        probe.ended = ended
+    }
+
+    static func dismantleUIView(_ probe: Probe, coordinator: ()) {
+        probe.removeFromSuperview()
     }
 }

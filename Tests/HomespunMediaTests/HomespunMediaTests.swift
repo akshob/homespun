@@ -106,3 +106,34 @@ func ffmpegHoldsUnvalidatedVideoAndKeepsHLG(name: String, transfer: String, fps:
     #expect(edited.range(of: xmp) != nil && edited.range(of: Data("2024:05:01 12:34:56".utf8)) != nil)
     #expect(edited.range(of: Data("Exif\0\0".utf8))!.lowerBound < edited.range(of: xmp)!.lowerBound)
 }
+
+/// iPhone videos with spatial audio (APAC, which ffmpeg can't decode) keep their stereo track in
+/// the compact copy; a video whose only sound is APAC is kept as it is rather than made silent.
+@Test func spatialAudioIsLeftOutAndAloneIsHeld() throws {
+    let listing = """
+    Codecs:
+     D..... = Decoding supported
+     -------
+     DEV.L. hevc                 H.265 / HEVC (High Efficiency Video Coding)
+     DEA.L. aac                  AAC (Advanced Audio Coding) (decoders: aac aac_fixed)
+     ..A.L. apple_apac           Apple Positional Audio Codec
+    """
+    let decodable = FFmpegCodecs.parse(listing)
+    #expect(decodable == ["hevc", "aac"])
+    let both = """
+    {"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","width":1920,"height":1080},
+                {"index":1,"codec_type":"audio","codec_name":"aac"},
+                {"index":2,"codec_type":"audio","codec_name":"apple_apac"},
+                {"index":3,"codec_type":"data","codec_name":"unknown"}]}
+    """
+    let probe = try VideoProbe.parse(Data(both.utf8), decodable: decodable)
+    #expect(probe.audioStreams == [1] && probe.undecodableAudio == 1 && probe.holdReasons.isEmpty)
+    let args = FFmpegVideoCompressor().arguments(input: URL(fileURLWithPath: "/in.mov"),
+                                                 output: URL(fileURLWithPath: "/out.mov"), probe: probe)
+    #expect(!args.contains("0:2"))
+    let only = """
+    {"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","width":1920,"height":1080},
+                {"index":1,"codec_type":"audio","codec_name":"apple_apac"}]}
+    """
+    #expect(try VideoProbe.parse(Data(only.utf8), decodable: decodable).holdReasons == ["spatial_audio"])
+}

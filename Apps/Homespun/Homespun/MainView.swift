@@ -109,6 +109,8 @@ struct MainTabView: View {
         // The tab span starts as the selection changes (a tab's onAppear runs before onChange).
         TabView(selection: Binding(get: { tab }, set: { new in
             if new != tab { PerfMonitor.shared.begin("tab") }
+            // Library tapped again: the newest items, like Photos (the grid's top is the oldest).
+            if new == tab, new == .library { model.library.newestRequests &+= 1 }
             tab = new
         })) {
             Tab("Library", systemImage: "photo.on.rectangle", value: TabID.library) {
@@ -128,6 +130,8 @@ struct MainTabView: View {
             .accessibilityIdentifier("tab.server")
         }
         .tabBarMinimizeBehavior(.onScrollDown)
+        // Get Started's Choose Items opens the Library (in Select mode).
+        .onChange(of: model.library.choosePending, initial: true) { _, pending in if pending { tab = .library } }
         .modifier(StatusAccessoryModifier(model: model, open: openFromAccessory))
         .sheet(item: $sheet, onDismiss: dismissed) { sheet in
             switch sheet {

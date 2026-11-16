@@ -2,6 +2,7 @@
 import BackgroundTasks
 import Foundation
 import os
+import UIKit
 
 /// A backup the person started keeps going when they leave Homespun, with the system's progress
 /// (and Stop) on the Lock Screen and in the Dynamic Island (DESIGN T18, iOS 26's continued
@@ -85,9 +86,34 @@ final class LongRun {
         {
             expiry.expired = true
             Task { @MainActor in
+                // Open on screen, the run simply carries on (it doesn't need the system's time). In
+                // the background, what hasn't started is dropped, or iOS ends the app.
+                guard UIApplication.shared.applicationState != .active else {
+                    LongRun.log.notice("continued processing expired while open; the run carries on")
+                    return
+                }
                 job.stopWaiting(Set(job.items.filter { $0.state == .waiting }.map(\.assetIdentifier)))
             }
             box.task.setTaskCompleted(success: false)
+        }
+    }
+
+    /// How far along the item being worked on is (0–1), from its step: iOS ends a continued task
+    /// whose progress stops moving, and a video can take minutes on the server, so that step creeps
+    /// forward with time.
+    nonisolated static func fraction(step: String, seconds: Double) -> Double {
+        switch step {
+        case let step where step.hasPrefix("Uploading"):
+            let percent = step.split(separator: " ").last.flatMap { Double($0.dropLast()) } ?? 0
+            return 0.1 + 0.5 * min(max(percent, 0), 100) / 100
+        case "Reading": return 0.02
+        case "Contacting server": return 0.08
+        case "Queued on server", "Compressing on server": return min(0.6 + seconds / 400, 0.85)
+        case "Downloading compact copy": return 0.88
+        case "Compressing motion": return 0.9
+        case "Checking Live Photo": return 0.93
+        case "Saving": return 0.96
+        default: return 0
         }
     }
 
@@ -108,12 +134,20 @@ final class LongRun {
         // so at once, or iOS ends the app. The item in progress finishes when the app runs again.
         task.expirationHandler = Self.expirationHandler(box, expiry: expiry, job: job)
         defer { running = false }
+        // Hundredths of an item, never going backwards.
+        var reported: Int64 = 0, step = "", stepStarted = Date()
         while !expiry.expired, job.isRunning || job.hasWaiting {
-            let total = job.runProgress.total
-            let done = job.runProgress.done
-            task.progress.totalUnitCount = Int64(max(total, 1))
-            task.progress.completedUnitCount = Int64(done)
-            task.updateTitle(task.title, subtitle: "\(done) of \(total)")
+            let progress = job.runProgress
+            let current = progress.current.map { "\($0.asset) \($0.message)" } ?? ""
+            if current != step {
+                step = current
+                stepStarted = Date()
+            }
+            let fraction = progress.current.map { Self.fraction(step: $0.message, seconds: Date().timeIntervalSince(stepStarted)) } ?? 0
+            reported = max(reported, Int64(progress.done) * 100 + Int64(fraction * 100))
+            task.progress.totalUnitCount = Int64(max(progress.total, 1)) * 100
+            task.progress.completedUnitCount = min(reported, task.progress.totalUnitCount)
+            task.updateTitle(task.title, subtitle: "\(progress.done) of \(progress.total)")
             try? await Task.sleep(for: .seconds(1))
         }
         guard !expiry.expired else { return }

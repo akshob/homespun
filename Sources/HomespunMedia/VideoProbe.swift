@@ -14,10 +14,13 @@ public struct VideoProbe: Equatable, Sendable {
     public var hasDolbyVisionConfiguration = false
     /// QuickTime Live Photo content identifier; set only for Live Photo motion.
     public var contentIdentifier: String?
+    /// Audio tracks ffmpeg can't decode, left out of `audioStreams`: newer iPhones record Apple's
+    /// spatial audio (APAC) next to an ordinary stereo track, which the compact copy keeps.
+    public var undecodableAudio = 0
 
     public init(width: Int, height: Int, videoDuration: Double?, containerDuration: Double?, audioStreams: [Int],
                 videoStreamIndex: Int = 0, colorTransfer: String? = nil, frameRate: Double = 0,
-                hasDolbyVisionConfiguration: Bool = false, contentIdentifier: String? = nil) {
+                hasDolbyVisionConfiguration: Bool = false, contentIdentifier: String? = nil, undecodableAudio: Int = 0) {
         self.width = width
         self.height = height
         self.videoDuration = videoDuration
@@ -28,6 +31,7 @@ public struct VideoProbe: Equatable, Sendable {
         self.frameRate = frameRate
         self.hasDolbyVisionConfiguration = hasDolbyVisionConfiguration
         self.contentIdentifier = contentIdentifier
+        self.undecodableAudio = undecodableAudio
     }
 
     public var isHLG: Bool { colorTransfer == "arib-std-b67" }
@@ -39,6 +43,8 @@ public struct VideoProbe: Equatable, Sendable {
         if colorTransfer == "smpte2084" { reasons.append("hdr") }
         if hasDolbyVisionConfiguration && !isHLG { reasons.append("dolby_vision") }
         if frameRate > 61 { reasons.append("high_frame_rate") }
+        // Its only sound is in tracks ffmpeg can't decode: a compact copy would be silent.
+        if audioStreams.isEmpty && undecodableAudio > 0 { reasons.append("spatial_audio") }
         return reasons
     }
 
@@ -46,11 +52,12 @@ public struct VideoProbe: Equatable, Sendable {
     public static func read(_ url: URL) throws -> VideoProbe {
         let data = try ProcessRunner.run(["ffprobe", "-v", "error", "-show_streams", "-show_format",
                                           "-of", "json", url.path])
-        return try parse(data)
+        return try parse(data, decodable: FFmpegCodecs.decodable)
     }
     #endif
 
-    static func parse(_ data: Data) throws -> VideoProbe {
+    /// `decodable`: the codecs ffmpeg can decode (nil: don't check).
+    static func parse(_ data: Data, decodable: Set<String>? = nil) throws -> VideoProbe {
         struct SideData: Decodable { let side_data_type: String? }
         struct Disposition: Decodable { let attached_pic: Int? }
         struct Stream: Decodable {
@@ -73,9 +80,10 @@ public struct VideoProbe: Equatable, Sendable {
               let width = video.width, let height = video.height else {
             throw VideoCompressionError.noVideoStream
         }
-        let audio = output.streams.filter {
+        let named = output.streams.filter {
             $0.codec_type == "audio" && !["", "none", "unknown"].contains($0.codec_name ?? "")
-        }.map(\.index)
+        }
+        let audio = named.filter { decodable?.contains($0.codec_name ?? "") ?? true }.map(\.index)
         func rate(_ text: String?) -> Double? {
             guard let parts = text?.split(separator: "/"), parts.count == 2,
                   let numerator = Double(parts[0]), let denominator = Double(parts[1]), denominator > 0 else { return nil }
@@ -90,6 +98,32 @@ public struct VideoProbe: Equatable, Sendable {
                           videoStreamIndex: video.index, colorTransfer: video.color_transfer,
                           frameRate: rate(video.avg_frame_rate) ?? rate(video.r_frame_rate) ?? 0,
                           hasDolbyVisionConfiguration: dolbyVision,
-                          contentIdentifier: tags["com.apple.quicktime.content.identifier"])
+                          contentIdentifier: tags["com.apple.quicktime.content.identifier"],
+                          undecodableAudio: named.count - audio.count)
+    }
+}
+
+/// The codecs this ffmpeg can decode: `ffmpeg -codecs` lists them with "D" first.
+public enum FFmpegCodecs {
+    #if os(Linux) || os(macOS)
+    public static let decodable: Set<String>? = {
+        guard let data = try? ProcessRunner.run(["ffmpeg", "-hide_banner", "-codecs"]) else { return nil }
+        let found = parse(String(decoding: data, as: UTF8.self))
+        return found.isEmpty ? nil : found
+    }()
+    #endif
+
+    static func parse(_ listing: String) -> Set<String> {
+        var found = Set<String>(), listed = false
+        for line in listing.split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            if parts.first?.hasPrefix("-------") == true {
+                listed = true
+                continue
+            }
+            guard listed, parts.count >= 2, parts[0].count == 6, parts[0].first == "D" else { continue }
+            found.insert(String(parts[1]))
+        }
+        return found
     }
 }

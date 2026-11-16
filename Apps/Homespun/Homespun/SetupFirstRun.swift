@@ -94,12 +94,9 @@ struct EstimatePage: View {
         flow.estimate = result.estimate
     }
 
-    private var small: Bool { flow.notBackedUp.count <= FirstTask.size }
 
     private var tryTitle: String {
-        if immich { return "Try It on \(flow.taskIDs.count) from Immich" }
-        if small { return flow.taskIDs.count == 1 ? "Try It on Your Photo" : "Try It on All \(flow.taskIDs.count)" }
-        return "Try It on Your \(flow.taskIDs.count) Newest"
+        immich ? "Try It on \(flow.taskIDs.count) from Immich" : "Choose Items to Try"
     }
 
     private var consequence: String {
@@ -107,12 +104,8 @@ struct EstimatePage: View {
             return "Makes compact copies of the \(flow.taskIDs.count) newest photos Immich has. Newer ones wait for the "
                 + "Immich app. Nothing is removed from this iPhone."
         }
-        if let free = storage?.freeBytes, let estimate = flow.estimate, free < estimate.bytes {
-            return "Backs up your \(flow.taskIDs.count) newest; they fit on \(name). Nothing is removed from this iPhone."
-        }
-        if small { return "Backs up all \(flow.taskIDs.count) to \(name). Nothing is removed from this iPhone." }
-        return "Backs up your \(flow.taskIDs.count) newest to \(name) so you can see their compact copies. Nothing is "
-            + "removed from this iPhone."
+        return "Pick a few in your Library to back up to \(name) and see their compact copies. Nothing is removed "
+            + "from this iPhone."
     }
 
     private func page(_ estimate: FirstTask.Estimate) -> some View {
@@ -159,7 +152,14 @@ struct EstimatePage: View {
             }
         } actions: {
             ConsequenceLine(text: consequence)
-            PrimaryButton(title: tryTitle, systemImage: "arrow.up.circle", id: "estimate.try") {
+            PrimaryButton(title: tryTitle, systemImage: immich ? "arrow.up.circle" : "checkmark.circle",
+                          id: immich ? "estimate.try" : "estimate.choose") {
+                // The person picks what to try in the Library (Free Up Space compares before removing).
+                // With Immich, the server can use only what Immich has: the newest of those.
+                guard immich else {
+                    library.choosePending = true
+                    return flow.finish()
+                }
                 flow.taskStarted = nil
                 flow.taskFinished = nil
                 flow.go(.firstTask)

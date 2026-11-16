@@ -20,6 +20,11 @@ struct LibraryView: View {
     @State private var dataReady = false
     @State private var builtKey: GridKey?
     @State private var anchor: Anchor?
+    @Namespace private var zoom
+    /// The newest items are well out of view (the grid offers Newest), as of the last scroll.
+    @State private var farFromNewest = false
+    /// The Library tab was tapped again: the newest, once the system's own scroll ends.
+    @State private var newestPending = false
     @State private var preheater: ThumbnailPreheater?
     /// What Back Up and Free Up Space would take from the selection (worked out off the main thread).
     @State private var selectionParts = SelectionParts()
@@ -88,7 +93,9 @@ struct LibraryView: View {
                 .toolbar { toolbar }
                 .toolbar(selecting ? .hidden : .automatic, for: .tabBar)
                 .navigationDestination(for: String.self) { id in
+                    // Zooms from its cell, and a swipe down shrinks it back into the grid (like Photos).
                     ItemViewer(model: model, ids: visibleIDs, start: id, freeUp: openFreeUp)
+                        .navigationTransition(.zoom(sourceID: id, in: zoom))
                 }
                 .sheet(item: $sheet) { sheet in
                     switch sheet {
@@ -101,6 +108,15 @@ struct LibraryView: View {
                     await measureSelection()
                 }
                 .task(id: gridKey) { await rebuildData() }
+                // Get Started: pick what to try, from what isn't backed up.
+                .onChange(of: controller.choosePending, initial: true) { _, pending in
+                    guard pending else { return }
+                    controller.choosePending = false
+                    path = []
+                    filter = .notBackedUp
+                    selecting = true
+                    controller.journey.used(.select)
+                }
                 .onChange(of: filter) { PerfMonitor.shared.begin("filter") }
                 .onChange(of: media) { PerfMonitor.shared.begin("filter") }
                 .onChange(of: selecting) { _, on in
@@ -251,6 +267,7 @@ struct LibraryView: View {
                                 let cell = data.cells[position]
                                 GridCell(initial: cell, library: controller.library, selection: selection,
                                          serverName: controller.serverName, pixels: pixels)
+                                    .matchedTransitionSource(id: cell.id, in: zoom)
                                     .onTapGesture { tapped(cell) }
                                     .contextMenu { if !selecting { menu(for: cell) } }
                                     .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("grid")) } action: {
@@ -274,6 +291,9 @@ struct LibraryView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 if data.cells.isEmpty { empty }
             }
+            // Inside the scroll view, to reach it: the system's own scroll to the top on a second tap
+            // of the tab would take the grid to the oldest items; that tap brings the newest instead.
+            .background(ScrollsToTop(enabled: false))
         }
         // A new grid when the columns change (the size menu, a pinch, unfolding iPhone Duo): a lazy
         // grid given new columns measures its rows again from the top of the library down to where
@@ -286,8 +306,25 @@ struct LibraryView: View {
             self.anchor = Anchor(item: anchor.item, shape: shape)
             if let position = data.positions[anchor.item] { proxy.scrollTo(position, anchor: .center) }
         }
+        // When scrolling stops (not per frame: following the scroll geometry of a 35,000-item grid
+        // cost every frame, measured as hitches).
         .onScrollPhaseChange { _, phase in
-            if phase == .idle { anchor = currentAnchor(shape) }
+            guard phase == .idle else { return }
+            if newestPending {
+                newestPending = false
+                return showNewest(proxy)
+            }
+            anchor = currentAnchor(shape)
+            // Once the cells where it stopped are laid out.
+            DispatchQueue.main.async { updateFarFromNewest() }
+        }
+        // The system scrolls to the top (the oldest) on that tap whatever the scroll view says; once
+        // it stops, the newest (or after a moment, if it didn't move).
+        .onChange(of: controller.newestRequests) {
+            newestPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                if newestPending { newestPending = false; showNewest(proxy) }
+            }
         }
         .perfScrollTracking()
         .onAppear {
@@ -307,7 +344,40 @@ struct LibraryView: View {
         .modifier(OpensAtNewest())
         .simultaneousGesture(MagnifyGesture().onEnded { value in resize(value.magnification) })
         .accessibilityIdentifier("grid")
+        // After the grid's identifier, which would otherwise become the button's too.
+        .overlay(alignment: .bottom) {
+            if farFromNewest, !data.cells.isEmpty {
+                Button { showNewest(proxy) } label: {
+                    Label("Newest", systemImage: "arrow.down").font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.label)
+                .glassEffect(.regular.interactive(), in: .capsule)
+                .padding(.bottom, 12)
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                .accessibilityLabel("Go to Newest")
+                .accessibilityIdentifier("grid.newest")
+            }
         }
+        }
+    }
+
+    /// The newest items at the bottom, like when the Library opens.
+    private func showNewest(_ proxy: ScrollViewProxy) {
+        guard let last = data.cells.indices.last else { return }
+        proxy.scrollTo(last, anchor: .bottom)
+        anchor = nil
+        if farFromNewest { withAnimation(.snappy) { farFromNewest = false } }
+    }
+
+    /// More than about three screens from the newest items: the cells laid out now (the screen and
+    /// about a screen each side) is the measure.
+    private func updateFarFromNewest() {
+        let shown = frames.rects.keys
+        guard let last = data.cells.indices.last, let newestShown = shown.max() else { return }
+        let far = last - newestShown > max(shown.count, 1)
+        if far != farFromNewest { withAnimation(.snappy) { farFromNewest = far } }
     }
 
     /// The grid's columns: a change makes a new grid.
@@ -780,6 +850,37 @@ struct HoldToDragSelect: UIGestureRecognizerRepresentable {
         case .ended, .cancelled, .failed: ended()
         default: break
         }
+    }
+}
+
+/// Turns the enclosing scroll view's scroll-to-top (status bar or a second tap on its tab) on or off.
+struct ScrollsToTop: UIViewRepresentable {
+    var enabled: Bool
+
+    final class Probe: UIView {
+        var enabled = true
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            apply()
+        }
+
+        func apply() {
+            var view = superview
+            while let current = view, !(current is UIScrollView) { view = current.superview }
+            (view as? UIScrollView)?.scrollsToTop = enabled
+        }
+    }
+
+    func makeUIView(context: Context) -> Probe {
+        let probe = Probe()
+        probe.isUserInteractionEnabled = false
+        probe.isHidden = true
+        return probe
+    }
+
+    func updateUIView(_ probe: Probe, context: Context) {
+        probe.enabled = enabled
+        probe.apply()
     }
 }
 

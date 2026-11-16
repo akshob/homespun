@@ -3,8 +3,8 @@ import Photos
 import SwiftUI
 
 /// Free Up Space (DESIGN 02·3.1–3.5): one sheet that explains, checks each original with the server
-/// again, lets iOS ask, and shows what was freed. The first time it removes at most 10 and asks
-/// whether the compact copies look right.
+/// again, lets iOS ask, and shows what was freed. The first time, before anything is removed, it
+/// shows the compact copies to compare with their originals; "They Look Right" frees them up.
 struct FreeUpSpaceSheet: View {
     let controller: LibraryController
     let scope: Set<String>?
@@ -34,8 +34,14 @@ struct FreeUpSpacePanel: View {
     /// Only these originals (from a selection or a finished backup), or everything ready.
     let scope: Set<String>?
     var close: () -> Void
-    @Environment(\.openURL) private var openURL
     @State private var somethingWrong = false
+    /// The compact copies of the first few, to compare before the first removal.
+    @State private var compacts: [String] = []
+    @State private var comparing: Comparing?
+
+    private struct Comparing: Identifiable {
+        let id: String
+    }
 
     private var settings: AppSettings { controller.settings }
     private var trial: Bool { !settings.trialConfirmed }
@@ -45,7 +51,7 @@ struct FreeUpSpacePanel: View {
         return controller.ready.originals.filter { scope.contains($0) }
     }
 
-    private var count: Int { trial ? min(originals.count, AppSettings.trialLimit) : originals.count }
+    private var count: Int { originals.count }
 
     private var bytes: Int {
         let sizes = controller.readySizes
@@ -66,6 +72,25 @@ struct FreeUpSpacePanel: View {
         }
         .background(Theme.background)
         .safeAreaBar(edge: .bottom) { actions.padding(.horizontal, 24).padding(.bottom, 12) }
+        .task(id: trial ? originals.prefix(12).joined() : "") {
+            guard trial else { return }
+            var found: [String] = []
+            for original in originals.prefix(12) {
+                if let compact = await controller.job.ledger.entry(for: original)?.compactIdentifier { found.append(compact) }
+            }
+            compacts = found
+        }
+        .sheet(item: $comparing) { item in
+            NavigationStack {
+                CompareView(model: AppModel.shared, compactIdentifier: item.id)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close", systemImage: "xmark") { comparing = nil }
+                                .accessibilityIdentifier("compare.close")
+                        }
+                    }
+            }
+        }
     }
 
     // MARK: Review
@@ -82,21 +107,18 @@ struct FreeUpSpacePanel: View {
                  + (trial ? "Their compact copies stay in Photos."
                     : "Homespun checks each one again, then iOS asks you."))
                 .foregroundStyle(Theme.secondaryLabel)
-            ThumbnailStrip(identifiers: Array(originals.prefix(count).prefix(12)), manager: controller.library.thumbnails)
             if trial {
+                compareCard
                 promise("checkmark.shield", "First, Homespun checks each original with \(controller.serverName) again, byte for byte.")
                 promise("trash", "Then iOS asks you. Removed originals stay in Recently Deleted for 30 days.")
                 promise("icloud", "With iCloud Photos, they're also removed from iCloud and your other devices. Compact copies stay.")
-                if originals.count > AppSettings.trialLimit {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: "hand.raised").foregroundStyle(Theme.accent).accessibilityHidden(true)
-                        Text("First time: \(count) of \(originals.count). Check how the compact copies look, then free up the rest.")
-                            .font(.subheadline)
-                    }
-                    .card(padding: 14)
-                    .accessibilityElement(children: .combine)
+                if somethingWrong {
+                    InlineNotice(tone: .info, title: "Nothing has been removed",
+                                 message: "Keep the originals on this iPhone for now. Server › Report a Problem tells us "
+                                    + "what looked wrong.")
                 }
             } else {
+                ThumbnailStrip(identifiers: Array(originals.prefix(12)), manager: controller.library.thumbnails)
                 DisclosureGroup("How it works") {
                     VStack(alignment: .leading, spacing: 12) {
                         promise("checkmark.shield", "Each original on this iPhone must match \(controller.serverName)'s copy exactly.")
@@ -108,6 +130,32 @@ struct FreeUpSpacePanel: View {
                 .tint(Theme.accent)
             }
         }
+    }
+
+    /// The first time: the compact copies that will stay, each opening Compare with its original.
+    private var compareCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Check the compact copies first").font(.headline).foregroundStyle(Theme.label)
+            Text("They take the originals' place in Photos. Tap one to compare it with its original on \(controller.serverName).")
+                .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(compacts, id: \.self) { compact in
+                        Button { comparing = Comparing(id: compact) } label: {
+                            Thumbnail(identifier: compact, manager: controller.library.thumbnails, side: 72)
+                                .overlay(alignment: .bottomTrailing) {
+                                    Image(systemName: "rectangle.split.2x1.fill").font(.caption)
+                                        .foregroundStyle(.white).padding(5).shadow(radius: 2)
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Compare with the original")
+                        .accessibilityIdentifier("remove.compare")
+                    }
+                }
+            }
+        }
+        .card()
     }
 
     // MARK: Checking
@@ -125,10 +173,14 @@ struct FreeUpSpacePanel: View {
 
     @ViewBuilder private func result(_ report: OriginalRemover.Report) -> some View {
         if !report.removed.isEmpty {
-            Label("Freed \(LibraryController.bytes(report.freedBytes))", systemImage: "checkmark.circle.fill")
-                .font(.title2.weight(.semibold)).foregroundStyle(Theme.label)
-                .symbolRenderingMode(.palette).foregroundStyle(Theme.teal, Theme.label)
-                .accessibilityIdentifier("remove.summary")
+            Label {
+                Text("Freed \(LibraryController.bytes(report.freedBytes))").foregroundStyle(Theme.label)
+            } icon: {
+                Image(systemName: "checkmark.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.white, Theme.teal)
+            }
+            .font(.title2.weight(.semibold))
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("remove.summary")
             Text("\(report.removed.count) original\(report.removed.count == 1 ? " is" : "s are") in Recently Deleted until "
                  + "\(Date.now.addingTimeInterval(30 * 86_400).formatted(.dateTime.month(.wide).day())).")
                 .foregroundStyle(Theme.secondaryLabel)
@@ -146,25 +198,6 @@ struct FreeUpSpacePanel: View {
                          message: report.blocked.joined(separator: "\n"))
                 .accessibilityIdentifier("remove.blocked")
         }
-        if trial, !report.removed.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Do the compact copies look right?").font(.headline)
-                Text("Open a few in Photos (the \(PhotoLibrary.albumTitle) album) and compare. If they look right, Homespun "
-                     + "frees up everything that's ready next time.")
-                    .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
-                Button("Open Photos", systemImage: "photo.on.rectangle") {
-                    if let url = URL(string: "photos-redirect://") { openURL(url) }
-                }
-                .font(.subheadline.weight(.semibold))
-            }
-            .card()
-            if somethingWrong {
-                InlineNotice(tone: .info, title: "Your originals are still safe",
-                             message: "They're on \(controller.serverName), and in Recently Deleted in Photos for 30 days: "
-                                + "open Photos › Recently Deleted › Recover. Homespun keeps freeing up at most "
-                                + "\(AppSettings.trialLimit) at a time until you say the copies look right.")
-            }
-        }
     }
 
     // MARK: Actions
@@ -175,36 +208,29 @@ struct FreeUpSpacePanel: View {
             if !originals.isEmpty {
                 VStack(spacing: 8) {
                     Button {
+                        // Looked at (or not) before anything is removed: the answer is this tap.
+                        if trial { settings.trialConfirmed = true }
                         Task { await controller.freeUp(only: scope) }
                     } label: {
-                        Text("Free Up \(count) Original\(count == 1 ? "" : "s")").frame(maxWidth: .infinity)
+                        Text((trial ? "They Look Right · " : "") + "Free Up \(count) Original\(count == 1 ? "" : "s")")
+                            .frame(maxWidth: .infinity)
                     }
                     .primaryAction()
                     .disabled(controller.job.isRunning)
                     .accessibilityIdentifier("remove.confirm")
+                    if trial {
+                        Button("Something Looks Wrong") { withAnimation { somethingWrong = true } }
+                            .accessibilityIdentifier("remove.wrong")
+                    }
                     Button("Not Now", action: close).accessibilityIdentifier("remove.notNow")
                 }
             }
         case .checking:
             EmptyView()
-        case .done(let report):
-            if trial, !report.removed.isEmpty {
-                VStack(spacing: 8) {
-                    Button {
-                        settings.trialConfirmed = true
-                        close()
-                    } label: {
-                        Text("They Look Right").frame(maxWidth: .infinity)
-                    }
-                    .primaryAction()
-                    .accessibilityIdentifier("trial.confirm")
-                    Button("Something's Wrong") { somethingWrong = true }
-                }
-            } else {
-                Button(action: close) { Text("Done").frame(maxWidth: .infinity) }
-                    .primaryAction()
-                    .accessibilityIdentifier("remove.dismiss")
-            }
+        case .done:
+            Button(action: close) { Text("Done").frame(maxWidth: .infinity) }
+                .primaryAction()
+                .accessibilityIdentifier("remove.dismiss")
         }
     }
 

@@ -163,3 +163,15 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
     await history.flush()
     #expect(RunHistory(url: url, now: { clock.now }).runs.flatMap(\.items).map(\.assetID) == ["new", "old"])
 }
+
+/// The system's progress moves within an item, step by step, and keeps creeping while the server
+/// compresses (iOS ends a continued task whose progress stops moving).
+@Test func longRunProgressMovesWithinAnItem() {
+    let steps = ["Reading", "Contacting server", "Uploading photo 0%", "Uploading photo 50%", "Uploading photo 100%",
+                 "Compressing on server", "Downloading compact copy", "Compressing motion", "Checking Live Photo", "Saving"]
+    let fractions = steps.map { LongRun.fraction(step: $0, seconds: 0) }
+    #expect(fractions == fractions.sorted() && fractions.allSatisfy { $0 < 1 })
+    #expect(LongRun.fraction(step: "Uploading photo 50%", seconds: 0) == 0.35)
+    let compressing = [0.0, 30, 60, 600].map { LongRun.fraction(step: "Compressing on server", seconds: $0) }
+    #expect(compressing[0] < compressing[1] && compressing[1] < compressing[2] && compressing[3] == 0.85)
+}

@@ -42,6 +42,11 @@ final class LibraryController {
     /// The Library is in Select mode: the status accessory steps aside so it doesn't cover
     /// Select mode's Back Up.
     var isSelecting = false
+    /// Bumped to bring the grid to the newest items (the Library tab tapped again).
+    var newestRequests = 0
+    /// The person is to pick items to try (setup, Get Started): the Library opens in Select mode on
+    /// what isn't backed up, now or when it next appears (setup ends first).
+    var choosePending = false
     /// Free space on this iPhone, for "almost full" (T15).
     private(set) var phoneFreeBytes: Int?
     /// Not backed up and created since the last backup, with the days since (T19).
