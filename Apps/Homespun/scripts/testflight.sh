@@ -51,4 +51,5 @@ xcodebuild -exportArchive -archivePath $WORK/Homespun.xcarchive -exportOptionsPl
 # altool finds the key in ~/.appstoreconnect/private_keys.
 xcrun altool --upload-app -f $WORK/export/Homespun.ipa -t ios --apiKey $ASC_KEY_ID --apiIssuer $ASC_ISSUER_ID 2>&1 \
   | grep -E "UPLOAD (SUCCEEDED|FAILED)|ERROR ITMS|error:"
-echo "Uploaded build $BUILD. It shows in App Store Connect › TestFlight after processing (about 10–30 minutes)."
+echo "Uploaded build $BUILD. It shows in App Store Connect › TestFlight after processing (about 10–30 minutes):"
+echo "  python3 scripts/asc.py wait $BUILD"

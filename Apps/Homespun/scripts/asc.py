@@ -5,7 +5,7 @@
   asc.py builds            the latest builds and their processing state
   asc.py testers           creates the internal group "Homespun Team" (all builds, no review needed)
                            and adds every App Store Connect user of the team to it
-  asc.py wait              waits until the newest build has processed
+  asc.py wait [build]      waits until that build (default: the newest) has processed
 
 Reads ASC_KEY_ID and ASC_ISSUER_ID (or ~/.appstoreconnect/homespun.env) and the key from
 ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8.
@@ -112,14 +112,16 @@ def testers():
         print(f"{email}: added; TestFlight sends an invitation")
 
 
-def wait():
+def wait(version=None):
+    """Waits for `version` (default: the newest build) to finish processing."""
     while True:
-        latest = builds(1)
-        if not latest:
-            print(f"{time.strftime('%H:%M:%S')} no build yet (Apple is still receiving it)", flush=True)
+        listed = builds(10)
+        match = [b for b in listed if version is None or b[0] == version][:1]
+        if not match:
+            print(f"{time.strftime('%H:%M:%S')} build {version or ''} not listed yet (Apple is still receiving it)", flush=True)
         else:
-            version, state, uploaded, _ = latest[0]
-            print(f"{time.strftime('%H:%M:%S')} build {version}: {state}", flush=True)
+            number, state, uploaded, _ = match[0]
+            print(f"{time.strftime('%H:%M:%S')} build {number}: {state}", flush=True)
             if state != "PROCESSING":
                 return state
         time.sleep(60)
@@ -133,6 +135,6 @@ if __name__ == "__main__":
     elif command == "testers":
         testers()
     elif command == "wait":
-        sys.exit(0 if wait() == "VALID" else 1)
+        sys.exit(0 if wait(sys.argv[2] if len(sys.argv) > 2 else None) == "VALID" else 1)
     else:
         sys.exit(__doc__)
