@@ -21,10 +21,10 @@ struct LibraryView: View {
     @State private var builtKey: GridKey?
     @State private var anchor: Anchor?
     @Namespace private var zoom
-    /// The newest items are well out of view (the grid offers Newest), as of the last scroll.
-    @State private var farFromNewest = false
     /// The Library tab was tapped again: the newest, once the system's own scroll ends.
     @State private var newestPending = false
+    /// Select mode's Newest (the tab bar, whose second tap does this, is hidden then).
+    @State private var newestTaps = 0
     @State private var preheater: ThumbnailPreheater?
     /// What Back Up and Free Up Space would take from the selection (worked out off the main thread).
     @State private var selectionParts = SelectionParts()
@@ -306,8 +306,6 @@ struct LibraryView: View {
             self.anchor = Anchor(item: anchor.item, shape: shape)
             if let position = data.positions[anchor.item] { proxy.scrollTo(position, anchor: .center) }
         }
-        // When scrolling stops (not per frame: following the scroll geometry of a 35,000-item grid
-        // cost every frame, measured as hitches).
         .onScrollPhaseChange { _, phase in
             guard phase == .idle else { return }
             if newestPending {
@@ -315,11 +313,10 @@ struct LibraryView: View {
                 return showNewest(proxy)
             }
             anchor = currentAnchor(shape)
-            // Once the cells where it stopped are laid out.
-            DispatchQueue.main.async { updateFarFromNewest() }
         }
         // The system scrolls to the top (the oldest) on that tap whatever the scroll view says; once
         // it stops, the newest (or after a moment, if it didn't move).
+        .onChange(of: newestTaps) { showNewest(proxy) }
         .onChange(of: controller.newestRequests) {
             newestPending = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
@@ -344,40 +341,14 @@ struct LibraryView: View {
         .modifier(OpensAtNewest())
         .simultaneousGesture(MagnifyGesture().onEnded { value in resize(value.magnification) })
         .accessibilityIdentifier("grid")
-        // After the grid's identifier, which would otherwise become the button's too.
-        .overlay(alignment: .bottom) {
-            if farFromNewest, !data.cells.isEmpty {
-                Button { showNewest(proxy) } label: {
-                    Label("Newest", systemImage: "arrow.down").font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 14).padding(.vertical, 10)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.label)
-                .glassEffect(.regular.interactive(), in: .capsule)
-                .padding(.bottom, 12)
-                .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                .accessibilityLabel("Go to Newest")
-                .accessibilityIdentifier("grid.newest")
-            }
-        }
         }
     }
 
-    /// The newest items at the bottom, like when the Library opens.
+    /// The newest items at the bottom, like when the Library opens (its tab tapped again).
     private func showNewest(_ proxy: ScrollViewProxy) {
         guard let last = data.cells.indices.last else { return }
         proxy.scrollTo(last, anchor: .bottom)
         anchor = nil
-        if farFromNewest { withAnimation(.snappy) { farFromNewest = false } }
-    }
-
-    /// More than about three screens from the newest items: the cells laid out now (the screen and
-    /// about a screen each side) is the measure.
-    private func updateFarFromNewest() {
-        let shown = frames.rects.keys
-        guard let last = data.cells.indices.last, let newestShown = shown.max() else { return }
-        let far = last - newestShown > max(shown.count, 1)
-        if far != farFromNewest { withAnimation(.snappy) { farFromNewest = far } }
     }
 
     /// The grid's columns: a change makes a new grid.
@@ -496,6 +467,9 @@ struct LibraryView: View {
                 } label: {
                     Label("More", systemImage: "ellipsis")
                 }
+                Button("Newest", systemImage: "arrow.down.to.line") { newestTaps &+= 1 }
+                    .accessibilityLabel("Go to Newest")
+                    .accessibilityIdentifier("select.newest")
                 Spacer()
                 let ids = backUpCandidates
                 Button {

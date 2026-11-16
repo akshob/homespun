@@ -332,22 +332,37 @@ final class PerformanceUITests: XCTestCase {
         XCTAssertTrue(grid.waitForExistence(timeout: 5))
     }
 
-    /// Far from the newest items the grid offers Newest; it and a second tap on the Library tab bring
-    /// the newest back (the system's own second tap went to the top, the oldest).
-    @MainActor func test12BackToTheNewest() throws {
+    /// A second tap on the Library tab brings the newest items (the system's own second tap went to
+    /// the top, the oldest).
+    @MainActor func test12LibraryTabBringsTheNewest() throws {
         try launch()
-        let newest = app.descendants(matching: .any)["grid.newest"]
-        XCTAssertFalse(newest.exists, "Newest offered at the newest")
+        // The grid lays out only around what's on screen: its last item is on screen only at the newest.
+        func atNewest() -> Bool {
+            guard let last = app.gridItems().allElementsBoundByIndex.last else { return false }
+            return app.isOnScreen(last)
+        }
+        func waitForNewest() -> Bool {
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                if atNewest() { return true }
+                sleep(1)
+            }
+            return false
+        }
+        XCTAssertTrue(atNewest(), "the Library didn't open at the newest")
         flicks(6, up: true)
-        XCTAssertTrue(newest.waitForExistence(timeout: 5), "no Newest after scrolling away")
-        newest.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(newest.waitForNonExistence(timeout: 5), "Newest didn't bring the newest")
-        flicks(6, up: true)
-        XCTAssertTrue(newest.waitForExistence(timeout: 5))
+        XCTAssertFalse(atNewest(), "the grid didn't scroll away from the newest")
         app.tab("Library").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        XCTAssertTrue(newest.waitForNonExistence(timeout: 5), "tapping Library again didn't bring the newest")
-        // Not the top of the library either (its notice is above the oldest items).
+        XCTAssertTrue(waitForNewest(), "tapping Library again didn't bring the newest")
         XCTAssertFalse(app.isOnScreen(app.buttons["connect.open"]), "tapping Library again went to the oldest")
+
+        // In Select mode (no tab bar), the bar's Newest does it.
+        tapBarButton("select.start")
+        flicks(6, up: true)
+        XCTAssertFalse(atNewest())
+        tapBarButton("select.newest")
+        XCTAssertTrue(waitForNewest(), "Newest in Select mode didn't bring the newest")
+        tapBarButton("select.done")
     }
 
     /// Xcode's own hitch metric, for the result bundle (reported, not a pass/fail budget).
