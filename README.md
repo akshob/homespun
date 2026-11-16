@@ -134,9 +134,12 @@ the app in App Store Connect, create an App Store Connect API key (Admin) and sa
 ASC_KEY_ID=<key id> ASC_ISSUER_ID=<issuer id> Apps/Homespun/scripts/testflight.sh
 ```
 
-It archives a Release build (signed in the cloud with the key), uploads it, and gives it a new
-build number. Add yourself to an internal testing group in App Store Connect › TestFlight and
-install it with the TestFlight app; internal builds need no review.
+It archives a Release build without signing (so it works over SSH, where the login keychain is
+locked), signs the export with Apple's cloud-managed distribution certificate, uploads it with
+`altool`, and gives it a new build number. `scripts/asc.py` talks to the App Store Connect API
+with the same key: `asc.py testers` creates the internal group "Homespun Team" (every build, no
+review) and adds the team's users, `asc.py wait` waits for processing, `asc.py builds` lists builds.
+Install with the TestFlight app.
 
 ### Running it on your iPhone
 
