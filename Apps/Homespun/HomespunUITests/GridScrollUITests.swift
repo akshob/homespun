@@ -102,6 +102,43 @@ final class GridScrollUITests: XCTestCase {
         }
     }
 
+    /// Paging the viewer to items that weren't in view: the grid behind it follows (like Photos), so
+    /// closing zooms into the item shown, in view, not into the one tapped.
+    @MainActor func testClosingTheViewerShowsTheItemItCameTo() throws {
+        try launch()
+        let start = try settled()
+        guard start.value("grid.bottom") - start.value("grid.top") > 2_000 else { throw XCTSkip("The library is short.") }
+        for _ in 0..<2 { swipe(by: 250) }
+        let middle = try settled(changedFrom: start)
+        let screen = app.windows.firstMatch.frame
+        let top = app.navigationBars.firstMatch.exists ? app.navigationBars.firstMatch.frame.maxY : screen.minY + 120
+        let cells = app.gridItems().allElementsBoundByIndex.filter { $0.frame.minY > top && app.isOnScreen($0) }
+        guard let first = cells.min(by: { ($0.frame.minY, $0.frame.minX) < ($1.frame.minY, $1.frame.minX) }) else {
+            return XCTFail("no cells on screen")
+        }
+        first.tap()
+        let viewer = app.descendants(matching: .any)["item.viewer"].firstMatch
+        XCTAssertTrue(viewer.waitForExistence(timeout: 8), "the item didn't open")
+        // Older items, past the top row: out of the grid's view.
+        for _ in 0..<Int(middle.value("grid.columns")) * 2 + 1 { viewer.swipeRight() }
+        sleep(2)
+        let paged = report()
+        let shown = paged.value("grid.shown")
+        XCTAssertGreaterThanOrEqual(shown, 0, "the grid didn't hear which item the viewer shows")
+        XCTAssertLessThan(shown, middle.value("grid.first"), "paging didn't reach the items above the screen")
+        XCTAssertEqual(paged.value("grid.zoom"), shown, "closing would zoom into another item than the one shown")
+        XCTAssertTrue(paged.value("grid.first") <= shown && shown <= paged.value("grid.last"),
+                      "item \(shown) isn't in view behind the viewer (\(paged.value("grid.first"))–\(paged.value("grid.last")))")
+
+        app.goBack()
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 8), "the viewer didn't close")
+        sleep(2)
+        let back = report()
+        XCTAssertTrue(back.value("grid.first") <= shown && shown <= back.value("grid.last"),
+                      "closed: item \(shown) isn't in view (\(back.value("grid.first"))–\(back.value("grid.last")))")
+        XCTAssertEqual(back.value("grid.jumps"), start.value("grid.jumps"))
+    }
+
     /// Pinching changes the columns (like Grid Size), keeping the item under the fingers in view.
     @MainActor func testPinchingChangesTheColumnsAndKeepsTheItem() throws {
         try launch()

@@ -215,6 +215,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         view.setNeedsLayout()
         // Back from an item: the zoom has landed, its stand-in goes.
         following?.cancel()
+        let paged = viewerItem != nil
         viewerItem = nil
         if zoom.source != nil || zoom.shown != nil {
             zoom.source = nil
@@ -227,6 +228,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         let offset = collectionView.contentOffset
         collectionView.contentOffset = CGPoint(x: offset.x, y: offset.y - 1)
         collectionView.contentOffset = offset
+        if paged { publishProbe() }
     }
 
     /// The navigation bar (its large title, its edge effect) and the tab bar (minimising on scroll,
@@ -642,6 +644,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                           range.upperBound))
         }
         prepareZoom(position)
+        publishProbe()
     }
 
     // MARK: Scrolling
@@ -853,8 +856,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         jumpProbe = (probe.id, y, finger)
     }
 
-    /// Where the grid is, for the UI tests: its offset and its ends', the items in view, jumps, and
-    /// cells still without a picture a moment later.
+    /// Where the grid is, for the UI tests: its offset and its ends', the items in view, jumps, cells
+    /// still without a picture a moment later, and the items the viewer shows and zooms back into.
     private func publishProbe() {
         guard PerfMonitor.shared.enabled, isViewLoaded else { return }
         for delay in [0, 0.8] {
@@ -867,6 +870,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                     "grid.jumps": Double(self.jumps), "grid.count": Double(geometry.count), "grid.columns": Double(geometry.columns),
                     "grid.first": Double(items.lowerBound), "grid.last": Double(items.upperBound - 1),
                     "grid.anchor": Double(geometry.anchor(in: visible)?.item ?? -1), "grid.blank": Double(self.blankCells().blank),
+                    "grid.shown": Double(self.viewerItem.flatMap { self.data.positions[$0] } ?? -1),
+                    "grid.zoom": Double(self.zoom.source.flatMap { self.data.positions[$0.id] } ?? -1),
                 ])
             }
         }
