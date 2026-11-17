@@ -5,7 +5,7 @@ import Testing
 
 // Performance budgets for the work behind the screens, on a library the size of a real one
 // (35,000 items, most of them backed up). Each test takes the median of a few runs and fails past
-// its budget. Run them in a Release build (homespun-test/perf-unit.sh): the budgets are for
+// its budget. Run them in a Release build (ci/perf.sh): the budgets are for
 // optimised code on the simulator, with headroom for a phone.
 
 /// The median of `runs` timings of `body`, in milliseconds.

@@ -93,6 +93,6 @@ private let now = Date(timeIntervalSince1970: 1_800_000_000)
     #expect(state.cells(.copyLater).map(\.id) == ["recent", "favorite"])
     #expect(state.cells(.notBackedUp).map(\.id) == ["plain"])
     #expect(cells["recent"].map { $0.canCompact && !$0.canFree && !$0.isNotBackedUp } == true)
-    #expect(Badge.copyLater.spoken(server: "polonium", compactAfter: nil)
-            == "Backed up. Original on polonium; favorites keep their original.")
+    #expect(Badge.copyLater.spoken(server: "Home Mac", compactAfter: nil)
+            == "Backed up. Original on Home Mac; favorites keep their original.")
 }

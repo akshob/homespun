@@ -21,7 +21,7 @@ cat > $DATA/copies.jsonl <<JSONL
 {"kind":"photo","originals":[{"role":"photo","path":"$ORIG/IMG_2002.JPG"}],"copies":[{"role":"photo","sha256":"$(h IMG_2002.JPG)"}]}
 {"kind":"video","originals":[{"role":"video","path":"$ORIG/IMG_2003.MOV"}],"copies":[{"role":"video","sha256":"$(h IMG_2003.MOV)"}]}
 JSONL
-export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="polonium (copies)"
+export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="Home Mac (copies)"
 $SERVER_BIN import $DATA/copies.jsonl
 $SERVER_BIN serve > $DATA.log 2>&1 &
 SERVER=$!; sleep 3

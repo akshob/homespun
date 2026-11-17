@@ -5,7 +5,7 @@ import XCTest
 /// old enough (Server › Automatic Mode, the slider). A recent item deleted on the iPhone meanwhile
 /// goes to the server's trash. Needs a fresh simulator whose library holds old synthetic media plus
 /// `HOMESPUN_RECENT` items added today, and a server (`HOMESPUN_SERVER`, `HOMESPUN_PAIRING_CODE`);
-/// `homespun-test/e2e-later.sh` sets this up. The tests run in order.
+/// `ci/later.sh` sets this up. The tests run in order.
 final class CompactLaterUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -38,7 +38,7 @@ final class CompactLaterUITests: XCTestCase {
     @MainActor func test1RecentItemsAreBackedUpAndCompactedLater() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"],
-              let recent else { throw XCTSkip("Run with homespun-test/e2e-later.sh.") }
+              let recent else { throw XCTSkip("Run with ci/later.sh.") }
         let app = launch()
         app.pair(address: address, code: code)
 
@@ -80,7 +80,7 @@ final class CompactLaterUITests: XCTestCase {
     /// Deleted on the iPhone before its compact copy: the server moves the original to its trash.
     @MainActor func test2ACleanedUpItemGoesToTheServersTrash() throws {
         guard ProcessInfo.processInfo.environment["HOMESPUN_SERVER"] != nil, let recent else {
-            throw XCTSkip("Run with homespun-test/e2e-later.sh.")
+            throw XCTSkip("Run with ci/later.sh.")
         }
         let app = launch(["-deleteNewestBackedUp"])
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
@@ -107,7 +107,7 @@ final class CompactLaterUITests: XCTestCase {
     /// The slider moved to Right Away: the next run compacts what was waiting.
     @MainActor func test3RightAwayCompactsWhatWaited() throws {
         guard ProcessInfo.processInfo.environment["HOMESPUN_SERVER"] != nil else {
-            throw XCTSkip("Run with homespun-test/e2e-later.sh.")
+            throw XCTSkip("Run with ci/later.sh.")
         }
         var app = launch()
         openAutomaticMode(app)

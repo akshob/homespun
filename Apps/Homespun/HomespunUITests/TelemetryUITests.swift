@@ -2,7 +2,7 @@
 import XCTest
 
 /// Analytics, problem reports and the "quit unexpectedly" question, against a telemetry stub
-/// (`STUB_PORT=… homespun-test/run-class.sh`, which checks what reached it) and a server to pair
+/// (`ci/lane.sh telemetry`, which checks what reached it) and a server to pair
 /// with. The tests run in order on one simulator.
 final class TelemetryUITests: XCTestCase {
     override func setUp() {
@@ -12,7 +12,7 @@ final class TelemetryUITests: XCTestCase {
     private var stub: String? { ProcessInfo.processInfo.environment["TELEMETRY_STUB"] }
 
     @MainActor private func launch(_ arguments: [String] = []) throws -> XCUIApplication {
-        guard let stub else { throw XCTSkip("Run with STUB_PORT=… homespun-test/run-class.sh.") }
+        guard let stub else { throw XCTSkip("Run with ci/lane.sh telemetry.") }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "-telemetryEndpoint", stub] + arguments
         app.launch()
@@ -67,7 +67,7 @@ final class TelemetryUITests: XCTestCase {
         XCTAssertTrue(diagnostics.waitForExistence(timeout: 10))
         let text = diagnostics.label
         XCTAssertTrue(text.contains("\"library\"") && text.contains("\"server\"") && text.contains("\"recentRuns\""), text)
-        XCTAssertFalse(text.contains("polonium") || text.contains("127.0.0.1"), "the server's name or address is included")
+        XCTAssertFalse(text.contains("Home Mac") || text.contains("127.0.0.1"), "the server's name or address is included")
         attach(app, "What's Included")
         app.goBack()
         XCTAssertTrue(send.waitForExistence(timeout: 5) && send.isEnabled)
