@@ -28,8 +28,10 @@ final class GridScrollUITests: XCTestCase {
         guard start.value("grid.bottom") - start.value("grid.top") > 400 else { throw XCTSkip("The library fits on the screen.") }
         XCTAssertEqual(start.value("grid.offset"), start.value("grid.bottom"), accuracy: 1, "the Library didn't open at the newest")
         XCTAssertEqual(start.value("grid.blank"), 0, "cells without their picture at the newest")
+        // The months whose headers are on screen (none when the newest month fills the screen), and the
+        // item in the middle: a jump would show another part of the library.
         let newest = months()
-        XCTAssertFalse(newest.isEmpty, "no month on screen")
+        let columns = start.value("grid.columns")
 
         // A short, slow drag toward older items, held at the end so it doesn't fling.
         drag(by: 100)
@@ -38,6 +40,8 @@ final class GridScrollUITests: XCTestCase {
         XCTAssertEqual(start.value("grid.offset") - dragged.value("grid.offset"), 100, accuracy: 35,
                        "a 100-point drag moved the grid \(start.value("grid.offset") - dragged.value("grid.offset")) points")
         check(months(), near: newest, within: 1, "after a 100-point drag")
+        XCTAssertLessThanOrEqual(abs(dragged.value("grid.anchor") - start.value("grid.anchor")), columns * 3,
+                                 "a 100-point drag moved from item \(start.value("grid.anchor")) to \(dragged.value("grid.anchor"))")
         XCTAssertEqual(dragged.value("grid.blank"), 0, "cells without their picture after a short drag")
 
         // Back to the newest by a drag the other way.
@@ -55,6 +59,8 @@ final class GridScrollUITests: XCTestCase {
         XCTAssertGreaterThan(travelled, 60, "a swipe toward older items didn't scroll")
         XCTAssertLessThan(travelled, 5_000, "a small swipe went \(travelled) points")
         check(months(), near: before, within: Int(travelled / 200) + 2, "after a small swipe of \(Int(travelled)) points")
+        XCTAssertLessThanOrEqual(abs(swiped.value("grid.anchor") - back.value("grid.anchor")), columns * (travelled / 60 + 3),
+                                 "a swipe of \(Int(travelled)) points moved from item \(back.value("grid.anchor")) to \(swiped.value("grid.anchor"))")
         XCTAssertEqual(swiped.value("grid.blank"), 0, "cells without their picture after a swipe")
 
         // The Library tab tapped again brings the newest, exactly (not the oldest, the system's scroll to
@@ -92,6 +98,9 @@ final class GridScrollUITests: XCTestCase {
     /// Pinching changes the columns (like Grid Size), keeping the item under the fingers in view.
     @MainActor func testPinchingChangesTheColumnsAndKeepsTheItem() throws {
         try launch()
+        // On iPhone Duo the grid runs under the tabs' strip, and XCTest's pinch (across the grid's frame)
+        // puts a finger on the strip: pinching is checked on the iPhone.
+        guard app.tabBars.firstMatch.exists else { throw XCTSkip("XCTest's pinch lands on iPhone Duo's tab strip.") }
         let start = try settled()
         guard start.value("grid.bottom") - start.value("grid.top") > 2_000 else { throw XCTSkip("The library is short.") }
         for _ in 0..<2 { swipe(by: 250) }
