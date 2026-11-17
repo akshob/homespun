@@ -42,10 +42,11 @@ for one in $runs; do
       run duo-cover zsh $D/ui.sh duo-cover iPhone-Duo \
         HomespunUITests/LibraryUITests,HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests 8795 ;;
     duo-grid)
-      # The grid's scrolling on the cover, over many months.
-      run duo-grid env DATED=240 zsh $D/ui.sh duo-grid iPhone-Duo HomespunUITests/GridScrollUITests 8791 ;;
+      # The grid over many months: scrolling on the cover, and unfolding, turning and folding mid-library.
+      run duo-grid env DATED=240 DUO_POSES=1 zsh $D/ui.sh duo-grid iPhone-Duo \
+        HomespunUITests/GridScrollUITests,HomespunUITests/DuoLayoutUITests/testFoldingMidLibraryKeepsTheItemInView 8791 ;;
     duo-open)
-      run duo-open env EXTRA=12 DATED=240 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo HomespunUITests/DuoLayoutUITests 8793 open ;;
+      run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo HomespunUITests/DuoLayoutUITests/testOneScreenInEveryPose 8793 open ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;
   esac

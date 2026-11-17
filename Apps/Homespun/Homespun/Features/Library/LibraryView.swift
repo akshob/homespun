@@ -76,7 +76,8 @@ struct LibraryView: View {
                 .navigationDestination(for: String.self) { id in
                     // Zooms from its cell, and a swipe down shrinks it back into the cell of the item
                     // shown (the grid keeps it in view behind the viewer, like Photos).
-                    ItemViewer(model: model, ids: visibleIDs, start: id, details: $details, freeUp: openFreeUp)
+                    ItemViewer(model: model, ids: visibleIDs, start: id, details: $details, freeUp: openFreeUp,
+                               onShow: { gridZoom.shown = $0 })
                         .navigationTransition(.zoom(sourceID: GridZoom.sourceID, in: zoom))
                 }
                 .sheet(item: $sheet) { sheet in

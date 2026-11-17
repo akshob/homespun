@@ -50,6 +50,8 @@ final class GridZoom {
     }
 
     var source: Source?
+    /// The item the viewer shows (its `onShow`): the grid keeps its cell in view and zooms back into it.
+    var shown: String?
     static let sourceID = "grid.zoom"
 }
 
@@ -211,6 +213,13 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         isFront = true
         lastInsets = collectionView.adjustedContentInset
         view.setNeedsLayout()
+        // Back from an item: the zoom has landed, its stand-in goes.
+        following?.cancel()
+        viewerItem = nil
+        if zoom.source != nil || zoom.shown != nil {
+            zoom.source = nil
+            zoom.shown = nil
+        }
         // Back from an item: the bars may differ from when it opened (the newest end stays in view).
         if placed, pinned { setOffset(offsetRange.upperBound) }
         // The bars learn where the grid is when it scrolls: opened at the newest, the large title
@@ -594,35 +603,31 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         return IndexPath(item: position - layout.geometry.monthRange(month).lowerBound, section: month)
     }
 
-    /// The item the viewer shows (nil when it isn't on screen), followed through `ItemPresence`
-    /// rather than through SwiftUI, so paging the viewer doesn't update the Library screen.
+    /// The item the viewer shows after paging (nil until then, and once the grid is back), followed
+    /// here rather than through SwiftUI, so paging the viewer doesn't update the Library screen.
     private var viewerItem: String?
     private var following: DispatchWorkItem?
 
     private func watchViewer() {
-        withObservationTracking { _ = ItemPresence.shared.shown } onChange: { [weak self] in
+        withObservationTracking { _ = zoom.shown } onChange: { [weak self] in
             // Called before the change: read it after.
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    self.viewerChanged(ItemPresence.shared.shown)
+                    self.viewerChanged(self.zoom.shown)
                     self.watchViewer()
                 }
             }
         }
     }
 
-    /// The viewer showed another item, or closed. Its cell is put in view behind the viewer (like
-    /// Photos) once paging pauses, so closing zooms into it; paging itself costs the grid nothing.
+    /// The viewer showed another item. Its cell is put in view behind the viewer (like Photos) once
+    /// paging pauses, so closing zooms into it; paging itself costs the grid nothing.
     private func viewerChanged(_ id: String?) {
         guard id != viewerItem else { return }
         viewerItem = id
         following?.cancel()
-        guard let id else {
-            zoom.source = nil
-            return
-        }
-        guard zoom.source?.id != id else { return }
+        guard let id, zoom.source?.id != id else { return }
         let work = DispatchWorkItem { [weak self] in self?.follow(id) }
         following = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)

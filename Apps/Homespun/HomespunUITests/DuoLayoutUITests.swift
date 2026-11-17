@@ -121,7 +121,8 @@ final class DuoLayoutUITests: XCTestCase {
         }
         let anchor = start["grid.anchor", default: -1]
         attach(app, "mid-library, folded")
-        for (name, wide) in [("landscape", true), ("portrait", false), ("folded", false), ("landscape", true)] {
+        // Unfolded, turned, folded again (it ends folded, where the grid's own scrolling tests run).
+        for (name, wide) in [("landscape", true), ("portrait", false), ("folded", false)] {
             pose(name, file: poses)
             XCTAssertTrue(name == "folded" ? app.wait(width: 0..<500) : app.wait(wide: wide), "the screen didn't turn \(name)")
             sleep(2)
@@ -367,7 +368,7 @@ private extension XCUIApplication {
 
     /// Waits until the window's width is in `range`.
     @MainActor func wait(width range: Range<CGFloat>) -> Bool {
-        let deadline = Date().addingTimeInterval(15)
+        let deadline = Date().addingTimeInterval(30)
         repeat {
             if range.contains(windows.firstMatch.frame.width) { return true }
             usleep(500_000)

@@ -12,6 +12,8 @@ struct ItemViewer: View {
     let ids: [String]
     let start: String
     var freeUp: (Set<String>?) -> Void
+    /// The item shown, whenever it changes (where closing the viewer zooms back to).
+    var onShow: (String) -> Void
     /// The item whose Details are open (nil: closed). The Library shows them: as an inspector beside
     /// the stack on the open iPhone Duo; inside this pushed screen it nested stacks and SwiftUI trapped.
     @Binding var details: String?
@@ -29,11 +31,12 @@ struct ItemViewer: View {
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
     init(model: AppModel, ids: [String], start: String, details: Binding<String?>,
-         freeUp: @escaping (Set<String>?) -> Void) {
+         freeUp: @escaping (Set<String>?) -> Void, onShow: @escaping (String) -> Void = { _ in }) {
         self.model = model
         self.ids = ids
         self.start = start
         self.freeUp = freeUp
+        self.onShow = onShow
         _details = details
         _current = State(initialValue: start)
         _center = State(initialValue: ids.firstIndex(of: start) ?? 0)
@@ -82,22 +85,17 @@ struct ItemViewer: View {
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbar(cell) }
         .itemScreen()
-        .onAppear {
-            PerfMonitor.shared.endAfterFrame("open")
-            ItemPresence.shared.shown = shown
-        }
+        .onAppear { PerfMonitor.shared.endAfterFrame("open") }
         .onChange(of: current) { _, id in
-            ItemPresence.shared.shown = id
             zoomed = false
             follow(id)
+            guard let id else { return }
+            onShow(id)
             // Open Details follow the item shown.
-            if details != nil, let id { details = id }
+            if details != nil { details = id }
         }
         // Compare goes over the viewer, and Back leaves it: Details close.
-        .onDisappear {
-            details = nil
-            ItemPresence.shared.shown = nil
-        }
+        .onDisappear { details = nil }
         .sheet(isPresented: $restoring) {
             RestoreOriginalSheet(controller: model.library, compacts: [shown]) { restored in
                 // The compact copy shown is gone: back to the grid, where the original is.
@@ -316,9 +314,6 @@ final class ItemPresence {
     static let shared = ItemPresence()
     private var count = 0
     var isOpen: Bool { count > 0 }
-    /// The item the viewer shows (nil when it isn't on screen): the Library keeps its cell in view
-    /// behind the viewer and zooms back into it.
-    var shown: String?
 
     fileprivate func opened() { count += 1 }
 
