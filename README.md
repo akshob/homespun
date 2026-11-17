@@ -183,8 +183,12 @@ Install with the TestFlight app.
 
 ### Running it on your iPhone
 
-A free Apple ID works; apps signed this way stop launching after 7 days until you
-install them again.
+The app, its widgets and the Apple Watch app share an App Group (`group.<bundle ID>`), which only a
+paid Apple Developer Program team can use. A free Apple ID's "Personal Team" works without it: add
+`CODE_SIGN_ENTITLEMENTS=` to the `xcodebuild` command below (or remove App Groups under Signing &
+Capabilities in Xcode, until the next `xcodegen generate`); everything works except the widgets and
+the watch, which then say "Open Homespun". Apps signed by a Personal Team stop launching after 7 days
+until you install them again.
 
 1. In Xcode, sign in under Settings > Accounts. This creates a "Personal Team".
 2. Put the team ID in `Apps/Homespun/Local.xcconfig` (git-ignored):

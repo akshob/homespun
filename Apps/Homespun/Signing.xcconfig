@@ -5,7 +5,8 @@
 //   DEVELOPMENT_TEAM = ABCDE12345
 //
 // Debug builds use a separate bundle ID, so a free Personal Team never registers the
-// App Store ID. If Xcode says the ID is not available, add a suffix in Local.xcconfig:
+// App Store ID. (A Personal Team can't use the App Group the widgets need: see README, "Running it on
+// your iPhone".) If Xcode says the ID is not available, add a suffix in Local.xcconfig:
 //
 //   HOMESPUN_BUNDLE_ID = photos.homespun.app.dev.yourname
 

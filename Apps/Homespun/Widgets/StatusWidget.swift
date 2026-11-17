@@ -3,7 +3,8 @@ import SwiftUI
 import WidgetKit
 
 /// Homespun at a glance: what's ready to free up, the last backup, the server and Automatic Mode
-/// (Premium). On the iPhone's Home Screen and Lock Screen, and on Apple Watch faces and Smart Stack.
+/// (unlocked with the one-time purchase; its words never say "Premium"). On the iPhone's Home Screen
+/// and Lock Screen, and on Apple Watch faces and Smart Stack.
 /// It never asks the network: it shows what the iPhone app last wrote (`StatusStore`).
 struct StatusWidget: Widget {
     var body: some WidgetConfiguration {
@@ -11,7 +12,8 @@ struct StatusWidget: Widget {
             StatusWidgetView(entry: entry)
         }
         .configurationDisplayName("Homespun")
-        .description("What's ready to free up, your last backup, your server and Automatic Mode. Part of Homespun Premium.")
+        .description("What's ready to free up, your last backup, your server and Automatic Mode. Unlocked with the same "
+                     + "one-time purchase as Automatic Mode and Cloud Copies.")
         .supportedFamilies(Self.families)
     }
 

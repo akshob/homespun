@@ -189,7 +189,7 @@ enum PremiumFeature: String, Identifiable {
         switch self {
         case .automatic: "Automatic mode is part of Premium"
         case .cloudCopies: "Cloud copies are part of Premium"
-        case .widgets: "Widgets are part of Premium"
+        case .widgets: "Unlock widgets"
         }
     }
 
@@ -203,7 +203,7 @@ enum PremiumFeature: String, Identifiable {
                 + "on your server's own copy."
         case .widgets:
             "See what's ready to free up, your last backup and your server at a glance, on your Home Screen, Lock "
-                + "Screen and Apple Watch. One purchase also unlocks automatic mode and cloud copies."
+                + "Screen and Apple Watch. Unlocked with the same one-time purchase as automatic mode and cloud copies."
         }
     }
 }

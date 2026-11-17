@@ -45,7 +45,7 @@ final class PremiumUITests: XCTestCase {
         app.open(URL(string: "homespun://unlock?feature=widgets")!)
         let title = app.staticTexts["premium.feature.title"]
         XCTAssertTrue(title.waitForExistence(timeout: 20), "no sheet about widgets")
-        XCTAssertEqual(title.label, "Widgets are part of Premium")
+        XCTAssertEqual(title.label, "Unlock widgets")
         XCTAssertTrue(app.buttons["premium.feature.buy"].exists)
         let sheet = XCTAttachment(screenshot: app.screenshot())
         sheet.name = "Unlock widgets"
