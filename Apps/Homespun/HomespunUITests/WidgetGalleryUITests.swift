@@ -51,12 +51,20 @@ final class WidgetGalleryUITests: XCTestCase {
         tap(springboard.buttons["Add Widget"], "Add Widget")
         let search = springboard.searchFields.firstMatch
         tap(search, "the gallery's search field")
-        search.typeText("Homespun")
-        sleep(2)
+        // Just installed, the gallery may not know Homespun's widgets yet: ask again for a while.
         let named = NSPredicate(format: "label == 'Homespun'")
-        let result = [springboard.cells.containing(named), springboard.buttons.matching(named),
+        var result: XCUIElement?
+        for attempt in 0..<6 where result == nil {
+            if attempt > 0 {
+                search.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 8))
+                sleep(10)
+            }
+            search.typeText("Homespun")
+            sleep(2)
+            result = [springboard.cells.containing(named), springboard.buttons.matching(named),
                       springboard.staticTexts.matching(named)]
-            .lazy.flatMap { $0.allElementsBoundByIndex }.first { $0.isHittable && $0.elementType != .icon }
+                .lazy.flatMap { $0.allElementsBoundByIndex }.first { $0.isHittable && $0.elementType != .icon }
+        }
         tap(result ?? springboard.cells.containing(named).firstMatch, "Homespun in the gallery")
         sleep(2)
         if shots { attach("Gallery, small") }
