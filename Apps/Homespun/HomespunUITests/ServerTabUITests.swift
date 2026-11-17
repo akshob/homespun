@@ -18,6 +18,21 @@ extension XCUIApplication {
             swipeDownInContent(near: element)
             tries -= 1
         }
+        // A swipe keeps scrolling after it ends, so on a short screen (iPhone Duo's cover) it can carry
+        // the row past the window both ways and leave it under the accessory: drag the rest of the way
+        // and hold, which doesn't coast. (Not on the open Duo, whose screen coordinates are turned.)
+        tries = 4
+        while element.exists, windows.firstMatch.frame.width < 700, tries > 0 {
+            let row = element.frame
+            let distance = row.maxY > limit ? row.maxY - limit + 40 : row.minY < 100 ? row.minY - 140 : 0
+            guard distance != 0, let list = contentLists.last(where: { $0.frame.intersects(row) }) ?? contentLists.last
+            else { break }
+            let step = max(-list.frame.height * 0.4, min(list.frame.height * 0.4, distance))
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -step)), withVelocity: .slow,
+                        thenHoldForDuration: 0.3)
+            tries -= 1
+        }
         return element.exists || scrollTo(element)
     }
 
@@ -103,6 +118,7 @@ final class ServerTabUITests: XCTestCase {
         app.goBack()
 
         // Devices lists this iPhone.
+        XCTAssertTrue(app.reveal(app.buttons["settings.devices"]), "no Devices row")
         app.buttons["settings.devices"].tap()
         let this = app.descendants(matching: .any)["devices.this"]
         XCTAssertTrue(this.waitForExistence(timeout: 15), "this iPhone isn't listed")
