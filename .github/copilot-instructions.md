@@ -23,7 +23,9 @@ and may not exist in other checkouts.
   holds `DEVELOPMENT_TEAM`. Never put a team ID in `project.yml`.
 - App sources (`Apps/Homespun/Homespun`) are grouped by layer; XcodeGen picks up any folder:
   - `App/`: entry point, `AppModel` (composition root), root and tab shell, settings, journey/tips.
-  - `Features/<Library|Item|Activity|Server|Setup|Premium|Feedback>/`: screens and their controllers.
+  - `Features/<Library|Item|Activity|Server|Setup|Premium|Feedback|Demo>/`: screens and their controllers.
+    `Demo/` is Try the Demo: its own `AppModel` on sample photos (`DemoLibrary`, media in `Resources/Demo`)
+    and an in-app pretend server (`DemoServer`, reached through `ServerClient` by `DemoURLProtocol`).
   - `Backup/`: the engine (job queue, server pipeline, ledger, schedule, automatic mode, background runs,
     history, original removal, copy finder). No views.
   - `Services/`: PhotoKit, server client and discovery, Keychain, telemetry, diagnostics, performance monitor.
@@ -72,6 +74,16 @@ and may not exist in other checkouts.
   capture date; undated media (WhatsApp, shared items) shows up on import day.
 - Hold HDR other than HLG (PQ, Dolby Vision-only) and >60 fps video unchanged
   until a conversion is validated. HLG becomes 10-bit HLG (main10).
+
+## The demo (Try the Demo)
+
+- Photos are read and changed only through `PhotoSource` (`PhotoKitSource` for Photos, `DemoLibrary` for
+  the demo); the Library grid reads Photos itself (`LibraryModel`) unless it has an `ItemCatalog`. New
+  PhotoKit calls go behind `PhotoSource`, so the demo never touches the person's library.
+- The demo's model keeps its own settings (`photos.homespun.demo`), folder (`Homespun Demo`), token and
+  records; it never writes the person's settings, Keychain, TipKit tips or analytics (`Telemetry.paused`),
+  never asks iOS for a permission, and pairs only with its pretend server. Leave the Demo deletes it all.
+- The demo changes nothing for real: its deletions ask in-app, say so, and remove only from the demo.
 
 ## Safety invariants (never weaken)
 
