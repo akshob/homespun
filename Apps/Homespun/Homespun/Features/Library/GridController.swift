@@ -202,6 +202,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // Back from an item: the bars may differ from when it opened (the newest end stays in view).
+        if placed, pinned { setOffset(offsetRange.upperBound) }
         // The bars learn where the grid is when it scrolls: opened at the newest, the large title
         // has to collapse at once.
         let offset = collectionView.contentOffset
@@ -332,8 +334,21 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// none; it keeps the ones it had (and gets back), so following the viewer's item and the zoom's
     /// stand-in are where they'll be.
     private var insets: UIEdgeInsets {
-        if collectionView.window != nil { lastInsets = collectionView.adjustedContentInset }
+        if collectionView.window != nil, isFront { lastInsets = collectionView.adjustedContentInset }
         return lastInsets
+    }
+
+    /// Whether the Library is the screen showing: not under the item viewer, and not on its way in
+    /// or out (an item opening hides the tab bar, which mustn't move the grid behind it).
+    private var isFront: Bool {
+        var controller: UIViewController = self
+        while let parent = controller.parent {
+            if let navigation = parent as? UINavigationController {
+                return navigation.topViewController === controller && navigation.transitionCoordinator == nil
+            }
+            controller = parent
+        }
+        return true
     }
 
     private var lastInsets = UIEdgeInsets.zero
@@ -672,7 +687,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) {
-        guard scrollView.window != nil else { return }
+        guard scrollView.window != nil, isFront else { return }
         // The bars changed (the tab bar minimised, the accessory came, the screen turned): the newest
         // end, or the item in view, stays in view.
         if placed, !scrollView.isTracking, !scrollView.isDecelerating {
