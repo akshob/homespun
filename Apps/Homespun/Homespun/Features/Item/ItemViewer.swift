@@ -85,7 +85,8 @@ struct ItemViewer: View {
 
     /// Every item the viewer goes through, a page each (UIKit: exact pages, reused).
     private var pager: some View {
-        ItemPager(ids: ids, start: start, current: $current, zoomed: $zoomed,
+        // From the item shown, should SwiftUI make the pager again while the viewer stays.
+        ItemPager(ids: ids, start: shown, current: $current, zoomed: $zoomed,
                   asset: { model.library.library.asset($0) }, label: spokenLabel) { drag = $0 } released: { translation, velocity in
             if translation.height > 120 || velocity.height > 900 {
                 dismiss()
