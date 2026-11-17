@@ -58,7 +58,7 @@ if [[ -n ${DUO_POSES:-} ]]; then
             portrait) $DUOCTL -d $SIM hinge 180; turn portrait;;
             laptop) $DUOCTL -d $SIM hinge 180; turn portrait; $DUOCTL -d $SIM hinge 100;;
             folded) $DUOCTL -d $SIM hinge 0; sleep 2; turn portrait;;
-          esac >> $DATA.poses 2>&1
+          esac >> $RESULTS/$NAME-poses.log 2>&1
           rm -f $POSEFILE
         fi
         sleep 0.5
