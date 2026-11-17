@@ -249,7 +249,7 @@ struct SetupRow: View {
     }
 }
 
-/// A row that leads somewhere: "Use hydrogen Anyway", "Connect Another Way".
+/// A row that leads somewhere: "Use Linux Box Anyway", "Connect Another Way".
 struct SetupLinkRow: View {
     let symbol: String
     let title: String

@@ -21,8 +21,8 @@ import Testing
     // Running work outranks space; a blocking problem outranks everything.
     inputs.backingUp = (3, 12, "IMG_2041.HEIC")
     #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC"))
-    inputs.unreachable = "polonium"
-    #expect(AccessoryLadder.pick(inputs) == .unreachable("polonium"))
+    inputs.unreachable = "Home Mac"
+    #expect(AccessoryLadder.pick(inputs) == .unreachable("Home Mac"))
     // Not paired: an unreachable name means nothing.
     inputs.paired = false
     #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC"))

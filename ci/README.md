@@ -14,9 +14,10 @@ simulators for iPhone 18 Pro and iPhone Duo). The macOS build job builds once an
 its tests and the release server to the other jobs as an archive (`build`). Every job starts on a
 fresh machine. Pull requests from forks run after the owner approves them and never see secrets.
 
-Performance runs nightly on polonium (a Mac mini with the 35,000-photo iPhone Duo simulator) from
-the private repository `akshob/homespun-perf`, which tests this repository's `main`: a self-hosted
-runner attached to a public repository would run anyone's pull request on that Mac.
+Performance budgets (`perf.sh`) need a Mac with a large iPhone Duo library (`setup-perf-sim.sh`,
+35,000 photos) and steady timings, which shared cloud machines don't give; the owner runs them
+nightly on a Mac of their own, from a separate private repository, so no self-hosted runner is ever
+attached to this public one.
 
 ## The scripts (`ci/`)
 
@@ -34,46 +35,19 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
 | `summary.py <results>` | the Markdown report each job adds to its summary |
-| `reset.sh` | stops what a cancelled job of this runner left running |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
 
-On polonium (16 GB), at most two simulators run at once on the whole Mac, whoever starts them:
-every script that boots one first takes a slot (`take_sim_slot` in `env.sh`, lock files in
-`/Users/Shared/homespun-sim-slots`) and waits for a free one. Anyone running simulators there by
-hand takes a slot the same way. Cancelling a job stops only its step's shell, so each job records
-what it starts and `reset.sh` (first and last step of every Apple job, also when cancelled) stops
-what an earlier job of the same runner left running and deletes its simulators.
+On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
+(see `env.sh`).
 
-## polonium's performance runner (once)
-
-The owner does steps 1–2 (they need an administrator's password); the rest is scripted.
-
-1. Create the account and its home folder, and let it log in over SSH with the same keys as yours:
-
-   ```sh
-   sudo sysadminctl -addUser homespun-ci -fullName "Homespun CI" -password -
-   sudo createhomedir -c -u homespun-ci
-   sudo dseditgroup -o edit -a homespun-ci -t user com.apple.access_ssh 2>/dev/null || true
-   sudo mkdir -p /Users/homespun-ci/.ssh && sudo cp ~/.ssh/authorized_keys /Users/homespun-ci/.ssh/
-   sudo chown -R homespun-ci:staff /Users/homespun-ci/.ssh && sudo chmod 700 /Users/homespun-ci/.ssh
-   ```
-
-2. Log in to the account once on polonium's screen (Fast User Switching: menu bar › your name ›
-   Homespun CI), then switch back to yours **without logging it out**. Simulators need that session;
-   after polonium restarts, log in to it once again.
-
-3. Then, over SSH as `homespun-ci`: `ci/install-runner.sh polonium-perf <token>` (the token from
-   `gh api -X POST repos/akshob/homespun-perf/actions/runners/registration-token --jq .token`)
-   downloads the Actions runner, registers it with `akshob/homespun-perf` (labels `self-hosted,
-   macOS, homespun-ci`) and starts it as a launch agent. Then `ci/setup-perf-sim.sh` (about 40
-   minutes) makes the performance simulator.
-
-## Repository settings (done)
+## Repository settings
 
 - Actions › fork pull requests: approval required for all outside contributors.
 - Environment `testflight`: deployments from `main` only, the owner as required reviewer; secrets
   `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (the `.p8` file's contents) and `DEVELOPMENT_TEAM`.
+- `main` is protected: no force pushes or deletion; changes come through pull requests whose CI
+  passed.
 - Private vulnerability reporting on.
 
 ## Reading results without opening a browser
