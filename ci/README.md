@@ -56,10 +56,11 @@ The owner does steps 1–3 (they need an administrator's password); the rest is 
 3. In the repository's settings: Actions › General › "Require approval for all external
    contributors" (for when the repository is public).
 
-4. Then (scripted over SSH as `homespun-ci`): download the Actions runner, register `polonium-1`
-   and `polonium-2` with the labels `self-hosted, macOS, homespun-ci`, install them as launch agents
-   (`svc.sh install && svc.sh start`), copy `duoctl` into `~/ci/tools/duoctl`, and run
-   `ci/setup-perf-sim.sh` (about 40 minutes).
+4. Then, over SSH as `homespun-ci`, `ci/install-runner.sh polonium-1 <token> <duoctl folder>` and
+   `ci/install-runner.sh polonium-2 <token>` (the token from
+   `gh api -X POST repos/akshob/homespun/actions/runners/registration-token --jq .token`): each
+   downloads the Actions runner, registers it with the labels `self-hosted, macOS, homespun-ci` and
+   starts it as a launch agent. Then `ci/setup-perf-sim.sh` (about 40 minutes).
 
 5. The `testflight` environment: the owner as required reviewer; secrets `ASC_KEY_ID`,
    `ASC_ISSUER_ID`, `ASC_KEY_P8` (the `.p8` file's contents) and `DEVELOPMENT_TEAM`.

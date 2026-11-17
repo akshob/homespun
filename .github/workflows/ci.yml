@@ -34,6 +34,10 @@ jobs:
     runs-on: ubuntu-24.04
     container: swift:6.3-noble
     timeout-minutes: 45
+    env:
+      # The server notices it's in a container (/.dockerenv) and acts like a Docker install; the tests
+      # describe a Linux computer.
+      HOMESPUN_HARDWARE_KIND: desktop
     steps:
       - uses: actions/checkout@v4
       - name: Libraries and tools
