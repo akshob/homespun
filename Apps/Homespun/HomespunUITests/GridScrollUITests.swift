@@ -13,6 +13,13 @@ final class GridScrollUITests: XCTestCase {
     }
 
     @MainActor private func launch() throws {
+        // On iPhone Duo with poses (ci/ui.sh DUO_POSES=1): folded, where XCTest's gestures reach the app.
+        if let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"] {
+            try "folded".write(toFile: poses, atomically: true, encoding: .utf8)
+            let deadline = Date().addingTimeInterval(90)
+            while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
+            sleep(3)
+        }
         app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "YES", "-perfMonitor", "YES"]
         app.launch()
