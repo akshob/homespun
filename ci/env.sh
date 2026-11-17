@@ -4,6 +4,8 @@
 #   DD        Xcode's derived data for this commit (shared by the jobs of one run)
 #   RESULTS   result bundles, logs and screenshots for the workflow to upload
 export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH
+# GitHub's xcode-27 image starts with Xcode 27.1; the app needs 27.2 (the iOS 27.2 SDK).
+[[ -z ${DEVELOPER_DIR:-} && -d /Applications/Xcode_27.2.app ]] && export DEVELOPER_DIR=/Applications/Xcode_27.2.app/Contents/Developer
 ROOT=${ROOT:-${0:A:h:h}}
 CI_STATE=${CI_STATE:-$HOME/ci}
 SHA=${GITHUB_SHA:-$(git -C $ROOT rev-parse HEAD 2>/dev/null || echo local)}
@@ -12,17 +14,24 @@ SHA=${GITHUB_SHA:-$(git -C $ROOT rev-parse HEAD 2>/dev/null || echo local)}
 DD=${DD:-$CI_STATE/dd/$SHA}
 RESULTS=${RESULTS:-$ROOT/ci-results}
 SEED=${SEED:-$ROOT/ci/seed}
-SERVER_BIN=${SERVER_BIN:-$ROOT/.build/release/homespun-server}
-# iPhone Duo's fold and rotate tool (from the design tools; copied into CI_STATE when the runner is set up).
-DUOCTL=${DUOCTL:-$CI_STATE/tools/duoctl/duoctl}
-[[ -x $DUOCTL ]] || DUOCTL=$HOME/homespun-design/duo/tools/duoctl/duoctl
+# The release server the UI tests run, kept with the build (build.sh) so other machines get it too.
+SERVER_BIN=${SERVER_BIN:-$DD/homespun-server}
+# iPhone Duo's fold, rotate and screenshot tool.
+DUOCTL=${DUOCTL:-$ROOT/ci/tools/duoctl/duoctl}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$CI_STATE/duo-cache}
 APP=$ROOT/Apps/Homespun
-RUNTIME_IPHONE=com.apple.CoreSimulator.SimRuntime.iOS-27-2
-RUNTIME_DUO=com.apple.CoreSimulator.SimRuntime.iOS-27-2-iPhone19-4
 mkdir -p $CI_STATE $RESULTS
 
-runtime_for() { [[ $1 == iPhone-Duo ]] && echo $RUNTIME_DUO || echo $RUNTIME_IPHONE; }
+# The newest installed simulator runtime for a device type (iPhone Duo has a runtime of its own).
+runtime_for() {
+    xcrun simctl list runtimes -j | python3 -c '
+import json, sys
+kind = "com.apple.CoreSimulator.SimDeviceType." + sys.argv[1]
+fits = [r for r in json.load(sys.stdin)["runtimes"]
+        if r.get("isAvailable") and any(d["identifier"] == kind for d in r.get("supportedDeviceTypes", []))]
+fits.sort(key=lambda r: [int(part) for part in r["version"].split(".")])
+print(fits[-1]["identifier"] if fits else "")' $1
+}
 
 # polonium has 16 GB: past two simulators at once (CI's lanes, anyone's tests) it swaps and tests
 # time out. A script takes one of the machine's simulator slots (shared by every account) before it

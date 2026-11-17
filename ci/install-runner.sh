@@ -1,19 +1,13 @@
 #!/bin/zsh
-# Installs one GitHub Actions runner instance for this repository in the current account (run as
-# `homespun-ci` on polonium, once per instance) and starts it as a launch agent.
-#   ci/install-runner.sh <name> <registration token> [duoctl folder]
-# The token comes from `gh api -X POST repos/akshob/homespun/actions/runners/registration-token`
-# (valid for an hour). The duoctl folder (duoctl + duoctl-helper.m) is copied to ~/ci/tools/duoctl.
+# Installs a GitHub Actions runner in the current account (`homespun-ci` on polonium) for the private
+# performance repository and starts it as a launch agent.
+#   ci/install-runner.sh <name> <registration token>
+# The token comes from `gh api -X POST repos/akshob/homespun-perf/actions/runners/registration-token`
+# (valid for an hour). REPO=owner/name registers it elsewhere.
 set -euo pipefail
-name=$1 token=$2 duoctl=${3:-}
-repo=https://github.com/akshob/homespun
+name=$1 token=$2
+repo=https://github.com/${REPO:-akshob/homespun-perf}
 dir=$HOME/actions-runner/$name
-
-if [[ -n $duoctl ]]; then
-    mkdir -p ~/ci/tools/duoctl
-    cp $duoctl/duoctl $duoctl/duoctl-helper.m ~/ci/tools/duoctl/
-    chmod +x ~/ci/tools/duoctl/duoctl
-fi
 
 mkdir -p $dir && cd $dir
 if [[ ! -x ./config.sh ]]; then
