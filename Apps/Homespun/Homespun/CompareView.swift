@@ -269,7 +269,8 @@ struct CompareView: View {
                     if shown == .split, compare.hasOriginal, compare.hasCompact {
                         // The line spans the photo; the whole height once it's zoomed in.
                         let photo = ZoomScrollView.fitted(compare.compact?.size ?? .zero, in: geo.size)
-                        SplitHandle(split: $split, size: geo.size, height: zoomed ? geo.size.height : photo.height)
+                        SplitHandle(split: $split, size: geo.size, height: zoomed ? geo.size.height : photo.height,
+                                    knobY: Self.knobY(in: geo, height: zoomed ? geo.size.height : photo.height))
                     }
                 }
                 pills
@@ -278,6 +279,24 @@ struct CompareView: View {
             .coordinateSpace(.named(Self.stage))
         }
         .clipped()
+    }
+
+    /// The split line's knob: in the middle of the line, unless iPhone Duo is partly folded with the
+    /// crease across it (held tall, like a laptop). Then just below the crease, so it's never on it
+    /// (HIG: keep controls on one side of an active division; the photo itself runs across).
+    static func knobY(in proxy: GeometryProxy, height: CGFloat) -> CGFloat {
+        let middle = proxy.size.height / 2
+        guard #available(iOS 27.1, *),
+              let fold = proxy.reservedRegions(kind: .division).first?.frame, fold.width > fold.height else { return middle }
+        return knobY(middle: middle, line: (middle - height / 2)...(middle + height / 2), fold: fold)
+    }
+
+    /// Off a horizontal fold, staying on the line: below it if there's room, else above.
+    static func knobY(middle: CGFloat, line: ClosedRange<CGFloat>, fold: CGRect, knob: CGFloat = 44) -> CGFloat {
+        let half = knob / 2
+        guard middle + half > fold.minY, middle - half < fold.maxY else { return middle }
+        if fold.maxY + knob <= line.upperBound { return fold.maxY + half + 8 }
+        return max(line.lowerBound + half, fold.minY - half - 8)
     }
 
     private var imageLabel: String {
@@ -406,6 +425,8 @@ private struct SplitHandle: View {
     @Binding var split: Double
     let size: CGSize
     let height: CGFloat
+    /// Where the knob sits on the line (off the fold of a partly folded iPhone Duo).
+    var knobY: CGFloat? = nil
 
     var body: some View {
         ZStack {
@@ -415,6 +436,7 @@ private struct SplitHandle: View {
                 .frame(width: 36, height: 36)
                 .background(Circle().fill(.white))
                 .shadow(color: .black.opacity(0.3), radius: 3)
+                .offset(y: (knobY ?? size.height / 2) - size.height / 2)
         }
         .frame(width: 44, height: height)
         .contentShape(Rectangle())

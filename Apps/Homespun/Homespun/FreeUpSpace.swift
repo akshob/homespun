@@ -28,7 +28,7 @@ struct FreeUpSpaceSheet: View {
     }
 }
 
-/// The review, the check, and the result; a sheet on iPhone, the right page of the open book on Duo.
+/// The review, the check, and the result, in a sheet (a page-sized one on the open iPhone Duo).
 struct FreeUpSpacePanel: View {
     let controller: LibraryController
     /// Only these originals (from a selection or a finished backup), or everything ready.

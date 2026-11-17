@@ -69,8 +69,15 @@ struct ItemDetailsSheet: View {
     let model: AppModel
     let cell: LibraryState.Cell
     var job: CompactJob.State?
+    /// Closes it: an inspector (a column on the open iPhone Duo, a sheet on a phone) isn't dismissed
+    /// like a sheet (`dismiss` there would leave the item).
+    var close: (() -> Void)?
     @State private var details: ItemDetails?
     @Environment(\.dismiss) private var dismiss
+
+    private func done() {
+        if let close { close() } else { dismiss() }
+    }
 
     private enum Problem {
         case failed(String), kept(String), notYet(String)
@@ -99,7 +106,7 @@ struct ItemDetailsSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done", systemImage: "checkmark", role: .confirm) { dismiss() }
+                    Button("Done", systemImage: "checkmark", role: .confirm, action: done)
                         .accessibilityIdentifier("details.done")
                 }
             }
@@ -201,7 +208,7 @@ struct ItemDetailsSheet: View {
                     tryAgain(blocked)
                     Button("Keep As Is") {
                         model.automatic.keepAsIs(cell.id)
-                        dismiss()
+                        done()
                     }
                     .frame(maxWidth: .infinity)
                     .accessibilityHint("Homespun stops trying to back it up. The original stays on this iPhone.")
@@ -235,7 +242,7 @@ struct ItemDetailsSheet: View {
     @ViewBuilder private func tryAgain(_ blocked: String?) -> some View {
         Button {
             model.library.backUp([cell.id])
-            dismiss()
+            done()
         } label: {
             Label("Try Again", systemImage: "arrow.clockwise").frame(maxWidth: .infinity)
         }

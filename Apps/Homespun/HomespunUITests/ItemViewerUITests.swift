@@ -36,8 +36,8 @@ final class ItemViewerUITests: XCTestCase {
         XCTAssertTrue(state.label.hasPrefix("Ready to free up · original on"), state.label)
         XCTAssertTrue(app.buttons["item.action"].label.contains("Free Up Space"))
         XCTAssertTrue(app.buttons["item.compare"].exists, "no Compare for a copy whose original is here")
-        // Full screen on an iPhone; on the open Duo's right page the strip and its tabs stay.
-        if !app.isBook { XCTAssertFalse(app.tabBars.buttons["Library"].isHittable, "the tab bar shows over the viewer") }
+        // Full screen, without the tabs, on every iPhone (the open Duo too).
+        XCTAssertFalse(app.tabBars.buttons["Library"].isHittable, "the tab bar shows over the viewer")
         attach(app, "Viewer")
 
         // Details: where it is, and the sizes.

@@ -87,9 +87,6 @@ struct MainTabView: View {
     let model: AppModel
     @SceneStorage("tab") private var tab = TabID.library
     @State private var sheet: Sheet?
-    @State private var libraryRoute = LibraryRoute.overview
-    @SceneStorage("library.showsPage") private var showsPage = true
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
     enum Sheet: Identifiable {
         case freeUp(only: Set<String>?)
@@ -114,7 +111,7 @@ struct MainTabView: View {
             tab = new
         })) {
             Tab("Library", systemImage: "photo.on.rectangle", value: TabID.library) {
-                LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) }, route: $libraryRoute)
+                LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) })
                     .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.library")
@@ -136,7 +133,8 @@ struct MainTabView: View {
         .sheet(item: $sheet, onDismiss: dismissed) { sheet in
             switch sheet {
             case .freeUp(let scope):
-                FreeUpSpaceSheet(controller: model.library, scope: scope)
+                // Room for Compare on the open iPhone Duo (a phone ignores the size).
+                FreeUpSpaceSheet(controller: model.library, scope: scope).presentationSizing(.page)
             case .backUp(let ids):
                 BackUpSheet(controller: model.library, identifiers: ids) {}
             case .pair(let link):
@@ -156,14 +154,9 @@ struct MainTabView: View {
         }
     }
 
-    /// On the open iPhone Duo, Free Up Space is the Library's right page; elsewhere a sheet.
+    /// Free Up Space: a sheet everywhere (centred across the open iPhone Duo, like Apple's).
     private func openFreeUp(_ scope: Set<String>?) {
-        if sizeClass == .regular, showsPage, model.library.access.allowsReading {
-            tab = .library
-            libraryRoute = .review(scope)
-        } else {
-            sheet = .freeUp(only: scope)
-        }
+        sheet = .freeUp(only: scope)
     }
 
     private func openFromAccessory(_ action: StatusAccessory.Action) {

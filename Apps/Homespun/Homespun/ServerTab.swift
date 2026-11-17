@@ -29,20 +29,20 @@ struct ServerTab: View {
 
     var body: some View {
         let settings = model.settings
-        BookNavigation(path: $path) {
+        let isPaired = settings.server != nil && settings.isPaired
+        // Beside the list on the open iPhone Duo: Server Check (Help and About before pairing).
+        SplitNavigation(path: $path, defaultRoute: isPaired ? .check : .help) { selection in
             Group {
                 if let server = settings.server, settings.isPaired {
-                    paired(server)
+                    paired(server, selection: selection)
                 } else {
-                    unpaired
+                    unpaired(selection: selection)
                 }
             }
         } destination: { route in
             destination(route)
-        } placeholder: {
-            ContentUnavailableView("Choose a setting", systemImage: "server.rack",
-                                   description: Text("What you open on the left shows here."))
-                .background(Theme.background)
+        } empty: {
+            EmptyView()
         }
         .sheet(isPresented: $settingUp) { OnboardingView(settings: settings, library: model.library) }
         .sheet(item: $locked) { feature in
@@ -60,10 +60,10 @@ struct ServerTab: View {
 
     // MARK: Paired
 
-    private func paired(_ server: ServerAPI.ServerInfo) -> some View {
+    private func paired(_ server: ServerAPI.ServerInfo, selection: Binding<Route?>?) -> some View {
         let settings = model.settings
         let unreachable: String? = if case .unreachable(let reason) = settings.serverStatus { reason } else { nil }
-        return List {
+        return List(selection: selection) {
             Section {
                 ServerStatusCard(server: server, status: settings.serverStatus, storage: storage,
                                  lastSeen: lastSeen > 0 ? Date(timeIntervalSince1970: lastSeen) : nil)
@@ -80,6 +80,7 @@ struct ServerTab: View {
                               valueTint: checkValue.tint)
                 }
                 .accessibilityIdentifier("settings.check")
+                .sidebarRow(Route.check)
                 if let os = server.platform?.os {
                     ServerRow(title: "Live Photos", symbol: "livephoto", value: os == .macOS ? "On the Mac" : "On this iPhone")
                 }
@@ -96,29 +97,34 @@ struct ServerTab: View {
                                   value: storage.map { ($0.originalsFolder as NSString).lastPathComponent })
                     }
                     .accessibilityIdentifier("settings.originals")
+                    .sidebarRow(Route.originals)
                 }
                 NavigationLink(value: Route.existingLibrary) {
                     ServerRow(title: "Existing Library", symbol: "archivebox", value: existingLibraryValue)
                 }
                 .accessibilityIdentifier("settings.existingLibrary")
+                .sidebarRow(Route.existingLibrary)
                 NavigationLink(value: Route.immich) {
                     ServerRow(title: "Immich", symbol: "circle.hexagongrid",
                               value: server.mode == .immich ? "Connected" : "Not connected")
                 }
                 .accessibilityIdentifier("settings.immich")
+                .sidebarRow(Route.immich)
             }
             .listRowBackground(Theme.card)
-            premiumSection
+            premiumSection(selection)
             Section {
                 NavigationLink(value: Route.compactCopies) {
                     ServerRow(title: "Compact Copies", symbol: "slider.horizontal.3",
                               value: "\(server.profile.photoMaxEdge) px · \(server.profile.videoShortEdge)p")
                 }
                 .accessibilityIdentifier("settings.compactCopies")
+                .sidebarRow(Route.compactCopies)
                 NavigationLink(value: Route.devices) {
                     ServerRow(title: "Devices", symbol: "iphone", value: devices.map { "\($0.count)" })
                 }
                 .accessibilityIdentifier("settings.devices")
+                .sidebarRow(Route.devices)
             }
             .listRowBackground(Theme.card)
             thisIPhoneSection
@@ -136,8 +142,9 @@ struct ServerTab: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button { path.append(.check) } label: { Label("Server Check", systemImage: "checkmark.shield") }
-                    Button { path.append(.addDevice) } label: { Label("Add Device", systemImage: "plus") }
+                    // On the list: replaces what's open beside it (on a phone the stack is at the list anyway).
+                    Button { path = [.check] } label: { Label("Server Check", systemImage: "checkmark.shield") }
+                    Button { path = [.addDevice] } label: { Label("Add Device", systemImage: "plus") }
                         .accessibilityIdentifier("settings.addDevice")
                     Button { confirmingSwitch = true } label: {
                         Label("Switch Server", systemImage: "arrow.left.arrow.right")
@@ -179,8 +186,8 @@ struct ServerTab: View {
 
     // MARK: Not paired
 
-    private var unpaired: some View {
-        List {
+    private func unpaired(selection: Binding<Route?>?) -> some View {
+        List(selection: selection) {
             Section {
                 VStack(spacing: 14) {
                     Image(systemName: "server.rack").font(.system(size: 34)).foregroundStyle(Theme.accent)
@@ -201,7 +208,7 @@ struct ServerTab: View {
                 .padding(.vertical, 10)
             }
             .listRowBackground(Theme.card)
-            premiumSection
+            premiumSection(selection)
             thisIPhoneSection
         }
         .homespunList()
@@ -212,12 +219,15 @@ struct ServerTab: View {
 
     // MARK: Sections
 
-    private var premiumSection: some View {
+    /// `selection`: the sidebar's, on the open iPhone Duo (a row there replaces what's open beside it).
+    private func premiumSection(_ selection: Binding<Route?>?) -> some View {
         let premium = model.premium, automatic = model.automatic, settings = model.settings
         return Section("Premium") {
             if premium.isUnlocked {
                 HStack(spacing: 12) {
-                    Button { path.append(.automatic) } label: {
+                    Button {
+                        if let selection { selection.wrappedValue = .automatic } else { path.append(.automatic) }
+                    } label: {
                         HStack {
                             ActivityRow(symbol: "bolt.fill", title: "Automatic Mode", detail: automaticDetail)
                             Spacer(minLength: 0)
@@ -235,11 +245,13 @@ struct ServerTab: View {
                     .disabled(!settings.canCompact)
                     .accessibilityIdentifier("automatic.toggle")
                 }
+                .sidebarRow(Route.automatic)
                 NavigationLink(value: Route.connectors) {
                     ServerRow(title: "Cloud Copies", symbol: "icloud.and.arrow.up", value: cloudValue)
                 }
                 .disabled(!settings.isPaired)
                 .accessibilityIdentifier("settings.connectors")
+                .sidebarRow(Route.connectors)
             } else {
                 Button { locked = .automatic } label: {
                     ServerRow(title: "Automatic Mode", symbol: "bolt.fill", value: "Premium", valueTint: Theme.accent,
@@ -264,20 +276,24 @@ struct ServerTab: View {
                 ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
             }
             .accessibilityIdentifier("settings.notifications")
+            .sidebarRow(Route.notifications)
             NavigationLink(value: Route.analytics) {
                 ServerRow(title: "Share Analytics", symbol: "chart.bar",
                           value: Telemetry.shared.isSharing ? "On" : "Off")
             }
             .accessibilityIdentifier("settings.analytics")
+            .sidebarRow(Route.analytics)
             NavigationLink(value: Route.premium) {
                 ServerRow(title: "Premium", symbol: "sparkles",
                           value: model.premium.isUnlocked ? "Unlocked" : nil)
             }
             .accessibilityIdentifier("settings.premium")
+            .sidebarRow(Route.premium)
             NavigationLink(value: Route.help) {
                 ServerRow(title: "Help and About", symbol: "questionmark.circle", value: nil)
             }
             .accessibilityIdentifier("settings.help")
+            .sidebarRow(Route.help)
         }
         .listRowBackground(Theme.card)
     }
@@ -397,22 +413,40 @@ struct ServerRow: View {
     var chevron = false
 
     var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: symbol).font(.body).foregroundStyle(Theme.accent).frame(width: 28)
-                .accessibilityHidden(true)
-            Text(title).foregroundStyle(Theme.label).layoutPriority(1)
-            Spacer(minLength: 8)
-            if let value {
-                Text(value).foregroundStyle(valueTint).lineLimit(1).minimumScaleFactor(0.8).truncationMode(.middle)
+        // The value beside the title when both fit; else under it (the open iPhone Duo's sidebar, large
+        // text), never cut short.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                icon
+                Text(title).foregroundStyle(Theme.label).lineLimit(1)
+                Spacer(minLength: 8)
+                if let value { Text(value).foregroundStyle(valueTint).lineLimit(1) }
+                disclosure
             }
-            if chevron {
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Theme.tertiaryLabel)
-                    .accessibilityHidden(true)
+            HStack(spacing: 14) {
+                icon
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(Theme.label)
+                    if let value { Text(value).font(.subheadline).foregroundStyle(valueTint) }
+                }
+                Spacer(minLength: 0)
+                disclosure
             }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+
+    private var icon: some View {
+        Image(systemName: symbol).font(.body).foregroundStyle(Theme.accent).frame(width: 28).accessibilityHidden(true)
+    }
+
+    @ViewBuilder private var disclosure: some View {
+        if chevron {
+            Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Theme.tertiaryLabel)
+                .accessibilityHidden(true)
+        }
     }
 }
 

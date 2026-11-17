@@ -8,11 +8,11 @@ import SwiftUI
 struct LibraryView: View {
     let model: AppModel
     var freeUp: (Set<String>?) -> Void
-    /// The right page's screen when the display is wide enough for a book (iPhone Duo open).
-    @Binding var route: LibraryRoute
     @State private var filter = LibraryState.Filter.all
     @State private var media = LibraryModel.Media.all
     @State private var selection = GridSelection()
+    /// The item whose Details are open in the viewer.
+    @State private var details: String?
     /// The grid's structure for the current filter (built off the main thread); it changes only
     /// when items come, go or move, so badge changes don't rebuild the grid.
     @State private var data = GridData()
@@ -35,9 +35,7 @@ struct LibraryView: View {
     @State private var pinch: CGFloat = 1
     /// The grid's density: 2 (large), 4 (medium) or 6 (small) columns on an iPhone.
     @AppStorage("gridColumns") private var columns = 4
-    @SceneStorage("library.showsPage") private var showsPage = true
     @State private var gridSize = CGSize.zero
-    @State private var gridFold: CGRect?
     /// Where the visible cells are, for drag-to-select (not observed: it changes as cells appear).
     @State private var frames = CellFrames()
     /// Drag-to-select: where the drag started, whether it selects or deselects, and the selection before it.
@@ -46,7 +44,6 @@ struct LibraryView: View {
     @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
     @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.horizontalSizeClass) private var sizeClass
 
     enum Sheet: Identifiable {
         case backUp([String]), legend, setup
@@ -74,18 +71,7 @@ struct LibraryView: View {
 
     var body: some View {
         NavigationStack(path: $path) {
-            Group {
-                if isBook {
-                    Book(showsSecond: showsPage) {
-                        content.safeAreaInset(edge: .top, spacing: 0) { paneHeader }
-                    } second: {
-                        LibraryRightPage(model: model, route: $route, selected: selected, ids: visibleIDs, backUp: backUp,
-                                         showAll: { filter = $0 }, openItem: { path.append($0) })
-                    }
-                } else {
-                    content
-                }
-            }
+            content
                 .background(Theme.background)
                 .navigationTitle(selecting ? selectionTitle : "Library")
                 .navigationSubtitle(subtitle)
@@ -94,7 +80,7 @@ struct LibraryView: View {
                 .toolbar(selecting ? .hidden : .automatic, for: .tabBar)
                 .navigationDestination(for: String.self) { id in
                     // Zooms from its cell, and a swipe down shrinks it back into the grid (like Photos).
-                    ItemViewer(model: model, ids: visibleIDs, start: id, freeUp: openFreeUp)
+                    ItemViewer(model: model, ids: visibleIDs, start: id, details: $details, freeUp: openFreeUp)
                         .navigationTransition(.zoom(sourceID: id, in: zoom))
                 }
                 .sheet(item: $sheet) { sheet in
@@ -119,21 +105,19 @@ struct LibraryView: View {
                 }
                 .onChange(of: filter) { PerfMonitor.shared.begin("filter") }
                 .onChange(of: media) { PerfMonitor.shared.begin("filter") }
-                .onChange(of: selecting) { _, on in
-                    controller.isSelecting = on
-                    guard isBook else { return }
-                    if on { route = .selection } else if route == .selection { route = .overview }
-                }
+                .onChange(of: selecting) { _, on in controller.isSelecting = on }
+        }
+        // On the stack, not inside the pushed viewer: there the inspector nested navigation stacks and
+        // SwiftUI trapped when the next item opened (open iPhone Duo).
+        .inspector(isPresented: Binding(get: { details != nil }, set: { if !$0 { details = nil } })) {
+            if let details {
+                ItemDetailsPanel(model: model, id: details) { self.details = nil }
+                    .inspectorColumnWidth(min: 280, ideal: 320, max: 400)
+            }
         }
     }
 
-    /// Two pages: the grid on the left, the next level on the right (DUO §8).
-    private var isBook: Bool { sizeClass == .regular && controller.access.allowsReading }
-
-    /// Free Up Space as the right page in a book, a sheet otherwise.
-    private func openFreeUp(_ scope: Set<String>?) {
-        if isBook, showsPage { route = .review(scope) } else { freeUp(scope) }
-    }
+    private func openFreeUp(_ scope: Set<String>?) { freeUp(scope) }
 
     // MARK: Content
 
@@ -222,31 +206,15 @@ struct LibraryView: View {
     /// The thumbnail's side in pixels, from the column width (the preheater caches the same size).
     private var thumbnailPixels: CGFloat {
         let width = gridSize.width > 0 ? gridSize.width : 402
-        let columns = max(1, gridLayout.items.count)
+        let columns = max(1, gridLayout.count)
         return (width / CGFloat(columns) * displayScale).rounded(.up)
     }
 
-    /// Even columns; across both pages of an open iPhone Duo, the fold is the gutter between the
-    /// two halves, never inside a cell (DUO §8, §11).
-    private var gridLayout: (items: [GridItem], leading: CGFloat) {
-        let accessibility = typeSize.isAccessibilitySize
-        if sizeClass == .regular, let gridFold, gridSize.width > 0 {
-            let split = BookSplit.make(size: gridSize, fold: gridFold)
-            if split.axis == .horizontal, split.gutter.width > BookSplit.plainGutter {
-                let perPage = GridColumns.count(width: split.second.width, density: columns, accessibility: accessibility)
-                let cell = (split.second.width - CGFloat(perPage - 1) * 2) / CGFloat(perPage)
-                let leading = split.first.width - (CGFloat(perPage) * cell + CGFloat(perPage - 1) * 2)
-                if cell > 30, leading >= 0 {
-                    let items = (0..<(perPage * 2)).map { index in
-                        GridItem(.fixed(cell), spacing: index == perPage - 1 ? split.gutter.width : 2)
-                    }
-                    return (items, leading)
-                }
-            }
-        }
+    /// One grid across the whole width, on the open iPhone Duo too (one screen, like Photos).
+    private var gridLayout: [GridItem] {
         let count = GridColumns.count(width: gridSize.width > 0 ? gridSize.width : 402, density: columns,
-                                      accessibility: accessibility)
-        return (Array(repeating: GridItem(.flexible(), spacing: 2), count: count), 0)
+                                      accessibility: typeSize.isAccessibilitySize)
+        return Array(repeating: GridItem(.flexible(), spacing: 2), count: count)
     }
 
     private var grid: some View {
@@ -254,11 +222,11 @@ struct LibraryView: View {
         let layout = gridLayout
         let pixels = thumbnailPixels
         let preheater = preheater
-        let shape = GridShape(columns: layout.items.count, leading: layout.leading)
+        let shape = GridShape(columns: layout.count)
         return ScrollViewReader { proxy in ScrollView {
             VStack(spacing: 12) {
                 notice
-                LazyVGrid(columns: layout.items, spacing: 2) {
+                LazyVGrid(columns: layout, spacing: 2) {
                     ForEach(data.sections, id: \.key) { section in
                         Section {
                             // Positions as identities: cheap to compare for 35,000 items; each cell
@@ -287,8 +255,7 @@ struct LibraryView: View {
                 }
                 .coordinateSpace(.named("grid"))
                 .gesture(HoldToDragSelect(enabled: selecting, changed: { dragSelect(to: $0, data) }, ended: endDragSelect))
-                .padding(.leading, layout.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity)
                 if data.cells.isEmpty { empty }
             }
             // Inside the scroll view, to reach it: the system's own scroll to the top on a second tap
@@ -354,7 +321,6 @@ struct LibraryView: View {
     /// The grid's columns: a change makes a new grid.
     private struct GridShape: Hashable {
         var columns: Int
-        var leading: CGFloat
     }
 
     /// The item in the middle of the screen when scrolling last stopped, so a new grid (other
@@ -376,7 +342,7 @@ struct LibraryView: View {
         guard new != columns else { return }
         PerfMonitor.shared.begin("gridSize")
         // What's in view now (the last stop of scrolling may be older).
-        anchor = currentAnchor(GridShape(columns: gridLayout.items.count, leading: gridLayout.leading))
+        anchor = currentAnchor(GridShape(columns: gridLayout.count))
         columns = new
     }
 
@@ -484,23 +450,11 @@ struct LibraryView: View {
                 .accessibilityHint(controller.backUpBlockedReason ?? "")
             }
         } else if controller.access.allowsReading {
-            // In the book they're the left page's own controls (the pane header), so the strip
-            // keeps room for what the right page opens.
-            if !isBook {
-                ToolbarItemGroup(placement: .primaryAction) {
-                    selectButton
-                    filterButton
-                }
+            ToolbarItemGroup(placement: .primaryAction) {
+                selectButton
+                filterButton
             }
             ToolbarItem(placement: .primaryAction) { moreMenu }
-            if isBook {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(showsPage ? "Hide Page" : "Show Page", systemImage: "sidebar.trailing") {
-                        withAnimation { showsPage.toggle() }
-                    }
-                    .accessibilityIdentifier("library.togglePage")
-                }
-            }
         }
     }
 
@@ -518,27 +472,6 @@ struct LibraryView: View {
             .popoverTip(BadgeTip()) { action in
                 if action.id == "guide" { openLegend() }
             }
-    }
-
-    /// The left page's header on the open iPhone Duo: Select and Filter in one glass capsule.
-    @ViewBuilder private var paneHeader: some View {
-        if isBook, !selecting, controller.access.allowsReading {
-            HStack {
-                Spacer()
-                GlassEffectContainer {
-                    HStack(spacing: 4) {
-                        selectButton
-                        filterButton
-                    }
-                    .labelStyle(.iconOnly)
-                    .font(.title3)
-                    .padding(.horizontal, 6)
-                    .glassEffect(.regular.interactive(), in: .capsule)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
-        }
     }
 
     private var filterMenu: some View {
@@ -596,7 +529,7 @@ struct LibraryView: View {
                 .disabled(controller.backUpBlockedReason != nil)
         }
         Button("Show Details", systemImage: "info.circle") {
-            if isBook, showsPage { route = .item(cell.id) } else { path.append(cell.id) }
+            path.append(cell.id)
         }
         Text(cell.badge.label)
     }
@@ -615,7 +548,7 @@ struct LibraryView: View {
     private func tapped(_ cell: LibraryState.Cell) {
         guard selecting else {
             PerfMonitor.shared.begin("open")
-            if isBook, showsPage { route = .item(cell.id) } else { path.append(cell.id) }
+            path.append(cell.id)
             return
         }
         guard cell.canCompact || cell.canFree else { return }
@@ -699,7 +632,6 @@ struct LibraryView: View {
 
     private func measure(_ proxy: GeometryProxy) {
         gridSize = proxy.size
-        gridFold = Book<EmptyView, EmptyView>.fold(in: proxy)
     }
 
     private func openSettings() {

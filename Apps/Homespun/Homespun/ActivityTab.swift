@@ -20,8 +20,8 @@ struct ActivityTab: View {
     var body: some View {
         let job = model.job, history = model.history
         let attention = ActivityTab.attention(model)
-        BookNavigation(path: $path) {
-            List {
+        SplitNavigation(path: $path, defaultRoute: defaultRoute(attention: attention)) { selection in
+            List(selection: selection) {
                 if job.isRunning {
                     Section {
                         NowCard(job: job, server: model.library.serverName)
@@ -29,6 +29,7 @@ struct ActivityTab: View {
                             Text("Show Items").foregroundStyle(Theme.accent)
                         }
                         .accessibilityIdentifier("activity.live")
+                        .sidebarRow(Route.liveRun)
                     }
                     .listRowBackground(Theme.card)
                 } else if model.settings.freedBytes > 0 {
@@ -49,6 +50,7 @@ struct ActivityTab: View {
                                             .first?.cause.title)
                         }
                         .accessibilityIdentifier("activity.attention")
+                        .sidebarRow(Route.attention)
                     }
                     .listRowBackground(Theme.card)
                 }
@@ -64,6 +66,7 @@ struct ActivityTab: View {
                                 .accessibilityElement(children: .combine)
                             }
                             .accessibilityIdentifier("activity.run")
+                            .sidebarRow(Route.run(run.id))
                         }
                     } header: {
                         Text("History")
@@ -72,8 +75,9 @@ struct ActivityTab: View {
                     }
                     .listRowBackground(Theme.card)
                 }
-                // In the list, under the Get Started card (an overlay was drawn on top of it).
-                if isEmpty {
+                // In the list, under the Get Started card (an overlay was drawn on top of it); beside
+                // the list (the open iPhone Duo, where there's a selection), the detail says it.
+                if isEmpty, selection == nil {
                     Section {
                         ContentUnavailableView("Nothing here yet", systemImage: "clock.arrow.circlepath",
                                                description: Text("Each backup and each time you free up space shows up "
@@ -95,11 +99,20 @@ struct ActivityTab: View {
             case .attention: NeedsAttentionView(model: model)
             case .automatic: AutomaticModeView(model: model)
             }
-        } placeholder: {
-            ContentUnavailableView("Choose a run", systemImage: "clock.arrow.circlepath",
-                                   description: Text("Its items and what changed show here."))
+        } empty: {
+            ContentUnavailableView("Nothing here yet", systemImage: "clock.arrow.circlepath",
+                                   description: Text("Each backup and each time you free up space shows up here, with "
+                                                     + "what changed."))
                 .background(Theme.background)
         }
+    }
+
+    /// What the detail shows beside the list on the open iPhone Duo until something is chosen: the
+    /// backup going on, else the newest run, else what needs attention.
+    private func defaultRoute(attention: [RunHistory.Item]) -> Route? {
+        if model.job.isRunning { return .liveRun }
+        if let run = model.history.runs.first { return .run(run.id) }
+        return attention.isEmpty ? nil : .attention
     }
 
     @ViewBuilder private var readySection: some View {
@@ -126,6 +139,7 @@ struct ActivityTab: View {
                                     detail: "Next run tonight while charging")
                     }
                     .accessibilityIdentifier("activity.automatic")
+                    .sidebarRow(Route.automatic)
                 }
             }
             .listRowBackground(Theme.card)

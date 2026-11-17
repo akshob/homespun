@@ -108,8 +108,8 @@ extension XCUIApplication {
     }
 
     /// Goes back one screen: the navigation bar's Back on an iPhone, the strip's on iPhone Duo. On a
-    /// wide screen (the open Duo's book) a page opened from the left has no Back, since the left page
-    /// is still there, so without a Back button this does nothing (a bar's first button there is
+    /// wide screen (the open Duo) a page opened from a tab's list has no Back, since the list is still
+    /// beside it, so without a Back button this does nothing (a bar's first button there is
     /// something else, such as More).
     @MainActor func goBack(from title: String? = nil) {
         // The strip's buttons on the open Duo say they can't be hit, though they can.
@@ -127,9 +127,6 @@ extension XCUIApplication {
 
     /// The automatic mode control: a switch on an iPhone, a checkbox on iPhone Duo's inner display.
     @MainActor var automaticToggle: XCUIElement { descendants(matching: .any)["automatic.toggle"] }
-
-    /// The open Duo shows the Library as a book: what you open goes to the right page.
-    @MainActor var isBook: Bool { descendants(matching: .any)["library.page"].exists }
 
     /// On iPhone Duo the tabs are in the vertical bar strip, where they're radio buttons.
     @MainActor func openTab(_ title: String) {

@@ -22,6 +22,8 @@ struct SetupScaffold<Content: View, Actions: View>: View {
     @AccessibilityFocusState private var titleFocused: Bool
     @Environment(\.dynamicTypeSize) private var typeSize
 
+    static var columnWidth: CGFloat { 600 }
+
     /// At accessibility sizes the actions scroll with the page, after its content, so a bar of
     /// stacked buttons doesn't cover half the screen (DESIGN §7: everything scrolls).
     private var actionsInline: Bool { typeSize.isAccessibilitySize }
@@ -59,6 +61,9 @@ struct SetupScaffold<Content: View, Actions: View>: View {
             .frame(maxWidth: .infinity, alignment: centered ? .center : .leading)
             .padding(.horizontal, 20)
             .padding(.bottom, 24)
+            // One readable column on a wide screen (the open iPhone Duo), centred.
+            .frame(maxWidth: Self.columnWidth)
+            .frame(maxWidth: .infinity)
         }
         .scrollBounceBehavior(.basedOnSize)
         .background(Theme.background)
@@ -68,6 +73,8 @@ struct SetupScaffold<Content: View, Actions: View>: View {
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
                     .padding(.bottom, 4)
+                    .frame(maxWidth: Self.columnWidth)
+                    .frame(maxWidth: .infinity)
             }
         }
         .navigationTitle("")

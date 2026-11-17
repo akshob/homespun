@@ -12,27 +12,27 @@ struct ItemViewer: View {
     let ids: [String]
     let start: String
     var freeUp: (Set<String>?) -> Void
-    /// On the right page of the open iPhone Duo: the tabs stay, and Close returns to the Overview.
-    var close: (() -> Void)?
+    /// The item whose Details are open (nil: closed). The Library shows them: as an inspector beside
+    /// the stack on the open iPhone Duo; inside this pushed screen it nested stacks and SwiftUI trapped.
+    @Binding var details: String?
     @State private var current: String?
     /// Where in `ids` the pages on hand are centred: only a window around the item shown is laid
     /// out (a library has tens of thousands of items; laying them all out froze the app).
     @State private var center: Int
     @State private var zoomed = false
-    @State private var showDetails = false
     @State private var comparing: String?
     /// Swipe down to close: how far the item has been dragged.
     @State private var drag: CGSize = .zero
     @Environment(\.dismiss) private var dismiss
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
-    init(model: AppModel, ids: [String], start: String, freeUp: @escaping (Set<String>?) -> Void,
-         close: (() -> Void)? = nil) {
+    init(model: AppModel, ids: [String], start: String, details: Binding<String?>,
+         freeUp: @escaping (Set<String>?) -> Void) {
         self.model = model
         self.ids = ids
         self.start = start
         self.freeUp = freeUp
-        self.close = close
+        _details = details
         _current = State(initialValue: start)
         _center = State(initialValue: ids.firstIndex(of: start) ?? 0)
     }
@@ -77,26 +77,18 @@ struct ItemViewer: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
-        .toolbar(close == nil ? .hidden : .automatic, for: .tabBar)
-        .toolbar {
-            if let close {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close", systemImage: "xmark", action: close).accessibilityIdentifier("item.close")
-                }
-            }
-            toolbar(cell)
-        }
+        .toolbar(.hidden, for: .tabBar)
+        .toolbar { toolbar(cell) }
         .itemScreen()
         .onAppear { PerfMonitor.shared.endAfterFrame("open") }
         .onChange(of: current) { _, id in
             zoomed = false
             follow(id)
+            // Open Details follow the item shown.
+            if details != nil, let id { details = id }
         }
-        .sheet(isPresented: $showDetails) {
-            if let cell {
-                ItemDetailsSheet(model: model, cell: cell, job: jobState(cell))
-            }
-        }
+        // Compare goes over the viewer, and Back leaves it: Details close.
+        .onDisappear { details = nil }
         .navigationDestination(item: $comparing) { id in
             CompareView(model: model, compactIdentifier: id)
         }
@@ -118,7 +110,7 @@ struct ItemViewer: View {
             // Inside the pager, to reach its scroll view.
             .background(SwipeDownToClose(enabled: !zoomed) { drag = $0 } ended: { translation, velocity in
                 if translation.height > 120 || velocity.height > 900 {
-                    if let close { close() } else { dismiss() }
+                    dismiss()
                 } else {
                     withAnimation(.snappy) { drag = .zero }
                 }
@@ -134,9 +126,11 @@ struct ItemViewer: View {
     }
 
     /// The cell for an item (the library state keeps an index by identifier).
-    private func cell(_ id: String) -> LibraryState.Cell? {
+    private func cell(_ id: String) -> LibraryState.Cell? { Self.cell(id, model: model) }
+
+    static func cell(_ id: String, model: AppModel) -> LibraryState.Cell? {
         guard let cell = model.library.library.state.cell(id) else { return nil }
-        return demo(cell)
+        return demo(cell, server: model.library.serverName)
     }
 
     /// VoiceOver's label for a page: the kind and date, then the badge sentence (DESIGN 03·1.1).
@@ -189,7 +183,7 @@ struct ItemViewer: View {
 
     @ToolbarContentBuilder private func toolbar(_ cell: LibraryState.Cell?) -> some ToolbarContent {
         ToolbarItem(placement: .bottomBar) {
-            Button("Details", systemImage: "info.circle") { showDetails = true }
+            Button("Details", systemImage: "info.circle") { details = shown }
                 .tint(.white)
                 .disabled(cell == nil)
                 .accessibilityIdentifier("item.details")
@@ -245,16 +239,18 @@ struct ItemViewer: View {
 
     // MARK: Job state
 
-    private func jobState(_ cell: LibraryState.Cell) -> CompactJob.State? {
+    private func jobState(_ cell: LibraryState.Cell) -> CompactJob.State? { Self.jobState(cell, model: model) }
+
+    static func jobState(_ cell: LibraryState.Cell, model: AppModel) -> CompactJob.State? {
         #if DEBUG
-        if let state = Self.demoState(server: server), cell.badge == state.badge { return state.job }
+        if let state = demoState(server: model.library.serverName), cell.badge == state.badge { return state.job }
         #endif
         return model.job.states[cell.id]
     }
 
-    private func demo(_ cell: LibraryState.Cell) -> LibraryState.Cell {
+    private static func demo(_ cell: LibraryState.Cell, server: String) -> LibraryState.Cell {
         #if DEBUG
-        if cell.badge == .none, let state = Self.demoState(server: server) {
+        if cell.badge == .none, let state = demoState(server: server) {
             var cell = cell
             cell.badge = state.badge
             return cell
@@ -274,6 +270,20 @@ struct ItemViewer: View {
         }
     }
     #endif
+}
+
+/// Details of the item shown in the viewer: beside the Library's stack on the open iPhone Duo (the
+/// photo narrows to make room), a sheet on a phone. Its own view, so job progress redraws only it.
+struct ItemDetailsPanel: View {
+    let model: AppModel
+    let id: String
+    var close: () -> Void
+
+    var body: some View {
+        if let cell = ItemViewer.cell(id, model: model) {
+            ItemDetailsSheet(model: model, cell: cell, job: ItemViewer.jobState(cell, model: model), close: close)
+        }
+    }
 }
 
 /// Whether an item screen (the viewer, Compare) is showing. The tab view hides its bottom
