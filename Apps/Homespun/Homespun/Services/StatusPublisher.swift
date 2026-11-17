@@ -49,6 +49,8 @@ final class StatusPublisher {
         if let demo = Self.demo(UserDefaults.standard.string(forKey: "widgetDemo"), now: Date()) {
             StatusStore.write(demo)
             WidgetCenter.shared.reloadTimelines(ofKind: StatusStore.widgetKind)
+            // The watch gets them the way it gets real ones.
+            if let data = StatusStore.encode(demo) { Task { [watch] in await watch.send(data, complication: true) } }
             return
         }
         #endif
@@ -58,7 +60,7 @@ final class StatusPublisher {
 
     #if DEBUG
     /// Screenshots and reviews: `-widgetDemo ready|away|nothing|locked|unpaired` shows made-up facts in the
-    /// widgets instead of this iPhone's own.
+    /// widgets and on the watch instead of this iPhone's own.
     nonisolated static func demo(_ name: String?, now: Date) -> StatusSnapshot? {
         var snapshot = StatusSnapshot.sample(now: now)
         // This morning at 9:12 (yesterday's, before then).
