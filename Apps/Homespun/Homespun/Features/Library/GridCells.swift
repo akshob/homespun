@@ -313,19 +313,6 @@ final class MonthHeaderView: UICollectionReusableView {
     }
 }
 
-/// The notice and the empty state above the first month, drawn by SwiftUI.
-final class NoticeView: UICollectionReusableView {
-    static let reuse = "notice"
-
-    func host(_ view: UIView) {
-        guard view.superview !== self else { return }
-        view.removeFromSuperview()
-        view.frame = bounds
-        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        addSubview(view)
-    }
-}
-
 /// The grid's colours, fonts and the small pictures every cell shares (drawn once per size).
 @MainActor
 enum GridStyle {

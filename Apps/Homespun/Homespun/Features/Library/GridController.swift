@@ -159,7 +159,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         collectionView.register(GridCell.self, forCellWithReuseIdentifier: GridCell.reuse)
         collectionView.register(MonthHeaderView.self, forSupplementaryViewOfKind: GridLayout.headerKind,
                                 withReuseIdentifier: MonthHeaderView.reuse)
-        collectionView.register(NoticeView.self, forSupplementaryViewOfKind: GridLayout.noticeKind, withReuseIdentifier: NoticeView.reuse)
         collectionView.accessibilityIdentifier = "grid"
         self.collectionView = collectionView
         view = collectionView
@@ -174,6 +173,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         // Inside the scroll view: the bars' safe area mustn't move it.
         noticeHost.safeAreaRegions = []
         noticeHost.rootView = input.notice
+        // Always in the grid (not a reused view): its Set Up button stays reachable when it's scrolled away.
+        collectionView.addSubview(noticeHost.view)
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitDisplayScale.self]) { (self: GridController, _) in
             self.view.setNeedsLayout()
             self.refreshVisible()
@@ -284,6 +285,9 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
         relayout()
+        let notice = CGRect(x: 0, y: 0, width: layout.geometry.metrics.width, height: noticeHeight)
+        if noticeHost.view.frame != notice { noticeHost.view.frame = notice }
+        noticeHost.view.isHidden = noticeHeight == 0
     }
 
     /// The thumbnails' side in pixels: a column's width on screen.
@@ -460,11 +464,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String,
                         at indexPath: IndexPath) -> UICollectionReusableView {
-        if kind == GridLayout.noticeKind {
-            let view = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: NoticeView.reuse, for: indexPath)
-            (view as? NoticeView)?.host(noticeHost.view)
-            return view
-        }
         let view = collectionView.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: MonthHeaderView.reuse, for: indexPath)
         if let header = view as? MonthHeaderView, indexPath.section < data.sections.count { configure(header, month: indexPath.section) }
         return view

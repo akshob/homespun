@@ -192,8 +192,6 @@ struct GridGeometry: Equatable, Sendable {
 /// The Library grid's layout: frames straight from `GridGeometry`, only for what's on screen.
 final class GridLayout: UICollectionViewLayout {
     static let headerKind = "month"
-    /// The notice and the empty state above the first month (section 0's).
-    static let noticeKind = "notice"
 
     var geometry = GridGeometry() {
         didSet { if geometry != oldValue { invalidateLayout() } }
@@ -209,9 +207,6 @@ final class GridLayout: UICollectionViewLayout {
     override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {
         let band = rect.minY...max(rect.minY, rect.maxY)
         var result: [UICollectionViewLayoutAttributes] = []
-        if geometry.metrics.top > 0, rect.minY < geometry.metrics.top {
-            result.append(noticeAttributes())
-        }
         if let headers = geometry.headers(inBand: band) {
             for month in headers { result.append(headerAttributes(month)) }
         }
@@ -239,24 +234,13 @@ final class GridLayout: UICollectionViewLayout {
 
     override func layoutAttributesForSupplementaryView(ofKind kind: String, at indexPath: IndexPath)
         -> UICollectionViewLayoutAttributes? {
-        switch kind {
-        case Self.noticeKind: indexPath == IndexPath(item: 0, section: 0) && geometry.metrics.top > 0 ? noticeAttributes() : nil
-        case Self.headerKind: indexPath.section < geometry.months ? headerAttributes(indexPath.section) : nil
-        default: nil
-        }
+        kind == Self.headerKind && indexPath.section < geometry.months ? headerAttributes(indexPath.section) : nil
     }
 
     private func headerAttributes(_ month: Int) -> UICollectionViewLayoutAttributes {
         let attributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: Self.headerKind,
                                                           with: IndexPath(item: 0, section: month))
         attributes.frame = geometry.headerFrame(month)
-        return attributes
-    }
-
-    private func noticeAttributes() -> UICollectionViewLayoutAttributes {
-        let attributes = UICollectionViewLayoutAttributes(forSupplementaryViewOfKind: Self.noticeKind,
-                                                          with: IndexPath(item: 0, section: 0))
-        attributes.frame = CGRect(x: 0, y: 0, width: geometry.metrics.width, height: max(0, geometry.metrics.top - 12))
         return attributes
     }
 }
