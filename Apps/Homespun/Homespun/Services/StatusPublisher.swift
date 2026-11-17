@@ -238,7 +238,7 @@ final class StatusPublisher {
 final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var activating = false
-    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var waiting: [UUID: CheckedContinuation<Void, Never>] = [:]
 
     func send(_ data: Data, complication: Bool) async {
         guard WCSession.isSupported() else { return }
@@ -251,15 +251,20 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
         }
     }
 
-    /// Returns once the session is active (or couldn't be activated). Asked for only when there's
-    /// something to send, never at launch.
+    /// Returns once the session is active, couldn't be activated, or 10 s have passed. Asked for only
+    /// when there's something to send, never at launch.
     private func activate() async {
         guard WCSession.default.activationState != .activated else { return }
+        let id = UUID()
         await withCheckedContinuation { continuation in
             let start = lock.withLock {
-                waiting.append(continuation)
+                waiting[id] = continuation
                 defer { activating = true }
                 return !activating
+            }
+            // Whichever comes first resumes it, once: the session's answer or the time limit.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10) { [weak self] in
+                self?.lock.withLock { self?.waiting.removeValue(forKey: id) }?.resume()
             }
             guard start else { return }
             WCSession.default.delegate = self
@@ -269,8 +274,8 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
 
     func session(_ session: WCSession, activationDidCompleteWith state: WCSessionActivationState, error: (any Error)?) {
         let resumed = lock.withLock {
-            defer { waiting = []; activating = false }
-            return waiting
+            defer { waiting = [:]; activating = false }
+            return Array(waiting.values)
         }
         for continuation in resumed { continuation.resume() }
     }
