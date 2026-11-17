@@ -200,8 +200,16 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         adoptAsContentScrollView()
     }
 
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        isFront = false
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        isFront = true
+        lastInsets = collectionView.adjustedContentInset
+        view.setNeedsLayout()
         // Back from an item: the bars may differ from when it opened (the newest end stays in view).
         if placed, pinned { setOffset(offsetRange.upperBound) }
         // The bars learn where the grid is when it scrolls: opened at the newest, the large title
@@ -338,18 +346,10 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         return lastInsets
     }
 
-    /// Whether the Library is the screen showing: not under the item viewer, and not on its way in
-    /// or out (an item opening hides the tab bar, which mustn't move the grid behind it).
-    private var isFront: Bool {
-        var controller: UIViewController = self
-        while let parent = controller.parent {
-            if let navigation = parent as? UINavigationController {
-                return navigation.topViewController === controller && navigation.transitionCoordinator == nil
-            }
-            controller = parent
-        }
-        return true
-    }
+    /// Whether the Library is the screen showing: from when it has appeared until it starts to go (an
+    /// item opening over it hides the tab bar, which mustn't move the grid behind it). Folding and
+    /// turning keep it showing.
+    private var isFront = true
 
     private var lastInsets = UIEdgeInsets.zero
 
