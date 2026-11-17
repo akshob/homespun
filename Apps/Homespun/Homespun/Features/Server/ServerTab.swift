@@ -10,13 +10,15 @@ struct ServerTab: View {
 
     enum Route: Hashable {
         case check, originals, existingLibrary, immich, automatic, connectors, compactCopies, devices, addDevice
-        case notifications, premium, help, analytics
+        case notifications, premium, help, analytics, deviceName
     }
 
     @State private var path: [Route] = []
     @State private var storage: ServerAPI.StorageInfo?
     @State private var checks: [ServerSetup.Check]?
     @State private var devices: [ServerAPI.DeviceInfo]?
+    /// This iPhone as the server knows it (its name names its originals folder there).
+    @State private var thisDevice: ServerAPI.DeviceInfo?
     @State private var cloud: [ServerAPI.ConnectorInfo]?
     @State private var notifications: UNAuthorizationStatus?
     @State private var settingUp = false
@@ -272,6 +274,14 @@ struct ServerTab: View {
 
     private var thisIPhoneSection: some View {
         Section("This iPhone") {
+            // Its name on the server, which names its originals folder there too.
+            if model.settings.isPaired {
+                NavigationLink(value: Route.deviceName) {
+                    ServerRow(title: "Name", symbol: "iphone", value: thisDevice?.name)
+                }
+                .accessibilityIdentifier("settings.deviceName")
+                .sidebarRow(Route.deviceName)
+            }
             NavigationLink(value: Route.notifications) {
                 ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
             }
@@ -308,7 +318,11 @@ struct ServerTab: View {
         case .automatic: AutomaticModeView(model: model)
         case .connectors: ConnectorsView(settings: settings)
         case .compactCopies: CompactCopiesView(server: settings.server)
-        case .devices: DevicesView(settings: settings) { path.append(.addDevice) }
+        case .devices: DevicesView(settings: settings, rename: { path.append(.deviceName) }) { path.append(.addDevice) }
+        case .deviceName: DeviceNameView(settings: settings) { updated in
+            thisDevice = updated
+            devices = devices?.map { $0.isThisDevice ? updated : $0 }
+        }
         case .addDevice: AddDeviceView(settings: settings)
         case .notifications: NotificationsView(model: model)
         case .premium: PremiumView(premium: model.premium, model: model)
@@ -363,7 +377,8 @@ struct ServerTab: View {
     // MARK: Loading
 
     private func load() async {
-        await loadNotifications()
+        // Beside the server's answers, not before them: iOS can take a while to answer this.
+        async let notifications: Void = loadNotifications()
         guard model.settings.serverStatus == .reachable, let client = model.settings.client else {
             if model.settings.serverStatus == .unknown { await model.settings.refreshServerInfo() }
             return
@@ -377,7 +392,9 @@ struct ServerTab: View {
         self.storage = newStorage ?? self.storage
         checks = newReport?.checks ?? checks
         self.devices = newDevices ?? self.devices
+        thisDevice = newDevices?.first(where: \.isThisDevice) ?? thisDevice
         self.cloud = newCloud ?? self.cloud
+        await notifications
     }
 
     private func loadNotifications() async {

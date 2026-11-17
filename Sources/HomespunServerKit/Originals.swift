@@ -54,7 +54,10 @@ actor OriginalsStore {
         let parts = captureDate.map { Calendar(identifier: .gregorian).dateComponents(in: TimeZone(identifier: "UTC")!, from: $0) }
         let month = parts.map { String(format: "%04d/%02d", $0.year ?? 0, $0.month ?? 0) } ?? "undated"
         var directory = root
-        if let folder { directory.appendPathComponent(Storage.sanitized(folder), isDirectory: true) }
+        if let folder {
+            let safe = Storage.folderName(folder)
+            directory.appendPathComponent(safe.isEmpty ? "iPhone" : safe, isDirectory: true)
+        }
         directory.appendPathComponent(month, isDirectory: true)
         let name = Storage.sanitized(filename)
         var candidate = directory.appendingPathComponent(name)

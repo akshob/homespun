@@ -376,6 +376,14 @@ struct HelpAboutView: View {
                     ServerRow(title: "Report a Problem", symbol: "exclamationmark.bubble", value: nil)
                 }
                 .accessibilityIdentifier("help.report")
+                if !SentReports.shared.reports.isEmpty {
+                    NavigationLink {
+                        SentReportsView()
+                    } label: {
+                        ServerRow(title: "Sent Reports", symbol: "tray.full", value: SentReports.shared.reports.count.formatted())
+                    }
+                    .accessibilityIdentifier("help.sentReports")
+                }
                 Button { showingBadges = true } label: {
                     ServerRow(title: "Badge Guide", symbol: "circle.lefthalf.filled", value: nil, chevron: true)
                 }

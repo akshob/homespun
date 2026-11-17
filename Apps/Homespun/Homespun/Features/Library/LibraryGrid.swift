@@ -1045,13 +1045,21 @@ final class ThumbnailPreheater {
         visible.remove(position)
     }
 
+    /// The positions to keep thumbnails for: a screen's worth each side of the cells on screen that
+    /// are in the grid. Cells of a longer grid (before a filter made it shorter, or while iPhone Duo
+    /// unfolds) can still report themselves, so positions past the end don't count. Nil if none is left.
+    nonisolated static func window(visible: Set<Int>, count: Int) -> (range: ClosedRange<Int>, center: Int, span: Int)? {
+        let shown = visible.filter { $0 >= 0 && $0 < count }
+        guard let low = shown.min(), let high = shown.max() else { return nil }
+        let span = max(high - low + 1, 24)
+        return (max(0, low - span)...min(count - 1, high + span), (low + high) / 2, span)
+    }
+
     private func update() {
-        guard let low = visible.min(), let high = visible.max(), !order.isEmpty, side > 0 else { return }
-        let center = (low + high) / 2, span = max(high - low + 1, 24)
+        guard side > 0, let (window, center, span) = Self.window(visible: visible, count: order.count) else { return }
         // Only when the window moved by a third of a screen.
         guard lastCenter < 0 || abs(center - lastCenter) > span / 3 else { return }
         lastCenter = center
-        let window = max(0, low - span)...min(order.count - 1, high + span)
         let wanted = Set(order[window])
         let start = wanted.subtracting(cached), stop = cached.subtracting(wanted)
         let size = CGSize(width: side, height: side)

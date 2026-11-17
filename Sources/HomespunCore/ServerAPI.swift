@@ -87,6 +87,13 @@ public enum ServerAPI {
         }
     }
 
+    /// `PATCH /api/v1/devices/{id}`: a phone renames itself (and its originals folder on the server).
+    public struct RenameDeviceRequest: Codable, Equatable, Sendable {
+        public static let maximumLength = 64
+        public var name: String
+        public init(name: String) { self.name = name }
+    }
+
     /// `POST /api/v1/pair` with a one-time code from `homespun-server pair`.
     public struct PairRequest: Codable, Equatable, Sendable {
         public var code: String

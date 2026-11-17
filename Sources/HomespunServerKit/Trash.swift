@@ -53,9 +53,10 @@ struct Trash: Sendable {
 
     /// Moves the asset's originals to the trash (and drops any partial uploads).
     func remove(_ asset: AssetRecord, now: Date = Date()) async throws {
-        let resources = try await catalog.resources(asset.id)
         let catalog = catalog, storage = storage
         try await originals.place { root in
+            // Read where the files move: a rename of the phone may have just moved its folder.
+            let resources = try await catalog.resources(asset.id)
             try Self.requireRoot(root)
             var paths: [Role: String] = [:]
             for resource in resources {
@@ -80,9 +81,10 @@ struct Trash: Sendable {
     /// files are missing). A file that's no longer in the trash (someone emptied it by hand) is
     /// forgotten, so the phone uploads it again instead of the item failing for good.
     func restore(_ asset: AssetRecord) async throws {
-        let resources = try await catalog.resources(asset.id)
         let catalog = catalog
         try await originals.place { root in
+            // Read where the files move: a rename of the phone may have just moved its folder.
+            let resources = try await catalog.resources(asset.id)
             try Self.requireRoot(root)
             var paths: [Role: String] = [:]
             var complete = true

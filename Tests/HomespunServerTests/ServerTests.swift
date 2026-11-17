@@ -1503,3 +1503,101 @@ final class ProblemLog: @unchecked Sendable {
         #expect(FileManager.default.fileExists(atPath: kept.path))
     }
 }
+
+// MARK: Renaming a phone
+
+/// A phone renames itself and its originals folder: the files (and a trashed item's) move with it,
+/// stay downloadable and restorable, and the name can't clash with another phone or folder.
+@Test(.enabled(if: ffmpegAvailable)) func aPhoneRenamesItselfAndItsOriginalsFolder() async throws {
+    let fixture = try await Fixture(originals: "originals")
+    let media = try await Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let date = Date(timeIntervalSince1970: 1_714_592_096)
+        let originals = fixture.directory.appendingPathComponent("originals")
+        let kept = try descriptor(.photo, media.photo)
+        let recentFile = fixture.directory.appendingPathComponent("recent.jpg")
+        try (try Data(contentsOf: media.photo) + Data(repeating: 7, count: 64)).write(to: recentFile)
+        let recent = try descriptor(.photo, recentFile, name: "IMG_0002.JPG")
+        for (resource, file) in [(kept, media.photo), (recent, recentFile)] {
+            _ = try await client.call("/api/v1/assets", .post, token: token,
+                                      json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: date, resources: [resource],
+                                                                           compact: false))
+            _ = try await fixture.upload(client, token: token, asset: resource.sha256, role: .photo, file: file)
+        }
+        try await fixture.server.drainJobs()
+        #expect(try await client.call("/api/v1/assets/\(recent.sha256)/removed", .post, token: token).status == .ok)
+        let devices = try await client.call("/api/v1/devices", token: token).decode([ServerAPI.DeviceInfo].self)
+        let me = try #require(devices.first(where: { $0.isThisDevice }))
+        #expect(me.folder == "Test iPhone")
+        func rename(_ name: String, id: String? = nil) async throws -> TestResponse {
+            try await client.call("/api/v1/devices/\(id ?? me.id)", .patch, token: token, json: ServerAPI.RenameDeviceRequest(name: name))
+        }
+        func exists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: originals.appendingPathComponent(path).path) }
+
+        // Renamed: the folder, its files and the trashed item's folder follow; nothing is left behind.
+        let renamed = try await rename("  Akshob’s iPhone: Duo  ")
+        #expect(renamed.status == .ok)
+        let info = try renamed.decode(ServerAPI.DeviceInfo.self)
+        #expect(info.name == "Akshob’s iPhone: Duo" && info.folder == "Akshob’s iPhone Duo")
+        #expect(exists("Akshob’s iPhone Duo/2024/05/IMG_0001.JPG") && !exists("Test iPhone"))
+        #expect(exists(".trash/\(recent.sha256)/Akshob’s iPhone Duo/2024/05/IMG_0002.JPG"))
+        let resources = try await fixture.server.catalog.resources(kept.sha256)
+        #expect(resources.first?.storedPath == "Akshob’s iPhone Duo/2024/05/IMG_0001.JPG")
+        let original = try await client.call("/api/v1/assets/\(kept.sha256)/original/photo", token: token)
+        let bytes = try Data(contentsOf: media.photo)
+        #expect(original.status == .ok && original.data == bytes)
+        let storage = try await client.call("/api/v1/storage", token: token).decode(ServerAPI.StorageInfo.self)
+        #expect(storage.deviceFolder?.hasSuffix("/Akshob’s iPhone Duo") == true)
+        // The trashed item, backed up again, comes back into the renamed folder.
+        let again = try await client.call("/api/v1/assets", .post, token: token,
+                                          json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: date, resources: [recent],
+                                                                               compact: false))
+        #expect(try again.decode(ServerAPI.AssetStatus.self).state == .stored)
+        #expect(exists("Akshob’s iPhone Duo/2024/05/IMG_0002.JPG") && !exists("Test iPhone"))
+
+        // Only the letter case changes (case-insensitive disks too).
+        #expect(try await rename("akshob’s iphone duo").status == .ok)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: originals.path).contains("akshob’s iphone duo"))
+        #expect(exists("akshob’s iphone duo/2024/05/IMG_0001.JPG"))
+
+        // Not another phone's name, nor a folder that's already there; not empty; not another phone.
+        let code = try await fixture.server.newPairingCode()
+        let other = try await client.call("/api/v1/pair", .post, json: ServerAPI.PairRequest(code: code, deviceName: "iPad"))
+            .decode(ServerAPI.PairResponse.self)
+        #expect(try await rename("IPAD").status == .conflict)
+        try FileManager.default.createDirectory(at: originals.appendingPathComponent("Camera Roll"), withIntermediateDirectories: true)
+        #expect(try await rename("Camera Roll").status == .conflict)
+        #expect(try await rename("   ").status == .badRequest)
+        #expect(try await rename("///").status == .badRequest)
+        #expect(try await rename(String(repeating: "x", count: 65)).status == .badRequest)
+        let all = try await fixture.server.catalog.devices()
+        let otherID = try #require(all.first(where: { $0.name == "iPad" })?.id)
+        #expect(try await rename("Mine", id: otherID).status == .forbidden)
+        #expect(try await client.call("/api/v1/devices/\(otherID)", .patch, token: other.token,
+                                      json: ServerAPI.RenameDeviceRequest(name: "iPad Pro")).status == .ok)
+        #expect(exists("akshob’s iphone duo/2024/05/IMG_0001.JPG"))
+    }
+}
+
+/// A server stopped mid-rename (folders moved, catalog not yet) puts the folders back at startup.
+@Test func aRenameInterruptedBeforeTheCatalogChangedIsUndone() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let catalog = try Catalog(path: directory.appendingPathComponent("catalog.db").path)
+    let root = directory.appendingPathComponent("originals", isDirectory: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("New/2024"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".trash/abc/New"), withIntermediateDirectories: true)
+    let plan = DeviceRename.Plan(device: "d", from: "Old", to: "New", trash: [".trash/abc"], via: nil)
+    try await catalog.setSetting(DeviceRename.journal, String(decoding: try JSONEncoder().encode(plan), as: UTF8.self))
+    try await DeviceRename.recover(catalog: catalog, root: root)
+    let fileManager = FileManager.default
+    #expect(fileManager.fileExists(atPath: root.appendingPathComponent("Old/2024").path))
+    #expect(fileManager.fileExists(atPath: root.appendingPathComponent(".trash/abc/Old").path))
+    #expect(!fileManager.fileExists(atPath: root.appendingPathComponent("New").path))
+    #expect(try await catalog.setting(DeviceRename.journal) == nil)
+    #expect(DeviceRename.moved("Old/2024/05/a.jpg", from: "Old", to: "New") == "New/2024/05/a.jpg")
+    #expect(DeviceRename.moved(".trash/abc/Old/2024/a.jpg", from: "Old", to: "New") == ".trash/abc/New/2024/a.jpg")
+    #expect(DeviceRename.moved("Older/a.jpg", from: "Old", to: "New") == nil)
+    #expect(Storage.folderName(" .Akshob’s iPhone. ") == "Akshob’s iPhone" && Storage.folderName("a/b:c") == "abc")
+    #expect(Storage.folderName("Test iPhone") == "Test iPhone" && Storage.folderName("..") == "")
+}

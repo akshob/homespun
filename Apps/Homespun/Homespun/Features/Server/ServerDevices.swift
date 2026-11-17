@@ -6,6 +6,8 @@ import SwiftUI
 /// Who is paired with the server (DESIGN 04·3.1): this iPhone first, the others removable.
 struct DevicesView: View {
     let settings: AppSettings
+    /// Opens this iPhone's name (and folder) to change it.
+    var rename: (() -> Void)?
     var addDevice: () -> Void
     @State private var devices: [ServerAPI.DeviceInfo]?
     @State private var error: String?
@@ -18,7 +20,26 @@ struct DevicesView: View {
             if let devices {
                 Section {
                     ForEach(devices.sorted { $0.isThisDevice && !$1.isThisDevice }) { device in
-                        DeviceRow(device: device)
+                        Group {
+                            if device.isThisDevice, let rename {
+                                Button(action: rename) {
+                                    HStack {
+                                        DeviceRow(device: device, isElement: false)
+                                        Spacer(minLength: 0)
+                                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold))
+                                            .foregroundStyle(Theme.tertiaryLabel).accessibilityHidden(true)
+                                    }
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                // One element: the row's words, as a button that renames it.
+                                .accessibilityElement(children: .combine)
+                                .accessibilityIdentifier("devices.this")
+                                .accessibilityHint("Renames this iPhone and its folder on \(server).")
+                            } else {
+                                DeviceRow(device: device)
+                            }
+                        }
                             .swipeActions {
                                 if !device.isThisDevice {
                                     Button("Remove", role: .destructive) { removing = device }
@@ -27,7 +48,7 @@ struct DevicesView: View {
                             .accessibilityAction(named: "Remove") { if !device.isThisDevice { removing = device } }
                     }
                 } footer: {
-                    Text("Swipe to remove a device. It can pair again with a new code.")
+                    Text("Tap this iPhone to rename it. Swipe to remove another device; it can pair again with a new code.")
                 }
                 .listRowBackground(Theme.card)
             } else if let error {
@@ -97,6 +118,8 @@ struct DevicesView: View {
 
 private struct DeviceRow: View {
     let device: ServerAPI.DeviceInfo
+    /// False inside a button, which is the element then.
+    var isElement = true
 
     var body: some View {
         HStack(spacing: 14) {
@@ -108,8 +131,7 @@ private struct DeviceRow: View {
             }
         }
         .padding(.vertical, 2)
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier(device.isThisDevice ? "devices.this" : "devices.other")
+        .modifier(DeviceRowElement(isElement: isElement, identifier: device.isThisDevice ? "devices.this" : "devices.other"))
     }
 
     /// "This iPhone · paired Nov 6" or "Paired Oct 2 · last seen yesterday".
@@ -244,5 +266,104 @@ struct AddDeviceView: View {
         guard let image = filter.outputImage,
               let cgImage = CIContext().createCGImage(image, from: image.extent) else { return nil }
         return UIImage(cgImage: cgImage)
+    }
+}
+
+private struct DeviceRowElement: ViewModifier {
+    let isElement: Bool
+    let identifier: String
+
+    func body(content: Content) -> some View {
+        if isElement {
+            content.accessibilityElement(children: .combine).accessibilityIdentifier(identifier)
+        } else {
+            content
+        }
+    }
+}
+
+/// This iPhone's name on the server, which is also the name of its originals folder there: renaming
+/// it renames the folder (the server moves it, with everything in it).
+struct DeviceNameView: View {
+    let settings: AppSettings
+    var renamed: (ServerAPI.DeviceInfo) -> Void = { _ in }
+    @State private var device: ServerAPI.DeviceInfo?
+    @State private var name = ""
+    @State private var working = false
+    @State private var error: String?
+    @FocusState private var focused: Bool
+    @Environment(\.dismiss) private var dismiss
+
+    private var server: String { settings.server?.name ?? "the server" }
+    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canSave: Bool {
+        guard let device, !working else { return false }
+        return !trimmed.isEmpty && trimmed.count <= ServerAPI.RenameDeviceRequest.maximumLength && trimmed != device.name
+    }
+
+    var body: some View {
+        List {
+            Section {
+                TextField("Name", text: $name, prompt: Text("Akshob’s iPhone"))
+                    .focused($focused)
+                    .submitLabel(.done)
+                    .onSubmit { if canSave { Task { await save() } } }
+                    .disabled(device == nil || working)
+                    .accessibilityIdentifier("device.name")
+                if let error {
+                    Text(error).font(.subheadline).foregroundStyle(Theme.red).accessibilityIdentifier("device.name.error")
+                }
+            } footer: {
+                if let folder = device?.folder {
+                    Text("This iPhone’s originals are in the folder “\(folder)” on \(server). Renaming this iPhone renames "
+                         + "that folder too; everything in it stays as it is.")
+                } else if device == nil, error == nil {
+                    ProgressView()
+                }
+            }
+            .listRowBackground(Theme.card)
+        }
+        .homespunList()
+        .navigationTitle("Name")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button(role: .confirm) { Task { await save() } } label: {
+                    if working { ProgressView() } else { Label("Save", systemImage: "checkmark") }
+                }
+                .disabled(!canSave)
+                .accessibilityIdentifier("device.name.save")
+            }
+        }
+        .task { await load() }
+    }
+
+    private func load() async {
+        guard let client = settings.client else { return }
+        do {
+            let this = try await client.devices().first(where: \.isThisDevice)
+            device = this
+            name = this?.name ?? ""
+            focused = true
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
+    private func save() async {
+        guard let client = settings.client, let device else { return }
+        working = true
+        error = nil
+        defer { working = false }
+        do {
+            let updated = try await client.renameDevice(device.id, to: trimmed)
+            renamed(updated)
+            Announce.say("Renamed to \(updated.name).")
+            dismiss()
+        } catch let failure as ServerClient.Failure where failure.status == 404 || failure.status == 405 {
+            error = "Update Homespun Server on \(server) to rename this iPhone."
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }

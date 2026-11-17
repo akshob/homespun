@@ -138,6 +138,26 @@ struct Routes: Sendable {
                                      lastSeenAt: Timestamp.date($0.lastSeenAt), isThisDevice: $0.id == context.deviceID)
             })
         }
+        // A phone renames itself, and its originals folder with it.
+        authenticated.patch("devices/:id") { request, context in
+            let id = context.parameters.get("id") ?? ""
+            guard id == context.deviceID else { throw HTTPError(.forbidden, message: "A device can rename only itself.") }
+            let body = try await request.decode(as: ServerAPI.RenameDeviceRequest.self, context: context)
+            let device: DeviceRecord
+            do {
+                device = try await DeviceRename(catalog: catalog, originals: originals, mover: mover).rename(device: id, to: body.name)
+            } catch let failure as DeviceRename.Failure {
+                switch failure {
+                case .invalid(let message): throw HTTPError(.badRequest, message: message)
+                case .notFound: throw HTTPError(.notFound, message: failure.description)
+                case .taken(let message), .busy(let message): throw HTTPError(.conflict, message: message)
+                case .unavailable(let message): throw HTTPError(.serviceUnavailable, message: message)
+                }
+            }
+            return try json(ServerAPI.DeviceInfo(id: device.id, name: device.name, folder: device.folder,
+                                                 pairedAt: Timestamp.date(device.createdAt),
+                                                 lastSeenAt: Timestamp.date(device.lastSeenAt), isThisDevice: true))
+        }
         authenticated.delete("devices/:id") { _, context in
             guard try await catalog.revoke(deviceID: context.parameters.get("id") ?? "") else {
                 throw HTTPError(.notFound, message: "No such device.")
@@ -403,9 +423,10 @@ struct Routes: Sendable {
             try await catalog.markResource(asset.id, role: resource.role, state: .mismatch)
             throw HTTPError(.unprocessableContent, message: "SHA-256 mismatch; upload \(resource.role.rawValue) again.")
         }
-        let folder = try await catalog.folder(forAsset: asset.id)
         let catalog = catalog
         try await originals.place { root in
+            // Read here, not before: a rename of the phone may have just moved its folder.
+            let folder = try await catalog.folder(forAsset: asset.id)
             guard FileManager.default.fileExists(atPath: root.path) else {
                 throw HTTPError(.serviceUnavailable, message: "The originals folder \(root.path) isn't available (is its disk connected?).")
             }

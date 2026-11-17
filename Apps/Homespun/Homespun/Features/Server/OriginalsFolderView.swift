@@ -29,7 +29,9 @@ struct OriginalsFolderView: View {
                         Image(systemName: "iphone").font(.title3).foregroundStyle(Theme.accent).frame(width: 28)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(UIDevice.current.name).foregroundStyle(Theme.label)
+                            // The folder is named after this iPhone's name on the server (Server › Name).
+                            Text(info.deviceFolder.map { ($0 as NSString).lastPathComponent } ?? UIDevice.current.name)
+                                .foregroundStyle(Theme.label)
                             if let folder = info.deviceFolder {
                                 Text(folder).font(.system(.footnote, design: .monospaced).weight(.medium))
                                     .foregroundStyle(Theme.secondaryLabel).textSelection(.enabled)

@@ -152,6 +152,23 @@ struct Storage: Sendable {
     func compact(_ assetID: String) -> URL { compactRoot.appendingPathComponent(assetID, isDirectory: true) }
     func cache(_ assetID: String) -> URL { cacheRoot.appendingPathComponent(assetID, isDirectory: true) }
 
+    /// A phone's folder in the originals folder: its name as typed (letters in any language, spaces,
+    /// apostrophes), without what would make it a path or trouble a NAS share (separators, `:*?"<>|`,
+    /// control characters, a leading dot, trailing dots or spaces), at most 64 characters. Empty if
+    /// nothing is left. Names that were already safe stay the same.
+    static func folderName(_ name: String) -> String {
+        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters).union(.illegalCharacters)
+        var cleaned = String(String.UnicodeScalarView(
+            name.precomposedStringWithCanonicalMapping.unicodeScalars.filter { !forbidden.contains($0) }))
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        while cleaned.hasPrefix(".") { cleaned.removeFirst() }
+        if cleaned.count > ServerAPI.RenameDeviceRequest.maximumLength {
+            cleaned = String(cleaned.prefix(ServerAPI.RenameDeviceRequest.maximumLength))
+        }
+        while let last = cleaned.last, last == "." || last.isWhitespace { cleaned.removeLast() }
+        return cleaned
+    }
+
     /// A safe single path component: no separators, no leading dot, limited characters and length.
     static func sanitized(_ filename: String) -> String {
         let base = filename.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? ""

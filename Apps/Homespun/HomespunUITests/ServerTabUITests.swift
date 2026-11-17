@@ -186,3 +186,45 @@ final class ServerTabUITests: XCTestCase {
         add(screenshot)
     }
 }
+
+extension ServerTabUITests {
+    /// Server › This iPhone › Name renames this iPhone and its originals folder on the server.
+    @MainActor func testRenameThisIPhone() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        app.pair(address: address, code: code)
+        app.showTab("Server")
+        let row = app.buttons["settings.deviceName"]
+        XCTAssertTrue(app.reveal(row), "no Name row")
+        row.tap()
+        let field = app.textFields["device.name"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitFor { (field.value as? String)?.isEmpty == false }, "the current name didn't load")
+        let current = field.value as? String ?? ""
+        field.tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count) + "Akshob’s iPhone")
+        attach(app, "Rename")
+        app.buttons["device.name.save"].tap()
+        XCTAssertTrue(app.reveal(row), "didn't go back to the Server tab")
+        XCTAssertTrue(waitFor { row.label.contains("Akshob’s iPhone") }, row.label)
+        // Its folder on the server has the new name too.
+        let originals = app.buttons["settings.originals"]
+        XCTAssertTrue(app.reveal(originals))
+        originals.tap()
+        let folder = app.descendants(matching: .any)["originals.deviceFolder"]
+        XCTAssertTrue(folder.waitForExistence(timeout: 15))
+        XCTAssertTrue(folder.label.contains("Akshob’s iPhone"), folder.label)
+        attach(app, "Originals folder after renaming")
+    }
+
+    private func waitFor(_ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(15)
+        while !condition(), Date() < deadline { usleep(250_000) }
+        return condition()
+    }
+}

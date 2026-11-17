@@ -168,3 +168,20 @@ private final class FakeService: @unchecked Sendable {
     print("LongRun on this simulator: \(outcome)")
     #expect(outcome != .notNeeded)
 }
+
+/// Sent reports are kept on this iPhone, newest first, so their numbers can be found later.
+@MainActor @Test func sentReportsAreKeptNewestFirst() throws {
+    let defaults = try #require(UserDefaults(suiteName: "sent-reports-\(UUID().uuidString)"))
+    let reports = SentReports(defaults: defaults)
+    reports.add(id: "HS-AAAAAA", message: "The grid was blank\nthen it crashed", at: Date(timeIntervalSince1970: 1))
+    reports.add(id: "HS-BBBBBB", message: String(repeating: "x", count: 300), at: Date(timeIntervalSince1970: 2))
+    #expect(reports.reports.map(\.id) == ["HS-BBBBBB", "HS-AAAAAA"])
+    #expect(reports.reports[1].summary == "The grid was blank" && reports.reports[0].summary.count == 120)
+    // Survives a relaunch; the oldest go past the limit; a number is listed once.
+    #expect(SentReports(defaults: defaults).reports.map(\.id) == ["HS-BBBBBB", "HS-AAAAAA"])
+    for index in 0..<SentReports.limit { reports.add(id: "HS-\(index)", message: "m") }
+    reports.add(id: "HS-0", message: "again")
+    #expect(reports.reports.count == SentReports.limit && reports.reports.first?.id == "HS-0")
+    #expect(!reports.reports.contains { $0.id == "HS-AAAAAA" })
+    #expect(reports.reports.filter { $0.id == "HS-0" }.count == 1)
+}

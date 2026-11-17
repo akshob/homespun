@@ -40,6 +40,41 @@ final class LibraryUITests: XCTestCase {
         XCTAssertTrue(app.buttons["select.start"].waitForExistence(timeout: 5))
     }
 
+    /// A short filter, then a new grid size (the thumbnail preheater reloads with the short list),
+    /// then All: the newest cells, far past the short list's end, used to trap the app (reports
+    /// HS-UHJXHW, HS-5MX4AG: filtering and the Library tab; opening iPhone Duo, which changes the size too).
+    @MainActor func testFilterThenGridSizeThenAllKeepsRunning() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 20), "no photos in the Library")
+        func choose(_ menu: String, _ item: String) {
+            app.descendants(matching: .any)[menu].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let option = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", item)).firstMatch
+            XCTAssertTrue(option.waitForExistence(timeout: 5), "no \(item)")
+            option.tap()
+            sleep(1)
+        }
+        for (filter, size) in [("Live Photos", "Small"), ("Videos", "Large"), ("Live Photos", "Medium")] {
+            choose("grid.filter", filter)
+            choose("grid.menu", "Grid Size")
+            let sizeItem = app.buttons[size].firstMatch
+            XCTAssertTrue(sizeItem.waitForExistence(timeout: 5), "no grid size \(size)")
+            sizeItem.tap()
+            sleep(1)
+            choose("grid.filter", "Photos and Videos")
+            choose("grid.filter", "All Items")
+            app.openTab("Library")
+            app.openTab("Library")
+            sleep(2)
+            XCTAssertEqual(app.state, .runningForeground, "crashed after \(filter), \(size), then All")
+            XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 10), "no grid after \(filter), \(size), then All")
+        }
+        choose("grid.menu", "Grid Size")
+        let medium = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Medium")).firstMatch
+        if medium.waitForExistence(timeout: 3) { medium.tap() }
+    }
+
     @MainActor private func selectedCells(_ app: XCUIApplication) -> [XCUIElement] {
         app.gridItems().allElementsBoundByIndex.filter(\.isSelected)
     }

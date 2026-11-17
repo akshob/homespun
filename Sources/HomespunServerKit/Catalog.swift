@@ -314,7 +314,8 @@ public actor Catalog {
     private func uniqueFolder(for name: String) throws -> String {
         let taken = Set(try database.query("SELECT folder FROM devices WHERE folder IS NOT NULL")
             .compactMap { $0["folder"]?.string?.lowercased() })
-        let base = Storage.sanitized(name)
+        let named = Storage.folderName(name)
+        let base = named.isEmpty ? "iPhone" : named
         var candidate = base, number = 2
         while taken.contains(candidate.lowercased()) {
             candidate = "\(base) \(number)"
@@ -385,6 +386,42 @@ public actor Catalog {
 
     public func devices() throws -> [DeviceRecord] {
         try database.query("SELECT * FROM devices ORDER BY created_at").map(Self.device)
+    }
+
+    /// A phone's new name and folder, and every path of its originals (stored, or in the trash) moved
+    /// from `from` to `to`, in one transaction that also ends the rename's journal: the folders on
+    /// disk have moved already (`DeviceRename`).
+    func renameDevice(_ id: String, name: String, folder: String, from: String?, journal: String) throws {
+        try database.transaction {
+            try database.execute("UPDATE devices SET name = ?, folder = ? WHERE id = ?", [.text(name), .text(folder), .text(id)])
+            if let from, from != folder {
+                let rows = try database.query("""
+                    SELECT r.asset_id, r.role, r.stored_path FROM resources r JOIN assets a ON a.id = r.asset_id
+                    WHERE a.device_id = ? AND r.stored_path IS NOT NULL
+                    """, [.text(id)])
+                for row in rows {
+                    guard let asset = row["asset_id"]?.string, let role = row["role"]?.string,
+                          let path = row["stored_path"]?.string,
+                          let moved = DeviceRename.moved(path, from: from, to: folder) else { continue }
+                    try database.execute("UPDATE resources SET stored_path = ? WHERE asset_id = ? AND role = ?",
+                                         [.text(moved), .text(asset), .text(role)])
+                }
+            }
+            try setSetting(journal, nil)
+        }
+        log("device_renamed", device: id, detail: from.map { "\($0) → \(folder)" } ?? folder)
+    }
+
+    /// The trash folders (`.trash/<item>`) holding originals of a phone's items.
+    func trashFolders(device id: String) throws -> [String] {
+        let rows = try database.query("""
+            SELECT DISTINCT r.stored_path FROM resources r JOIN assets a ON a.id = r.asset_id
+            WHERE a.device_id = ? AND r.stored_path LIKE '.trash/%'
+            """, [.text(id)])
+        return Array(Set(rows.compactMap { row -> String? in
+            guard let path = row["stored_path"]?.string, let original = Trash.restored(path) else { return nil }
+            return String(path.dropLast(original.count + 1))
+        })).sorted()
     }
 
     public func revoke(deviceID: String) throws -> Bool {

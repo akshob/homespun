@@ -236,6 +236,11 @@ struct ReportProblemView: View {
                 .multilineTextAlignment(.center).foregroundStyle(Theme.secondaryLabel)
             Text("Report \(id)").font(.body.monospaced()).textSelection(.enabled)
                 .accessibilityIdentifier("report.id")
+            Button("Copy Report Number", systemImage: "doc.on.doc") { UIPasteboard.general.string = id }
+                .tint(Theme.accent)
+                .accessibilityIdentifier("report.copyID")
+            Text("You'll find it again in Help and About › Sent Reports.")
+                .font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
             PrimaryButton(title: "Done", id: "report.done") { dismiss() }
                 .padding(.top, 8)
         }
@@ -251,7 +256,9 @@ struct ReportProblemView: View {
         let report = ProblemReport(message: message.trimmingCharacters(in: .whitespacesAndNewlines), email: trimmedEmail,
                                    diagnostics: includeDiagnostics ? diagnostics : nil)
         do {
-            sentID = try await Telemetry.shared.sendReport(report)
+            let id = try await Telemetry.shared.sendReport(report)
+            SentReports.shared.add(id: id, message: report.message)
+            sentID = id
             if afterCrash { SessionMarker.shared.offersReport = false }
         } catch let failure as TelemetryError {
             error = failure.localizedDescription

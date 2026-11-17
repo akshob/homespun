@@ -151,6 +151,11 @@ struct ServerClient: Sendable {
     /// Devices paired with the server.
     func devices() async throws -> [ServerAPI.DeviceInfo] { try await send("devices", as: [ServerAPI.DeviceInfo].self) }
 
+    /// Renames this device, and its originals folder on the server with it.
+    func renameDevice(_ id: String, to name: String) async throws -> ServerAPI.DeviceInfo {
+        try await send("devices/\(id)", method: "PATCH", json: ServerAPI.RenameDeviceRequest(name: name), as: ServerAPI.DeviceInfo.self)
+    }
+
     /// Unpairs a device (this one too: it can't use the server afterwards).
     func removeDevice(_ id: String) async throws {
         var request = request("devices/\(id)", method: "DELETE")

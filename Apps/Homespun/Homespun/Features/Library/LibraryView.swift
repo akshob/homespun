@@ -181,6 +181,8 @@ struct LibraryView: View {
         if !same {
             let old = data
             data = new
+            // The preheater follows the grid's items (a filter changes them, not the library's version).
+            preheater?.configure(order: new.ids, side: thumbnailPixels)
             releaseInBackground(old)
         } else {
             releaseInBackground(new)

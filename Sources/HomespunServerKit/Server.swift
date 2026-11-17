@@ -39,6 +39,8 @@ public struct HomespunServer: Sendable {
         if try !Storage.prepareOriginals(root) {
             logger.error("the originals folder \(root.path) isn't available (is its disk connected?)")
         }
+        // Stopped mid-rename of a phone: its folders go back where the catalog says they are.
+        try await DeviceRename.recover(catalog: catalog, root: root)
         originals = OriginalsStore(root: root)
         mover = OriginalsMover(catalog: catalog, store: originals, dataDirectory: configuration.dataDirectory, logger: logger)
         immichState = try await ImmichState(catalog: catalog, fallback: configuration.immich)

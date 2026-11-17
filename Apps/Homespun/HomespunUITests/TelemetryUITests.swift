@@ -78,6 +78,17 @@ final class TelemetryUITests: XCTestCase {
         XCTAssertTrue(id.label.hasPrefix("Report HS-"), id.label)
         attach(app, "Report sent")
         app.buttons["report.done"].tap()
+
+        // Its number can be found again later: Help and About › Sent Reports.
+        let number = String(id.label.dropFirst("Report ".count))
+        let sent = app.buttons["help.sentReports"]
+        XCTAssertTrue(sent.waitForExistence(timeout: 10), "no Sent Reports")
+        sent.tap()
+        let row = app.descendants(matching: .any).matching(identifier: "reports.row").firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "no sent report listed")
+        XCTAssertTrue(row.label.contains(number), "\(row.label) doesn't show \(number)")
+        attach(app, "Sent reports")
+        app.goBack(from: "Sent Reports")
     }
 
     /// After Homespun quit while on screen, it asks once and opens the report.
