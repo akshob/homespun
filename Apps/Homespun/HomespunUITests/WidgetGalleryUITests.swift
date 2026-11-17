@@ -37,10 +37,10 @@ final class WidgetGalleryUITests: XCTestCase {
 
     /// Edit Home Screen › Edit › Add Widget › Homespun, the size on `page`, Add Widget, Done.
     @MainActor private func addWidget(page: Int, shots: Bool) {
-        // Still editing the Home Screen (an earlier run): stop first.
+        // Still editing the Home Screen (an earlier run, or a missed Done): the Home button stops it.
         if springboard.buttons["Done"].waitForExistence(timeout: 2) {
-            springboard.buttons["Done"].tap()
-            sleep(2)
+            XCUIDevice.shared.press(.home)
+            sleep(3)
         }
         // Homespun's own icon (not its widget) is on the page the Home button leads back to.
         let icon = springboard.icons.matching(NSPredicate(format: "identifier == 'Homespun' AND value != 'Widget'")).firstMatch
@@ -84,8 +84,8 @@ final class WidgetGalleryUITests: XCTestCase {
         sleep(3)
         tap(springboard.buttons["Done"], "Done")
         sleep(3)
-        // A busy simulator can miss the first tap.
-        if springboard.buttons["Done"].exists { springboard.buttons["Done"].tap() }
+        // A busy simulator can miss the tap; the Home button stops editing too.
+        if springboard.buttons["Done"].exists { XCUIDevice.shared.press(.home) }
         sleep(2)
     }
 
