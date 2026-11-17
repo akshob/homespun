@@ -4,9 +4,16 @@ Every change is validated by GitHub Actions (`.github/workflows`), not by hand:
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | every push | server build and tests on Linux, the telemetry Worker, the package on macOS, the app's build and unit tests (PhotoKit ones included), UI smoke |
-| `ci.yml` | pull request to `main`, or Run workflow › `full` | the whole UI suite, one run per machine at once: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`) and iPhone Duo (`duo-cover`, `duo-open` in every pose) |
+| `ci.yml` | pull request to `main` | what changed: the server on Linux and macOS, the telemetry Worker, the app's build and unit tests (PhotoKit ones included), and the whole UI suite, one run per machine at once: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`) and iPhone Duo (`duo-cover`, `duo-grid`, `duo-open` in every pose). A draft pull request gets UI smoke only. |
+| `ci.yml` | push to `main` | what changed, with UI smoke |
+| `ci.yml` | push to another branch | build and unit tests, or nothing if the branch has an open pull request (that run covers it) |
+| `ci.yml` | Run workflow (any branch) | everything, with UI runs `none`, `smoke` or `full` |
+| `ci.yml` | a change to `site/` | the website's checks (`site-check.py`, html-validate); from `main`, published to homespun.photos (environment `website`) |
 | `testflight.yml` | on demand, by the owner, who approves each run | archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
+
+`ci/plan.py` decides what a run needs from the files it changes (design files and Markdown alone run
+nothing; the website alone runs only its checks and deploy), because GitHub gives this account five
+macOS machines at once. The `CI result` job sums the run up; `main` requires it to pass.
 
 All of it runs on GitHub's own machines, free for a public repository: Linux (`ubuntu-24.04`, the
 server in the `swift:6.3-noble` container) and macOS (`xcode-27`: Xcode 27.2 with the iOS 27.2
@@ -34,6 +41,8 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `lane.sh <run\|group> ...` | UI runs by name (`smoke`, `iphone`, `library`, …) or group (`iphone-all`, `duo-all`, `full`) |
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
+| `plan.py` | what a run needs (see above) |
+| `site-check.py`, `htmlvalidate.json` | the website's checks |
 | `summary.py <results>` | the Markdown report each job adds to its summary |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
@@ -48,6 +57,8 @@ On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulator
   `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (the `.p8` file's contents) and `DEVELOPMENT_TEAM`.
 - `main` is protected: no force pushes or deletion; changes come through pull requests whose CI
   passed.
+- Environment `website`: deployments from `main` only; secrets `CLOUDFLARE_API_TOKEN` (Cloudflare
+  Pages edit only) and `CLOUDFLARE_ACCOUNT_ID`.
 - Private vulnerability reporting on.
 
 ## Reading results without opening a browser
