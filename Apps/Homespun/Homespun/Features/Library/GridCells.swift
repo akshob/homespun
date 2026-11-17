@@ -205,8 +205,12 @@ final class MonthHeaderView: UICollectionReusableView {
         count.adjustsFontForContentSizeCategory = true
         count.textColor = GridStyle.secondaryLabel
         title.lineBreakMode = .byTruncatingTail
+        // The largest text sizes shrink a long month name rather than cut it.
+        title.adjustsFontSizeToFitWidth = true
+        title.minimumScaleFactor = 0.5
         count.lineBreakMode = .byTruncatingTail
         button.configuration?.contentInsets = .zero
+        button.configuration?.titleLineBreakMode = .byTruncatingTail
         button.tintColor = GridStyle.accent
         button.addAction(UIAction { [weak self] _ in self?.action?() }, for: .primaryActionTriggered)
         for view in [title, count, button] as [UIView] { addSubview(view) }
@@ -243,7 +247,8 @@ final class MonthHeaderView: UICollectionReusableView {
     static func height(width: CGFloat, traits: UITraitCollection) -> CGFloat {
         let key = "\(width) \(traits.preferredContentSizeCategory.rawValue)"
         if let known = heights[key] { return known }
-        let lines = titleFont(traits).lineHeight + (stacked(width: width, traits: traits) ? 2 + countFont(traits).lineHeight : 0)
+        let second = max(countFont(traits).lineHeight, buttonFont(traits).lineHeight)
+        let lines = titleFont(traits).lineHeight + (stacked(width: width, traits: traits) ? 2 + second : 0)
         let height = (14 + lines + 6).rounded(.up)
         heights[key] = height
         return height
@@ -277,31 +282,34 @@ final class MonthHeaderView: UICollectionReusableView {
         setNeedsLayout()
     }
 
+    /// One line: the name, the count on its baseline, the button at the end. When that doesn't fit
+    /// (large text), the name on its own line and the count and the button under it.
     override func layoutSubviews() {
         super.layoutSubviews()
-        let width = bounds.width, inner = width - 24
+        let width = bounds.width, inner = max(0, width - 24)
         let stacked = Self.stacked(width: width, traits: traitCollection)
-        let titleFont = Self.titleFont(traitCollection)
-        let baseline = 14 + titleFont.ascender
+        let titleFont = Self.titleFont(traitCollection), countFont = Self.countFont(traitCollection)
+        let buttonFont = Self.buttonFont(traitCollection)
+        // The baseline the count and the button sit on: the name's, or the second line's.
+        let second = max(countFont.lineHeight, buttonFont.lineHeight)
+        let baseline = stacked ? 14 + titleFont.lineHeight + 2 + (second - countFont.lineHeight) / 2 + countFont.ascender
+            : 14 + titleFont.ascender
         var right = width - 12
         if !button.isHidden {
-            let size = button.sizeThatFits(CGSize(width: inner / 2, height: 100))
-            let font = Self.buttonFont(traitCollection)
-            button.frame = CGRect(x: right - size.width, y: baseline - font.ascender - (size.height - font.lineHeight) / 2,
-                                  width: size.width, height: size.height)
-            right -= size.width + 8
+            // Under the name, the button may take what the count leaves.
+            let widest = stacked ? (count.isHidden ? inner : inner * 0.6) : inner / 2
+            let size = button.sizeThatFits(CGSize(width: widest, height: 200))
+            let fitted = CGSize(width: min(size.width, widest), height: size.height)
+            button.frame = CGRect(x: right - fitted.width, y: baseline - buttonFont.ascender - (fitted.height - buttonFont.lineHeight) / 2,
+                                  width: fitted.width, height: fitted.height)
+            right -= fitted.width + 8
         }
-        let titleWidth = min(title.sizeThatFits(CGSize(width: inner, height: 100)).width, right - 12)
+        let titleRight = stacked ? width - 12 : right
+        let titleWidth = min(title.sizeThatFits(CGSize(width: inner, height: 200)).width, titleRight - 12)
         title.frame = CGRect(x: 12, y: 14, width: max(0, titleWidth), height: titleFont.lineHeight)
         guard !count.isHidden else { return }
-        let countFont = Self.countFont(traitCollection)
-        if stacked {
-            count.frame = CGRect(x: 12, y: title.frame.maxY + 2, width: max(0, inner), height: countFont.lineHeight)
-        } else {
-            // On the name's baseline.
-            let x = title.frame.maxX + 8
-            count.frame = CGRect(x: x, y: baseline - countFont.ascender, width: max(0, right - x), height: countFont.lineHeight)
-        }
+        let x = stacked ? 12 : title.frame.maxX + 8
+        count.frame = CGRect(x: x, y: baseline - countFont.ascender, width: max(0, right - x), height: countFont.lineHeight)
     }
 }
 

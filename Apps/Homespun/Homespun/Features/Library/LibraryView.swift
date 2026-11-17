@@ -223,12 +223,14 @@ struct LibraryView: View {
                     dragEnded: { endDragSelect() }, resize: { resize($0) })
     }
 
-    /// Above the first month: the notice, and the empty state when nothing is shown.
+    /// Above the first month: the notice, and the empty state when nothing is shown (at their own
+    /// height: the grid measures them).
     private var top: some View {
         VStack(spacing: 12) {
             notice
             if data.cells.isEmpty { empty }
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// What `top` says, so the grid draws and measures it again only when that changes.

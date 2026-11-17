@@ -89,6 +89,72 @@ final class GridScrollUITests: XCTestCase {
         }
     }
 
+    /// Pinching changes the columns (like Grid Size), keeping the item under the fingers in view.
+    @MainActor func testPinchingChangesTheColumnsAndKeepsTheItem() throws {
+        try launch()
+        let start = try settled()
+        guard start.value("grid.bottom") - start.value("grid.top") > 2_000 else { throw XCTSkip("The library is short.") }
+        for _ in 0..<2 { swipe(by: 250) }
+        let middle = try settled(changedFrom: start)
+        let columns = middle.value("grid.columns"), anchor = middle.value("grid.anchor")
+        grid.pinch(withScale: 0.4, velocity: -1)
+        sleep(2)
+        let smaller = report()
+        // Back to the size it had, whatever happens (the size is kept for the next launch).
+        defer { if report().value("grid.columns") != columns { grid.pinch(withScale: 2.5, velocity: 1) } }
+        XCTAssertGreaterThan(smaller.value("grid.columns"), columns, "pinching in didn't make the cells smaller")
+        XCTAssertTrue(smaller.value("grid.first") <= anchor && anchor <= smaller.value("grid.last"),
+                      "item \(anchor) left the screen (\(smaller.value("grid.first"))–\(smaller.value("grid.last")))")
+        grid.pinch(withScale: 2.5, velocity: 1)
+        sleep(2)
+        let back = report()
+        XCTAssertEqual(back.value("grid.columns"), columns, "pinching out didn't bring the size back")
+        XCTAssertTrue(back.value("grid.first") <= anchor && anchor <= back.value("grid.last"), "item \(anchor) left the screen")
+        XCTAssertEqual(back.value("grid.jumps"), start.value("grid.jumps"))
+    }
+
+    /// Select mode: a sideways drag along a row selects it, like Photos; touching and holding, then
+    /// dragging to the top edge, scrolls the grid and selects everything it passes.
+    @MainActor func testDragToSelect() throws {
+        try launch()
+        let start = try settled()
+        app.buttons["select.start"].tap()
+        XCTAssertTrue(app.hasScreen("Select Items", timeout: 5))
+        sleep(1)
+        // Select mode's bars differ from the tab bar: the newest end stays in view.
+        let selecting = report()
+        let screen = app.windows.firstMatch.frame
+        let cells = app.gridItems().allElementsBoundByIndex.filter {
+            $0.frame.minY > screen.minY + 150 && $0.frame.maxY < screen.maxY - 150 && app.isOnScreen($0)
+        }
+        let rows = Dictionary(grouping: cells) { Int($0.frame.minY.rounded()) }
+        guard let row = rows.values.max(by: { $0.count < $1.count })?.sorted(by: { $0.frame.minX < $1.frame.minX }), row.count > 1 else {
+            return XCTFail("no row of cells on screen")
+        }
+        row[0].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.05, thenDragTo: row[row.count - 1].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)),
+                   withVelocity: .slow, thenHoldForDuration: 0.3)
+        XCTAssertTrue(app.hasScreen("\(row.count) Selected", timeout: 5), "a sideways drag along a row didn't select it")
+        XCTAssertEqual(report().value("grid.offset"), selecting.value("grid.offset"), accuracy: 1, "the grid scrolled during the drag")
+        guard start.value("grid.bottom") - start.value("grid.top") > 1_500 else { return app.buttons["select.done"].tap() }
+
+        // Hold on a cell that isn't selected (from a selected one the drag deselects), then drag up to
+        // the top edge and stay there: the grid scrolls toward older items, selecting all it passes.
+        guard let other = cells.first(where: { abs($0.frame.minY - row[0].frame.minY) > 1 }) else {
+            return app.buttons["select.done"].tap()
+        }
+        let top = app.navigationBars.firstMatch.exists ? app.navigationBars.firstMatch.frame.maxY : screen.minY + 120
+        other.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.6, thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: screen.midX, dy: top + 25)), withVelocity: .default, thenHoldForDuration: 2.5)
+        let scrolled = try settled(changedFrom: selecting)
+        XCTAssertLessThan(scrolled.value("grid.offset"), selecting.value("grid.offset") - 150, "the grid didn't scroll at the top edge")
+        let title = app.descendants(matching: .any).matching(NSPredicate(format: "label MATCHES '^[0-9]+ Selected$'")).firstMatch
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(Int(title.label.split(separator: " ")[0]) ?? 0, row.count * 3, "the run didn't grow while scrolling")
+        app.buttons["select.done"].tap()
+    }
+
     // MARK: Gestures
 
     private var grid: XCUIElement { app.descendants(matching: .any)["grid"].firstMatch }

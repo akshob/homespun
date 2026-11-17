@@ -125,6 +125,9 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// The place kept through a change of size: turning or unfolding brings a new width, then new
     /// insets, in steps; each step puts back the place from before the first, not from the step before.
     private var held: (place: Place, until: CFTimeInterval)?
+    /// Where the grid was just put: for a moment, the scroll view moving by itself (a large title
+    /// collapsing keeps a scroll view that was at the top there) is undone.
+    private var placedAt: (y: CGFloat, until: CFTimeInterval)?
     private var lastPreheat: ClosedRange<CGFloat>?
     private var lastOffset: CGFloat = 0
     private var tracking = false
@@ -176,6 +179,11 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self, UITraitDisplayScale.self]) { (self: GridController, _) in
             self.view.setNeedsLayout()
             self.refreshVisible()
+            // The notice's text size reaches SwiftUI a moment later: measured again then.
+            DispatchQueue.main.async {
+                self.noticeMeasured = nil
+                self.view.setNeedsLayout()
+            }
         }
         apply(data: input.data, version: input.dataVersion)
         if PerfMonitor.shared.enabled {
@@ -364,6 +372,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     private func setOffset(_ y: CGFloat, animated: Bool = false) {
         let point = CGPoint(x: -collectionView.adjustedContentInset.left, y: y)
+        placedAt = animated ? nil : (y, CACurrentMediaTime() + 0.5)
         if animated { collectionView.setContentOffset(point, animated: true) } else { collectionView.contentOffset = point }
         pinned = y >= offsetRange.upperBound - 1
         updatePreheat()
@@ -386,7 +395,9 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private func showNewest() {
         let range = offsetRange
         let distance = range.upperBound - collectionView.contentOffset.y
-        setOffset(range.upperBound, animated: distance < collectionView.bounds.height * 2)
+        let animated = distance < collectionView.bounds.height * 2
+        setOffset(range.upperBound, animated: animated)
+        if !animated { publishProbe() }
     }
 
     // MARK: Data source
@@ -586,6 +597,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         held = nil
+        placedAt = nil
         if !tracking {
             tracking = true
             PerfMonitor.shared.scrollBegan()
@@ -615,6 +627,10 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         if scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating {
             pinned = scrollView.contentOffset.y >= offsetRange.upperBound - 1
+        } else if let placedAt, CACurrentMediaTime() < placedAt.until, abs(scrollView.contentOffset.y - placedAt.y) > 0.5 {
+            // UIKit moved it, not the person: back to the newest end, or where it was put.
+            let range = offsetRange
+            setOffset(pinned ? range.upperBound : min(max(placedAt.y, range.lowerBound), range.upperBound))
         }
         updatePreheat()
         checkJump()
@@ -628,6 +644,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             if let place = heldPlace() { restore(place) } else if pinned { setOffset(offsetRange.upperBound) }
         }
         view.setNeedsLayout()
+        publishProbe()
     }
 
     // MARK: Drag to select, pinch
@@ -695,6 +712,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             dragPoint = nil
             lastDragged = nil
             actions.dragEnded()
+            publishProbe()
         }
     }
 
