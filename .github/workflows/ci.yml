@@ -1,9 +1,10 @@
 # Validation for every change, on GitHub's own machines (Linux, and macOS with Xcode 27.2 and the
 # iPhone 18 Pro and iPhone Duo simulators), so it runs here and not by hand (ci/README.md).
-#   Every push: the server on Linux, the telemetry Worker, the package on macOS, the app's build and
-#   unit tests, and a smoke run of the UI tests.
-#   A pull request to main (or "full" from Run workflow): the whole UI suite, one run per machine
-#   (iPhone, and iPhone Duo folded and open). Pull requests from forks run after the owner approves.
+# ci/plan.py decides what a run needs (only what changed; macOS machines are few):
+#   pull request to main: the whole UI suite, one run per machine (a draft: UI smoke)
+#   push to main: UI smoke · push to a branch: build and unit tests, or nothing if it has an open
+#   pull request · Run workflow: everything, with the UI runs chosen
+# "CI result" sums it up; main requires it. Pull requests from forks run after the owner approves.
 name: CI
 
 on:
@@ -13,12 +14,13 @@ on:
     paths-ignore: ["site/**", "**/*.md", "design/**"]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       ui:
         description: UI tests
         type: choice
-        options: [smoke, full]
+        options: [none, smoke, full]
         default: smoke
 
 permissions:
@@ -34,9 +36,37 @@ env:
   HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
 jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      server: ${{ steps.plan.outputs.server }}
+      telemetry: ${{ steps.plan.outputs.telemetry }}
+      app: ${{ steps.plan.outputs.app }}
+      package: ${{ steps.plan.outputs.package }}
+      ui: ${{ steps.plan.outputs.ui }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          fetch-depth: 0
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ env.HEAD_SHA }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+          UI_INPUT: ${{ inputs.ui }}
+        run: python3 ci/plan.py
+
   server-linux:
     name: Server (Linux)
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: plan
+    if: needs.plan.outputs.server == 'true'
     runs-on: ubuntu-24.04
     container: swift:6.3-noble
     timeout-minutes: 45
@@ -66,7 +96,8 @@ jobs:
 
   telemetry:
     name: Telemetry Worker
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: plan
+    if: needs.plan.outputs.telemetry == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
@@ -83,7 +114,9 @@ jobs:
       - run: npm test
 
   build:
-    name: Build and package tests (macOS)
+    name: Build (macOS)
+    needs: plan
+    if: needs.plan.outputs.app == 'true'
     runs-on: xcode-27
     timeout-minutes: 60
     env:
@@ -107,10 +140,6 @@ jobs:
           path: ${{ runner.temp }}/build.tgz
           retention-days: 2
           compression-level: 0
-      - name: Package tests (macOS)
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
-        run: swift test 2>&1 | tee ci-results/package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
-        shell: zsh {0}
       - name: Keep the results of a failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -118,6 +147,29 @@ jobs:
           name: build-results-${{ github.run_id }}
           path: ci-results
           retention-days: 5
+
+  package:
+    name: Package tests (macOS)
+    needs: plan
+    if: needs.plan.outputs.package == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HEAD_SHA }}
+      - name: Tools
+        run: brew install --quiet ffmpeg
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: macos-test-${{ hashFiles('Package.resolved') }}-${{ env.HEAD_SHA }}
+          restore-keys: macos-test-${{ hashFiles('Package.resolved') }}-
+      - name: Package tests
+        run: swift test 2>&1 | tee package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
+        shell: zsh {0}
 
   unit:
     name: App unit tests
@@ -153,11 +205,12 @@ jobs:
 
   ui:
     name: UI (${{ matrix.run }})
-    needs: build
+    needs: [plan, build]
+    if: needs.plan.outputs.ui != '[]'
     strategy:
       fail-fast: false
       matrix:
-        run: ${{ fromJSON((github.event_name == 'pull_request' || inputs.ui == 'full') && '["iphone","library","later","copies","onboarding","telemetry","duo-cover","duo-open"]' || '["smoke"]') }}
+        run: ${{ fromJSON(needs.plan.outputs.ui) }}
     runs-on: xcode-27
     timeout-minutes: 120
     env:
@@ -186,3 +239,23 @@ jobs:
           name: ui-${{ matrix.run }}-${{ github.run_id }}
           path: ci-results
           retention-days: 5
+
+  result:
+    name: CI result
+    if: always()
+    needs: [plan, server-linux, telemetry, build, package, unit, ui]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job that ran passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'EOF'
+          import json, os
+          results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
+          print("\n".join(f"{name}: {result}" for name, result in results.items()))
+          bad = [name for name, result in results.items() if result in ("failure", "cancelled")]
+          if bad:
+              raise SystemExit(f"Not passed: {', '.join(bad)}")
+          EOF

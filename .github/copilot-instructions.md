@@ -96,9 +96,10 @@ and may not exist in other checkouts.
 
 ## Validation runs in CI (ci/README.md)
 
-- Validate changes with GitHub Actions, not by hand: work on a branch, push (build + unit + server
-  + UI smoke), open a pull request to `main` for the full UI suite (one run per GitHub macOS machine,
-  iPhone and iPhone Duo). Read only the run's summary and failures (`gh run watch`,
+- Validate changes with GitHub Actions, not by hand: work on a branch, push (build and unit tests),
+  `gh workflow run ci.yml --ref <branch> -f ui=smoke|full` for UI runs, and open a pull request to
+  `main` for the full suite (one UI run per GitHub macOS machine, iPhone and iPhone Duo). macOS
+  machines are few (five at once): push in batches, run `full` when the work is ready. Read only the run's summary and failures (`gh run watch`,
   `gh run view <id> --log-failed`, `gh run download` for a failure's screenshots). Run tests
   locally only to reproduce a failure.
 - Everything runs on GitHub's machines (the repository is public). Never attach a self-hosted
