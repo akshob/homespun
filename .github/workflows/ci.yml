@@ -9,6 +9,8 @@ name: CI
 on:
   push:
     branches: ["**"]
+    # The website and docs need no build. (Pull requests always run: main requires their checks.)
+    paths-ignore: ["site/**", "**/*.md", "design/**"]
   pull_request:
     branches: [main]
   workflow_dispatch:
