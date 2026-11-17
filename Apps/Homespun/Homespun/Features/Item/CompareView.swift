@@ -7,6 +7,8 @@ import SwiftUI
 /// What Compare shows: one version, or both split by a line.
 enum CompareMode: String, CaseIterable, Identifiable {
     case original, compact, split
+    /// Both whole, next to each other (or one above the other held tall): the open iPhone Duo.
+    case sideBySide
     var id: String { rawValue }
 
     var title: String {
@@ -14,6 +16,7 @@ enum CompareMode: String, CaseIterable, Identifiable {
         case .original: "Original"
         case .compact: "Compact Copy"
         case .split: "Split"
+        case .sideBySide: "Side by Side"
         }
     }
 }
@@ -201,17 +204,21 @@ struct CompareView: View {
     let model: AppModel
     /// The compact copy's local identifier; its original is found in the ledger.
     let compactIdentifier: String
+    /// False when it's part of another screen (Free Up Space on the open iPhone Duo), which has the title.
+    var standalone = true
     @State private var compare = CompareModel()
     @State private var mode = CompareMode.split
     @State private var split = 0.5
     @State private var holding = false
     @State private var zoomed = false
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     static let stage = "compare.stage"
 
-    init(model: AppModel, compactIdentifier: String) {
+    init(model: AppModel, compactIdentifier: String, standalone: Bool = true) {
         self.model = model
         self.compactIdentifier = compactIdentifier
+        self.standalone = standalone
     }
 
     /// Touch and hold shows the other version.
@@ -220,11 +227,15 @@ struct CompareView: View {
         switch mode {
         case .original: return .compact
         case .compact: return .original
-        case .split: return .split
+        case .split, .sideBySide: return mode
         }
     }
 
-    private var modes: [CompareMode] { compare.isVideo ? [.original, .compact] : CompareMode.allCases }
+    /// Side by Side where there's room for both (the open iPhone Duo), first; the slider on a phone.
+    private var modes: [CompareMode] {
+        if compare.isVideo { return [.original, .compact] }
+        return sizeClass == .regular ? [.sideBySide, .split, .original, .compact] : [.original, .compact, .split]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -239,13 +250,16 @@ struct CompareView: View {
             facts
         }
         .background(Theme.background)
-        .navigationTitle("Compare")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
-        .itemScreen()
+        .modifier(CompareScreen(standalone: standalone))
         .task(id: compactIdentifier) {
             await compare.load(model: model, compactIdentifier: compactIdentifier)
-            if compare.isVideo, mode == .split { mode = .compact }
+            if compare.isVideo, [.split, .sideBySide].contains(mode) { mode = .compact }
+        }
+        // Side by side where both fit (opening iPhone Duo too); the slider when it folds.
+        .onChange(of: sizeClass, initial: true) { _, size in
+            guard !compare.isVideo else { return }
+            if size == .regular, mode == .split { mode = .sideBySide }
+            if size != .regular, mode == .sideBySide { mode = .split }
         }
         .onChange(of: mode) { old, new in compare.switchVideo(from: old, to: new) }
         .onDisappear { compare.close() }
@@ -263,6 +277,9 @@ struct CompareView: View {
                     } else {
                         Theme.fill
                     }
+                } else if shown == .sideBySide {
+                    SideBySide(original: compare.original, compact: compare.compact, originalLabel: originalPill,
+                               compactLabel: "Compact copy · in Photos")
                 } else {
                     CompareCanvas(original: compare.original, compact: compare.compact, mode: shown, split: split,
                                   label: imageLabel, onZoom: { zoomed = $0 }) { holding = $0 }
@@ -273,7 +290,7 @@ struct CompareView: View {
                                     knobY: Self.knobY(in: geo, height: zoomed ? geo.size.height : photo.height))
                     }
                 }
-                pills
+                if shown != .sideBySide { pills }
                 status.frame(maxHeight: .infinity, alignment: .bottom).padding(16)
             }
             .coordinateSpace(.named(Self.stage))
@@ -304,6 +321,7 @@ struct CompareView: View {
         case .original: "Original"
         case .compact: "Compact copy"
         case .split: "Original on the left, compact copy on the right"
+        case .sideBySide: "Original and compact copy, side by side"
         }
     }
 
@@ -410,12 +428,160 @@ struct CompareView: View {
 
     private var hint: String {
         var text = compare.isVideo ? "Switch between them; the other carries on from the same moment."
+            : shown == .sideBySide ? "Zoom or move either one; the other follows."
             : shown == .split ? "Zoom in to compare the details. Drag the line to move it."
             : "Zoom in to compare the details. Touch and hold to see the other one."
         if case .server = compare.source, compare.status == .ready {
             text += " The original came from \(compare.server) for this and isn't kept on this iPhone."
         }
         return text
+    }
+}
+
+/// Compare on its own screen: its title, no tabs, the status accessory out of the way. Part of
+/// another screen, that screen has them.
+private struct CompareScreen: ViewModifier {
+    let standalone: Bool
+
+    func body(content: Content) -> some View {
+        if standalone {
+            content.navigationTitle("Compare").navigationBarTitleDisplayMode(.inline).toolbar(.hidden, for: .tabBar).itemScreen()
+        } else {
+            content
+        }
+    }
+}
+
+/// The original and the compact copy each whole, next to each other when wide and one above the
+/// other when tall; zooming or moving one moves the other. On a partly folded iPhone Duo the two
+/// meet at the crease, so neither has it across it.
+private struct SideBySide: View {
+    var original: UIImage?
+    var compact: UIImage?
+    var originalLabel: String
+    var compactLabel: String
+    @State private var link = ZoomLink()
+
+    var body: some View {
+        GeometryReader { proxy in
+            let panes = Self.panes(size: proxy.size, fold: Self.fold(proxy))
+            ZStack(alignment: .topLeading) {
+                pane(original, label: originalLabel, id: "compare.original", image: "compare.image.original")
+                    .frame(width: panes.first.width, height: panes.first.height)
+                    .offset(x: panes.first.minX, y: panes.first.minY)
+                pane(compact, label: compactLabel, id: "compare.compact", image: "compare.image.compact")
+                    .frame(width: panes.second.width, height: panes.second.height)
+                    .offset(x: panes.second.minX, y: panes.second.minY)
+            }
+        }
+    }
+
+    private func pane(_ image: UIImage?, label: String, id: String, image imageID: String) -> some View {
+        LinkedZoomImage(image: image, link: link, label: label, identifier: imageID)
+            .background(Color.black)
+            .overlay(alignment: .topLeading) {
+                if image != nil {
+                    Text(label).font(.footnote.weight(.medium)).foregroundStyle(Theme.label)
+                        .lineLimit(1).minimumScaleFactor(0.8)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(Theme.card.opacity(0.92), in: Capsule())
+                        .padding(12)
+                        .allowsHitTesting(false)
+                        .accessibilityIdentifier(id)
+                } else {
+                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+    }
+
+    /// An active fold (partly folded iPhone Duo), in the stage's coordinates.
+    static func fold(_ proxy: GeometryProxy) -> CGRect? {
+        guard #available(iOS 27.1, *) else { return nil }
+        return proxy.reservedRegions(kind: .division).first?.frame
+    }
+
+    /// Two halves: left and right when wide, top and bottom when tall; at the fold when it crosses
+    /// the stage the long way and leaves room on both sides.
+    static func panes(size: CGSize, fold: CGRect?, gap: CGFloat = 2) -> (first: CGRect, second: CGRect) {
+        let wide = size.width >= size.height
+        if let fold {
+            if fold.height > fold.width, fold.minX > 120, fold.maxX < size.width - 120 {
+                return (CGRect(x: 0, y: 0, width: fold.minX, height: size.height),
+                        CGRect(x: fold.maxX, y: 0, width: size.width - fold.maxX, height: size.height))
+            }
+            if fold.width > fold.height, fold.minY > 120, fold.maxY < size.height - 120 {
+                return (CGRect(x: 0, y: 0, width: size.width, height: fold.minY),
+                        CGRect(x: 0, y: fold.maxY, width: size.width, height: size.height - fold.maxY))
+            }
+        }
+        if wide {
+            let width = (size.width - gap) / 2
+            return (CGRect(x: 0, y: 0, width: width, height: size.height),
+                    CGRect(x: width + gap, y: 0, width: width, height: size.height))
+        }
+        let height = (size.height - gap) / 2
+        return (CGRect(x: 0, y: 0, width: size.width, height: height),
+                CGRect(x: 0, y: height + gap, width: size.width, height: height))
+    }
+}
+
+/// Zoom views that move together: the same zoom and the same point of the photo in the middle.
+@MainActor
+final class ZoomLink {
+    private let views = NSHashTable<ZoomScrollView>.weakObjects()
+    private var following = false
+
+    func add(_ view: ZoomScrollView) {
+        views.add(view)
+        view.onTransform = { [weak self, weak view] in
+            guard let self, let view else { return }
+            follow(view)
+        }
+    }
+
+    private func follow(_ source: ZoomScrollView) {
+        guard !following else { return }
+        following = true
+        defer { following = false }
+        for other in views.allObjects where other !== source {
+            if abs(other.zoomScale - source.zoomScale) > 0.0001 { other.zoomScale = source.zoomScale }
+            let from = source.contentSize, to = other.contentSize
+            guard from.width > 0, from.height > 0 else { continue }
+            let middle = CGPoint(x: (source.contentOffset.x + source.bounds.width / 2) / from.width,
+                                 y: (source.contentOffset.y + source.bounds.height / 2) / from.height)
+            let insets = other.contentInset
+            let x = min(max(middle.x * to.width - other.bounds.width / 2, -insets.left),
+                        max(-insets.left, to.width - other.bounds.width + insets.right))
+            let y = min(max(middle.y * to.height - other.bounds.height / 2, -insets.top),
+                        max(-insets.top, to.height - other.bounds.height + insets.bottom))
+            other.contentOffset = CGPoint(x: x, y: y)
+        }
+    }
+}
+
+/// One photo in a `ZoomScrollView` that moves with the others in its `ZoomLink`.
+private struct LinkedZoomImage: UIViewRepresentable {
+    var image: UIImage?
+    let link: ZoomLink
+    var label: String
+    var identifier: String
+
+    func makeUIView(context: Context) -> ZoomScrollView {
+        let imageView = UIImageView()
+        imageView.contentMode = .scaleAspectFit
+        imageView.isAccessibilityElement = true
+        imageView.accessibilityTraits = .image
+        let view = ZoomScrollView(content: imageView)
+        link.add(view)
+        return view
+    }
+
+    func updateUIView(_ view: ZoomScrollView, context: Context) {
+        guard let imageView = view.content as? UIImageView else { return }
+        if imageView.image !== image { imageView.image = image }
+        view.aspect = image?.size ?? .zero
+        imageView.accessibilityLabel = label
+        imageView.accessibilityIdentifier = identifier
     }
 }
 

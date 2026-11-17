@@ -5,6 +5,11 @@ set -euo pipefail
 source ${0:A:h}/env.sh
 cd $ROOT
 swift build -c release --product homespun-server 2>&1 | tail -3
+# A branch's push and its pull request build the same commit at once: one builds, the other waits.
+mkdir -p $CI_STATE/dd
+zmodload zsh/system
+: >> $CI_STATE/dd/$SHA.lock
+zsystem flock -f lockfd $CI_STATE/dd/$SHA.lock    # held until this script ends
 if [[ -f $DD/.built ]]; then echo "app already built for $SHA"; exit 0; fi
 cd $APP && xcodegen generate --quiet
 set -o pipefail
@@ -12,4 +17,4 @@ xcodebuild build-for-testing -project Homespun.xcodeproj -scheme Homespun -desti
   -derivedDataPath $DD 2>&1 | tee $RESULTS/build.log | filter
 touch $DD/.built
 # Old commits' builds go (the newest few stay for re-runs).
-ls -1dt $CI_STATE/dd/*(N/) | tail -n +6 | xargs rm -rf
+ls -1dt $CI_STATE/dd/*(N/) | tail -n +6 | while read old; do rm -rf $old $old.lock; done

@@ -150,7 +150,10 @@ final class LibraryController {
             return found
         }.value
         var due: [String: Date?] = [:]
-        for (id, created, favorite) in assets { due[id] = automatic.due(created: created, id: id, favorite: favorite) }
+        for (id, created, favorite) in assets {
+            // Kept full size: never (shown as such, unlike a favorite's).
+            due[id] = backedUp[id]?.kept == true ? Date.distantFuture : automatic.due(created: created, id: id, favorite: favorite)
+        }
         return due
     }
 
@@ -309,6 +312,99 @@ final class LibraryController {
         finished = nil
         await refreshReady()
         await refreshGrid()
+    }
+
+    // MARK: Restoring originals
+
+    enum Restoring: Equatable {
+        case idle
+        case running(OriginalRestorer.Progress)
+        case done(OriginalRestorer.Report)
+    }
+
+    private(set) var restoring = Restoring.idle
+    @ObservationIgnored private var restoreTask: Task<Void, Never>?
+
+    var isRestoring: Bool {
+        if case .running = restoring { return true }
+        return false
+    }
+
+    /// Which of these compact copies can have their originals restored: known to this iPhone, with the
+    /// original on Homespun Server (not in Immich) and not on this iPhone.
+    func restorable(_ compacts: [String]) async -> [OriginalRestorer.Item] {
+        guard settings.server?.mode != .immich else { return [] }
+        let wanted = Set(compacts)
+        let entries = await job.ledger.snapshot().filter { wanted.contains($0.value.compactIdentifier) && $0.value.serverAssetID != nil }
+        let originals = entries.keys.filter { !$0.hasPrefix(CompactLedger.elsewhere("")) }
+        let present = await Task.detached { PhotoLibrary.existing(Array(originals), includeHidden: true) }.value
+        return entries.filter { !present.contains($0.key) }
+            .map { OriginalRestorer.Item(key: $0.key, compact: $0.value.compactIdentifier, serverAssetID: $0.value.serverAssetID!,
+                                         originalBytes: $0.value.originalBytes) }
+            .sorted { $0.compact < $1.compact }
+    }
+
+    /// Restores these originals (see `OriginalRestorer`); `restoring` follows it.
+    func restore(_ items: [OriginalRestorer.Item]) {
+        guard !isRestoring, !items.isEmpty, let client = settings.client else { return }
+        let restorer = OriginalRestorer(client: client, ledger: job.ledger)
+        restoring = .running(.init(done: 0, total: items.count, message: "Getting ready"))
+        Announce.say(items.count == 1 ? "Restoring the original." : "Restoring \(items.count) originals.")
+        restoreTask = Task {
+            let report = await restorer.restore(items) { progress in
+                Task { @MainActor [weak self] in
+                    if self?.isRestoring == true { self?.restoring = .running(progress) }
+                }
+            }
+            restoring = .done(report)
+            if !report.restored.isEmpty {
+                Announce.say(report.restored.count == 1 ? "Restored the original." : "Restored \(report.restored.count) originals.")
+            }
+            await refreshReady()
+            await refreshGrid()
+        }
+    }
+
+    /// Stops after the original being restored (those done stay done).
+    func stopRestoring() { restoreTask?.cancel() }
+
+    func dismissRestore() { if !isRestoring { restoring = .idle } }
+
+    /// Keep Original (Free Up Space): the compact copies go (iOS asks first) and the originals stay
+    /// on this iPhone, kept full size. False if nothing changed (cancelled, or nothing to keep).
+    @discardableResult
+    func keepOriginals(_ originals: [String]) async -> Bool {
+        let ledger = job.ledger
+        var items: [(original: String, serverAssetID: String, originalBytes: Int)] = []
+        var compacts: [String] = []
+        for original in originals {
+            guard let entry = await ledger.entry(for: original), let assetID = entry.serverAssetID else { continue }
+            items.append((original, assetID, entry.originalBytes))
+            compacts.append(entry.compactIdentifier)
+        }
+        guard !items.isEmpty else { return false }
+        do {
+            try await Self.deleteAssets(compacts)
+        } catch {
+            return false
+        }
+        do {
+            try await ledger.keepOriginals(items)
+        } catch {
+            Telemetry.shared.record(error: error, where: "keep")
+        }
+        Announce.say(items.count == 1 ? "Kept the original. Its compact copy is in Recently Deleted."
+                     : "Kept \(items.count) originals. Their compact copies are in Recently Deleted.")
+        await refreshReady()
+        await refreshGrid()
+        return true
+    }
+
+    /// Deletes these items (iOS asks first; a cancel throws). Nothing to delete is fine.
+    private nonisolated static func deleteAssets(_ ids: [String]) async throws {
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        guard assets.count > 0 else { return }
+        try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
     }
 
     func dismissRemoval() {

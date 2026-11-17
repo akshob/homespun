@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import UniformTypeIdentifiers
 
 /// Talks to Homespun Server's `/api/v1`.
 struct ServerClient: Sendable {
@@ -162,6 +163,28 @@ struct ServerClient: Sendable {
         request.timeoutInterval = 15
         let (data, response) = try await session.data(for: request)
         _ = try check(data, response, accepting: [204])
+    }
+
+    /// Downloads one of an original's files into `directory`, under the name the server sends
+    /// (its own name, `IMG_1234.HEIC`; `fallback` from servers that don't send one). Restore Original.
+    func downloadOriginalFile(assetID: String, role: ServerAPI.ResourceRole, to directory: URL,
+                              fallback: String) async throws -> URL {
+        let (temporary, response) = try await session.download(for: request("assets/\(assetID)/original/\(role.rawValue)"))
+        let http = response as? HTTPURLResponse
+        guard http?.statusCode == 200 else {
+            let data = (try? Data(contentsOf: temporary)) ?? Data()
+            _ = try check(data, response, accepting: [200])
+            throw Failure(status: http?.statusCode ?? 0, message: "The server didn't send the original.", code: nil)
+        }
+        let sent = http?.value(forHTTPHeaderField: "Content-Disposition") != nil ? response.suggestedFilename : nil
+        // Without a name, at least the right extension (Photos goes by it).
+        let typed = response.mimeType.flatMap { UTType(mimeType: $0)?.preferredFilenameExtension }.map { "\(fallback).\($0)" }
+        let name = (sent?.isEmpty == false ? sent! : typed ?? fallback).replacingOccurrences(of: "/", with: "_")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(name)
+        try? FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: temporary, to: url)
+        return url
     }
 
     /// Downloads an original from the server (for comparing it with its compact copy).

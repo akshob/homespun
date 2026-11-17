@@ -1284,6 +1284,9 @@ final class ProblemLog: @unchecked Sendable {
         let bytes = try Data(contentsOf: media.photo)
         let whole = try await client.call(path, token: token)
         #expect(whole.status == .ok && whole.data == bytes && whole.headers[.contentType] == "image/jpeg")
+        #expect(whole.headers[.contentDisposition] == "attachment; filename=\"IMG_0001.JPG\"; filename*=UTF-8''IMG_0001.JPG")
+        #expect(Routes.contentDisposition("Akshob’s photo.heic")
+                == "attachment; filename=\"Akshob_s photo.heic\"; filename*=UTF-8''Akshob%E2%80%99s%20photo.heic")
         #expect(try await client.call(path).status == .unauthorized)
         var headers = HTTPFields()
         headers[.authorization] = "Bearer \(token)"

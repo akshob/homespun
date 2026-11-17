@@ -52,24 +52,36 @@ final class ServerModeUITests: XCTestCase {
         let proceed = app.buttons["remove.confirm"]
         XCTAssertTrue(proceed.waitForExistence(timeout: 10), "no Free Up Space sheet")
         attach(app, "Free Up Space")
-        // The first time, the compact copies can be compared with their originals before anything goes.
-        let compare = app.buttons["remove.compare"].firstMatch
-        if compare.waitForExistence(timeout: 5) {
-            compare.tap()
-            XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
-            attach(app, "Compare before freeing up")
-            app.descendants(matching: .any)["compare.close"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            XCTAssertTrue(proceed.waitForExistence(timeout: 5))
-        }
-        proceed.tap()
         // iOS asks for confirmation; the alert may belong to the app or to SpringBoard.
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let confirmation = [app.alerts.buttons["Delete"], springboard.alerts.buttons["Delete"]]
-        let confirmDeadline = Date().addingTimeInterval(300)
-        while Date() < confirmDeadline, !confirmation.contains(where: \.exists) { sleep(1) }
-        attach(springboard, "Confirmation")
-        guard let delete = confirmation.first(where: \.exists) else { return XCTFail("no deletion confirmation appeared") }
-        delete.tap()
+        func confirmDeletion(_ what: String) -> Bool {
+            let confirmation = [app.alerts.buttons["Delete"], springboard.alerts.buttons["Delete"]]
+            let deadline = Date().addingTimeInterval(300)
+            while Date() < deadline, !confirmation.contains(where: \.exists) { sleep(1) }
+            attach(springboard, "Confirmation: \(what)")
+            guard let delete = confirmation.first(where: \.exists) else { return false }
+            delete.tap()
+            return true
+        }
+        // The compact copies can be compared with their originals before anything goes, inside the
+        // same sheet (no second sheet); one keeps its original instead (its compact copy goes).
+        let before = proceed.label
+        let compare = app.buttons["remove.compare"].firstMatch
+        XCTAssertTrue(compare.waitForExistence(timeout: 5), "no compact copies to compare")
+        compare.tap()
+        XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
+        attach(app, "Compare before freeing up")
+        let keep = app.buttons["remove.keepOriginal"]
+        XCTAssertTrue(keep.waitForExistence(timeout: 5), "no Keep Original under Compare")
+        keep.tap()
+        XCTAssertTrue(confirmDeletion("keep original"), "no confirmation to delete the compact copy")
+        XCTAssertTrue(proceed.waitForExistence(timeout: 20), "didn't go back to the review after Keep Original")
+        let deadline = Date().addingTimeInterval(15)
+        while proceed.label == before, Date() < deadline { sleep(1) }
+        XCTAssertNotEqual(proceed.label, before, "the kept original is still offered: \(proceed.label)")
+        attach(app, "After Keep Original")
+        proceed.tap()
+        guard confirmDeletion("free up") else { return XCTFail("no deletion confirmation appeared") }
         let summary = app.staticTexts["remove.summary"]
         XCTAssertTrue(summary.waitForExistence(timeout: 60))
         attach(app, "Removed")
@@ -78,9 +90,82 @@ final class ServerModeUITests: XCTestCase {
         let done = app.buttons["remove.dismiss"]
         XCTAssertTrue(done.waitForExistence(timeout: 10), "no Done after freeing up")
         done.tap()
-        // The removed originals' copies now show their originals at home.
+        // The removed originals' copies now show their originals at home; the kept one is backed up,
+        // its original still here full size.
         XCTAssertTrue(app.gridItems("Original at home").firstMatch.waitForExistence(timeout: 10), "no items marked at home")
+        XCTAssertTrue(app.gridItems("Backed up").firstMatch.waitForExistence(timeout: 10), "the kept original isn't Backed up")
         attach(app, "Backed up")
+    }
+
+    /// Restore Original: an original freed up in the first test comes back from the server into
+    /// Photos (from the viewer), its compact copy goes once iOS asks, and it's kept full size
+    /// (Backed up); then another through Select mode under Original at Home.
+    @MainActor func test3RestoreOriginals() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["HOMESPUN_SERVER"] != nil, environment["HOMESPUN_REMOVE"] == "1" else {
+            throw XCTSkip("Runs after the first test freed up originals (HOMESPUN_REMOVE=1).")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        XCTAssertTrue(app.isConnected(), "not paired with the server")
+        app.openTab("Library")
+        let atHome = app.gridItems("Original at home")
+        XCTAssertTrue(atHome.firstMatch.waitForExistence(timeout: 20), "nothing freed up to restore")
+        let before = atHome.count
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        func restore(_ what: String) {
+            let confirm = app.buttons["restore.confirm"]
+            XCTAssertTrue(confirm.waitForExistence(timeout: 20), "\(what): no Restore Original sheet")
+            attach(app, "\(what): Restore Original")
+            confirm.tap()
+            let delete = [app.alerts.buttons["Delete"], springboard.alerts.buttons["Delete"]]
+            let deadline = Date().addingTimeInterval(180)
+            while Date() < deadline, !delete.contains(where: \.exists) { sleep(1) }
+            guard let button = delete.first(where: \.exists) else { return XCTFail("\(what): iOS didn't ask to delete the compact copy") }
+            button.tap()
+            let summary = app.descendants(matching: .any)["restore.summary"]
+            XCTAssertTrue(summary.waitForExistence(timeout: 60), "\(what): no result")
+            XCTAssertTrue(summary.label.hasPrefix("Restored"), "\(what): \(summary.label)")
+            attach(app, "\(what): restored")
+            app.buttons["restore.done"].tap()
+        }
+
+        // From the viewer.
+        guard let item = atHome.allElementsBoundByIndex.last(where: { app.isOnScreen($0) }) else {
+            return XCTFail("no item at home on screen")
+        }
+        item.tap()
+        let action = app.buttons["item.action"]
+        XCTAssertTrue(action.waitForExistence(timeout: 10) && action.label.contains("Restore Original"), action.label)
+        action.tap()
+        restore("viewer")
+        XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10), "didn't return to the grid")
+        XCTAssertTrue(app.gridItems("Backed up").firstMatch.waitForExistence(timeout: 15), "the restored original isn't Backed up")
+        let deadline = Date().addingTimeInterval(15)
+        while atHome.count != before - 1, Date() < deadline { sleep(1) }
+        XCTAssertEqual(atHome.count, before - 1, "the restored item is still at home only")
+        guard before > 1 else { return }
+
+        // Select mode, under Original at Home.
+        app.descendants(matching: .any)["grid.filter"].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let filter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Original at Home")).firstMatch
+        XCTAssertTrue(filter.waitForExistence(timeout: 5), "no Original at Home filter")
+        filter.tap()
+        app.buttons["select.start"].tap()
+        guard let pick = atHome.allElementsBoundByIndex.last(where: { app.isOnScreen($0) }) else { return XCTFail("nothing to select") }
+        pick.tap()
+        let selected = app.buttons["restore.selected"]
+        XCTAssertTrue(selected.waitForExistence(timeout: 5) && selected.label.contains("1"), selected.label)
+        selected.tap()
+        restore("selection")
+        XCTAssertTrue(waitForCount(atHome, before - 2), "the selection wasn't restored")
+    }
+
+    @MainActor private func waitForCount(_ query: XCUIElementQuery, _ count: Int) -> Bool {
+        let deadline = Date().addingTimeInterval(15)
+        while query.count != count, Date() < deadline { sleep(1) }
+        return query.count == count
     }
 
     /// Automatic mode (unlocked in Debug builds) backs up and compacts everything else, with

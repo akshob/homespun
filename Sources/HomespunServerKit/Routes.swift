@@ -504,6 +504,8 @@ struct Routes: Sendable {
         var headers = HTTPFields()
         headers[.contentType] = Self.mediaType(resource.filename)
         headers[.acceptRanges] = "bytes"
+        // Its own name, so a restored original goes back into Photos as it was (IMG_1234.HEIC).
+        headers[.contentDisposition] = Self.contentDisposition(resource.filename)
         if let header = request.headers[.range] {
             guard let range = Self.byteRange(header, size: resource.size) else {
                 headers[.contentRange] = "bytes */\(resource.size)"
@@ -516,6 +518,15 @@ struct Routes: Sendable {
         }
         headers[.contentLength] = String(resource.size)
         return Response(status: .ok, headers: headers, body: try await FileIO().loadFile(path: url.path, context: context))
+    }
+
+    /// `attachment` with the file's name: plain for ASCII, and RFC 5987's `filename*` for the rest.
+    static func contentDisposition(_ filename: String) -> String {
+        let name = Storage.sanitized(filename)
+        let plain = String(name.unicodeScalars.map { $0.isASCII && $0 != "\"" && $0 != "\\" ? Character($0) : "_" })
+        let encoded = filename.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~")))
+            ?? plain
+        return "attachment; filename=\"\(plain)\"; filename*=UTF-8''\(encoded)"
     }
 
     /// One `bytes=` range (`a-b`, `a-` or `-n`), clamped to the file; nil if it can't be served.

@@ -87,6 +87,14 @@ struct MainTabView: View {
     let model: AppModel
     @SceneStorage("tab") private var tab = TabID.library
     @State private var sheet: Sheet?
+    /// Free Up Space on the open iPhone Duo: the whole screen (a sheet everywhere else).
+    @State private var cover: Cover?
+    @Environment(\.horizontalSizeClass) private var sizeClass
+
+    enum Cover: Identifiable {
+        case freeUp(Set<String>?)
+        var id: String { "freeUp" }
+    }
 
     enum Sheet: Identifiable {
         case freeUp(only: Set<String>?)
@@ -111,7 +119,7 @@ struct MainTabView: View {
             tab = new
         })) {
             Tab("Library", systemImage: "photo.on.rectangle", value: TabID.library) {
-                LibraryView(model: model, freeUp: { sheet = .freeUp(only: $0) })
+                LibraryView(model: model, freeUp: { openFreeUp($0) })
                     .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.library")
@@ -130,11 +138,15 @@ struct MainTabView: View {
         // Get Started's Choose Items opens the Library (in Select mode).
         .onChange(of: model.library.choosePending, initial: true) { _, pending in if pending { tab = .library } }
         .modifier(StatusAccessoryModifier(model: model, open: openFromAccessory))
+        .fullScreenCover(item: $cover, onDismiss: dismissed) { cover in
+            switch cover {
+            case .freeUp(let scope): FreeUpSpaceScreen(controller: model.library, scope: scope)
+            }
+        }
         .sheet(item: $sheet, onDismiss: dismissed) { sheet in
             switch sheet {
             case .freeUp(let scope):
-                // Room for Compare on the open iPhone Duo (a phone ignores the size).
-                FreeUpSpaceSheet(controller: model.library, scope: scope).presentationSizing(.page)
+                FreeUpSpaceScreen(controller: model.library, scope: scope)
             case .backUp(let ids):
                 BackUpSheet(controller: model.library, identifiers: ids) {}
             case .pair(let link):
@@ -154,9 +166,11 @@ struct MainTabView: View {
         }
     }
 
-    /// Free Up Space: a sheet everywhere (centred across the open iPhone Duo, like Apple's).
+    /// Free Up Space: a sheet on a phone and iPhone Duo's cover; the whole screen on the open Duo,
+    /// for comparing side by side. Decided when it opens: folding or unfolding later changes its
+    /// layout, never its presentation (that would interrupt a removal).
     private func openFreeUp(_ scope: Set<String>?) {
-        sheet = .freeUp(only: scope)
+        if sizeClass == .regular { cover = .freeUp(scope) } else { sheet = .freeUp(only: scope) }
     }
 
     private func openFromAccessory(_ action: StatusAccessory.Action) {

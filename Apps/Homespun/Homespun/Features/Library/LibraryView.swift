@@ -46,10 +46,11 @@ struct LibraryView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
 
     enum Sheet: Identifiable {
-        case backUp([String]), legend, setup
+        case backUp([String]), legend, setup, restore([String])
         var id: String {
             switch self {
             case .backUp: "backUp"
+            case .restore: "restore"
             case .legend: "legend"
             case .setup: "setup"
             }
@@ -88,6 +89,7 @@ struct LibraryView: View {
                     case .backUp(let ids): BackUpSheet(controller: controller, identifiers: ids) { endSelecting() }
                     case .legend: BadgeLegendView(serverName: controller.serverName)
                     case .setup: OnboardingView(settings: model.settings, library: controller)
+                    case .restore(let ids): RestoreOriginalSheet(controller: controller, compacts: ids) { if $0 { endSelecting() } }
                     }
                 }
                 .task(id: selection.version) {
@@ -439,17 +441,31 @@ struct LibraryView: View {
                     .accessibilityLabel("Go to Newest")
                     .accessibilityIdentifier("select.newest")
                 Spacer()
-                let ids = backUpCandidates
-                Button {
-                    backUp(ids)
-                } label: {
-                    Label(ids.isEmpty ? "Back Up" : "Back Up \(ids.count)", systemImage: "arrow.up.circle")
-                        .labelStyle(.titleAndIcon)
+                if filter == .atHome {
+                    // What's at home, chosen to come back full size.
+                    let ids = selectionParts.restorable
+                    Button {
+                        sheet = .restore(ids)
+                    } label: {
+                        Label(ids.isEmpty ? "Restore" : "Restore \(ids.count)", systemImage: "arrow.uturn.backward.circle")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(ids.isEmpty || settings.server?.mode == .immich)
+                    .accessibilityIdentifier("restore.selected")
+                } else {
+                    let ids = backUpCandidates
+                    Button {
+                        backUp(ids)
+                    } label: {
+                        Label(ids.isEmpty ? "Back Up" : "Back Up \(ids.count)", systemImage: "arrow.up.circle")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .buttonStyle(.glassProminent)
+                    .disabled(ids.isEmpty || controller.backUpBlockedReason != nil)
+                    .accessibilityIdentifier("compact.selected")
+                    .accessibilityHint(controller.backUpBlockedReason ?? "")
                 }
-                .buttonStyle(.glassProminent)
-                .disabled(ids.isEmpty || controller.backUpBlockedReason != nil)
-                .accessibilityIdentifier("compact.selected")
-                .accessibilityHint(controller.backUpBlockedReason ?? "")
             }
         } else if controller.access.allowsReading {
             ToolbarItemGroup(placement: .primaryAction) {
@@ -530,6 +546,9 @@ struct LibraryView: View {
             Button("Back Up", systemImage: "arrow.up.circle") { backUp([cell.id]) }
                 .disabled(controller.backUpBlockedReason != nil)
         }
+        if ItemAction.canRestore(cell, immich: settings.server?.mode == .immich) {
+            Button("Restore Original", systemImage: "arrow.uturn.backward.circle") { sheet = .restore([cell.id]) }
+        }
         Button("Show Details", systemImage: "info.circle") {
             path.append(cell.id)
         }
@@ -553,7 +572,7 @@ struct LibraryView: View {
             path.append(cell.id)
             return
         }
-        guard cell.canCompact || cell.canFree else { return }
+        guard data.selectable.contains(cell.id) else { return }
         if selected.contains(cell.id) { selected.remove(cell.id) } else { selected.insert(cell.id) }
         Announce.say(selected.isEmpty ? "None selected" : "\(selected.count) selected")
     }
@@ -672,19 +691,23 @@ final class SectionCounts {
 struct SelectionParts: Sendable {
     var backUp: [String] = []
     var freeable: Set<String> = []
+    /// Compact copies whose originals can come back (Restore Original), in library order.
+    var restorable: [String] = []
 
     init() {}
 
     init(state: LibraryState, selected: Set<String>) {
-        var positioned: [(Int, String)] = []
+        var positioned: [(Int, String)] = [], restoring: [(Int, String)] = []
         positioned.reserveCapacity(selected.count)
         for id in selected {
             guard let position = state.positions[id] else { continue }
             let cell = state.cells[position]
             if cell.canCompact { positioned.append((position, id)) }
             if cell.canFree, let original = cell.original { freeable.insert(original) }
+            if cell.canRestore { restoring.append((position, id)) }
         }
         backUp = positioned.sorted { $0.0 < $1.0 }.map(\.1)
+        restorable = restoring.sorted { $0.0 < $1.0 }.map(\.1)
     }
 }
 

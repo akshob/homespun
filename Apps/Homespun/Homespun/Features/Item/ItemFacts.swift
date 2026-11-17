@@ -76,6 +76,12 @@ enum ItemAction: Equatable {
     /// Whether Compare can show this item: it has a compact copy and its original can be reached,
     /// on this iPhone or streamed from the server (not in Immich mode, where the server has no
     /// original of its own).
+    /// Restore Original: a compact copy whose original is at home on the server (not on this
+    /// iPhone, and not only in Immich, which the server can't send).
+    static func canRestore(_ cell: LibraryState.Cell, immich: Bool) -> Bool {
+        cell.canRestore && cell.original != nil && !immich
+    }
+
     static func canCompare(_ cell: LibraryState.Cell, immich: Bool) -> Bool {
         guard cell.original != nil else { return false }
         switch cell.badge {

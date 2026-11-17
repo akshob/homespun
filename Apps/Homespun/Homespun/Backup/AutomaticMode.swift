@@ -230,7 +230,9 @@ final class AutomaticMode {
         let eligible = Set(Self.pick(assets.map { ($0.id, $0.created) }, since: state.since,
                                      added: added.union(backedUp.keys), ledger: ledger, album: PhotoLibrary.albumMembers(),
                                      attempts: state.attempts, settled: state.settled, limit: .max))
-        return AutomaticPlan.make(assets.filter { eligible.contains($0.id) }, backedUp: Set(backedUp.keys),
+        // Kept full size (Keep Original): never compacted automatically.
+        let kept = Set(backedUp.filter { $0.value.kept == true }.keys)
+        return AutomaticPlan.make(assets.filter { eligible.contains($0.id) && !kept.contains($0.id) }, backedUp: Set(backedUp.keys),
                                   firstSeen: state.firstSeen, schedule: state.schedule, now: Date(), backsUp: backsUp,
                                   limit: Self.batch)
     }
