@@ -169,8 +169,11 @@ ASC_KEY_ID=<key id> ASC_ISSUER_ID=<issuer id> Apps/Homespun/scripts/testflight.s
 
 It archives a Release build without signing (so it works over SSH, where the login keychain is
 locked), signs each bundle ad hoc with its entitlements (the App Group; an unsigned bundle has none
-for the export to keep), signs the export with Apple's cloud-managed distribution certificate, uploads it with
-`altool`, and gives it a new build number. `scripts/asc.py` talks to the App Store Connect API
+for the export to keep), signs the export with Apple's cloud-managed distribution certificate
+(registering the widgets' and the watch app's bundle IDs as needed; if it says the App Group isn't
+allowed, add `group.photos.homespun.app` in Certificates, Identifiers & Profiles › App Groups and turn
+on App Groups for `photos.homespun.app` and its `.widgets`, `.watchkitapp` and `.watchkitapp.widgets`),
+uploads it with `altool`, and gives it a new build number. `scripts/asc.py` talks to the App Store Connect API
 with the same key: `asc.py testers` creates the internal group "Homespun Team" (every build, no
 review) and adds the team's users, `asc.py wait` waits for processing, `asc.py builds` lists builds,
 `asc.py crashes` fetches testers' crash feedback and crash logs. TestFlight itself asks testers to
