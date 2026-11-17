@@ -185,9 +185,12 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         collectionView.frame = frame
         layout.invalidateLayout()
         collectionView.contentOffset = CGPoint(x: CGFloat(index) * frame.width, y: 0)
-        preload()
+        let scale = traitCollection.displayScale
+        images.resize(CGSize(width: view.bounds.width * scale, height: view.bounds.height * scale))
         collectionView.layoutIfNeeded()
         resizing = false
+        // The neighbours once the page shown is on screen (opening the viewer doesn't wait for them).
+        Task { @MainActor [weak self] in self?.preload() }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -276,9 +279,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
 
     /// Screen-size images of the neighbours, so a swipe never shows an empty page.
     private func preload() {
-        let size = view.bounds.size, scale = traitCollection.displayScale
-        images.keep(ids: ids, around: index, pixels: CGSize(width: size.width * scale, height: size.height * scale),
-                    asset: asset)
+        images.keep(ids: ids, around: index, asset: asset)
     }
 
     // MARK: Scrolling
@@ -364,17 +365,20 @@ final class ItemImages {
 
     func image(_ id: String) -> UIImage? { decoded[id] }
 
-    /// Keeps the images around `index` (screen size in `pixels`), and lets go of the rest.
-    func keep(ids: [String], around index: Int, pixels: CGSize, asset: (String) -> PHAsset?) {
-        guard pixels.width > 0, pixels.height > 0, !ids.isEmpty else { return }
-        if pixels != self.pixels {
-            manager.stopCachingImagesForAllAssets()
-            cached = [:]
-            decoded = [:]
-            loading.values.forEach { $0.cancel() }
-            loading = [:]
-            self.pixels = pixels
-        }
+    /// The screen's size in pixels: a new one lets go of everything loaded at the old.
+    func resize(_ pixels: CGSize) {
+        guard pixels != self.pixels else { return }
+        manager.stopCachingImagesForAllAssets()
+        cached = [:]
+        decoded = [:]
+        loading.values.forEach { $0.cancel() }
+        loading = [:]
+        self.pixels = pixels
+    }
+
+    /// Keeps the images around `index`, and lets go of the rest.
+    func keep(ids: [String], around index: Int, asset: (String) -> PHAsset?) {
+        guard pixels.width > 0, pixels.height > 0, !ids.isEmpty, ids.indices.contains(index) else { return }
         func around(_ reach: Int) -> ArraySlice<String> {
             ids[max(0, index - reach)...min(ids.count - 1, index + reach)]
         }
