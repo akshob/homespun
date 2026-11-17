@@ -1,4 +1,5 @@
-# Uploads a TestFlight build of main, on request only: only the owner can start it, and the
+# Uploads a TestFlight build of main, on request only: only the owner can start it, only for a commit
+# that passed the extended suite (ci/release-guard.py), and the
 # `testflight` environment (main only, the owner approves each run) holds the App Store Connect API
 # key and the team. It runs on a fresh GitHub machine that's discarded afterwards; the build's
 # symbols (for crash reports, scripts/symbolicate.py) are kept as the run's `dsyms-<build>` artifact.
@@ -9,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: testflight
@@ -26,6 +28,13 @@ jobs:
       HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Only a commit that passed the extended suite
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python3 ci/release-guard.py ${{ github.sha }}
       - name: Tools
         run: brew install --quiet xcodegen
       - name: Signing inputs
