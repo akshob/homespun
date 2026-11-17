@@ -2,22 +2,48 @@
 import BackgroundTasks
 import Foundation
 
-/// Owns the app's long-lived objects, so the background task and the screen share them.
+/// Owns the app's long-lived objects, so the background task and the screen share them. The person's
+/// own is `shared`; Try the Demo makes another (`DemoMode`), on the demo's sample photos and pretend
+/// server, with its own settings and records, so nothing of the person's is touched.
 @MainActor
 final class AppModel {
     static let shared = AppModel()
+    /// The model on screen: the demo's while it's on, else the person's own.
+    static var current: AppModel { DemoMode.shared.model ?? shared }
+
     let settings: AppSettings
     let job: CompactJob
-    let premium = Premium()
-    let automatic = AutomaticMode()
-    let copyFinder = CopyFinder()
+    /// The App Store purchase is the person's own, in the demo too.
+    let premium: Premium
+    let automatic: AutomaticMode
+    let copyFinder: CopyFinder
     /// Activity › History: backup runs (manual, automatic, the first task) and freed space.
-    let history = RunHistory(load: false)
+    let history: RunHistory
     let library: LibraryController
 
     private init() {
+        premium = Premium()
+        automatic = AutomaticMode()
+        copyFinder = CopyFinder()
+        history = RunHistory(load: false)
         settings = AppSettings()
         job = CompactJob(settings: settings)
+        job.history = history
+        library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
+                                    copyFinder: copyFinder)
+        let history = history
+        Task { await history.load() }
+    }
+
+    /// The demo's: everything kept in its folder and settings (`DemoSession`).
+    init(demo: DemoSession, premium: Premium) {
+        settings = AppSettings(defaults: demo.defaults, photos: demo.library, tokens: demo.tokens, session: DemoServer.session,
+                               isDemo: true)
+        job = CompactJob(settings: settings, ledger: CompactLedger(url: demo.folder.appendingPathComponent("ledger.json")))
+        self.premium = premium
+        automatic = AutomaticMode(url: demo.folder.appendingPathComponent("automatic.json"), photos: demo.library, system: false)
+        copyFinder = CopyFinder(url: demo.folder.appendingPathComponent("copy-finder.json"), photos: demo.library)
+        history = RunHistory(url: demo.folder.appendingPathComponent("history.json"), load: false)
         job.history = history
         library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
                                     copyFinder: copyFinder)

@@ -41,3 +41,17 @@ enum Keychain {
         cache.withLock { $0[server] = nil }
     }
 }
+
+/// Where pairing tokens are kept: the Keychain for the person's own server (`KeychainTokens`); the
+/// demo keeps its pretend server's token with its own settings.
+protocol TokenStore: Sendable {
+    func token(for server: String) -> String?
+    func setToken(_ token: String, for server: String) throws
+    func removeToken(for server: String)
+}
+
+struct KeychainTokens: TokenStore {
+    func token(for server: String) -> String? { Keychain.token(for: server) }
+    func setToken(_ token: String, for server: String) throws { try Keychain.setToken(token, for: server) }
+    func removeToken(for server: String) { Keychain.removeToken(for: server) }
+}

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import Photos
 import SwiftUI
 
 /// Restore Original: for compact copies whose originals were freed up, brings each original back
@@ -48,7 +47,7 @@ struct RestoreOriginalSheet: View {
         .interactiveDismissDisabled(controller.isRestoring)
         .task {
             let found = await controller.restorable(compacts)
-            edited = found.filter { item in PhotoLibrary.asset(item.compact).map(PhotoLibrary.isEdited) ?? false }.count
+            edited = found.filter { item in controller.settings.photos.item(item.compact)?.isEdited ?? false }.count
             items = found
         }
     }
@@ -118,6 +117,9 @@ struct RestoreOriginalSheet: View {
             .accessibilityIdentifier("restore.summary")
             Text(report.copiesKept
                  ? "You kept the compact copies, so both are in Photos. Free Up Space can remove the originals again."
+                 : controller.settings.isDemo
+                 ? "\(LibraryController.bytes(report.bytes)) back, full size. In the demo, the compact copies only left its library; "
+                    + "with your own photos, they'd stay in Recently Deleted for 30 days."
                  : "\(LibraryController.bytes(report.bytes)) back on this iPhone, full size. The compact copies are in Recently "
                     + "Deleted until \(Date.now.addingTimeInterval(30 * 86_400).formatted(.dateTime.month(.wide).day())).")
                 .foregroundStyle(Theme.secondaryLabel)

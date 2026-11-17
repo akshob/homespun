@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import Photos
 import SwiftUI
 
 /// An original ready to free up, and its compact copy in Photos.
@@ -66,7 +65,7 @@ struct FreeUpSpaceScreen: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { closeButton }
                 .navigationDestination(for: FreeUpPair.self) { pair in
-                    CompareView(model: AppModel.shared, compactIdentifier: pair.compact)
+                    CompareView(model: AppModel.current, compactIdentifier: pair.compact)
                         .safeAreaBar(edge: .bottom) {
                             KeepOriginalButton(controller: controller, pair: pair) { path.removeAll() }
                                 .padding(.horizontal, 24).padding(.bottom, 8)
@@ -107,7 +106,7 @@ struct FreeUpSpaceScreen: View {
 
     @ViewBuilder private var comparison: some View {
         if let selected {
-            CompareView(model: AppModel.shared, compactIdentifier: selected.compact, standalone: false)
+            CompareView(model: AppModel.current, compactIdentifier: selected.compact, standalone: false)
                 .id(selected)
                 .safeAreaBar(edge: .bottom) {
                     KeepOriginalButton(controller: controller, pair: selected) { advance(from: selected) }
@@ -223,6 +222,7 @@ struct FreeUpSpacePanel: View {
             ContentUnavailableView("Nothing to free up yet", systemImage: "circle.lefthalf.filled",
                                    description: Text("Back up some photos first. Their originals can then be removed here."))
         } else if brief {
+            demoNotice
             Text("\(LibraryController.bytes(bytes)) · \(count) original\(count == 1 ? "" : "s") safe on \(controller.serverName)")
                 .font(.headline).monospacedDigit().foregroundStyle(Theme.label)
                 .accessibilityIdentifier("remove.bytes")
@@ -231,6 +231,7 @@ struct FreeUpSpacePanel: View {
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel)
             if !pairs.isEmpty { strip }
         } else {
+            demoNotice
             Text(LibraryController.bytes(bytes)).font(.system(size: 44, weight: .semibold, design: .rounded))
                 .monospacedDigit().foregroundStyle(Theme.label)
                 .accessibilityIdentifier("remove.bytes")
@@ -260,6 +261,14 @@ struct FreeUpSpacePanel: View {
                 }
                 .tint(Theme.accent)
             }
+        }
+    }
+
+    @ViewBuilder private var demoNotice: some View {
+        if controller.settings.isDemo {
+            InlineNotice(tone: .info, title: "In the demo, nothing is deleted",
+                         message: "You'll see every step and the question iOS asks; the sample photos only leave the demo.")
+                .accessibilityIdentifier("remove.demo")
         }
     }
 
@@ -293,7 +302,7 @@ struct FreeUpSpacePanel: View {
 
     private func thumbnail(_ pair: FreeUpPair) -> some View {
         Button { compare(pair) } label: {
-            Thumbnail(identifier: pair.compact, manager: controller.library.thumbnails, side: 72)
+            Thumbnail(identifier: pair.compact, library: controller.library, side: 72)
                 .overlay(alignment: .bottomTrailing) {
                     Image(systemName: "rectangle.split.2x1.fill").font(.caption)
                         .foregroundStyle(.white).padding(5).shadow(radius: 2)
@@ -333,8 +342,11 @@ struct FreeUpSpacePanel: View {
             .font(.title2.weight(.semibold))
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("remove.summary")
-            Text("\(report.removed.count) original\(report.removed.count == 1 ? " is" : "s are") in Recently Deleted until "
-                 + "\(Date.now.addingTimeInterval(30 * 86_400).formatted(.dateTime.month(.wide).day())).")
+            Text(controller.settings.isDemo
+                 ? "In the demo, nothing was deleted: \(report.removed.count == 1 ? "the original has" : "the originals have") left "
+                    + "only the demo's library. With your own photos, they'd stay in Recently Deleted for 30 days."
+                 : "\(report.removed.count) original\(report.removed.count == 1 ? " is" : "s are") in Recently Deleted until "
+                    + "\(Date.now.addingTimeInterval(30 * 86_400).formatted(.dateTime.month(.wide).day())).")
                 .foregroundStyle(Theme.secondaryLabel)
         } else if report.cancelled {
             Label("Nothing was removed", systemImage: "hand.raised").font(.title2.weight(.semibold))
@@ -397,12 +409,12 @@ struct FreeUpSpacePanel: View {
 /// A row of small thumbnails, for what a sheet is about to act on.
 struct ThumbnailStrip: View {
     let identifiers: [String]
-    let manager: PHCachingImageManager
+    let library: LibraryModel
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(identifiers, id: \.self) { Thumbnail(identifier: $0, manager: manager, side: 56) }
+                ForEach(identifiers, id: \.self) { Thumbnail(identifier: $0, library: library, side: 56) }
             }
         }
         .accessibilityHidden(true)
@@ -412,7 +424,7 @@ struct ThumbnailStrip: View {
 /// One item's thumbnail, loaded on appear.
 struct Thumbnail: View {
     let identifier: String
-    let manager: PHCachingImageManager
+    let library: LibraryModel
     var side: CGFloat = 56
     @State private var image: UIImage?
 
@@ -422,14 +434,7 @@ struct Thumbnail: View {
             .overlay { if let image { Image(uiImage: image).resizable().scaledToFill() } }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .task(id: identifier) {
-                guard let asset = PhotoLibrary.asset(identifier) else { return }
-                let options = PHImageRequestOptions()
-                options.deliveryMode = .opportunistic
-                options.isNetworkAccessAllowed = true
-                let size = CGSize(width: side * 3, height: side * 3)
-                manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: options) { result, _ in
-                    MainActor.assumeIsolated { if let result { image = result } }
-                }
+                await library.requestThumbnail(identifier, side: side) { image = $0 }
             }
     }
 }

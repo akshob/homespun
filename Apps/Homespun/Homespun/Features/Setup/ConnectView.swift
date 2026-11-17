@@ -303,6 +303,20 @@ struct OtherWaysPage: View {
     @State private var error: String?
 
     var body: some View {
+        if flow.settings.isDemo { demo } else { ways }
+    }
+
+    /// The demo pairs only with its pretend server (a real one would get the demo's sample photos).
+    private var demo: some View {
+        SetupScaffold(title: "Connect another way") {
+            InlineNotice(tone: .info, title: "In the demo, it's Homespun Demo",
+                         message: "Your own server pairs with a code, a QR code or a link from it. Leave the demo to connect it.")
+        } actions: {
+            LeaveDemoButton(prominent: true)
+        }
+    }
+
+    private var ways: some View {
         SetupScaffold(title: "Connect another way") {
             SetupCard {
                 if PairingScanner.isSupported {

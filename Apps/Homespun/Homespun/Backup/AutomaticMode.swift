@@ -68,13 +68,20 @@ final class AutomaticMode {
     private(set) var state: State
     private(set) var running = false
     private let url: URL
+    private let photos: any PhotoSource
+    /// Runs in the background, and notifies, through iOS (off for the demo, whose runs happen only
+    /// while it's on screen).
+    private let system: Bool
 
     var enabled: Bool { state.enabled }
     /// Backs up everything not backed up yet, not only items added since it was turned on.
     var backsUpEverything: Bool { state.since == .distantPast }
 
-    init(url: URL = URL.applicationSupportDirectory.appendingPathComponent("Homespun/automatic.json")) {
+    init(url: URL = URL.applicationSupportDirectory.appendingPathComponent("Homespun/automatic.json"),
+         photos: any PhotoSource = PhotoKitSource(), system: Bool = true) {
         self.url = url
+        self.photos = photos
+        self.system = system
         state = (try? JSONDecoder().decode(State.self, from: Data(contentsOf: url))) ?? State()
     }
 
@@ -90,12 +97,13 @@ final class AutomaticMode {
         Telemetry.shared.record(.featureUsed("automatic", existing ? "on.everything" : "on.new"))
         state.enabled = true
         state.since = existing ? .distantPast : Date()
-        state.token = Self.archive(PHPhotoLibrary.shared().currentChangeToken)
+        state.token = photos.changeToken()
         if state.removalToken == nil { state.removalToken = state.token }
         state.attempts = [:]
         state.settled = []
         state.pending = []
         save()
+        guard system else { return }
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
         schedule()
     }
@@ -125,14 +133,14 @@ final class AutomaticMode {
     func setNotifies(_ on: Bool) {
         state.notifies = on
         save()
-        if on { Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge]) } }
+        if on, system { Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge]) } }
     }
 
     func disable() {
         Telemetry.shared.record(.featureUsed("automatic", "off"))
         state.enabled = false
         save()
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskID)
+        if system { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskID) }
     }
 
     /// The user chose Keep As Is for an item that couldn't be backed up: it isn't tried again.
@@ -143,7 +151,7 @@ final class AutomaticMode {
 
     /// Asks iOS for a background run: on power and network, an hour or more from now.
     func schedule() {
-        guard state.enabled else { return }
+        guard state.enabled, system else { return }
         let request = BGProcessingTaskRequest(identifier: Self.taskID)
         request.requiresExternalPower = true
         request.requiresNetworkConnectivity = true
@@ -168,67 +176,16 @@ final class AutomaticMode {
         return Array(eligible.sorted { ($0.created ?? .distantFuture) < ($1.created ?? .distantFuture) }.prefix(limit).map(\.id))
     }
 
-    /// Items Photos added since `token`. `read` is false if the changes couldn't be read, so
-    /// the token must not move on. An expired token can't be read again either way.
-    private nonisolated static func inserted(since token: Data?) -> (ids: Set<String>, read: Bool) {
-        guard let token = token.flatMap(unarchive) else { return ([], true) }
-        var ids = Set<String>()
-        do {
-            for change in try PHPhotoLibrary.shared().fetchPersistentChanges(since: token) {
-                ids.formUnion(try change.changeDetails(for: .asset).insertedLocalIdentifiers)
-            }
-            return (ids, true)
-        } catch let error as PHPhotosError where error.code == .persistentChangeTokenExpired {
-            return ([], true)
-        } catch {
-            return ([], false)
-        }
-    }
-
-    /// Items Photos deleted since `token` (nil: none read yet). `read` is false if the changes
-    /// couldn't be read; an expired or foreign token (a restored backup) reads as nothing deleted.
-    private nonisolated static func deleted(since token: Data?) -> (ids: Set<String>, read: Bool) {
-        guard let token = token.flatMap(unarchive) else { return ([], true) }
-        var ids = Set<String>()
-        do {
-            for change in try PHPhotoLibrary.shared().fetchPersistentChanges(since: token) {
-                ids.formUnion(try change.changeDetails(for: .asset).deletedLocalIdentifiers)
-            }
-            return (ids, true)
-        } catch let error as PHPhotosError where error.code == .persistentChangeTokenExpired {
-            return ([], true)
-        } catch {
-            return ([], false)
-        }
-    }
-
     /// What this run does: compact copies for items whose time came (backed up already or not),
     /// and backing up recent ones (files mode only; in Immich mode they wait). Reads the library
     /// since the cutoff, so it runs in the background (it's the whole library at first).
     private nonisolated static func plan(_ state: State, ledger: [String: CompactLedger.Entry],
                                          backedUp: [String: CompactLedger.BackedUp], added: Set<String>,
-                                         backsUp: Bool) -> AutomaticPlan {
-        let options = PHFetchOptions()
-        options.predicate = NSPredicate(format: "(mediaType == %d OR mediaType == %d) AND creationDate >= %@",
-                                        PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue, state.since as NSDate)
-        var assets: [AutomaticCandidate] = []
-        var seen = Set<String>()
-        PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
-            assets.append(AutomaticCandidate(id: asset.localIdentifier, created: asset.creationDate, favorite: asset.isFavorite))
-            seen.insert(asset.localIdentifier)
-        }
+                                         backsUp: Bool, photos: any PhotoSource) -> AutomaticPlan {
         // Added later with older dates, and backed up earlier: wherever their dates fall.
-        let late = Array(added.union(backedUp.keys).subtracting(seen))
-        if !late.isEmpty {
-            PHAsset.fetchAssets(withLocalIdentifiers: late, options: nil).enumerateObjects { asset, _, _ in
-                if [.image, .video].contains(asset.mediaType) {
-                    assets.append(AutomaticCandidate(id: asset.localIdentifier, created: asset.creationDate,
-                                                     favorite: asset.isFavorite))
-                }
-            }
-        }
+        let assets = photos.candidates(since: state.since, also: Array(added.union(backedUp.keys)))
         let eligible = Set(Self.pick(assets.map { ($0.id, $0.created) }, since: state.since,
-                                     added: added.union(backedUp.keys), ledger: ledger, album: PhotoLibrary.albumMembers(),
+                                     added: added.union(backedUp.keys), ledger: ledger, album: photos.albumMembers(),
                                      attempts: state.attempts, settled: state.settled, limit: .max))
         // Kept full size (Keep Original): never compacted automatically.
         let kept = Set(backedUp.filter { $0.value.kept == true }.keys)
@@ -243,17 +200,18 @@ final class AutomaticMode {
     /// included): an item Homespun merely can't see (hidden, limited access, a restored backup with
     /// other identifiers) is never reported. Needs Full Access.
     func reportRemoved(settings: AppSettings, ledger: CompactLedger) async {
-        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized, let client = settings.client else { return }
+        let photos = photos
+        guard photos.authorization() == .authorized, let client = settings.client else { return }
         let backedUp = await ledger.backedUpSnapshot()
-        let token = PHPhotoLibrary.shared().currentChangeToken
+        let token = photos.changeToken()
         let since = state.removalToken
-        let deleted = await Task.detached(priority: .utility) { Self.deleted(since: since) }.value
+        let deleted = await Task.detached(priority: .utility) { photos.deleted(since: since) }.value
         let before = state, now = Date()
         for id in deleted.ids where state.removed[id] == nil { state.removed[id] = now }
-        if deleted.read { state.removalToken = Self.archive(token) }
+        if deleted.read { state.removalToken = token }
         // Recovered from Recently Deleted (or never gone): nothing to tell.
         let removed = Array(state.removed.keys)
-        let back = await Task.detached(priority: .utility) { PhotoLibrary.existing(removed, includeHidden: true) }.value
+        let back = await Task.detached(priority: .utility) { photos.existing(removed, includeHidden: true) }.value
         for id in back { state.removed[id] = nil }
         state.removed = state.removed.filter { id, date in backedUp[id] != nil || now.timeIntervalSince(date) < 7 * 86_400 }
         var reported: [String] = []
@@ -291,7 +249,8 @@ final class AutomaticMode {
     func run(settings: AppSettings, job: CompactJob, premium: Premium, notify: Bool) async -> Summary {
         var summary = Summary()
         guard state.enabled, premium.isUnlocked, !running else { return summary }
-        guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized else {
+        let photos = photos
+        guard photos.authorization() == .authorized else {
             summary.skipped = "Homespun needs Full Access to Photos."
             return finish(summary)
         }
@@ -310,9 +269,9 @@ final class AutomaticMode {
         let before = Set(await remover?.candidates().map(\.original) ?? [])
 
         // The token as of now: items added while this run works are found next time.
-        let token = PHPhotoLibrary.shared().currentChangeToken
+        let token = photos.changeToken()
         let since = state.token
-        let inserted = await Task.detached(priority: .utility) { Self.inserted(since: since) }.value
+        let inserted = await Task.detached(priority: .utility) { photos.inserted(since: since) }.value
         state.pending.formUnion(inserted.ids)
         let now = Date()
         for id in inserted.ids where state.firstSeen[id] == nil { state.firstSeen[id] = now }
@@ -320,7 +279,7 @@ final class AutomaticMode {
         let planLedger = await job.ledger.snapshot(), planBackedUp = await job.ledger.backedUpSnapshot()
         let snapshot = state, backsUp = settings.server?.mode != .immich
         let plan = await Task.detached(priority: .utility) {
-            Self.plan(snapshot, ledger: planLedger, backedUp: planBackedUp, added: snapshot.pending, backsUp: backsUp)
+            Self.plan(snapshot, ledger: planLedger, backedUp: planBackedUp, added: snapshot.pending, backsUp: backsUp, photos: photos)
         }.value
         let picked = plan.compact + plan.backUp
         if !picked.isEmpty {
@@ -360,8 +319,8 @@ final class AutomaticMode {
         let ledger = await job.ledger.snapshot(), backedUp = await job.ledger.backedUpSnapshot()
         let pending = Array(state.pending)
         let (copies, album, existing) = await Task.detached(priority: .utility) {
-            (Set(ledger.values.map(\.compactIdentifier)), PhotoLibrary.albumMembers(),
-             PhotoLibrary.existing(pending, includeHidden: true))
+            (Set(ledger.values.map(\.compactIdentifier)), photos.albumMembers(),
+             photos.existing(pending, includeHidden: true))
         }.value
         state.pending = state.pending.filter { id in
             existing.contains(id) && ledger[id]?.serverAssetID == nil && backedUp[id] == nil && !copies.contains(id)
@@ -370,11 +329,11 @@ final class AutomaticMode {
         // First-seen dates matter only until the compact copy (and never beyond the longest cutoff).
         let oldest = now.addingTimeInterval(-Double((CompactSchedule.stops.last ?? 90) + 10) * 86_400)
         state.firstSeen = state.firstSeen.filter { id, date in ledger[id] == nil && date > oldest }
-        if inserted.read { state.token = Self.archive(token) }
+        if inserted.read { state.token = token }
         let after = Set(await remover?.candidates().map(\.original) ?? [])
         summary.removable = after.count
         summary.newlyRemovable = after.subtracting(before).count
-        if notify, state.notifies, summary.newlyRemovable > 0 { await Self.notify(summary) }
+        if notify, system, state.notifies, summary.newlyRemovable > 0 { await Self.notify(summary) }
         return finish(summary)
     }
 
@@ -406,13 +365,5 @@ final class AutomaticMode {
         content.sound = .default
         let request = UNNotificationRequest(identifier: "homespun.removable", content: content, trigger: nil)
         try? await UNUserNotificationCenter.current().add(request)
-    }
-
-    private nonisolated static func archive(_ token: PHPersistentChangeToken) -> Data? {
-        try? NSKeyedArchiver.archivedData(withRootObject: token, requiringSecureCoding: true)
-    }
-
-    private nonisolated static func unarchive(_ data: Data) -> PHPersistentChangeToken? {
-        try? NSKeyedUnarchiver.unarchivedObject(ofClass: PHPersistentChangeToken.self, from: data)
     }
 }

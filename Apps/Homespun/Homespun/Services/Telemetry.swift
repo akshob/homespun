@@ -33,6 +33,8 @@ final class Telemetry {
     private var beforeConsent: [Event] = []
     private var flushing = false
     private var channel: AppInfo.Channel?
+    /// Nothing is recorded while the demo is on: it isn't how the person uses Homespun.
+    var paused = false
 
     let endpoint: URL?
     private let defaults: UserDefaults
@@ -94,6 +96,7 @@ final class Telemetry {
 
     /// Queues an event if the person shares (before they've decided, setup events wait in memory).
     func record(_ event: Event) {
+        guard !paused else { return }
         switch consent {
         case .sharing:
             queued.append(event)
@@ -150,6 +153,7 @@ final class Telemetry {
 
     /// The server's kind and version: once a day, and when its version changes.
     func recordServerInfoDaily(_ info: ServerAPI.ServerInfo, now: Date = Date()) {
+        guard !paused else { return }
         let key = "\(info.version).\(info.mode.rawValue)"
         let last = defaults.object(forKey: "telemetry.serverInfoDate") as? Date ?? .distantPast
         guard key != defaults.string(forKey: "telemetry.serverInfoKey") || now.timeIntervalSince(last) > 86_400 else { return }

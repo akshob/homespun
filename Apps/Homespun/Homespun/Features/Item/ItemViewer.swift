@@ -26,6 +26,7 @@ struct ItemViewer: View {
     /// Swipe down to close: how far the item has been dragged.
     @State private var drag: CGSize = .zero
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.showsTips) private var showsTips
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
     init(model: AppModel, ids: [String], start: String, details: Binding<String?>,
@@ -63,7 +64,7 @@ struct ItemViewer: View {
     private var immich: Bool { model.settings.server?.mode == .immich }
 
     var body: some View {
-        let cell = cell(shown), asset = model.library.library.asset(shown)
+        let cell = cell(shown), asset = model.library.library.item(shown)
         let pulled = min(max(drag.height, 0) / 400, 1)
         ZStack {
             Color.black.opacity(1 - pulled * 0.8).ignoresSafeArea()
@@ -74,7 +75,7 @@ struct ItemViewer: View {
         }
 
         .navigationTitle(ItemText.title(asset?.creationDate))
-        .navigationSubtitle(ItemText.subtitle(asset?.creationDate, kind: asset.flatMap(PhotoLibrary.kind),
+        .navigationSubtitle(ItemText.subtitle(asset?.creationDate, kind: asset?.itemKind,
                                               duration: asset?.duration ?? 0))
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
@@ -108,7 +109,7 @@ struct ItemViewer: View {
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(Array(window), id: \.self) { id in
-                    ItemViewerPage(asset: model.library.library.asset(id), isCurrent: id == shown, label: spokenLabel(id)) { zoomed in
+                    ItemViewerPage(asset: model.library.library.item(id), isCurrent: id == shown, label: spokenLabel(id)) { zoomed in
                         if id == shown { self.zoomed = zoomed }
                     }
                     .containerRelativeFrame([.horizontal, .vertical])
@@ -162,7 +163,7 @@ struct ItemViewer: View {
 
     /// The badge and its sentence, just under the photo; over it, on a scrim, when the photo
     /// fills the height.
-    private func stateLine(_ cell: LibraryState.Cell, asset: PHAsset?) -> some View {
+    private func stateLine(_ cell: LibraryState.Cell, asset: (any LibraryItem)?) -> some View {
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
             let screen = CGSize(width: geo.size.width + insets.leading + insets.trailing,
@@ -204,7 +205,7 @@ struct ItemViewer: View {
                 }
                 .tint(.white)
                 .accessibilityIdentifier("item.compare")
-                .popoverTip(CompareTip())
+                .popoverTip(showsTips ? CompareTip() : nil)
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
@@ -382,7 +383,7 @@ struct ItemStateLine: View {
 /// One item in the viewer: a zoomable photo or Live Photo, or a video. The page on screen loads
 /// at full size; its neighbours at about screen size.
 struct ItemViewerPage: View {
-    let asset: PHAsset?
+    let asset: (any LibraryItem)?
     let isCurrent: Bool
     let label: String
     var onZoom: (Bool) -> Void
@@ -398,7 +399,7 @@ struct ItemViewerPage: View {
 
     var body: some View {
         Group {
-            if asset?.mediaType == .video {
+            if asset?.itemKind == .video {
                 if let player {
                     VideoPlayer(player: player)
                         .accessibilityLabel(label)
@@ -429,18 +430,18 @@ struct ItemViewerPage: View {
         let width = Double(asset.pixelWidth), height = Double(asset.pixelHeight)
         if image == nil {
             let scale = min(1, 1000 * displayScale / max(width, height, 1))
-            image = await ItemMedia.image(asset, size: CGSize(width: width * scale, height: height * scale))
+            image = await asset.image(size: CGSize(width: width * scale, height: height * scale), fast: false)
         }
         guard isCurrent, !Task.isCancelled else { return }
-        if asset.mediaType == .video {
-            if player == nil { player = await ItemMedia.player(asset) }
+        if asset.itemKind == .video {
+            if player == nil { player = await asset.player() }
             return
         }
         let scale = min(1, 4096 / max(width, height, 1))
         let full = CGSize(width: width * scale, height: height * scale)
-        if asset.mediaSubtypes.contains(.photoLive) {
-            if livePhoto == nil { livePhoto = await ItemMedia.livePhoto(asset, size: full) }
-        } else if let sharper = await ItemMedia.image(asset, size: full), !Task.isCancelled {
+        if asset.itemKind == .livePhoto {
+            if livePhoto == nil { livePhoto = await asset.livePhoto(size: full) }
+        } else if let sharper = await asset.image(size: full, fast: false), !Task.isCancelled {
             image = sharper
         }
     }

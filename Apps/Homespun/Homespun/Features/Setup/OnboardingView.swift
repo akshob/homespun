@@ -58,18 +58,19 @@ private struct SetupNavigation: View {
                         }
                     }
                 }
-                .navigationDestination(for: SetupFlow.Page.self) { page($0) }
+                .demoMarker(flow.settings.isDemo)
+                .navigationDestination(for: SetupFlow.Page.self) { page($0).demoMarker(flow.settings.isDemo) }
         }
         .sheet(item: Binding(get: { comparing.map(ComparedItem.init) }, set: { comparing = $0?.id })) { item in
             NavigationStack {
-                CompareView(model: .shared, compactIdentifier: item.id)
+                CompareView(model: .current, compactIdentifier: item.id)
                     .toolbar {
                         ToolbarItem(placement: .confirmationAction) {
                             Button("Done") { comparing = nil }.accessibilityIdentifier("compare.done")
                         }
                     }
             }
-            .onAppear { AppModel.shared.library.journey.used(.compare) }
+            .onAppear { AppModel.current.library.journey.used(.compare) }
         }
         .tint(Theme.accent)
         .sheet(item: $flow.link) { link in
@@ -159,6 +160,7 @@ private struct WelcomePage: View {
             } second: {
                 SecondaryButton(title: "Set Up Later", id: "setup.later") { flow.finish() }
             }
+            if !flow.settings.isDemo { TryTheDemoButton() }
         }
         .task { await flow.checkReturning() }
     }
@@ -231,7 +233,7 @@ struct PhotosPromisesPage: View {
             PrimaryButton(title: "Continue", busy: asking, id: "photos.continue") {
                 asking = true
                 Task {
-                    let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+                    let status = await flow.settings.photos.requestAuthorization()
                     asking = false
                     flow.afterPhotos(status)
                 }
@@ -244,8 +246,13 @@ struct PhotosPromisesPage: View {
 
 private struct LimitedPhotosPage: View {
     let flow: SetupFlow
-    @State private var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    @State private var status: PHAuthorizationStatus
     @Environment(\.openURL) private var openURL
+
+    init(flow: SetupFlow) {
+        self.flow = flow
+        _status = State(initialValue: flow.settings.photos.authorization())
+    }
 
     var body: some View {
         SetupScaffold(symbol: "photo.on.rectangle", title: "Homespun needs all photos",
@@ -263,7 +270,7 @@ private struct LimitedPhotosPage: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
             // Back from Settings with Full Access: carry on by itself (L6).
-            status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            status = flow.settings.photos.authorization()
             if status == .authorized, flow.current == .limitedPhotos { flow.go(.estimate) }
         }
     }

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import CryptoKit
 import Foundation
 import HomespunCore
-import Photos
 import UIKit
 
 /// Finds compact copies Homespun didn't make on this iPhone: made with other tools from
@@ -57,13 +55,15 @@ final class CopyFinder {
     private var atHome: [String: AtHome]
     private var task: Task<Void, Never>?
     private let url: URL
+    private let photos: any PhotoSource
 
     static var defaultURL: URL {
         URL.applicationSupportDirectory.appendingPathComponent("Homespun/copy-finder.json")
     }
 
-    init(url: URL = CopyFinder.defaultURL) {
+    init(url: URL = CopyFinder.defaultURL, photos: any PhotoSource = PhotoKitSource()) {
         self.url = url
+        self.photos = photos
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let saved = (try? decoder.decode(Saved.self, from: Data(contentsOf: url))) ?? Saved()
@@ -99,7 +99,7 @@ final class CopyFinder {
         }
         let snapshot = await ledger.snapshot()
         let known = Self.known(snapshot)
-        let todo = PhotoLibrary.allIdentifiers().filter { !known.contains($0) && !settled.contains($0) }
+        let todo = photos.allIdentifiers().filter { !known.contains($0) && !settled.contains($0) }
         total = todo.count
         checked = 0
         found = 0
@@ -110,7 +110,7 @@ final class CopyFinder {
         for (key, entry) in snapshot where key == CompactLedger.elsewhere(entry.compactIdentifier) {
             if let asset = entry.serverAssetID { copies[asset] = (entry.compactIdentifier, entry.compactBytes, entry.originalBytes) }
         }
-        let present = PhotoLibrary.existing(Array(atHome.keys))
+        let present = photos.existing(Array(atHome.keys), includeHidden: false)
         atHome = atHome.filter { present.contains($0.key) }
         var originals: [String: (id: String, bytes: Int)] = [:]
         for (id, original) in atHome { originals[original.assetID] = (id, original.bytes) }
@@ -119,7 +119,7 @@ final class CopyFinder {
             for start in stride(from: 0, to: todo.count, by: batch) {
                 try Task.checkCancellation()
                 let ids = Array(todo[start..<min(start + batch, todo.count)])
-                let hashed = await Self.hash(ids)
+                let hashed = await photos.copyHashes(ids)
                 let hashes = Array(Set(hashed.values.flatMap { $0.hashes.values }))
                 var matches: [String: ServerAPI.CopyLookupResponse.Match] = [:]
                 for first in stride(from: 0, to: hashes.count, by: ServerAPI.CopyLookupRequest.maximumCount) {
@@ -172,7 +172,7 @@ final class CopyFinder {
                     }
                 }
                 try await ledger.record(entries, removing: removing)
-                try await PhotoLibrary.addToAlbum(album)
+                try await photos.addToAlbum(album)
                 checked += ids.count
                 found = result.found
                 result.checked = checked
@@ -202,60 +202,6 @@ final class CopyFinder {
     struct Hashed: Sendable {
         var hashes: [ServerAPI.ResourceRole: String]
         var bytes: Int
-    }
-
-    /// The SHA-256 of each item's photo, motion, and video, read from this iPhone only; items
-    /// without such files here (only in iCloud, say) are left out.
-    nonisolated static func hash(_ identifiers: [String], concurrently: Int = 4) async -> [String: Hashed] {
-        await withTaskGroup(of: (String, Hashed?).self) { group in
-            var results: [String: Hashed] = [:], next = 0
-            func addNext() {
-                guard next < identifiers.count else { return }
-                let id = identifiers[next]
-                next += 1
-                group.addTask { (id, try? await hash(id)) }
-            }
-            for _ in 0..<concurrently { addNext() }
-            while let (id, hashed) = await group.next() {
-                if let hashed { results[id] = hashed }
-                addNext()
-            }
-            return results
-        }
-    }
-
-    private nonisolated static func hash(_ identifier: String) async throws -> Hashed? {
-        guard let asset = PhotoLibrary.asset(identifier) else { return nil }
-        let resources = PHAssetResource.assetResources(for: asset)
-            .filter { CopyMatching.roles.contains(PhotoLibrary.role(of: $0.type)) }
-        guard !resources.isEmpty else { return nil }
-        var hashed = Hashed(hashes: [:], bytes: 0)
-        for resource in resources {
-            let (sha256, size) = try await digest(resource)
-            hashed.hashes[PhotoLibrary.role(of: resource.type)] = sha256
-            hashed.bytes += size
-        }
-        return hashed
-    }
-
-    private final class Digest: @unchecked Sendable {
-        var hash = SHA256()
-        var size = 0
-    }
-
-    private nonisolated static func digest(_ resource: PHAssetResource) async throws -> (String, Int) {
-        let digest = Digest()
-        let options = PHAssetResourceRequestOptions()
-        options.isNetworkAccessAllowed = false
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHAssetResourceManager.default().requestData(for: resource, options: options) { data in
-                digest.hash.update(data: data)
-                digest.size += data.count
-            } completionHandler: { error in
-                if let error { continuation.resume(throwing: error) } else { continuation.resume() }
-            }
-        }
-        return (digest.hash.finalize().map { String(format: "%02x", $0) }.joined(), digest.size)
     }
 
     private func save(_ summary: Summary) {

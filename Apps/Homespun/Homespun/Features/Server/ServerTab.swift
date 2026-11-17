@@ -66,6 +66,7 @@ struct ServerTab: View {
         let settings = model.settings
         let unreachable: String? = if case .unreachable(let reason) = settings.serverStatus { reason } else { nil }
         return List(selection: selection) {
+            if settings.isDemo { DemoCard() }
             Section {
                 ServerStatusCard(server: server, status: settings.serverStatus, storage: storage,
                                  lastSeen: lastSeen > 0 ? Date(timeIntervalSince1970: lastSeen) : nil)
@@ -130,14 +131,17 @@ struct ServerTab: View {
             }
             .listRowBackground(Theme.card)
             thisIPhoneSection
-            Section {
-                Button("Unpair from \(server.name)…", role: .destructive) { confirmingUnpair = true }
-                    .foregroundStyle(Theme.red)
-                    .accessibilityIdentifier("server.unpair")
-            } footer: {
-                Text("Unpairing keeps every original on the server and every compact copy in Photos.")
+            // The demo's pairing is pretend: the way out is leaving the demo (its card, above).
+            if !settings.isDemo {
+                Section {
+                    Button("Unpair from \(server.name)…", role: .destructive) { confirmingUnpair = true }
+                        .foregroundStyle(Theme.red)
+                        .accessibilityIdentifier("server.unpair")
+                } footer: {
+                    Text("Unpairing keeps every original on the server and every compact copy in Photos.")
+                }
+                .listRowBackground(Theme.card)
             }
-            .listRowBackground(Theme.card)
         }
         .homespunList()
         .navigationTitle(server.name)
@@ -148,12 +152,14 @@ struct ServerTab: View {
                     Button { path = [.check] } label: { Label("Server Check", systemImage: "checkmark.shield") }
                     Button { path = [.addDevice] } label: { Label("Add Device", systemImage: "plus") }
                         .accessibilityIdentifier("settings.addDevice")
-                    Button { confirmingSwitch = true } label: {
-                        Label("Switch Server", systemImage: "arrow.left.arrow.right")
-                    }
-                    .accessibilityIdentifier("server.switch")
-                    Button(role: .destructive) { confirmingUnpair = true } label: {
-                        Label("Unpair", systemImage: "minus.circle")
+                    if !settings.isDemo {
+                        Button { confirmingSwitch = true } label: {
+                            Label("Switch Server", systemImage: "arrow.left.arrow.right")
+                        }
+                        .accessibilityIdentifier("server.switch")
+                        Button(role: .destructive) { confirmingUnpair = true } label: {
+                            Label("Unpair", systemImage: "minus.circle")
+                        }
                     }
                 } label: {
                     Label("More", systemImage: "ellipsis")
@@ -190,6 +196,7 @@ struct ServerTab: View {
 
     private func unpaired(selection: Binding<Route?>?) -> some View {
         List(selection: selection) {
+            if model.settings.isDemo { DemoCard() }
             Section {
                 VStack(spacing: 14) {
                     Image(systemName: "server.rack").font(.system(size: 34)).foregroundStyle(Theme.accent)
@@ -289,7 +296,7 @@ struct ServerTab: View {
             .sidebarRow(Route.notifications)
             NavigationLink(value: Route.analytics) {
                 ServerRow(title: "Share Analytics", symbol: "chart.bar",
-                          value: Telemetry.shared.isSharing ? "On" : "Off")
+                          value: model.settings.isDemo ? "Off in the demo" : Telemetry.shared.isSharing ? "On" : "Off")
             }
             .accessibilityIdentifier("settings.analytics")
             .sidebarRow(Route.analytics)
@@ -327,7 +334,7 @@ struct ServerTab: View {
         case .notifications: NotificationsView(model: model)
         case .premium: PremiumView(premium: model.premium, model: model)
         case .help: HelpAboutView(model: model)
-        case .analytics: AnalyticsSettingsView()
+        case .analytics: AnalyticsSettingsView(demo: settings.isDemo)
         }
     }
 

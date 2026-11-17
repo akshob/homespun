@@ -10,6 +10,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// A session starts when the app comes back from the background (or launches).
     @State private var wasBackground = true
+    /// A pairing link opened while the demo is on.
+    @State private var linkInDemo = false
 
     var body: some View {
         @Bindable var settings = model.settings
@@ -28,7 +30,15 @@ struct RootView: View {
             if phase == .active { SessionMarker.shared.active() }
         }
         .onOpenURL { url in
-            if let link = PairingLink(url) { settings.pendingLink = link }
+            guard let link = PairingLink(url) else { return }
+            // The demo pairs only with its pretend server: a link is for the person's own Homespun.
+            if settings.isDemo { linkInDemo = true } else { settings.pendingLink = link }
+        }
+        .alert("You're in the demo", isPresented: $linkInDemo) {
+            Button("Stay in the Demo", role: .cancel) {}
+            Button("Leave the Demo") { DemoMode.shared.leave() }
+        } message: {
+            Text("Leave the demo, then open the pairing link again to pair your own server.")
         }
         // Each item's phase, not its progress messages: badges change only when the phase does.
         .onChange(of: model.job.phaseVersion) { _, _ in model.library.jobChanged() }
@@ -252,6 +262,7 @@ struct StatusAccessory: View {
     var serverName = "your computer"
     let open: (Action) -> Void
     @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+    @Environment(\.showsTips) private var showsTips
 
     var body: some View {
         switch status {
@@ -305,7 +316,7 @@ struct StatusAccessory: View {
             if let button {
                 Button(button, action: action).buttonStyle(.glassProminent).tint(Theme.accent).controlSize(.small)
                     .accessibilityIdentifier("accessory.action")
-                    .popoverTip(button == "Free Up" ? FreeUpTip(server: serverName) : nil)
+                    .popoverTip(button == "Free Up" && showsTips ? FreeUpTip(server: serverName) : nil)
             }
         }
         .padding(.horizontal, 14)

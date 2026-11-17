@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import AVKit
 import HomespunCore
-import Photos
 import SwiftUI
 
 /// What Compare shows: one version, or both split by a line.
@@ -64,33 +63,34 @@ final class CompareModel {
         compactPlayer = nil
         server = model.library.serverName
         client = model.settings.client
-        guard let asset = PhotoLibrary.asset(compactIdentifier) else {
+        let photos = model.settings.photos
+        guard let asset = photos.item(compactIdentifier) else {
             status = .failed("The compact copy isn't in Photos any more.")
             return
         }
-        kind = PhotoLibrary.kind(of: asset) ?? .photo
-        compactFacts = ItemMedia.facts(asset).main
+        kind = asset.itemKind ?? .photo
+        compactFacts = asset.mediaFacts().main
         let match = await model.job.ledger.snapshot().first { $0.value.compactIdentifier == compactIdentifier }
         guard !Task.isCancelled else { return }
-        let originalAsset = match.flatMap { PhotoLibrary.asset($0.key) }
+        let originalAsset = match.flatMap { photos.item($0.key) }
         source = OriginalSource.choose(original: match?.key, onPhone: originalAsset != nil,
                                        serverAssetID: match?.value.serverAssetID, mode: model.settings.server?.mode)
         switch source {
-        case .phone: if let originalAsset { originalFacts = ItemMedia.facts(originalAsset).main }
+        case .phone: if let originalAsset { originalFacts = originalAsset.mediaFacts().main }
         case .server: fetchOriginal()
         case .immich: status = .inImmich
         case .unknown: status = .noOriginal
         }
         if isVideo {
-            compactPlayer = await ItemMedia.player(asset)
+            compactPlayer = await asset.player()
         } else {
-            compact = await ItemMedia.image(asset, size: nil)
+            compact = await asset.image(size: nil, fast: false)
         }
         if case .phone = source, let originalAsset, !Task.isCancelled {
             if isVideo {
-                originalPlayer = await ItemMedia.player(originalAsset)
+                originalPlayer = await originalAsset.player()
             } else {
-                original = await ItemMedia.image(originalAsset, size: nil)
+                original = await originalAsset.image(size: nil, fast: false)
             }
             status = hasOriginal ? .ready : .failed("The original couldn't be read from Photos.")
         }
@@ -176,7 +176,10 @@ final class CompareModel {
     /// it runs. Cancelling the calling task cancels the download.
     nonisolated static func fetch(_ client: ServerClient, assetID: String, role: ServerAPI.ResourceRole, to folder: URL,
                                   name: String, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws -> URL {
-        let session = URLSession(configuration: .ephemeral)
+        let configuration = URLSessionConfiguration.ephemeral
+        // A server that answers inside the app (the demo's) is reached through its own session's protocol.
+        if client.session !== URLSession.shared { configuration.protocolClasses = client.session.configuration.protocolClasses }
+        let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         var client = client
         client.session = session

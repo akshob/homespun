@@ -15,7 +15,13 @@ targets:
   Homespun:
     type: application
     platform: iOS
-    sources: [Homespun]
+    sources:
+      - path: Homespun
+        excludes: ["Resources/Demo", "Resources/Demo/**"]
+      # Try the Demo's sample photos and videos (drawn by scripts/demo-media.swift), as one folder.
+      - path: Homespun/Resources/Demo
+        type: folder
+        buildPhase: resources
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
