@@ -5,13 +5,15 @@ set -euo pipefail
 source ${0:A:h}/env.sh
 cd $ROOT
 swift build -c release --product homespun-server 2>&1 | tail -3
+# Every job's checkout needs the project, also when it reuses the build below (it isn't committed).
+(cd $APP && xcodegen generate --quiet)
 # A branch's push and its pull request build the same commit at once: one builds, the other waits.
 mkdir -p $CI_STATE/dd
 zmodload zsh/system
 : >> $CI_STATE/dd/$SHA.lock
 zsystem flock -f lockfd $CI_STATE/dd/$SHA.lock    # held until this script ends
 if [[ -f $DD/.built ]]; then echo "app already built for $SHA"; exit 0; fi
-cd $APP && xcodegen generate --quiet
+cd $APP
 set -o pipefail
 xcodebuild build-for-testing -project Homespun.xcodeproj -scheme Homespun -destination "generic/platform=iOS Simulator" \
   -derivedDataPath $DD 2>&1 | tee $RESULTS/build.log | filter
