@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 
-/// Without Premium, automatic mode and cloud copies explain themselves, then lead to the Premium screen.
+/// Without Premium, automatic mode and cloud copies explain themselves, then lead to the Premium screen; widgets'
+/// links lead to their places, or to unlocking widgets.
 final class PremiumUITests: XCTestCase {
     @MainActor func testLockedFeaturesOfferPremium() throws {
         let app = XCUIApplication()
@@ -33,5 +34,38 @@ final class PremiumUITests: XCTestCase {
         screenshot.name = "Premium"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    /// A locked widget's tap (homespun://unlock?feature=widgets) asks to unlock widgets.
+    @MainActor func testWidgetUnlockLinkOffersPremium() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES", "-hideTips"]
+        app.launch()
+        XCTAssertTrue(app.hasTab("Library"))
+        app.open(URL(string: "homespun://unlock?feature=widgets")!)
+        let title = app.staticTexts["premium.feature.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 20), "no sheet about widgets")
+        XCTAssertEqual(title.label, "Widgets are part of Premium")
+        XCTAssertTrue(app.buttons["premium.feature.buy"].exists)
+        let sheet = XCTAttachment(screenshot: app.screenshot())
+        sheet.name = "Unlock widgets"
+        sheet.lifetime = .keepAlways
+        add(sheet)
+    }
+
+    /// An unlocked widget's taps open their places: Activity, and Automatic Mode in the Server tab.
+    @MainActor func testWidgetLinksOpenTheirPlaces() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        XCTAssertTrue(app.hasTab("Library"))
+        app.open(URL(string: "homespun://activity")!)
+        let activity = app.tab("Activity")
+        XCTAssertTrue(activity.waitForExistence(timeout: 20))
+        let selected = expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: activity)
+        wait(for: [selected], timeout: 20)
+        app.open(URL(string: "homespun://automatic")!)
+        XCTAssertTrue(app.descendants(matching: .any)["automatic.page.toggle"].waitForExistence(timeout: 20),
+                      "Automatic Mode didn't open")
     }
 }

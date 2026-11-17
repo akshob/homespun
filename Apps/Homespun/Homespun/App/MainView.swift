@@ -28,7 +28,11 @@ struct RootView: View {
             if phase == .active { SessionMarker.shared.active() }
         }
         .onOpenURL { url in
-            if let link = PairingLink(url) { settings.pendingLink = link }
+            if let link = PairingLink(url) {
+                settings.pendingLink = link
+            } else if let link = AppLink(url) {
+                model.router.pending = link
+            }
         }
         // Each item's phase, not its progress messages: badges change only when the phase does.
         .onChange(of: model.job.phaseVersion) { _, _ in model.library.jobChanged() }
@@ -100,11 +104,14 @@ struct MainTabView: View {
         case freeUp(only: Set<String>?)
         case backUp([String])
         case pair(PairingLink)
+        /// A Premium feature asked for while locked (a widget's Unlock).
+        case unlock(PremiumFeature)
         var id: String {
             switch self {
             case .freeUp: "freeUp"
             case .backUp: "backUp"
             case .pair(let link): link.id
+            case .unlock(let feature): "unlock." + feature.rawValue
             }
         }
     }
@@ -151,13 +158,25 @@ struct MainTabView: View {
                 BackUpSheet(controller: model.library, identifiers: ids) {}
             case .pair(let link):
                 PairConfirmView(settings: model.settings, link: link) {}
+            case .unlock(let feature):
+                PremiumFeatureSheet(feature: feature, premium: model.premium) {
+                    self.sheet = nil
+                    tab = .server
+                    model.router.serverRoute = .premium
+                }
             }
         }
         .onChange(of: settings.pendingLink, initial: true) { _, link in
             if let link { sheet = .pair(link) }
         }
+        .onChange(of: model.router.pending, initial: true) { _, link in
+            guard let link else { return }
+            model.router.pending = nil
+            open(link)
+        }
         .task {
             await model.library.start()
+            model.status.start()
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-deleteNewestBackedUp") {
                 await model.library.deleteNewestBackedUpForTesting()
@@ -171,6 +190,25 @@ struct MainTabView: View {
     /// layout, never its presentation (that would interrupt a removal).
     private func openFreeUp(_ scope: Set<String>?) {
         if sizeClass == .regular { cover = .freeUp(scope) } else { sheet = .freeUp(only: scope) }
+    }
+
+    /// Where a widget's link leads.
+    private func open(_ link: AppLink) {
+        switch link {
+        case .freeUp: openFreeUp(nil)
+        case .activity: tab = .activity
+        case .server: tab = .server
+        case .automatic:
+            tab = .server
+            model.router.serverRoute = .automatic
+        case .unlock(let feature):
+            if model.premium.isUnlocked {
+                tab = .server
+                model.router.serverRoute = .premium
+            } else {
+                sheet = .unlock(PremiumFeature(rawValue: feature) ?? .widgets)
+            }
+        }
     }
 
     private func openFromAccessory(_ action: StatusAccessory.Action) {

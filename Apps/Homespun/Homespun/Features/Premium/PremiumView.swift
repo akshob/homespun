@@ -46,6 +46,10 @@ struct PremiumView: View {
                 feature("icloud.and.arrow.up", "Cloud copies",
                         "\(server) also copies each original to OneDrive (Google Photos and others later), as an extra "
                             + "backup.")
+                Divider().overlay(Theme.separator)
+                feature(PremiumFeature.widgets.symbol, "Widgets",
+                        "What's ready to free up, your last backup and your server at a glance, on your Home Screen, "
+                            + "Lock Screen and Apple Watch.")
             }
             .card()
             feature("checkmark.circle", "Always free",
@@ -77,7 +81,8 @@ struct PremiumView: View {
             Image(systemName: "checkmark.circle.fill").font(.system(size: 48)).foregroundStyle(Theme.teal)
                 .accessibilityHidden(true)
             Text("Premium unlocked").displayTitle().accessibilityAddTraits(.isHeader)
-            Text("Thank you. Both features are ready when you are.").foregroundStyle(Theme.secondaryLabel)
+            Text("Thank you. Automatic mode, cloud copies and widgets are ready when you are.")
+                .foregroundStyle(Theme.secondaryLabel)
             if let model {
                 VStack(spacing: 0) {
                     NavigationLink { AutomaticModeView(model: model) } label: {
@@ -167,10 +172,40 @@ struct PremiumView: View {
     }
 }
 
-/// A Premium feature tapped while locked.
+/// A Premium feature tapped while locked (`widgets`: from a widget's `homespun://unlock?feature=widgets`).
 enum PremiumFeature: String, Identifiable {
-    case automatic, cloudCopies
+    case automatic, cloudCopies, widgets
     var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .automatic: "bolt.fill"
+        case .cloudCopies: "icloud.and.arrow.up"
+        case .widgets: "square.grid.2x2"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .automatic: "Automatic mode is part of Premium"
+        case .cloudCopies: "Cloud copies are part of Premium"
+        case .widgets: "Widgets are part of Premium"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .automatic:
+            "New photos back up on their own, usually overnight while charging. Homespun tells you when there's space "
+                + "to free up."
+        case .cloudCopies:
+            "Your server also copies each original to OneDrive, as an extra backup. Freeing up space still depends only "
+                + "on your server's own copy."
+        case .widgets:
+            "See what's ready to free up, your last backup and your server at a glance, on your Home Screen, Lock "
+                + "Screen and Apple Watch. One purchase also unlocks automatic mode and cloud copies."
+        }
+    }
 }
 
 /// Explains the one feature tapped, in a medium sheet (05·1.2).
@@ -186,16 +221,13 @@ struct PremiumFeatureSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    Image(systemName: feature == .automatic ? "bolt.fill" : "icloud.and.arrow.up")
+                    Image(systemName: feature.symbol)
                         .font(.system(size: 36)).foregroundStyle(Theme.accent).accessibilityHidden(true)
-                    Text(feature == .automatic ? "Automatic mode is part of Premium" : "Cloud copies are part of Premium")
+                    Text(feature.title)
                         .font(.title2.weight(.semibold)).foregroundStyle(Theme.label).multilineTextAlignment(.center)
                         .accessibilityAddTraits(.isHeader)
-                    Text(feature == .automatic
-                         ? "New photos back up on their own, usually overnight while charging. Homespun tells you when "
-                            + "there's space to free up."
-                         : "Your server also copies each original to OneDrive, as an extra backup. Freeing up space "
-                            + "still depends only on your server's own copy.")
+                        .accessibilityIdentifier("premium.feature.title")
+                    Text(feature.explanation)
                         .font(.subheadline).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
                     Button { Task { await buy() } } label: {
                         BusyLabel(title: premium.product.map { "Unlock · \($0.displayPrice)" } ?? "Unlock", busy: working)

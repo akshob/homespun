@@ -14,6 +14,10 @@ final class AppModel {
     /// Activity › History: backup runs (manual, automatic, the first task) and freed space.
     let history = RunHistory(load: false)
     let library: LibraryController
+    /// Widget links waiting for the main screen.
+    let router = AppRouter()
+    /// Keeps the widgets and the Apple Watch current (started by the main screen).
+    let status: StatusPublisher
 
     private init() {
         settings = AppSettings()
@@ -21,6 +25,8 @@ final class AppModel {
         job.history = history
         library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
                                     copyFinder: copyFinder)
+        status = StatusPublisher(settings: settings, library: library, history: history, automatic: automatic,
+                                 premium: premium)
         let history = history
         Task { await history.load() }
     }
@@ -34,6 +40,9 @@ final class AppModel {
                 await model.premium.refresh()
                 let summary = await model.automatic.run(settings: model.settings, job: model.job, premium: model.premium,
                                                         notify: true)
+                // The widgets and the watch show what the run did (the screen isn't there to start them).
+                if summary.skipped == nil, model.settings.isPaired, !Task.isCancelled { await model.library.refreshReady() }
+                await model.status.publishNow()
                 box.task.setTaskCompleted(success: summary.skipped == nil)
             }
             task.expirationHandler = { work.cancel() }

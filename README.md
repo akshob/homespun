@@ -29,7 +29,7 @@ Homespun always works with a server you run; the app doesn't compress on its own
 | `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: libvips photos (EXIF copied byte for byte, so Live Photo identifiers survive) and x265 via the `ffmpeg` tool. Apple: ImageIO photos, AVFoundation video and Live Photo motion, `PHLivePhoto` pair validation |
 | `HomespunTestSupport` | iOS, macOS | Synthetic photos, Live Photos, and videos for tests (not product code) |
 | `HomespunServerKit`, `homespun-server` | Linux, macOS | Hummingbird server: SQLite catalog, pairing, verified uploads, compression jobs, Immich originals |
-| `Apps/Homespun` | iOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package |
+| `Apps/Homespun` | iOS, watchOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package; its widgets, and Homespun on Apple Watch |
 | `services/telemetry` | Cloudflare Workers | Opt-in analytics, MetricKit reports and problem reports from the app (`telemetry.homespun.photos`) |
 
 Live Photo motion is compressed only with AVFoundation (on the phone or a Mac).
@@ -110,6 +110,12 @@ and the Get Started card open the Library to pick a few items to try.
     moves to the server's trash, `<originals>/.trash/<item>/`, and is deleted after 30 days;
     recovering it on the iPhone puts it back. Anything with a compact copy is never trashed.
 - **Cloud copies**: the server's connectors (see below).
+- **Widgets**: what's ready to free up (size and items), the last backup (when, how many), whether
+  the server can be reached (by name) and Automatic Mode ("Tonight while charging", "Off"), on the
+  Home Screen (small, medium), the Lock Screen (circular, rectangular, inline) and Apple Watch
+  (circular, rectangular, inline, corner, and the Smart Stack, higher up when there's space to free
+  or the server can't be reached). Tapping one opens that place in the app. Locked, they say
+  "Unlock widgets in the Homespun app" and open the unlock sheet (`homespun://unlock?feature=widgets`).
 
 Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
 TestFlight builds are unlocked too while the App Store has no Premium product; once it exists,
@@ -125,6 +131,31 @@ cd Apps/Homespun && xcodegen generate && open Homespun.xcodeproj
 
 The Xcode project is generated from `project.yml` and not committed.
 
+### Widgets and Apple Watch
+
+The widgets never use the network. Whenever what they show changes (a backup, freeing up space,
+the server's answer, Automatic Mode, Premium), the app writes a small status (`Shared/StatusSnapshot.swift`:
+counts, sizes, dates and the server's name; no photos, file names or addresses) into the App Group
+`group.photos.homespun.app` (`.dev` for Debug builds), at most every few seconds and off the main thread,
+and asks WidgetKit to redraw only when the facts changed. It sends the same status to the watch with
+WatchConnectivity (the application context, and complication data when the facts changed). Homespun on
+Apple Watch (`HomespunWatch`, watchOS 26, installed with the iPhone app) keeps it in its own App Group
+for its widgets and shows it on one screen; it can't reach the server itself, so it says how old the
+news is and, after 6 hours, "Open Homespun on your iPhone". Relative dates are drawn by the system, so
+they stay current without redrawing.
+
+| Target | Bundle ID | Source |
+|---|---|---|
+| `HomespunWidgets` (iPhone widgets) | `photos.homespun.app.widgets` | `Widgets/`, `Shared/` |
+| `HomespunWatch` (watch app) | `photos.homespun.app.watchkitapp` | `HomespunWatch/`, `Shared/` |
+| `HomespunWatchWidgets` (watch widgets) | `photos.homespun.app.watchkitapp.widgets` | `Widgets/`, `Shared/` |
+
+Debug builds add `.dev` after `photos.homespun.app`, like the app. Links from the widgets:
+`homespun://free-up`, `activity`, `server`, `automatic` and `unlock?feature=widgets`. Debug builds
+launched with `-widgetDemo ready|away|nothing|locked|unpaired` show made-up facts in the widgets.
+`HomespunWidgetTests` draws every size in every state; with `TEST_RUNNER_HOMESPUN_WIDGET_SHOTS=<folder>`
+it saves them as PNGs.
+
 ### TestFlight
 
 With an Apple Developer Program membership: register the bundle ID `photos.homespun.app`, create
@@ -136,7 +167,8 @@ ASC_KEY_ID=<key id> ASC_ISSUER_ID=<issuer id> Apps/Homespun/scripts/testflight.s
 ```
 
 It archives a Release build without signing (so it works over SSH, where the login keychain is
-locked), signs the export with Apple's cloud-managed distribution certificate, uploads it with
+locked), signs each bundle ad hoc with its entitlements (the App Group; an unsigned bundle has none
+for the export to keep), signs the export with Apple's cloud-managed distribution certificate, uploads it with
 `altool`, and gives it a new build number. `scripts/asc.py` talks to the App Store Connect API
 with the same key: `asc.py testers` creates the internal group "Homespun Team" (every build, no
 review) and adds the team's users, `asc.py wait` waits for processing, `asc.py builds` lists builds,

@@ -7,6 +7,9 @@ Apps/Homespun/*.xcodeproj/
 Apps/Homespun/Local.xcconfig
 .wrangler/
 Apps/Homespun/Homespun/Info.plist
+Apps/Homespun/HomespunWidgets/Info.plist
+Apps/Homespun/HomespunWatch/Info.plist
+Apps/Homespun/HomespunWatchWidgets/Info.plist
 
 # CI results and Python caches (ci/)
 ci-results/
