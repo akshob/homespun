@@ -94,48 +94,6 @@ final class DuoLayoutUITests: XCTestCase {
         attach(app, "unfolded again, Server")
     }
 
-    /// Scrolled to the middle of the library, unfolding, turning and folding keep the item that was in
-    /// the middle of the screen in view, without a crash (one was reported unfolding on the grid).
-    /// Scrolled while folded: XCTest's gestures don't reach the open Duo. The app reports where its
-    /// grid is (`-perfMonitor`).
-    @MainActor func testFoldingMidLibraryKeepsTheItemInView() throws {
-        guard let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"] else {
-            throw XCTSkip("Run on the iPhone Duo with run-class.sh and DUO_POSES=1.")
-        }
-        let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "YES", "-perfMonitor", "YES"]
-        pose("folded", file: poses)
-        app.launch()
-        XCTAssertTrue(app.wait(width: 0..<500), "didn't fold")
-        let grid = app.descendants(matching: .any)["grid"].firstMatch
-        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 30), "no photos in the Library")
-        for _ in 0..<4 {
-            grid.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-                .press(forDuration: 0.05, thenDragTo: grid.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8)),
-                       withVelocity: .fast, thenHoldForDuration: 0)
-        }
-        sleep(3)
-        let start = app.gridReport()
-        guard start["grid.bottom", default: 0] - start["grid.offset", default: 0] > 300 else {
-            throw XCTSkip("The library is too short to be scrolled to its middle.")
-        }
-        let anchor = start["grid.anchor", default: -1]
-        attach(app, "mid-library, folded")
-        // Unfolded, turned, folded again (it ends folded, where the grid's own scrolling tests run).
-        for (name, wide) in [("landscape", true), ("portrait", false), ("folded", false)] {
-            pose(name, file: poses)
-            XCTAssertTrue(name == "folded" ? app.wait(width: 0..<500) : app.wait(wide: wide), "the screen didn't turn \(name)")
-            sleep(2)
-            XCTAssertEqual(app.state, .runningForeground, "crashed: \(name)")
-            let now = app.gridReport()
-            XCTAssertTrue(now["grid.first", default: .nan] <= anchor && anchor <= now["grid.last", default: .nan],
-                          "\(name): item \(anchor) isn't in view (\(now["grid.first", default: -1])–\(now["grid.last", default: -1]))")
-            XCTAssertEqual(now["grid.jumps", default: 0], 0, "\(name): the grid jumped")
-            XCTAssertGreaterThan(app.gridItems().allElementsBoundByIndex.filter { app.isOnScreen($0) }.count, 0, "\(name): the grid is blank")
-            attach(app, "mid-library, \(name)")
-        }
-    }
-
     // MARK: - Checks
 
     /// A full row of cells runs edge to edge with only the hairline spacing between them.
@@ -300,16 +258,6 @@ final class DuoLayoutUITests: XCTestCase {
 }
 
 private extension XCUIApplication {
-    /// What the grid reports about itself with `-perfMonitor` (where it is, the items in view).
-    @MainActor func gridReport() -> [String: Double] {
-        var values: [String: Double] = [:]
-        for part in descendants(matching: .any)["perf.monitor"].label.split(separator: ";") {
-            let pair = part.split(separator: "=", maxSplits: 1)
-            if pair.count == 2, let value = Double(pair[1]) { values[String(pair[0])] = value }
-        }
-        return values
-    }
-
     /// The fullest row of grid cells on screen, left to right: whole cells, clear of the title and of the
     /// status accessory and tab bar at the bottom (a tap there lands on them).
     @MainActor func gridRow() -> [XCUIElement] {
@@ -371,7 +319,7 @@ private extension XCUIApplication {
 
     /// Waits until the window's width is in `range`.
     @MainActor func wait(width range: Range<CGFloat>) -> Bool {
-        let deadline = Date().addingTimeInterval(30)
+        let deadline = Date().addingTimeInterval(15)
         repeat {
             if range.contains(windows.firstMatch.frame.width) { return true }
             usleep(500_000)

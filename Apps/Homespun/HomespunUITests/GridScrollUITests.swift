@@ -12,14 +12,12 @@ final class GridScrollUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    /// On iPhone Duo with poses (`ci/ui.sh` with `DUO_POSES=1`): the file `ui.sh` watches to fold and turn it.
+    private let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"]
+
     @MainActor private func launch() throws {
-        // On iPhone Duo with poses (ci/ui.sh DUO_POSES=1): folded, where XCTest's gestures reach the app.
-        if let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"] {
-            try "folded".write(toFile: poses, atomically: true, encoding: .utf8)
-            let deadline = Date().addingTimeInterval(90)
-            while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
-            sleep(3)
-        }
+        // Folded, where XCTest's gestures reach the app.
+        pose("folded")
         app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "YES", "-perfMonitor", "YES"]
         app.launch()
@@ -99,6 +97,34 @@ final class GridScrollUITests: XCTestCase {
             XCTAssertTrue(now.value("grid.first") <= anchor && anchor <= now.value("grid.last"),
                           "turned \(orientation.rawValue): item \(anchor) isn't in view (\(now.value("grid.first"))–\(now.value("grid.last")))")
             XCTAssertEqual(now.value("grid.jumps"), start.value("grid.jumps"))
+        }
+    }
+
+    /// iPhone Duo, scrolled to the middle of the library: unfolding, turning and folding keep the item
+    /// in the middle of the screen in view, without a crash (one was reported unfolding on the grid).
+    /// It scrolls folded: XCTest's gestures don't reach the open Duo.
+    @MainActor func testFoldingMidLibraryKeepsTheItemInView() throws {
+        guard poses != nil else { throw XCTSkip("Folds iPhone Duo (ci/ui.sh with DUO_POSES=1).") }
+        try launch()
+        let start = try settled()
+        guard start.value("grid.bottom") - start.value("grid.top") > 2_000 else { throw XCTSkip("The library is short.") }
+        for _ in 0..<3 { swipe(by: 250) }
+        let middle = try settled(changedFrom: start)
+        let anchor = middle.value("grid.anchor")
+        shot("mid-library, folded")
+        // Unfolded, turned, folded again.
+        for (name, wide) in [("landscape", true), ("portrait", false), ("folded", false)] {
+            pose(name)
+            XCTAssertTrue(waitForWindow { name == "folded" ? $0.width < 500 : $0.width > 500 && ($0.width > $0.height) == wide },
+                          "the screen didn't turn \(name)")
+            sleep(2)
+            XCTAssertEqual(app.state, .runningForeground, "crashed: \(name)")
+            let now = report()
+            XCTAssertTrue(now.value("grid.first") <= anchor && anchor <= now.value("grid.last"),
+                          "\(name): item \(anchor) isn't in view (\(now.value("grid.first"))–\(now.value("grid.last")))")
+            XCTAssertEqual(now.value("grid.jumps"), middle.value("grid.jumps"), "\(name): the grid jumped")
+            XCTAssertFalse(app.gridItems().allElementsBoundByIndex.filter { app.isOnScreen($0) }.isEmpty, "\(name): the grid is blank")
+            shot("mid-library, \(name)")
         }
     }
 
@@ -224,6 +250,36 @@ final class GridScrollUITests: XCTestCase {
         let from = grid.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35))
         from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: points)), withVelocity: .fast,
                    thenHoldForDuration: 0)
+    }
+
+    // MARK: iPhone Duo's poses
+
+    /// Asks `ui.sh` to fold or turn iPhone Duo (nothing elsewhere), then waits until it has.
+    @MainActor private func pose(_ name: String) {
+        guard let poses else { return }
+        XCTAssertNoThrow(try name.write(toFile: poses, atomically: true, encoding: .utf8))
+        let deadline = Date().addingTimeInterval(90)
+        while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: poses), "nobody turned the simulator \(name)")
+        sleep(3)
+    }
+
+    /// A screenshot by `ui.sh` (XCTest's own shows the cover, black while the Duo is open).
+    @MainActor private func shot(_ name: String) {
+        guard let poses else { return }
+        try? "shot \(name)".write(toFile: poses, atomically: true, encoding: .utf8)
+        let deadline = Date().addingTimeInterval(30)
+        while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
+    }
+
+    /// Waits until the window's frame is as wanted (a slow machine takes a while to fold or turn).
+    @MainActor private func waitForWindow(_ wanted: (CGRect) -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(30)
+        repeat {
+            if wanted(app.windows.firstMatch.frame) { return true }
+            usleep(500_000)
+        } while Date() < deadline
+        return false
     }
 
     // MARK: Reading the grid
