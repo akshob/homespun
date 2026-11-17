@@ -228,6 +228,9 @@ struct LibraryState: Equatable, Sendable {
 }
 
 extension LibraryState.Cell {
+    /// A compact copy whose original is at home and not on this iPhone: Restore Original brings it back.
+    var canRestore: Bool { badge == .backedUp }
+
     /// Has no copy on the server yet (including items being worked on).
     var isNotBackedUp: Bool {
         switch badge {
@@ -852,7 +855,8 @@ struct GridData: Sendable {
             }
             key = month
             if cell.isNotBackedUp { open += 1 }
-            if cell.canCompact || cell.canFree { selectable.insert(cell.id) }
+            // Under Original at Home, what can be restored; elsewhere, what can be backed up or freed.
+            if filter == .atHome ? cell.canRestore : cell.canCompact || cell.canFree { selectable.insert(cell.id) }
             positions[cell.id] = index
             ids.append(cell.id)
         }
@@ -919,7 +923,7 @@ struct GridCell: View {
             .overlay(alignment: .topTrailing) { BadgeView(badge: cell.badge, size: typeSize.isAccessibilitySize ? 28 : 20).padding(6) }
             .overlay { if selected { Color.white.opacity(0.2) } }
             .overlay(alignment: .bottomTrailing) {
-                if selecting { selectionMark(selected, selectable: cell.canCompact || cell.canFree).padding(6) }
+                if selecting { selectionMark(selected, selectable: cell.canCompact || cell.canFree || cell.canRestore).padding(6) }
             }
             .contentShape(Rectangle())
             .task(id: ThumbnailKey(item: initial.id, pixels: pixels)) { await loadThumbnail() }
@@ -1135,9 +1139,11 @@ extension Badge {
         }
     }
 
-    /// "compact copy after December 15", or for a kept favorite, "favorites keep their original".
+    /// "compact copy after December 15", for a kept favorite "favorites keep their original", and
+    /// for one kept with Keep Original (`distantFuture`) "kept full size on this iPhone".
     static func compactLater(_ date: Date?) -> String {
         guard let date else { return "favorites keep their original" }
+        if date == .distantFuture { return "kept full size on this iPhone" }
         return date <= Date() ? "compact copy on the next run"
             : "compact copy after " + date.formatted(.dateTime.month(.wide).day())
     }

@@ -34,6 +34,7 @@ final class DuoLayoutUITests: XCTestCase {
             XCTAssertTrue(app.wait(wide: name == "landscape"), "the screen didn't turn \(name)")
             checkGrid(app, columns: columns, pose: name)
             checkItem(app, pose: name)
+            checkFreeUp(app, pose: name)
             checkActivity(app, pose: name)
             checkServer(app, pose: name)
         }
@@ -140,6 +141,45 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(details.waitForNonExistence(timeout: 5), "\(pose): Details didn't close")
         app.closeItem()
         XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10), "\(pose): no grid after closing")
+    }
+
+    /// Free Up Space takes the whole screen: the chosen item compared side by side (beside or
+    /// stacked, whichever shows the photo larger) with the review beside it held wide and under it
+    /// held tall, Keep Original under it; never a sheet over a sheet.
+    @MainActor private func checkFreeUp(_ app: XCUIApplication, pose: String) {
+        app.openTab("Library")
+        let offer = app.buttons["accessory.action"]
+        guard offer.waitForExistence(timeout: 10) else { return XCTFail("\(pose): no Free Up offer") }
+        offer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let original = app.descendants(matching: .any)["compare.image.original"]
+        let compact = app.descendants(matching: .any)["compare.image.compact"]
+        XCTAssertTrue(original.waitForExistence(timeout: 15) && compact.waitForExistence(timeout: 15),
+                      "\(pose): Free Up Space doesn't compare side by side")
+        XCTAssertTrue(app.descendants(matching: .any)["compare.compact"].waitForExistence(timeout: 30), "\(pose): no compact copy")
+        sleep(2)
+        attach(app, "\(pose), Free Up Space")
+        let screen = app.windows.firstMatch.frame
+        // The original first, the copy after it: beside it or under it, whichever shows the photo larger.
+        XCTAssertTrue(original.frame.maxX <= compact.frame.minX + 1 || original.frame.maxY <= compact.frame.minY + 1,
+                      "\(pose): the original and the copy overlap, or the copy comes first")
+        if pose == "landscape" {
+            XCTAssertTrue(app.buttons["remove.compare"].firstMatch.frame.maxX < original.frame.minX + 1,
+                          "\(pose): the review isn't beside the comparison")
+        } else {
+            XCTAssertTrue(app.buttons["remove.compare"].firstMatch.frame.minY > max(original.frame.maxY, compact.frame.maxY) - 1,
+                          "\(pose): the review isn't under the comparison")
+        }
+        // Each photo fills its pane one way (a portrait photo its height, a landscape one its width).
+        for image in [original, compact] {
+            XCTAssertTrue(image.frame.height > screen.height * 0.4 || image.frame.width > screen.width * 0.3,
+                          "\(pose): the comparison is small: \(image.frame)")
+        }
+        XCTAssertTrue(app.buttons["remove.keepOriginal"].exists, "\(pose): no Keep Original")
+        XCTAssertEqual(app.sheets.count, 0, "\(pose): a sheet")
+        let close = app.buttons["remove.close"]
+        XCTAssertTrue(close.exists, "\(pose): no Close")
+        close.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10), "\(pose): Close didn't return")
     }
 
     /// The newest run opens by itself; held wide, the list stays beside it.

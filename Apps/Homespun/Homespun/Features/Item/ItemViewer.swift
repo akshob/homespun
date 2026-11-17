@@ -16,6 +16,8 @@ struct ItemViewer: View {
     /// the stack on the open iPhone Duo; inside this pushed screen it nested stacks and SwiftUI trapped.
     @Binding var details: String?
     @State private var current: String?
+    /// Restore Original's sheet is up.
+    @State private var restoring = false
     /// Where in `ids` the pages on hand are centred: only a window around the item shown is laid
     /// out (a library has tens of thousands of items; laying them all out froze the app).
     @State private var center: Int
@@ -89,6 +91,12 @@ struct ItemViewer: View {
         }
         // Compare goes over the viewer, and Back leaves it: Details close.
         .onDisappear { details = nil }
+        .sheet(isPresented: $restoring) {
+            RestoreOriginalSheet(controller: model.library, compacts: [shown]) { restored in
+                // The compact copy shown is gone: back to the grid, where the original is.
+                if restored { dismiss() }
+            }
+        }
         .navigationDestination(item: $comparing) { id in
             CompareView(model: model, compactIdentifier: id)
         }
@@ -200,7 +208,7 @@ struct ItemViewer: View {
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
-        if let cell, ItemAction.for(cell) != .none {
+        if let cell, ItemAction.for(cell) != .none || ItemAction.canRestore(cell, immich: immich) {
             ToolbarItem(placement: .bottomBar) { action(cell) }
         }
     }
@@ -233,7 +241,14 @@ struct ItemViewer: View {
             .accessibilityHint(blocked ?? "Makes its compact copy now instead of waiting. Nothing is removed from this iPhone.")
             .accessibilityIdentifier("item.action")
         case .none:
-            EmptyView()
+            if ItemAction.canRestore(cell, immich: immich) {
+                Button { restoring = true } label: {
+                    TitleAndIcon(title: "Restore Original", systemImage: "arrow.uturn.backward.circle")
+                }
+                .buttonStyle(.glassProminent).tint(Theme.accent)
+                .accessibilityHint("Brings the full-size original back from \(server) and deletes this compact copy. iOS asks first.")
+                .accessibilityIdentifier("item.action")
+            }
         }
     }
 

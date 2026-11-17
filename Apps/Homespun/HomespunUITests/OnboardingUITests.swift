@@ -260,7 +260,9 @@ final class OnboardingUITests: XCTestCase {
         compare.tap()
         XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
         attach("1.13 Compare")
-        app.descendants(matching: .any)["compare.close"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        // Compare opened inside the sheet: Back returns to the review.
+        XCTAssertTrue(app.buttons["remove.keepOriginal"].exists, "Compare isn't inside Free Up Space")
+        app.goBack(from: "Compare")
         let free = app.buttons["remove.confirm"]
         XCTAssertTrue(free.waitForExistence(timeout: 5))
         XCTAssertTrue(free.label.hasPrefix("They Look Right"), free.label)

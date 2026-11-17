@@ -24,8 +24,10 @@ JSONL
 export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="Home Mac (copies)"
 $SERVER_BIN import $DATA/copies.jsonl
 $SERVER_BIN serve > $DATA.log 2>&1 &
-SERVER=$!; sleep 3
-CODE=$($SERVER_BIN pair --minutes 180 | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
+SERVER=$!
+wait_for_server $PORT || exit 1
+CODE=$(pairing_output | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
+[[ -n $CODE ]] || { echo "no pairing code"; exit 1; }
 RESULT=$RESULTS/$NAME.xcresult; rm -rf $RESULT
 cd $APP
 TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_COPIES=3 \

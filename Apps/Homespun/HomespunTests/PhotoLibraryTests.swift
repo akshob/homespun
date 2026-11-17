@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import CoreLocation
 import Foundation
+import HomespunCore
 import HomespunTestSupport
 import Photos
 import Testing
@@ -72,6 +73,41 @@ import Testing
             #expect(PhotoLibrary.isCompactCopy(compact) && !PhotoLibrary.isCompactCopy(original))
             #expect(PhotoLibrary.albumMembers().contains(compact.localIdentifier))
         }
+    }
+
+    /// Restore Original: a Live Photo's files go back into Photos byte for byte, with the compact
+    /// copy's favorite and its place in the person's own albums (not Homespun's).
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func restoredOriginalsAreTheSameBytesWithTheCopysChoices() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pairing = UUID().uuidString
+        let photo = directory.appendingPathComponent("photo/IMG_0042.HEIC"), motion = directory.appendingPathComponent("paired_video/IMG_0042.MOV")
+        for url in [photo, motion] { try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true) }
+        try Synthetic.photo(at: photo, .init(type: .heic, contentIdentifier: pairing))
+        try await Synthetic.video(at: motion, .init(width: 960, height: 720, frames: 30, bitrate: 8_000_000, audioChannels: 1,
+                                                    liveIdentifier: pairing))
+        let expected = [ServerAPI.ResourceRole.photo: try Fingerprint.sha256(of: photo), .pairedVideo: try Fingerprint.sha256(of: motion)]
+        // One of the person's albums the compact copy was in.
+        let box = Box()
+        try await PHPhotoLibrary.shared().performChanges {
+            box.value = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: "Trip \(UUID().uuidString.prefix(4))")
+                .placeholderForCreatedAssetCollection.localIdentifier
+        }
+        let album = try #require(box.value)
+
+        let restored = try asset(try await PhotoLibrary.restore([(.photo, photo), (.pairedVideo, motion)], favorite: true, hidden: false,
+                                                                 albums: [album]))
+        #expect(restored.mediaSubtypes.contains(.photoLive) && restored.isFavorite && !restored.isHidden)
+        #expect(PhotoLibrary.userAlbums(containing: restored) == [album])
+        #expect(!PhotoLibrary.albumMembers().contains(restored.localIdentifier))
+        let names = PHAssetResource.assetResources(for: restored).map(\.originalFilename)
+        #expect(names.contains("IMG_0042.HEIC") && names.contains("IMG_0042.MOV"))
+        let check = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: check) }
+        let held = try await ServerCompactor.export(PHAssetResource.assetResources(for: restored), to: check) { _ in }
+        #expect(Dictionary(held.map { ($0.role, $0.descriptor.sha256) }, uniquingKeysWith: { a, _ in a }) == expected)
+        #expect(!PhotoLibrary.isEdited(restored))
     }
 }
 

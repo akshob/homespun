@@ -32,6 +32,8 @@ actor CompactLedger {
         var serverAssetID: String
         var originalBytes: Int
         var backedUpAt: Date
+        /// Kept full size on this iPhone (Keep Original): no compact copy until the person makes one.
+        var kept: Bool? = nil
     }
 
     private let url: URL
@@ -121,6 +123,41 @@ actor CompactLedger {
         guard entries[original]?.serverAssetID == nil else { return }
         backedUp[original] = BackedUp(serverAssetID: serverAssetID, originalBytes: originalBytes, backedUpAt: Date())
         try saveBackedUp()
+    }
+
+    /// Keep Original: the compact copies are gone and the originals stay, backed up and kept full
+    /// size (automatic mode and Free Up Space leave them alone; Make Compact Copy starts over).
+    func keepOriginals(_ items: [(original: String, serverAssetID: String, originalBytes: Int)]) throws {
+        guard !items.isEmpty else { return }
+        for item in items {
+            backedUp[item.original] = BackedUp(serverAssetID: item.serverAssetID, originalBytes: item.originalBytes,
+                                               backedUpAt: Date(), kept: true)
+        }
+        try saveBackedUp()
+        try record([:], removing: items.map(\.original))
+    }
+
+    /// Restore Original: each original is back in Photos as `restored` (its new identifier). With
+    /// its compact copy deleted it's kept full size; with the copy kept, the two are an ordinary
+    /// pair again (ready to free up).
+    func restored(_ items: [(key: String, restored: String, entry: Entry)], copiesDeleted: Bool) throws {
+        guard !items.isEmpty else { return }
+        if copiesDeleted {
+            for item in items {
+                backedUp[item.restored] = BackedUp(serverAssetID: item.entry.serverAssetID ?? "", originalBytes: item.entry.originalBytes,
+                                                   backedUpAt: Date(), kept: true)
+            }
+            try saveBackedUp()
+            try record([:], removing: items.map(\.key))
+        } else {
+            var pairs: [String: Entry] = [:]
+            for item in items {
+                var entry = item.entry
+                entry.savedAt = Date()
+                pairs[item.restored] = entry
+            }
+            try record(pairs, removing: items.map(\.key))
+        }
     }
 
     /// Forgets items that were removed on this iPhone before their compact copy (the server has

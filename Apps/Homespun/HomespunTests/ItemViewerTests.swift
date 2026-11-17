@@ -72,6 +72,10 @@ import Testing
         #expect(!ItemAction.canCompare(atHome, immich: true))
         #expect(!ItemAction.canCompare(.init(id: "copy", badge: .compactCopy, original: nil, canFree: false), immich: false))
         #expect(!ItemAction.canCompare(.init(id: "a", badge: .none, original: nil, canFree: false), immich: false))
+        // Restore Original: only what's at home and not on this iPhone, and not from Immich.
+        #expect(ItemAction.canRestore(atHome, immich: false) && !ItemAction.canRestore(atHome, immich: true))
+        #expect(!ItemAction.canRestore(ready, immich: false))
+        #expect(!ItemAction.canRestore(.init(id: "copy", badge: .compactCopy, original: nil, canFree: false), immich: false))
     }
 
     @Test func originalComesFromThePhoneThenTheServer() {

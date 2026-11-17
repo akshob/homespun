@@ -77,10 +77,10 @@ final class TelemetryUITests: XCTestCase {
         // The stub answers HS-TEST01; the real service a new number.
         XCTAssertTrue(id.label.hasPrefix("Report HS-"), id.label)
         attach(app, "Report sent")
+        let number = String(id.label.dropFirst("Report ".count))
         app.buttons["report.done"].tap()
 
         // Its number can be found again later: Help and About › Sent Reports.
-        let number = String(id.label.dropFirst("Report ".count))
         let sent = app.buttons["help.sentReports"]
         XCTAssertTrue(sent.waitForExistence(timeout: 10), "no Sent Reports")
         sent.tap()

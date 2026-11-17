@@ -295,6 +295,77 @@ enum PhotoLibrary {
         return AlbumReference(collection: created)
     }
 
+    /// The resource type a file of `role` is added back to Photos as (Restore Original); nil for
+    /// one Photos makes itself.
+    static func type(for role: ServerAPI.ResourceRole) -> PHAssetResourceType? {
+        switch role {
+        case .photo: .photo
+        case .video: .video
+        case .audio: .audio
+        case .pairedVideo: .pairedVideo
+        case .alternatePhoto: .alternatePhoto
+        case .fullSizePhoto: .fullSizePhoto
+        case .fullSizeVideo: .fullSizeVideo
+        case .fullSizePairedVideo: .fullSizePairedVideo
+        case .adjustmentData: .adjustmentData
+        case .adjustmentBasePhoto: .adjustmentBasePhoto
+        case .adjustmentBaseVideo: .adjustmentBaseVideo
+        case .adjustmentBasePairedVideo: .adjustmentBasePairedVideo
+        case .photoProxy, .other: nil
+        }
+    }
+
+    /// The person's own albums an item is in (not Homespun's), to put a restored original in them too.
+    static func userAlbums(containing asset: PHAsset) -> [String] {
+        var albums: [String] = []
+        PHAssetCollection.fetchAssetCollectionsContaining(asset, with: .album, options: nil).enumerateObjects { album, _, _ in
+            if album.assetCollectionSubtype == .albumRegular, album.localizedTitle != albumTitle, album.canPerform(.addContent) {
+                albums.append(album.localIdentifier)
+            }
+        }
+        return albums
+    }
+
+    /// Whether the person edited this item in Photos (its edits wouldn't carry over to another).
+    static func isEdited(_ asset: PHAsset) -> Bool {
+        PHAssetResource.assetResources(for: asset).contains { $0.type == .adjustmentData }
+    }
+
+    /// Adds an original back to Photos from its files (`shouldMoveFile`: they're temporary), with
+    /// the favorite, hidden and album choices the compact copy had. Returns its local identifier.
+    static func restore(_ files: [(role: ServerAPI.ResourceRole, url: URL)], favorite: Bool, hidden: Bool,
+                        albums: [String]) async throws -> String {
+        let typed = files.compactMap { file in type(for: file.role).map { (type: $0, url: file.url) } }
+        guard !typed.isEmpty else { throw Failure.importFailed("nothing to add") }
+        let collections = AlbumsReference(albums: PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: albums,
+                                                                                          options: nil))
+        let box = IdentifierBox()
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                let request = PHAssetCreationRequest.forAsset()
+                for file in typed {
+                    let options = PHAssetResourceCreationOptions()
+                    options.originalFilename = file.url.lastPathComponent
+                    options.shouldMoveFile = true
+                    request.addResource(with: file.type, fileURL: file.url, options: options)
+                }
+                request.isFavorite = favorite
+                request.isHidden = hidden
+                guard let placeholder = request.placeholderForCreatedAsset else { return }
+                box.value = placeholder.localIdentifier
+                collections.albums.enumerateObjects { album, _, _ in
+                    PHAssetCollectionChangeRequest(for: album)?.addAssets([placeholder] as NSArray)
+                }
+            }
+        } catch {
+            throw Failure.importFailed(error.localizedDescription)
+        }
+        guard let identifier = box.value else { throw Failure.importFailed("no asset was created") }
+        return identifier
+    }
+
+    private struct AlbumsReference: @unchecked Sendable { let albums: PHFetchResult<PHAssetCollection> }
+
     /// Creates the compact asset in the Homespun album and returns its local identifier.
     static func save(_ plan: ImportPlan) async throws -> String {
         let album = try await album()

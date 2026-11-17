@@ -113,7 +113,8 @@ struct Fixture {
         configuration.originalsDirectory = originals.map { base.appendingPathComponent($0, isDirectory: true) }
         configuration.maximumChunkBytes = 1 << 20
         server = try await HomespunServer(configuration: configuration, connectors: connectors, approver: approver,
-                                          approvalPause: 0.3, builtIn: [])
+                                          // Long enough for a slow machine's requests to fit inside it.
+                                          approvalPause: 2, builtIn: [])
     }
 
     func pair(_ client: some TestClientProtocol) async throws -> String {
@@ -692,7 +693,7 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
 
         // Denied: no device, and a pause before the next question.
         #expect(try await ask("Too soon").status == .tooManyRequests)
-        try await Task.sleep(for: .milliseconds(400))
+        try await Task.sleep(for: .milliseconds(2100))
         approver.lock.withLock { approver.answer = false }
         let denied = try await ask("Stranger").decode(ServerAPI.ApprovalTicket.self)
         #expect(try await answer(denied) == .init(state: .denied))
@@ -1299,6 +1300,9 @@ final class ProblemLog: @unchecked Sendable {
         let bytes = try Data(contentsOf: media.photo)
         let whole = try await client.call(path, token: token)
         #expect(whole.status == .ok && whole.data == bytes && whole.headers[.contentType] == "image/jpeg")
+        #expect(whole.headers[.contentDisposition] == "attachment; filename=\"IMG_0001.JPG\"; filename*=UTF-8''IMG_0001.JPG")
+        #expect(Routes.contentDisposition("Akshob’s photo.heic")
+                == "attachment; filename=\"Akshob_s photo.heic\"; filename*=UTF-8''Akshob%E2%80%99s%20photo.heic")
         #expect(try await client.call(path).status == .unauthorized)
         var headers = HTTPFields()
         headers[.authorization] = "Bearer \(token)"
