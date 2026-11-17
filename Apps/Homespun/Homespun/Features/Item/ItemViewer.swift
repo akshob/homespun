@@ -82,15 +82,22 @@ struct ItemViewer: View {
         .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbar(cell) }
         .itemScreen()
-        .onAppear { PerfMonitor.shared.endAfterFrame("open") }
+        .onAppear {
+            PerfMonitor.shared.endAfterFrame("open")
+            ItemPresence.shared.shown = shown
+        }
         .onChange(of: current) { _, id in
+            ItemPresence.shared.shown = id
             zoomed = false
             follow(id)
             // Open Details follow the item shown.
             if details != nil, let id { details = id }
         }
         // Compare goes over the viewer, and Back leaves it: Details close.
-        .onDisappear { details = nil }
+        .onDisappear {
+            details = nil
+            ItemPresence.shared.shown = nil
+        }
         .sheet(isPresented: $restoring) {
             RestoreOriginalSheet(controller: model.library, compacts: [shown]) { restored in
                 // The compact copy shown is gone: back to the grid, where the original is.
@@ -309,6 +316,9 @@ final class ItemPresence {
     static let shared = ItemPresence()
     private var count = 0
     var isOpen: Bool { count > 0 }
+    /// The item the viewer shows (nil when it isn't on screen): the Library keeps its cell in view
+    /// behind the viewer and zooms back into it.
+    var shown: String?
 
     fileprivate func opened() { count += 1 }
 

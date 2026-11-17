@@ -422,45 +422,10 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// Set by the screen to recompute badges after the library changed.
     var onChange: (@MainActor () -> Void)?
 
-    /// One observable per cell a view shows, so a badge change redraws only that cell (every cell
-    /// reading the whole state redrew them all on each change).
-    @MainActor @Observable
-    final class CellBox {
-        var cell: LibraryState.Cell
-        init(_ cell: LibraryState.Cell) { self.cell = cell }
-    }
-
-    @ObservationIgnored private var boxes: [String: CellBox] = [:]
-
-    func box(for cell: LibraryState.Cell) -> CellBox {
-        if let box = boxes[cell.id] { return box }
-        let box = CellBox(state.cell(cell.id) ?? cell)
-        boxes[cell.id] = box
-        return box
-    }
-
-    /// Keeps the boxes in step with a new state (only cells that changed are touched).
-    private func syncBoxes(_ ids: some Sequence<String>) {
-        for id in ids {
-            guard let box = boxes[id] else { continue }
-            if let cell = state.cell(id) {
-                if box.cell != cell { box.cell = cell }
-            } else {
-                boxes[id] = nil
-            }
-        }
-    }
-
     func asset(_ id: String) -> PHAsset? { source.asset(id) }
 
     /// The item's kind, length and date (nil until the library is read).
     func info(_ id: String) -> MediaInfo? { media[id] }
-
-    /// The asset, read in the background (a cell's thumbnail).
-    func loadAsset(_ id: String) async -> PHAsset? {
-        let source = source
-        return await Task.detached(priority: .userInitiated) { Unchecked(value: source.asset(id)) }.value.value
-    }
 
     private struct Loaded: @unchecked Sendable {
         let assets: PHFetchResult<PHAsset>
@@ -585,7 +550,6 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
             let old = state
             state = built
             releaseInBackground(old)
-            syncBoxes(Array(boxes.keys))
         }
         if read, !loaded { loaded = true }
     }
@@ -596,7 +560,6 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         guard !changes.isEmpty else { return }
         for (id, value) in changes { inputs.job[id] = value }
         state.apply(job: changes)
-        syncBoxes(changes.keys)
     }
 
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
@@ -817,11 +780,6 @@ struct GridData: Sendable {
         var range: Range<Int>
         /// Items in it not backed up yet.
         var open: Int
-
-        /// The section's identity in the grid: its own type, so it never matches a cell's position
-        /// (an `Int`) when the grid scrolls to a cell.
-        struct Key: Hashable, Sendable { let id: Int }
-        var key: Key { Key(id: id) }
     }
 
     var cells: [LibraryState.Cell] = []
@@ -879,230 +837,13 @@ extension PHAuthorizationStatus {
     var allowsReading: Bool { self == .authorized || self == .limited }
 }
 
-/// One photo in the grid: thumbnail, badge, selection, and video length or Live Photo mark.
-/// Select mode and what's selected. Cells read it themselves, so a change redraws them directly:
-/// a lazy grid doesn't reliably rebuild cells when a value passed down to them changes.
+/// Select mode and what's selected.
 @MainActor @Observable
 final class GridSelection {
     var active = false
     var ids = Set<String>() { didSet { version &+= 1 } }
     /// Bumped on every change, for work keyed to the selection (cheaper than comparing sets).
     private(set) var version = 0
-}
-
-struct GridCell: View {
-    /// What the grid had when it laid this cell out; the cell reads its current state from its
-    /// box, so a new badge redraws this cell alone.
-    let initial: LibraryState.Cell
-    let library: LibraryModel
-    let selection: GridSelection
-    var serverName = "your server"
-    /// The thumbnail's side in pixels (the same size the preheater caches).
-    var pixels: CGFloat = 360
-    @State private var image: UIImage?
-    /// The item `image` shows: cells are kept by position, so when items shift (one deleted, an
-    /// older one synced in) a cell's item changes and its thumbnail must follow.
-    @State private var imageItem: String?
-    @Environment(\.dynamicTypeSize) private var typeSize
-
-    private var selecting: Bool { selection.active }
-
-    var body: some View {
-        let cell = library.box(for: initial).cell
-        let info = library.info(initial.id)
-        let selected = selection.active && selection.ids.contains(initial.id)
-        return Theme.fill
-            .aspectRatio(1, contentMode: .fit)
-            .overlay {
-                if let image {
-                    Image(uiImage: image).resizable().scaledToFill()
-                }
-            }
-            .clipped()
-            .overlay(alignment: .bottomLeading) { MediaMark(info: info) }
-            .overlay(alignment: .topTrailing) { BadgeView(badge: cell.badge, size: typeSize.isAccessibilitySize ? 28 : 20).padding(6) }
-            .overlay { if selected { Color.white.opacity(0.2) } }
-            .overlay(alignment: .bottomTrailing) {
-                if selecting { selectionMark(selected, selectable: cell.canCompact || cell.canFree || cell.canRestore).padding(6) }
-            }
-            .contentShape(Rectangle())
-            .task(id: ThumbnailKey(item: initial.id, pixels: pixels)) { await loadThumbnail() }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Self.name(info))
-            .accessibilityValue(cell.badge.spoken(server: serverName, compactAfter: cell.compactAfter))
-            .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
-            .accessibilityIdentifier("asset")
-    }
-
-    @ViewBuilder private func selectionMark(_ selected: Bool, selectable: Bool) -> some View {
-        if selected {
-            Image(systemName: "checkmark.circle.fill").symbolRenderingMode(.palette)
-                .foregroundStyle(.white, Theme.BadgeColor.accent).font(.title3)
-                .background(Circle().fill(.white).padding(2))
-        } else if selectable {
-            Circle().strokeBorder(.white, lineWidth: 1.5).frame(width: 22, height: 22).shadow(radius: 1)
-        }
-    }
-
-    nonisolated(unsafe) private static let dateStyle = Date.FormatStyle(date: .abbreviated, time: .shortened)
-
-    private static func name(_ info: MediaInfo?) -> String {
-        guard let info else { return "Item" }
-        let kind = switch info.kind {
-        case .video: "Video"
-        case .livePhoto: "Live Photo"
-        case .photo: "Photo"
-        }
-        guard let date = info.created else { return kind }
-        return "\(kind), \(dateStyle.format(date))"
-    }
-
-    /// The thumbnail from Photos' cache (filled ahead of scrolling by `ThumbnailPreheater`): a quick
-    /// low-quality one first, then the real one, decoded off the main thread. Ends when the cell goes.
-    private struct ThumbnailKey: Hashable {
-        let item: String
-        let pixels: CGFloat
-    }
-
-    private func loadThumbnail() async {
-        // Another item's picture never stays on: blank until this item's arrives (a new size keeps
-        // the old picture meanwhile).
-        if imageItem != initial.id {
-            image = nil
-            imageItem = initial.id
-        }
-        guard let asset = await library.loadAsset(initial.id), !Task.isCancelled else { return }
-        for await result in ThumbnailPreheater.thumbnails(for: asset, side: pixels, manager: library.thumbnails) {
-            let prepared = await result.byPreparingForDisplay() ?? result
-            guard !Task.isCancelled else { return }
-            image = prepared
-        }
-    }
-}
-
-/// A video's length or the Live Photo mark, in a cell's corner.
-private struct MediaMark: View {
-    let info: MediaInfo?
-
-    var body: some View {
-        switch info?.kind {
-        case .video?:
-            Text(Duration.seconds(Int64(info?.seconds ?? 0)).formatted(Self.style))
-                .font(.caption2.weight(.semibold)).foregroundStyle(.white).shadow(radius: 2)
-                .padding(4)
-        case .livePhoto?:
-            Image(systemName: "livephoto").font(.caption2).foregroundStyle(.white).shadow(radius: 2).padding(4)
-        default:
-            EmptyView()
-        }
-    }
-
-    private static let style = Duration.TimeFormatStyle(pattern: .minuteSecond)
-}
-
-/// Fills Photos' thumbnail cache ahead of scrolling: the visible items plus about a screen each
-/// way, started and stopped as the window moves (Apple's preheat pattern for large grids), with
-/// high-quality caching off so fast scrolling stays quick.
-@MainActor
-final class ThumbnailPreheater {
-    private let library: LibraryModel
-    private var visible = Set<Int>()
-    private var cached = Set<String>()
-    private var lastCenter = -1
-    private var side: CGFloat = 0
-    private var order: [String] = []
-
-    init(library: LibraryModel) {
-        self.library = library
-        library.thumbnails.allowsCachingHighQualityImages = false
-    }
-
-    private static let queue = DispatchQueue(label: "photos.homespun.preheat", qos: .userInitiated)
-
-    nonisolated static func options() -> PHImageRequestOptions {
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = false
-        return options
-    }
-
-    /// The items in grid order, and the thumbnail side in pixels; a change resets the cache.
-    func configure(order: [String], side: CGFloat) {
-        guard side != self.side || order.count != self.order.count || order.first != self.order.first
-                || order.last != self.order.last else {
-            self.order = order
-            return
-        }
-        stopAll()
-        self.order = order
-        self.side = side
-        lastCenter = -1
-    }
-
-    func appeared(_ position: Int) {
-        visible.insert(position)
-        update()
-    }
-
-    func disappeared(_ position: Int) {
-        visible.remove(position)
-    }
-
-    /// The positions to keep thumbnails for: a screen's worth each side of the cells on screen that
-    /// are in the grid. Cells of a longer grid (before a filter made it shorter, or while iPhone Duo
-    /// unfolds) can still report themselves, so positions past the end don't count. Nil if none is left.
-    nonisolated static func window(visible: Set<Int>, count: Int) -> (range: ClosedRange<Int>, center: Int, span: Int)? {
-        let shown = visible.filter { $0 >= 0 && $0 < count }
-        guard let low = shown.min(), let high = shown.max() else { return nil }
-        let span = max(high - low + 1, 24)
-        return (max(0, low - span)...min(count - 1, high + span), (low + high) / 2, span)
-    }
-
-    private func update() {
-        guard side > 0, let (window, center, span) = Self.window(visible: visible, count: order.count) else { return }
-        // Only when the window moved by a third of a screen.
-        guard lastCenter < 0 || abs(center - lastCenter) > span / 3 else { return }
-        lastCenter = center
-        let wanted = Set(order[window])
-        let start = wanted.subtracting(cached), stop = cached.subtracting(wanted)
-        let size = CGSize(width: side, height: side)
-        let source = library.source, manager = Unchecked(value: library.thumbnails)
-        // Reading assets faults them in from Photos' database: in the background, in order.
-        Self.queue.async {
-            if !stop.isEmpty {
-                manager.value.stopCachingImages(for: source.assets(stop), targetSize: size, contentMode: .aspectFill,
-                                                options: Self.options())
-            }
-            if !start.isEmpty {
-                manager.value.startCachingImages(for: source.assets(start), targetSize: size, contentMode: .aspectFill,
-                                                 options: Self.options())
-            }
-        }
-        cached = wanted
-    }
-
-    func stopAll() {
-        let manager = Unchecked(value: library.thumbnails)
-        Self.queue.async { manager.value.stopCachingImagesForAllAssets() }
-        cached = []
-        visible = []
-    }
-
-    /// A thumbnail request as a stream: the quick image, then the final one.
-    static func thumbnails(for asset: PHAsset, side: CGFloat, manager: PHCachingImageManager) -> AsyncStream<UIImage> {
-        AsyncStream { continuation in
-            let request = manager.requestImage(for: asset, targetSize: CGSize(width: side, height: side), contentMode: .aspectFill,
-                                               options: options()) { image, info in
-                if let image { continuation.yield(image) }
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if !degraded || info?[PHImageErrorKey] != nil || (info?[PHImageCancelledKey] as? Bool) == true {
-                    continuation.finish()
-                }
-            }
-            continuation.onTermination = { _ in manager.cancelImageRequest(request) }
-        }
-    }
 }
 
 /// A badge on a white halo: palette symbols that differ by shape, so meaning never rests on colour.

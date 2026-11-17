@@ -25,14 +25,6 @@ import Testing
     }
 }
 
-/// Drag-to-select finds the cell under a finger among the cells on screen.
-@Test func cellFramesFindTheCellUnderAPoint() {
-    let frames = CellFrames()
-    frames.rects = [0: CGRect(x: 0, y: 0, width: 99, height: 99), 1: CGRect(x: 101, y: 0, width: 99, height: 99)]
-    #expect(frames.position(at: CGPoint(x: 150, y: 50)) == 1)
-    #expect(frames.position(at: CGPoint(x: 100, y: 50)) == nil) // the gap
-}
-
 /// Partly folded and held tall (like a laptop), iPhone Duo's crease runs across the screen; Compare's
 /// split knob moves off it (below, or above when the line ends first) and stays put otherwise.
 @Test func compareKnobAvoidsAnActiveFold() {
@@ -40,16 +32,4 @@ import Testing
     #expect(CompareView.knobY(middle: 300, line: 100...500, fold: fold) == 300)
     #expect(CompareView.knobY(middle: 390, line: 100...700, fold: fold) == 413.5 + 22 + 8)
     #expect(CompareView.knobY(middle: 390, line: 200...440, fold: fold) == 373.5 - 22 - 8)
-}
-
-/// Cells of a longer grid can still report themselves after a filter made it shorter (or while
-/// iPhone Duo unfolds): the preheat window ignores them instead of trapping (reports HS-UHJXHW,
-/// HS-5MX4AG).
-@MainActor @Test func preheatWindowIgnoresCellsPastTheEnd() {
-    #expect(ThumbnailPreheater.window(visible: [33_000, 33_010], count: 285) == nil)
-    let mixed = ThumbnailPreheater.window(visible: [3, 10, 33_000], count: 285)
-    #expect(mixed?.range == 0...34 && mixed?.center == 6 && mixed?.span == 24)
-    #expect(ThumbnailPreheater.window(visible: [270, 284], count: 285)?.range == 246...284)
-    #expect(ThumbnailPreheater.window(visible: [], count: 285) == nil)
-    #expect(ThumbnailPreheater.window(visible: [0], count: 0) == nil)
 }
