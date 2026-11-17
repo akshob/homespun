@@ -13,8 +13,9 @@ case $1 in
   iphone)
     run iphone zsh $D/ui.sh iphone iPhone-18-Pro \
       HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests,HomespunUITests/PremiumUITests 8794
-    # A bigger library (the newest cells far from the oldest; the filter crash needed it).
-    run library env EXTRA=200 zsh $D/ui.sh library iPhone-18-Pro HomespunUITests/LibraryUITests 8799
+    # A bigger library (the newest cells far from the oldest; the filter crash needed it; paging
+    # through items and turning the iPhone needs a few).
+    run library env EXTRA=200 zsh $D/ui.sh library iPhone-18-Pro HomespunUITests/LibraryUITests,HomespunUITests/ItemPagingUITests 8799
     run later zsh $D/later.sh later iPhone-18-Pro 8796
     run copies zsh $D/copies.sh copies 8792
     # These expect a fresh install of their own.
@@ -24,7 +25,8 @@ case $1 in
   duo)
     run duo-cover zsh $D/ui.sh duo-cover iPhone-Duo \
       HomespunUITests/LibraryUITests,HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests 8795
-    run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo HomespunUITests/DuoLayoutUITests 8793 open
+    run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo \
+      HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests 8793 open
     ;;
 esac
 (( ${#failed} == 0 )) || { echo "failed: ${failed[*]}"; exit 1; }

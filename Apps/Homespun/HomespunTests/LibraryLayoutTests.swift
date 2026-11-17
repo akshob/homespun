@@ -25,6 +25,20 @@ import Testing
     }
 }
 
+/// Free Up Space's grid beside the comparison (a 320–400 point column): as many square thumbnails of
+/// at least 72 points as fit inside the card, filling it edge to edge.
+@Test func freeUpGridFillsTheCard() {
+    for width in stride(from: 320.0, through: 400, by: 4) {
+        let (count, side) = FreeUpColumnLayout.columns(width: width)
+        let inside = width - 2 * (FreeUpColumnLayout.margin + FreeUpColumnLayout.padding)
+        #expect(side >= 72)
+        #expect(abs(CGFloat(count) * side + CGFloat(count - 1) * 6 - inside) < 0.001)
+        #expect(CGFloat(count + 1) * 72 + CGFloat(count) * 6 > inside, "another column would fit at \(width)")
+    }
+    #expect(FreeUpColumnLayout.columns(width: 320).count == 3 && FreeUpColumnLayout.columns(width: 400).count == 4)
+    #expect(FreeUpColumnLayout.columns(width: 0).count == 1)
+}
+
 /// Drag-to-select finds the cell under a finger among the cells on screen.
 @Test func cellFramesFindTheCellUnderAPoint() {
     let frames = CellFrames()

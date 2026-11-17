@@ -134,6 +134,29 @@ import Testing
         #expect(SplitPosition.spoken(0.333) == "Split at 33 percent")
     }
 
+    /// Pages are whole strides apart (a page and the gap after it), the one under the middle is the
+    /// one shown, and a new size puts the same page back at its own offset.
+    @Test func pagerPagesAreExactStrides() {
+        let pager = PagerGeometry(page: CGSize(width: 400, height: 800), gap: 20, count: 35_000)
+        #expect(pager.offset(of: 3) == 1260)
+        #expect(pager.frame(of: 3) == CGRect(x: 1260, y: 0, width: 400, height: 800))
+        #expect(pager.contentSize == CGSize(width: 35_000 * 420, height: 800))
+        #expect(pager.offset(of: 40_000) == pager.offset(of: 34_999) && pager.offset(of: -1) == 0)
+        // Past half a stride, the next page is the one shown; never one outside the items.
+        #expect(pager.index(at: 1260 + 209) == 3 && pager.index(at: 1260 + 211) == 4)
+        #expect(pager.index(at: -300) == 0 && pager.index(at: 1e9) == 34_999)
+        // At rest one page is on screen (the gap after it is empty); mid-swipe, two.
+        #expect(pager.pages(from: 1260, to: 1680) == 3..<4)
+        #expect(pager.pages(from: 1400, to: 1820) == 3..<5)
+        #expect(pager.pages(from: 1661, to: 1675).isEmpty)
+        #expect(pager.pages(from: 0, to: 1e12) == 0..<35_000)
+        #expect(PagerGeometry(page: .zero, gap: 20, count: 10).pages(from: 0, to: 100).isEmpty)
+        // Folding: the old offset is another page at the new width; the page's own offset isn't.
+        let folded = PagerGeometry(page: CGSize(width: 300, height: 700), gap: 20, count: 35_000)
+        #expect(folded.index(at: pager.offset(of: 3)) != 3)
+        #expect(folded.index(at: folded.offset(of: 3)) == 3)
+    }
+
     @Test func photoFitsInsideTheScreen() {
         #expect(ZoomScrollView.fitted(CGSize(width: 4032, height: 3024), in: CGSize(width: 400, height: 800))
             == CGSize(width: 400, height: 300))
