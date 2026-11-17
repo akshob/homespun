@@ -13,7 +13,7 @@ final class ThumbnailCell: UICollectionViewCell {
     private let mark = UIImageView()
     private let ring = UIView()
     /// The element VoiceOver and the UI tests see: a button over the whole cell.
-    private let element = UIView()
+    private let element = Element()
     private var request: PHImageRequestID?
     private weak var loader: ThumbnailLoader?
     private(set) var identifier: String?
@@ -86,12 +86,25 @@ final class ThumbnailCell: UICollectionViewCell {
         ring.isHidden = !selected
     }
 
-    /// A button for VoiceOver (nil: hidden, like the picture it is).
-    func accessibility(label: String?, identifier: String?, selected: Bool) {
+    /// A button for VoiceOver (nil: hidden, like the picture it is) that does `activate` when chosen.
+    func accessibility(label: String?, identifier: String?, selected: Bool, activate: (() -> Void)?) {
         element.isAccessibilityElement = label != nil
         element.accessibilityLabel = label
         element.accessibilityIdentifier = identifier
         element.accessibilityTraits = selected ? [.button, .selected] : .button
+        element.activate = activate
+    }
+
+    /// Chosen with VoiceOver, it acts at once rather than touching its middle (which a sheet's
+    /// buttons can cover while the row is scrolled under them).
+    private final class Element: UIView {
+        var activate: (() -> Void)?
+
+        override func accessibilityActivate() -> Bool {
+            guard let activate else { return false }
+            activate()
+            return true
+        }
     }
 }
 
@@ -211,7 +224,8 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
         let thumbnail = items[item]
         cell.show(thumbnail.photo, loader: loader)
         cell.decorate(marked: thumbnail.marked, selected: thumbnail.selected)
-        cell.accessibility(label: accessibility?.label, identifier: accessibility?.identifier, selected: thumbnail.selected)
+        cell.accessibility(label: accessibility?.label, identifier: accessibility?.identifier, selected: thumbnail.selected,
+                           activate: accessibility == nil ? nil : { [weak self] in self?.tap(item) })
     }
 
     func dequeue(_ view: UICollectionView, at indexPath: IndexPath) -> UICollectionViewCell {

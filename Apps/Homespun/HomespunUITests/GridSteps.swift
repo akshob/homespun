@@ -272,14 +272,13 @@ extension XCUIApplication {
 
     /// Taps one of Free Up Space's compact copies. They're a UIKit row in a SwiftUI page, which
     /// XCTest doesn't scroll by itself: in a half-height sheet the row can be under the buttons at the
-    /// bottom (a tap there lands on them), so the page is dragged up by its amount first.
+    /// bottom (a tap there lands on them), so the sheet is pulled up to full height first, by its bar.
     @MainActor func tapCompactCopy(_ thumbnail: XCUIElement) {
-        let buttons = self.buttons["remove.confirm"], amount = staticTexts["remove.bytes"]
-        for _ in 0..<4 {
-            guard thumbnail.exists, buttons.exists, amount.exists, thumbnail.frame.maxY > buttons.frame.minY - 12 else { break }
-            let distance = thumbnail.frame.maxY - buttons.frame.minY + 60
-            let from = amount.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-            from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -distance)))
+        let buttons = self.buttons["remove.confirm"], close = self.buttons["remove.close"]
+        for _ in 0..<2 {
+            guard thumbnail.exists, buttons.exists, close.exists, thumbnail.frame.maxY > buttons.frame.minY - 12 else { break }
+            let bar = close.coordinate(withNormalizedOffset: CGVector(dx: 3, dy: 0.5))
+            bar.press(forDuration: 0.1, thenDragTo: bar.withOffset(CGVector(dx: 0, dy: -500)))
             sleep(1)
         }
         thumbnail.tap()
