@@ -152,8 +152,23 @@ final class ServerModeUITests: XCTestCase {
         let filter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Original at Home")).firstMatch
         XCTAssertTrue(filter.waitForExistence(timeout: 5), "no Original at Home filter")
         filter.tap()
-        app.buttons["select.start"].tap()
-        guard let pick = atHome.allElementsBoundByIndex.last(where: { app.isOnScreen($0) }) else { return XCTFail("nothing to select") }
+        // The menu closes and the grid shows only what's at home before Select can start.
+        let shown = Date().addingTimeInterval(10)
+        while filter.exists || !atHome.firstMatch.exists, Date() < shown { sleep(1) }
+        let start = app.buttons["select.start"]
+        let done = app.buttons["select.done"]
+        for _ in 0..<3 where !done.exists {
+            start.tap()
+            _ = done.waitForExistence(timeout: 3)
+        }
+        XCTAssertTrue(done.exists, "Select didn't start")
+        guard let pick = atHome.allElementsBoundByIndex.last(where: { app.isOnScreen($0) }) else {
+            attach(app, "nothing to select")
+            let tree = XCTAttachment(string: app.debugDescription)
+            tree.name = "screen elements"; tree.lifetime = .keepAlways
+            add(tree)
+            return XCTFail("nothing to select")
+        }
         pick.tap()
         let selected = app.buttons["restore.selected"]
         XCTAssertTrue(selected.waitForExistence(timeout: 5) && selected.label.contains("1"), selected.label)
@@ -184,7 +199,8 @@ final class ServerModeUITests: XCTestCase {
 
         app.openTab("Server")
         let toggle = app.automaticToggle
-        XCTAssertTrue(app.scrollTo(toggle), "automatic mode isn't offered")
+        // Clear of the status bar at the bottom (iPhone Duo's cover is short).
+        XCTAssertTrue(app.reveal(toggle), "automatic mode isn't offered")
         // A switch's knob on an iPhone; the checkbox itself on iPhone Duo's inner display.
         if toggle.switches.firstMatch.exists { toggle.switches.firstMatch.tap() } else { toggle.tap() }
         app.buttons["Everything not backed up yet"].firstMatch.tap()

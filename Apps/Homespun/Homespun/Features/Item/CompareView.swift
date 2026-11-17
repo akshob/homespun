@@ -452,10 +452,11 @@ private struct CompareScreen: ViewModifier {
     }
 }
 
-/// The original and the compact copy each whole, next to each other when wide and one above the
-/// other when tall; zooming or moving one moves the other. On a partly folded iPhone Duo the two
-/// meet at the crease, so neither has it across it.
-private struct SideBySide: View {
+/// The original and the compact copy each whole, next to each other or one above the other,
+/// whichever shows the photo larger (a tall photo side by side, a wide one stacked); zooming or
+/// moving one moves the other. On a partly folded iPhone Duo the two meet at the crease, so neither
+/// has it across it.
+struct SideBySide: View {
     var original: UIImage?
     var compact: UIImage?
     var originalLabel: String
@@ -464,7 +465,7 @@ private struct SideBySide: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let panes = Self.panes(size: proxy.size, fold: Self.fold(proxy))
+            let panes = Self.panes(size: proxy.size, fold: Self.fold(proxy), photo: (original ?? compact)?.size)
             ZStack(alignment: .topLeading) {
                 pane(original, label: originalLabel, id: "compare.original", image: "compare.image.original")
                     .frame(width: panes.first.width, height: panes.first.height)
@@ -500,10 +501,20 @@ private struct SideBySide: View {
         return proxy.reservedRegions(kind: .division).first?.frame
     }
 
-    /// Two halves: left and right when wide, top and bottom when tall; at the fold when it crosses
-    /// the stage the long way and leaves room on both sides.
-    static func panes(size: CGSize, fold: CGRect?, gap: CGFloat = 2) -> (first: CGRect, second: CGRect) {
-        let wide = size.width >= size.height
+    /// Two halves: at the fold when it crosses the stage the long way and leaves room on both sides;
+    /// otherwise left and right or top and bottom, whichever fits the photo larger (without a photo
+    /// yet: left and right when the stage is wide).
+    static func panes(size: CGSize, fold: CGRect?, photo: CGSize? = nil, gap: CGFloat = 2) -> (first: CGRect, second: CGRect) {
+        var wide = size.width >= size.height
+        if let photo, photo.width > 0, photo.height > 0 {
+            func shown(_ pane: CGSize) -> CGFloat {
+                let scale = min(pane.width / photo.width, pane.height / photo.height)
+                return photo.width * scale * photo.height * scale
+            }
+            let beside = shown(CGSize(width: (size.width - gap) / 2, height: size.height))
+            let stacked = shown(CGSize(width: size.width, height: (size.height - gap) / 2))
+            if beside != stacked { wide = beside > stacked }
+        }
         if let fold {
             if fold.height > fold.width, fold.minX > 120, fold.maxX < size.width - 120 {
                 return (CGRect(x: 0, y: 0, width: fold.minX, height: size.height),
