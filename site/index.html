@@ -12,37 +12,65 @@
 <body>
   <header>
     <a class="name" href="/">Homespun</a>
-    <nav><a href="/setup">Setup</a><a href="/privacy">Privacy</a><a href="/support">Support</a></nav>
+    <nav><a href="/setup">Setup</a><a href="/privacy">Privacy</a><a href="/support">Support</a><a href="https://github.com/akshob/homespun">Source</a></nav>
   </header>
   <main>
     <h1>Originals at home.<br>Compact copies on your iPhone.</h1>
-    <p class="lead">Homespun keeps full-quality photos and videos on a server you own, and puts small,
+    <p class="lead">Homespun keeps full-quality photos and videos on a computer you own, and puts small,
       good-looking copies back in Apple Photos.</p>
-    <p class="status">In development. Not yet on the App Store.</p>
-    <p>Both ways of using it work in testing today: with your own server, and with Immich.</p>
+    <p class="status">In testing on TestFlight. Not yet on the App Store.</p>
 
     <h2>How it works</h2>
     <ol class="steps">
-      <li><strong>Pick</strong> the photos and videos you want to slim down.</li>
-      <li><strong>Store</strong> the originals on your server. Each one is checked byte for byte (SHA-256).</li>
+      <li><strong>Back up</strong> the photos and videos you choose. Each original goes to your server, which checks
+        it byte for byte (SHA-256) before anything else happens.</li>
       <li><strong>Get compact copies</strong> back in Apple Photos with the same date, place, and favorites.
         Live Photos stay live.</li>
-      <li><strong>Free up space</strong> if you want. Homespun asks iOS to remove an original only after your
-        server proves it holds an identical copy. iOS asks you to confirm, and the item stays in Recently Deleted.</li>
+      <li><strong>Compare, then free up space.</strong> Look at the original and its compact copy side by side, zoom
+        in on both at once, and keep any original you'd rather have full size on your iPhone. Homespun asks iOS to remove
+        an original only after your server proves it holds an identical copy. iOS asks you to confirm, and the item stays
+        in Recently Deleted.</li>
+      <li><strong>Restore an original</strong> whenever you want it back. Homespun brings it home from your server,
+        checks it, puts it in Photos with its favorite and albums, and only then removes the compact copy.</li>
     </ol>
 
-    <h2>Two ways to use it</h2>
+    <h2>On its own, if you like</h2>
+    <p>Automatic Mode backs up new photos and videos overnight while your iPhone charges. You choose when they get
+      compact copies: right away, or once they're a week to three months old, so the photos you're still sorting through
+      stay full size. Favorites keep their originals, and anything you delete on your iPhone before then is never
+      sent back. Cloud Copies will also copy each original to a cloud service, starting with OneDrive, as one more
+      backup.</p>
+
+    <h2>Where your originals live</h2>
     <div class="modes">
       <section class="mode">
-        <h3>Your own server</h3>
-        <p>Run Homespun Server on a Mac or Linux computer at home. It keeps the originals and makes the smallest copies;
-          a Mac does everything, Live Photos included. <a href="/setup">Set one up</a>.</p>
+        <h3>A Mac</h3>
+        <p>Any Mac that stays on. It makes every compact copy itself, Live Photos included.
+          <a href="/setup#mac">Set it up</a>.</p>
+      </section>
+      <section class="mode">
+        <h3>Linux or a NAS</h3>
+        <p>A Linux computer, or a NAS with Docker (Synology, QNAP, UGREEN, TrueNAS, Unraid, and others).
+          Set up <a href="/setup#linux">Linux</a> or <a href="/setup#nas">a NAS</a>.</p>
       </section>
       <section class="mode">
         <h3>With Immich</h3>
-        <p>Already back up to Immich? Homespun checks your originals there, byte for byte, and never changes them.</p>
+        <p>Already back up to Immich? Homespun uses the originals there, checks them byte for byte, and never
+          changes them. <a href="/setup#immich">Connect it</a>.</p>
       </section>
     </div>
+
+    <h2>Made for every iPhone</h2>
+    <p>Including iPhone Duo: folded it works like any iPhone; open, your library, the comparison of an original
+      with its copy, and the settings use the whole display.</p>
+
+    <h2>Free, with one purchase for automation</h2>
+    <p>Backing up, compact copies, comparing, freeing up space, and restoring originals are free. A one-time
+      purchase unlocks Automatic Mode and Cloud Copies together, on all your devices with your Apple Account.</p>
+
+    <h2>Open source</h2>
+    <p>The app and the server are <a href="https://github.com/akshob/homespun">on GitHub</a>: the app under
+      Apache-2.0, the server under AGPL-3.0. You can read every line that touches your photos, and build it yourself.</p>
 
     <h2>Why</h2>
     <p>Homespun grew out of a personal setup that shrank a 37,000-item photo library to about a fifth of its
@@ -50,7 +78,7 @@
       and nothing is deleted until a verified copy exists.</p>
   </main>
   <footer>
-    <a href="/privacy">Privacy policy</a><a href="/support">Support</a>
+    <a href="/privacy">Privacy policy</a><a href="/support">Support</a><a href="https://github.com/akshob/homespun">Source code</a>
   </footer>
 </body>
 </html>

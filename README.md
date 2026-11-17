@@ -441,10 +441,13 @@ Functionality), only from problem reports; no tracking.
 
 `site/` holds the static site for [homespun.photos](https://homespun.photos): plain HTML
 and CSS, no scripts or build step. It is hosted on Cloudflare Pages (project `homespun`).
-To deploy, with a Pages-scoped API token and the account ID in the environment:
+CI checks every change to it (`ci/site-check.py`: titles, links and anchors, nothing the
+Content-Security-Policy blocks; html-validate: valid HTML) and publishes `main` to
+homespun.photos (the `website` environment holds the Pages token). By hand, with a Pages-scoped
+API token and the account ID in the environment:
 
 ```bash
-npx wrangler@4 pages deploy site --project-name homespun --branch main
+python3 ci/site-check.py site && npx wrangler@4 pages deploy site --project-name homespun --branch main
 ```
 
 ## Roadmap
