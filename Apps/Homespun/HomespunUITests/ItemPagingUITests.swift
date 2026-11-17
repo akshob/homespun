@@ -3,7 +3,7 @@ import UIKit
 import XCTest
 
 /// Swiping between items, then turning the iPhone (folding and unfolding iPhone Duo): the item shown
-/// stays the same through every size, and each page shows its photo. No server needed; at least six
+/// stays the same through every size, and each page shows its photo; zoomed in, a swipe doesn't page. No server needed; at least six
 /// items (`EXTRA=` in ci/ui.sh). On iPhone Duo, pass `DUO_POSE_FILE` as for DuoLayoutUITests (with a
 /// `TEST_RUNNER_` prefix): the test folds and turns the simulator through it.
 final class ItemPagingUITests: XCTestCase {
@@ -73,6 +73,19 @@ final class ItemPagingUITests: XCTestCase {
         }
         viewer.swipeLeft()
         check(app, viewer, at: shown + 1, "after turning, 1 forward")
+
+        // Zoomed in, a swipe pans the photo instead of paging; zoomed out, it pages again.
+        let state = app.staticTexts["item.state"]
+        XCTAssertTrue(state.waitForExistence(timeout: 5), "no state line")
+        viewer.doubleTap()
+        XCTAssertTrue(state.waitForNonExistence(timeout: 5), "didn't zoom in")
+        viewer.swipeRight()
+        sleep(1)
+        XCTAssertEqual(position(viewer)?.index, shown + 1, "a swipe paged while zoomed in")
+        viewer.doubleTap()
+        XCTAssertTrue(state.waitForExistence(timeout: 5), "didn't zoom out")
+        viewer.swipeRight()
+        check(app, viewer, at: shown, "zoomed out, 1 back")
     }
 
     // MARK: - Checks

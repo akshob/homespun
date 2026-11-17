@@ -133,8 +133,10 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     }
 
     private(set) var ids: [String]
-    /// The page shown: the one under the middle of the screen.
+    /// The page shown: the one a swipe ended on.
     private(set) var index: Int
+    /// The page under the middle of the screen (another while a swipe is under way).
+    private var middle: Int
     private let layout = PagerLayout()
     private lazy var collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
     private let images = ItemImages()
@@ -146,6 +148,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     init(ids: [String], start: String) {
         self.ids = ids
         index = ids.firstIndex(of: start) ?? 0
+        middle = index
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -183,6 +186,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         // Keep the page shown: a new width moves every page, and UIKit keeps the old offset.
         resizing = true
         layout.anchor = index
+        middle = index
         collectionView.frame = frame
         layout.invalidateLayout()
         collectionView.contentOffset = CGPoint(x: CGFloat(index) * frame.width, y: 0)
@@ -214,6 +218,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         let id = ids.indices.contains(index) ? ids[index] : nil
         ids = new
         index = id.flatMap { new.firstIndex(of: $0) } ?? min(index, max(new.count - 1, 0))
+        middle = index
         guard isViewLoaded else { return }
         resizing = true
         layout.anchor = index
@@ -302,9 +307,29 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         guard !resizing, layout.geometry.stride > 0 else { return }
         let page = layout.geometry.index(at: scrollView.contentOffset.x)
+        // Past half a page, its neighbours start loading.
+        if page != middle, ids.indices.contains(page) {
+            middle = page
+            images.keep(ids: ids, around: page, asset: asset)
+        }
+        // Moved by VoiceOver or code rather than a finger: shown at once.
+        if !scrollView.isTracking, !scrollView.isDecelerating { show(page) }
+    }
+
+    func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { landed(scrollView) }
+
+    /// The page a swipe ends on is the one shown: its full-size image loads (not while the pages
+    /// move), and the title, toolbar and Details follow it.
+    private func landed(_ scrollView: UIScrollView) {
+        guard !resizing, layout.geometry.stride > 0 else { return }
+        show(layout.geometry.index(at: scrollView.contentOffset.x))
+    }
+
+    private func show(_ page: Int) {
         guard page != index, ids.indices.contains(page) else { return }
         let old = index
         index = page
+        middle = page
         layout.anchor = page
         for item in [old, page] {
             if let cell = collectionView.cellForItem(at: IndexPath(item: item, section: 0)) as? PageCell {
@@ -328,10 +353,15 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if !decelerate { settled() }
+        guard !decelerate else { return }
+        landed(scrollView)
+        settled()
     }
 
-    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { settled() }
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        landed(scrollView)
+        settled()
+    }
 
     private func settled() {
         guard moving else { return }
