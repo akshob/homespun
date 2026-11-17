@@ -10,6 +10,7 @@
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 TYPE=$2 ONLY=$3 PORT=$4 POSE=${5:-}
+take_sim_slot
 SIM=$(new_simulator $TYPE "HS CI $NAME $PORT")
 DATA=$CI_STATE/servers/$NAME-$PORT; rm -rf $DATA; mkdir -p $DATA/originals
 SERVER="" STUB="" WATCH=""
@@ -35,7 +36,7 @@ if [[ -n ${EXTRA:-} ]]; then
     xcrun simctl addmedia $SIM $(ls $MEDIA/*.JPG | head -$EXTRA)
 fi
 export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
-       HOMESPUN_NAME="polonium (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
+       HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
 $SERVER_BIN serve > $DATA.log 2>&1 &
 SERVER=$!; sleep 3
 # Codes last 10 minutes; a run can spend longer than that before its first test pairs.
@@ -72,6 +73,6 @@ TEST_RUNNER_HOMESPUN_REMOVE=1 \
   -resultBundlePath $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} 2>&1 | tee $RESULTS/$NAME.log | filter
 STATUS=${pipestatus[1]}
 if [[ -n ${STUB_PORT:-} ]]; then
-    python3 ${0:A:h}/telemetry-check.py $STUBLOG "polonium" "127.0.0.1:$PORT" "IMG_200" || STATUS=1
+    python3 ${0:A:h}/telemetry-check.py $STUBLOG "Home Mac" "127.0.0.1:$PORT" "IMG_200" || STATUS=1
 fi
 exit $STATUS

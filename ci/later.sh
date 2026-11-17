@@ -8,6 +8,7 @@ NAME=$1 TYPE=$2 PORT=$3 POSE=${4:-}
 MEDIA=$CI_STATE/media/later-$PORT; rm -rf $MEDIA; mkdir -p $MEDIA
 ffmpeg -v error -f lavfi -i testsrc2=size=1600x1200 -frames:v 1 -q:v 2 $MEDIA/RECENT_1.JPG
 ffmpeg -v error -f lavfi -i testsrc2=size=1280x720:rate=30:duration=2 -c:v libx264 -pix_fmt yuv420p $MEDIA/RECENT_2.MP4
+take_sim_slot
 SIM=$(new_simulator $TYPE "HS CI $NAME $PORT")
 DATA=$CI_STATE/servers/$NAME-$PORT; rm -rf $DATA; mkdir -p $DATA/originals
 SERVER=""
@@ -15,7 +16,7 @@ trap '[[ -n $SERVER ]] && kill $SERVER; cp $DATA.log $RESULTS/$NAME-server.log 2
 if [[ -n $POSE ]]; then $DUOCTL -d $SIM $POSE >/dev/null 2>&1; sleep 15; fi
 xcrun simctl privacy $SIM grant photos photos.homespun.app.dev
 xcrun simctl addmedia $SIM $SEED/IMG_2001.HEIC $SEED/IMG_2001.MOV $SEED/IMG_2002.JPG $SEED/IMG_2003.MOV $MEDIA/RECENT_1.JPG $MEDIA/RECENT_2.MP4
-export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="polonium (test)"
+export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="Home Mac (test)"
 $SERVER_BIN serve > $DATA.log 2>&1 &
 SERVER=$!; sleep 3
 CODE=$($SERVER_BIN pair --minutes 180 | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")

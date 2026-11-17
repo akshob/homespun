@@ -4,48 +4,48 @@ import HomespunCore
 import Testing
 @testable import Homespun
 
-private let mini = SetupAdvisor.Server(id: "polonium", os: .macOS, kind: .desktop, model: "Mac mini", freeBytes: 1_700_000_000_000)
+private let mini = SetupAdvisor.Server(id: "Home Mac", os: .macOS, kind: .desktop, model: "Mac mini", freeBytes: 1_700_000_000_000)
 private let studio = SetupAdvisor.Server(id: "studio", os: .macOS, kind: .desktop, model: "Mac Studio", freeBytes: 410_000_000_000)
 private let air = SetupAdvisor.Server(id: "Sam's MacBook Air", os: .macOS, kind: .laptop, model: "MacBook Air",
                                       freeBytes: 2_000_000_000_000)
-private let hydrogen = SetupAdvisor.Server(id: "hydrogen", os: .linux, kind: .desktop, freeBytes: 2_100_000_000_000)
+private let linuxBox = SetupAdvisor.Server(id: "Linux Box", os: .linux, kind: .desktop, freeBytes: 2_100_000_000_000)
 private let attic = SetupAdvisor.Server(id: "attic", os: .linux, kind: .container, model: "Synology DS923+",
                                         freeBytes: 8_000_000_000_000)
 
 /// The recommendation rules (DESIGN §6) and the words and numbers setup shows.
 struct SetupAdvisorTests {
     @Test func foundServersAreRankedMacThenNASThenLinuxWithLaptopsLast() {
-        #expect(SetupAdvisor.rank([hydrogen, air, attic, mini]).map(\.id) == ["polonium", "attic", "hydrogen", air.id])
+        #expect(SetupAdvisor.rank([linuxBox, air, attic, mini]).map(\.id) == ["Home Mac", "attic", "Linux Box", air.id])
         // Ties: more free space, then paired before.
         var small = studio
         small.freeBytes = mini.freeBytes
         small.pairedBefore = true
-        #expect(SetupAdvisor.rank([mini, studio]).map(\.id) == ["polonium", "studio"])
-        #expect(SetupAdvisor.rank([mini, small]).map(\.id) == ["studio", "polonium"])
+        #expect(SetupAdvisor.rank([mini, studio]).map(\.id) == ["Home Mac", "studio"])
+        #expect(SetupAdvisor.rank([mini, small]).map(\.id) == ["studio", "Home Mac"])
         // A server too old to pair with goes last, whatever it runs on.
         var old = mini
         old.id = "old"
         old.needsUpdate = true
-        #expect(SetupAdvisor.rank([old, hydrogen]).map(\.id) == ["hydrogen", "old"])
+        #expect(SetupAdvisor.rank([old, linuxBox]).map(\.id) == ["Linux Box", "old"])
     }
 
     @Test func aMacAndLinuxFoundRecommendsTheMacWithLinuxAnyway() throws {
-        let advice = try #require(SetupAdvisor.advise(found: [hydrogen, mini]))
+        let advice = try #require(SetupAdvisor.advise(found: [linuxBox, mini]))
         #expect(advice.layout == .recommend)
         #expect(advice.title == "We recommend your Mac")
-        #expect(advice.recommended.id == "polonium")
+        #expect(advice.recommended.id == "Home Mac")
         #expect(advice.recommended.summary == "Mac mini · Homespun running · 1.7 TB free")
         #expect(advice.reasons.map(\.text) == ["Makes every compact copy itself, Live Photos included.",
                                                "A desktop Mac that stays on at home."])
-        #expect(advice.others.map(\.title) == ["Use hydrogen Anyway"])
+        #expect(advice.others.map(\.title) == ["Use Linux Box Anyway"])
         #expect(advice.others.first?.detail == "Linux · Homespun running. Live Photo motion is compressed on this iPhone.")
-        #expect(advice.others.first?.target == .server("hydrogen"))
+        #expect(advice.others.first?.target == .server("Linux Box"))
     }
 
     @Test func oneServerFoundNeedsNothingInstalled() throws {
-        let advice = try #require(SetupAdvisor.advise(found: [hydrogen]))
+        let advice = try #require(SetupAdvisor.advise(found: [linuxBox]))
         #expect(advice.layout == .onlyOne)
-        #expect(advice.title == "hydrogen is ready to pair")
+        #expect(advice.title == "Linux Box is ready to pair")
         #expect(advice.reasons == [.init(kind: .plus, text: "Already running, so there's nothing to install."),
                                    .init(kind: .note, text: "Live Photo motion is compressed on this iPhone.")])
         #expect(advice.others.isEmpty)
@@ -57,13 +57,13 @@ struct SetupAdvisorTests {
         let advice = try #require(SetupAdvisor.advise(found: [air, studio, mini]))
         #expect(advice.layout == .chooseMac)
         #expect(advice.title == "Which Mac should keep your originals?")
-        #expect(advice.recommended.id == "polonium")
-        #expect(advice.ranked.map(\.id) == ["polonium", "studio", air.id])
+        #expect(advice.recommended.id == "Home Mac")
+        #expect(advice.ranked.map(\.id) == ["Home Mac", "studio", air.id])
         #expect(air.summary == "MacBook Air · Homespun running · sleeps when closed")
     }
 
     @Test func aNASFoundBeforeLinuxSaysWhereLivePhotosAreCompressed() throws {
-        let advice = try #require(SetupAdvisor.advise(found: [hydrogen, attic]))
+        let advice = try #require(SetupAdvisor.advise(found: [linuxBox, attic]))
         #expect(advice.title == "We recommend your NAS")
         #expect(advice.recommended.summary == "Synology DS923+ · Homespun running · 8 TB free")
         #expect(advice.reasons.map(\.kind) == [.plus, .note])

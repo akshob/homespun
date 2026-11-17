@@ -5,21 +5,24 @@ Every change is validated by GitHub Actions (`.github/workflows`), not by hand:
 | Workflow | When | What |
 |---|---|---|
 | `ci.yml` | every push | server build and tests on Linux, the telemetry Worker, the package on macOS, the app's build and unit tests (PhotoKit ones included), UI smoke |
-| `ci.yml` | pull request to `main`, or Run workflow › `full` | the whole UI suite: iPhone lane and iPhone Duo lane (folded, and open in every pose) at once |
-| `perf.yml` | nightly 3:00 Pacific, or on demand | performance budgets on a 35,000-photo iPhone Duo simulator, launch time |
-| `testflight.yml` | on demand, by the owner | archive, sign in the cloud, upload, wait until the build is ready |
+| `ci.yml` | pull request to `main`, or Run workflow › `full` | the whole UI suite, one run per machine at once: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`) and iPhone Duo (`duo-cover`, `duo-open` in every pose) |
+| `testflight.yml` | on demand, by the owner, who approves each run | archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
 
-Linux jobs run on GitHub's machines. Apple jobs run on polonium (a Mac mini) under its own macOS
-account, `homespun-ci`, with two runner instances (`polonium-1`, `polonium-2`) so the two UI lanes
-run together. That account can't read anyone else's files, the real Homespun Server's data
-(`/Volumes/Homespun`) or signing keys; the TestFlight secrets reach it only for a run the owner starts.
-Apple jobs never run for a pull request from a fork. When the repository is public, fork pull
-requests will run on GitHub's own macOS machines instead (free for public repositories), after
-the owner approves them.
+All of it runs on GitHub's own machines, free for a public repository: Linux (`ubuntu-24.04`, the
+server in the `swift:6.3-noble` container) and macOS (`xcode-27`: Xcode 27.2 with the iOS 27.2
+simulators for iPhone 18 Pro and iPhone Duo). The macOS build job builds once and passes the app,
+its tests and the release server to the other jobs as an archive (`build`). Every job starts on a
+fresh machine. Pull requests from forks run after the owner approves them and never see secrets.
+
+Performance budgets (`perf.sh`) need a Mac with a large iPhone Duo library (`setup-perf-sim.sh`,
+35,000 photos) and steady timings, which shared cloud machines don't give; the owner runs them
+nightly on a Mac of their own, from a separate private repository, so no self-hosted runner is ever
+attached to this public one.
 
 ## The scripts (`ci/`)
 
-All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo simulator runtime:
+All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo simulator runtime
+(each picks the newest runtime installed for the device):
 
 | Script | Does |
 |---|---|
@@ -27,45 +30,24 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access |
 | `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DUO_POSES=1`, `STUB_PORT=`) |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
-| `lane.sh smoke\|iphone\|duo` | the sets of runs the workflows use |
+| `lane.sh <run\|group> ...` | UI runs by name (`smoke`, `iphone`, `library`, …) or group (`iphone-all`, `duo-all`, `full`) |
+| `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
 | `summary.py <results>` | the Markdown report each job adds to its summary |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
 
-## Setting up the runner account (once, on polonium)
+On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
+(see `env.sh`).
 
-The owner does steps 1–3 (they need an administrator's password); the rest is scripted.
+## Repository settings
 
-1. Create the account and its home folder, let it log in over SSH with the same keys as yours, and
-   make the shared folder for build symbols:
-
-   ```sh
-   sudo sysadminctl -addUser homespun-ci -fullName "Homespun CI" -password -
-   sudo createhomedir -c -u homespun-ci
-   sudo dseditgroup -o edit -a homespun-ci -t user com.apple.access_ssh 2>/dev/null || true
-   sudo mkdir -p /Users/homespun-ci/.ssh && sudo cp ~/.ssh/authorized_keys /Users/homespun-ci/.ssh/
-   sudo chown -R homespun-ci:staff /Users/homespun-ci/.ssh && sudo chmod 700 /Users/homespun-ci/.ssh
-   sudo mkdir -p /Users/Shared/homespun-builds && sudo chmod 1777 /Users/Shared/homespun-builds
-   ```
-
-2. Log in to the account once on polonium's screen (Fast User Switching: menu bar › your name ›
-   Homespun CI), then switch back to yours **without logging it out**. Simulators need that session;
-   after polonium restarts, log in to it once again.
-
-3. In the repository's settings: Actions › General › "Require approval for all external
-   contributors" (for when the repository is public).
-
-4. Then, over SSH as `homespun-ci`, `ci/install-runner.sh polonium-1 <token> <duoctl folder>` and
-   `ci/install-runner.sh polonium-2 <token>` (the token from
-   `gh api -X POST repos/akshob/homespun/actions/runners/registration-token --jq .token`): each
-   downloads the Actions runner, registers it with the labels `self-hosted, macOS, homespun-ci` and
-   starts it as a launch agent. Then `ci/setup-perf-sim.sh` (about 40 minutes).
-
-5. The `testflight` environment (done): deployments from `main` only; secrets `ASC_KEY_ID`,
-   `ASC_ISSUER_ID`, `ASC_KEY_P8` (the `.p8` file's contents) and `DEVELOPMENT_TEAM`; the workflow
-   runs only for the owner. When the repository is public, add the owner as a required reviewer
-   (GitHub's free plan offers that only for public repositories).
+- Actions › fork pull requests: approval required for all outside contributors.
+- Environment `testflight`: deployments from `main` only, the owner as required reviewer; secrets
+  `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` (the `.p8` file's contents) and `DEVELOPMENT_TEAM`.
+- `main` is protected: no force pushes or deletion; changes come through pull requests whose CI
+  passed.
+- Private vulnerability reporting on.
 
 ## Reading results without opening a browser
 

@@ -19,8 +19,11 @@ for bundle in sorted(glob.glob(os.path.join(results, "*.xcresult"))):
         lines.append(f"| {name} | – | unreadable ({error.__class__.__name__}) | – |")
         continue
     passed, failed, skipped = summary.get("passedTests", 0), summary.get("failedTests", 0), summary.get("skippedTests", 0)
-    mark = "❌" if failed else "✅"
+    # A run that never got to its tests (no project, no simulator) failed too.
+    mark = "❌" if failed or passed + failed + skipped == 0 else "✅"
     lines.append(f"| {mark} {name} | {passed} | {failed} | {skipped} |")
+    if passed + failed + skipped == 0:
+        failures.append(f"- **{name}**: no tests ran (see the job's log)")
     for failure in summary.get("testFailures", []):
         text = " ".join(failure.get("failureText", "").split())[:300]
         failures.append(f"- **{name}** `{failure.get('testName', '?')}`: {text}")

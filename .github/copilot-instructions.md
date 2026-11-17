@@ -97,13 +97,15 @@ and may not exist in other checkouts.
 ## Validation runs in CI (ci/README.md)
 
 - Validate changes with GitHub Actions, not by hand: work on a branch, push (build + unit + server
-  + UI smoke), open a pull request to `main` for the full UI suite (iPhone and iPhone Duo lanes).
-  Read only the run's summary and failures (`gh run watch`, `gh run view <id> --log-failed`,
-  `gh run download` for a failure's screenshots). Run tests locally only to reproduce a failure.
-- Apple jobs run on polonium's `homespun-ci` account and never for a fork's pull request; keep
-  every job's `if:` guard when editing workflows. Test servers use their own data and ports, never
-  the real server's (`/Volumes/Homespun`, port 8787).
-- New UI test classes go into a lane in `ci/lane.sh` (with a free port); new test media into `ci/`.
+  + UI smoke), open a pull request to `main` for the full UI suite (one run per GitHub macOS machine,
+  iPhone and iPhone Duo). Read only the run's summary and failures (`gh run watch`,
+  `gh run view <id> --log-failed`, `gh run download` for a failure's screenshots). Run tests
+  locally only to reproduce a failure.
+- Everything runs on GitHub's machines (the repository is public). Never attach a self-hosted
+  runner to this repository; performance budgets run from a separate private repository. Test
+  servers use their own data and ports, never a real server's (port 8787).
+- A new UI test class goes into a run in `ci/lane.sh` (with a free port); a new run also goes into
+  the `ui` job's matrix in `.github/workflows/ci.yml`. New test media goes into `ci/`.
 
 ## Build and test
 
