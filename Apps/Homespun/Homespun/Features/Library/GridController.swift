@@ -24,8 +24,6 @@ struct GridInput {
     /// measured again only when that changes.
     var notice: AnyView
     var noticeKey: String
-    /// The item the viewer shows, if it's open: kept in view behind it, and zoomed back into.
-    var viewerItem: String?
 }
 
 /// What the grid does with taps, menus, drags and pinches.
@@ -186,6 +184,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             }
         }
         apply(data: input.data, version: input.dataVersion)
+        watchViewer()
         if PerfMonitor.shared.enabled {
             PerfMonitor.shared.blankProbe = { [weak self] in self?.blankCells() ?? (0, 0) }
         }
@@ -248,7 +247,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         selectPan.isEnabled = new.selecting
         holdDrag.isEnabled = new.selecting
         if new.newest != old.newest { showNewest() }
-        if new.viewerItem != old.viewerItem { follow(new.viewerItem) }
     }
 
     /// New items (a filter, the library changed): the item in view stays where it is on screen, or
@@ -286,7 +284,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     private func metrics() -> GridGeometry.Metrics? {
-        let insets = collectionView.adjustedContentInset
+        let insets = self.insets
         let width = collectionView.bounds.width - insets.left - insets.right
         guard width > 0, collectionView.bounds.height > 0 else { return nil }
         measureNotice(width: width)
@@ -315,7 +313,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             for case let cell as GridCell in collectionView.visibleCells { configure(cell, at: collectionView.indexPath(for: cell)) }
         }
         restore(place)
-        if let viewer = input.viewerItem { follow(viewer) }
+        // The viewer is open (folding or turning with an item open): its cell's new place, after this layout.
+        if let viewer = viewerItem { DispatchQueue.main.async { [weak self] in self?.follow(viewer) } }
         publishProbe()
     }
 
@@ -329,15 +328,25 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             : noticeHost.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude)).height.rounded(.up)
     }
 
+    /// The bars' insets. While an item is open over the grid, the grid is out of the window and has
+    /// none; it keeps the ones it had (and gets back), so following the viewer's item and the zoom's
+    /// stand-in are where they'll be.
+    private var insets: UIEdgeInsets {
+        if collectionView.window != nil { lastInsets = collectionView.adjustedContentInset }
+        return lastInsets
+    }
+
+    private var lastInsets = UIEdgeInsets.zero
+
     /// What's visible, in the grid's coordinates: the scroll view less its bars.
     private var visibleRect: CGRect {
-        let insets = collectionView.adjustedContentInset, bounds = collectionView.bounds
+        let insets = self.insets, bounds = collectionView.bounds
         return CGRect(x: 0, y: bounds.minY + insets.top, width: layout.geometry.metrics.width,
                       height: max(1, bounds.height - insets.top - insets.bottom))
     }
 
     private var offsetRange: ClosedRange<CGFloat> {
-        let insets = collectionView.adjustedContentInset
+        let insets = self.insets
         let top = -insets.top
         return top...max(top, layout.geometry.contentHeight + insets.bottom - collectionView.bounds.height)
     }
@@ -364,14 +373,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         var y = range.upperBound
         if case .item(let id, let position, let fraction) = place, let now = self.position(of: id, was: position, in: old) {
             let top = layout.geometry.top(for: .init(item: now, fraction: fraction), visibleHeight: visibleRect.height)
-            y = min(max(top - collectionView.adjustedContentInset.top, range.lowerBound), range.upperBound)
+            y = min(max(top - insets.top, range.lowerBound), range.upperBound)
         }
         setOffset(y)
         if layout.geometry.count > 0 { placed = true }
     }
 
     private func setOffset(_ y: CGFloat, animated: Bool = false) {
-        let point = CGPoint(x: -collectionView.adjustedContentInset.left, y: y)
+        let point = CGPoint(x: -insets.left, y: y)
         placedAt = animated ? nil : (y, CACurrentMediaTime() + 0.5)
         if animated { collectionView.setContentOffset(point, animated: true) } else { collectionView.contentOffset = point }
         pinned = y >= offsetRange.upperBound - 1
@@ -571,24 +580,49 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         return IndexPath(item: position - layout.geometry.monthRange(month).lowerBound, section: month)
     }
 
-    /// The viewer shows another item (or closed): keep it in view behind the viewer, like Photos, so
-    /// closing zooms into its cell.
-    private func follow(_ id: String?) {
-        guard let id, let position = data.positions[id] else {
-            // Closed: the stand-in goes once SwiftUI has finished this update.
-            if id == nil { DispatchQueue.main.async { [weak self] in if self?.input.viewerItem == nil { self?.zoom.source = nil } } }
+    /// The item the viewer shows (nil when it isn't on screen), followed through `ItemPresence`
+    /// rather than through SwiftUI, so paging the viewer doesn't update the Library screen.
+    private var viewerItem: String?
+    private var following: DispatchWorkItem?
+
+    private func watchViewer() {
+        withObservationTracking { _ = ItemPresence.shared.shown } onChange: { [weak self] in
+            // Called before the change: read it after.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.viewerChanged(ItemPresence.shared.shown)
+                    self.watchViewer()
+                }
+            }
+        }
+    }
+
+    /// The viewer showed another item, or closed. Its cell is put in view behind the viewer (like
+    /// Photos) once paging pauses, so closing zooms into it; paging itself costs the grid nothing.
+    private func viewerChanged(_ id: String?) {
+        guard id != viewerItem else { return }
+        viewerItem = id
+        following?.cancel()
+        guard let id else {
+            zoom.source = nil
             return
         }
+        guard zoom.source?.id != id else { return }
+        let work = DispatchWorkItem { [weak self] in self?.follow(id) }
+        following = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+    }
+
+    private func follow(_ id: String) {
+        guard viewerItem == id, let position = data.positions[id] else { return }
         let frame = layout.geometry.frame(ofItem: position), visible = visibleRect
         if !visible.contains(frame), collectionView.bounds.height > 0 {
             let range = offsetRange
-            setOffset(min(max(frame.midY - visible.height / 2 - collectionView.adjustedContentInset.top, range.lowerBound),
+            setOffset(min(max(frame.midY - visible.height / 2 - insets.top, range.lowerBound),
                           range.upperBound))
         }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.input.viewerItem == id, let position = self.data.positions[id] else { return }
-            self.prepareZoom(position)
-        }
+        prepareZoom(position)
     }
 
     // MARK: Scrolling
@@ -638,6 +672,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) {
+        guard scrollView.window != nil else { return }
         // The bars changed (the tab bar minimised, the accessory came, the screen turned): the newest
         // end, or the item in view, stays in view.
         if placed, !scrollView.isTracking, !scrollView.isDecelerating {
@@ -742,7 +777,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// Near the top or bottom edge the grid scrolls, faster the closer the finger.
     fileprivate func dragTick(_ link: CADisplayLink) {
         guard var point = dragPoint else { return }
-        let insets = collectionView.adjustedContentInset, offset = collectionView.contentOffset.y
+        let insets = self.insets, offset = collectionView.contentOffset.y
         let onScreen = point.y - offset, top = insets.top, bottom = collectionView.bounds.height - insets.bottom
         let edge: CGFloat = 70, fastest: CGFloat = 1_400
         var speed: CGFloat = 0

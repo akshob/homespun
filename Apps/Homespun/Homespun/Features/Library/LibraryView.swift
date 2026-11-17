@@ -215,7 +215,7 @@ struct LibraryView: View {
         GridInput(data: data, dataVersion: dataVersion, stateVersion: controller.library.state.version, selecting: selecting,
                   selectionVersion: selection.version, countsVersion: counts.version, filter: filter, paired: settings.isPaired,
                   serverName: controller.serverName, density: columns, newest: controller.newestRequests &+ newestTaps,
-                  notice: AnyView(top), noticeKey: topKey, viewerItem: ItemPresence.shared.shown)
+                  notice: AnyView(top), noticeKey: topKey)
     }
 
     private var gridActions: GridActions {
