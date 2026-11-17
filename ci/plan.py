@@ -8,6 +8,8 @@ Writes key=value lines to $GITHUB_OUTPUT and a short note to the job summary.
   app        anything the app or its tests use changed: build and unit tests
   package    macOS package tests
   ui         the UI runs, as a JSON list ([] for none)
+  site       the website changed: check it (site-check.py, html-validate)
+  deploy     publish the website to homespun.photos (main only)
 
 What runs, by event:
   pull request, ready   everything that changed; the whole UI suite
@@ -16,7 +18,8 @@ What runs, by event:
   push to a branch      nothing when the branch has an open pull request (its run covers it);
                         otherwise build and unit tests (Run workflow › smoke or full for UI runs)
   Run workflow          everything, with the UI runs asked for
-Changes to the website, design files or Markdown alone run nothing.
+Changes to design files or Markdown alone run nothing; the website alone runs only its checks (and
+its deploy, on main).
 """
 import json, os, subprocess, sys
 
@@ -50,15 +53,16 @@ def plan(env, files, open_pull_request):
     if event == "workflow_dispatch":
         ui = {"none": [], "smoke": ["smoke"], "full": FULL}[env.get("UI_INPUT") or "smoke"]
         return {"server": True, "telemetry": True, "app": True, "package": True, "ui": ui,
-                "why": f"Run workflow ({env.get('UI_INPUT') or 'smoke'})"}
+                "site": True, "deploy": ref == "main", "why": f"Run workflow ({env.get('UI_INPUT') or 'smoke'})"}
     if event == "push" and ref != "main" and open_pull_request:
         return {"server": False, "telemetry": False, "app": False, "package": False, "ui": [],
-                "why": f"{ref} has an open pull request; its run covers this commit"}
+                "site": False, "deploy": False, "why": f"{ref} has an open pull request; its run covers this commit"}
     workflow = (".github/workflows/ci.yml",)
     package = ("Package.swift", "Package.resolved")
     server = touches(files, ("Sources/", "Tests/"), package + workflow)
     telemetry = touches(files, ("services/telemetry/",), workflow)
     app = touches(files, ("Apps/", "Sources/", "ci/"), package + workflow)
+    site = any(f.startswith("site/") for f in files) or touches(files, (), workflow + ("ci/site-check.py", "ci/htmlvalidate.json"))
     draft = env.get("DRAFT") == "true"
     if not app:
         ui = []
@@ -71,6 +75,7 @@ def plan(env, files, open_pull_request):
     main_or_pr = event == "pull_request" or ref == "main"
     kind = "draft pull request" if event == "pull_request" and draft else event.replace("_", " ")
     return {"server": server, "telemetry": telemetry, "app": app, "package": server and main_or_pr, "ui": ui,
+            "site": site, "deploy": site and event == "push" and ref == "main",
             "why": f"{kind} on {ref}: {len(files)} files changed"}
 
 
@@ -90,7 +95,7 @@ def main():
         out.write("\n".join(lines) + "\n")
     summary = (f"### Plan\n{result['why']}. Server: {result['server']}, telemetry: {result['telemetry']}, "
                f"app: {result['app']}, macOS package tests: {result['package']}, "
-               f"UI: {', '.join(result['ui']) or 'none'}.\n")
+               f"UI: {', '.join(result['ui']) or 'none'}, website: {result['site']}, deploy: {result['deploy']}.\n")
     print(summary)
     if env.get("GITHUB_STEP_SUMMARY"):
         with open(env["GITHUB_STEP_SUMMARY"], "a") as out:

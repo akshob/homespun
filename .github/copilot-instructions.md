@@ -32,7 +32,8 @@ and may not exist in other checkouts.
 - Everything is Swift. Do not add Python, Node, or shell pipelines to the product.
 - `site/` is the homespun.photos website: static HTML and CSS only (no JavaScript, no
   third-party assets or analytics; `_headers` sets a strict CSP). The privacy policy there
-  must match what the app actually does; update it when data handling changes.
+  must match what the app actually does; update it when data handling changes. CI checks it
+  (`ci/site-check.py`, html-validate) and publishes `main` to homespun.photos; don't deploy by hand.
 - Code that uses `Foundation.Process` must be wrapped in `#if os(Linux) || os(macOS)`,
   because iOS has no `Process`.
 - Apple backends live in `Sources/HomespunMedia/Apple`, each file wrapped in
