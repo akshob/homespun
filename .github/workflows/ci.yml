@@ -1,40 +1,31 @@
-# Validation for every change, on GitHub's own machines (Linux, and macOS with Xcode 27.2 and the
-# iPhone 18 Pro and iPhone Duo simulators), so it runs here and not by hand (ci/README.md).
-# ci/plan.py decides what a run needs (only what changed; macOS machines are few):
-#   pull request to main: the whole UI suite, one run per machine (a draft: UI smoke)
-#   push to main: UI smoke · push to a branch: build and unit tests, or nothing if it has an open
-#   pull request · Run workflow: everything, with the UI runs chosen
-#   the website: checked when it changes; published to homespun.photos from main
-# "CI result" sums it up; main requires it. Pull requests from forks run after the owner approves.
+# The extended suite after a merge to main: what changed, with every UI run (iPhone, iPhone Duo
+# folded, iPhone Duo open in every pose) and the server's package tests on macOS; the website goes
+# live when it changed. One run at a time: a running one finishes, and only the newest waiting
+# merge runs next. A failure opens (or updates) the "main is failing" issue; a pass closes it.
+# Run workflow tests any branch: UI runs none, quick (the pull request's) or full.
 name: CI
 
 on:
   push:
-    branches: ["**"]
-    # Docs and design files need nothing. (Pull requests always run: main requires their result.)
-    paths-ignore: ["**/*.md", "design/**"]
-  pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore: ["**/*.md", "design/**"]
   workflow_dispatch:
     inputs:
       ui:
-        description: UI tests
+        description: UI runs
         type: choice
-        options: [none, smoke, full]
-        default: smoke
+        options: [none, quick, full]
+        default: quick
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-  HOMEBREW_NO_AUTO_UPDATE: "1"
-  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+  HEAD_SHA: ${{ github.sha }}
 
 jobs:
   plan:
@@ -44,227 +35,42 @@ jobs:
     outputs:
       server: ${{ steps.plan.outputs.server }}
       telemetry: ${{ steps.plan.outputs.telemetry }}
+      site: ${{ steps.plan.outputs.site }}
       app: ${{ steps.plan.outputs.app }}
       package: ${{ steps.plan.outputs.package }}
       ui: ${{ steps.plan.outputs.ui }}
-      site: ${{ steps.plan.outputs.site }}
-      deploy: ${{ steps.plan.outputs.deploy }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.HEAD_SHA }}
           fetch-depth: 0
       - id: plan
         env:
-          GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
+          MODE: ${{ github.event_name == 'workflow_dispatch' && 'manual' || 'main' }}
           REF_NAME: ${{ github.ref_name }}
-          BASE_REF: ${{ github.base_ref }}
           BEFORE: ${{ github.event.before }}
-          SHA: ${{ env.HEAD_SHA }}
-          DRAFT: ${{ github.event.pull_request.draft }}
+          SHA: ${{ github.sha }}
           UI_INPUT: ${{ inputs.ui }}
         run: python3 ci/plan.py
 
-  server-linux:
-    name: Server (Linux)
+  suite:
+    name: CI
     needs: plan
-    if: needs.plan.outputs.server == 'true'
-    runs-on: ubuntu-24.04
-    container: swift:6.3-noble
-    timeout-minutes: 45
-    env:
-      # The server notices it's in a container (/.dockerenv) and acts like a Docker install; the tests
-      # describe a Linux computer.
-      HOMESPUN_HARDWARE_KIND: desktop
-    steps:
-      - uses: actions/checkout@v4
-      - name: Libraries and tools
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends libvips-dev libsqlite3-dev libheif-plugin-libde265 ffmpeg
-      - uses: actions/cache@v4
-        with:
-          path: .build
-          key: linux-build-${{ hashFiles('Package.resolved') }}-${{ github.sha }}
-          restore-keys: linux-build-${{ hashFiles('Package.resolved') }}-
-      - name: Build
-        run: swift build --build-tests
-      - name: Test
-        run: |
-          swift test --skip-build 2>&1 | tee test.log
-          echo "### Server (Linux)" >> $GITHUB_STEP_SUMMARY
-          grep -E "Test run with|✘" test.log | tail -20 | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
-          ! grep -q "✘" test.log
+    uses: ./.github/workflows/suite.yml
+    with:
+      ref: ${{ github.sha }}
+      server: ${{ needs.plan.outputs.server == 'true' }}
+      telemetry: ${{ needs.plan.outputs.telemetry == 'true' }}
+      site: ${{ needs.plan.outputs.site == 'true' }}
+      app: ${{ needs.plan.outputs.app == 'true' }}
+      package: ${{ needs.plan.outputs.package == 'true' }}
+      ui: ${{ needs.plan.outputs.ui }}
+      retry: true
 
-  telemetry:
-    name: Telemetry Worker
-    needs: plan
-    if: needs.plan.outputs.telemetry == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: services/telemetry
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: services/telemetry/package-lock.json
-      - run: npm ci
-      - run: npm test
-
-  build:
-    name: Build (macOS)
-    needs: plan
-    if: needs.plan.outputs.app == 'true'
-    runs-on: xcode-27
-    timeout-minutes: 60
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.HEAD_SHA }}
-      - name: Tools
-        run: brew install --quiet xcodegen ffmpeg
-      - uses: actions/cache@v4
-        with:
-          path: .build
-          key: macos-build-${{ hashFiles('Package.resolved') }}-${{ env.HEAD_SHA }}
-          restore-keys: macos-build-${{ hashFiles('Package.resolved') }}-
-      - name: Build (server and app)
-        run: BUILD_ARCHIVE=${{ runner.temp }}/build.tgz zsh ci/build.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: build
-          path: ${{ runner.temp }}/build.tgz
-          retention-days: 2
-          compression-level: 0
-      - name: Keep the results of a failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-results-${{ github.run_id }}
-          path: ci-results
-          retention-days: 5
-
-  package:
-    name: Package tests (macOS)
-    needs: plan
-    if: needs.plan.outputs.package == 'true'
-    runs-on: xcode-27
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.HEAD_SHA }}
-      - name: Tools
-        run: brew install --quiet ffmpeg
-      - uses: actions/cache@v4
-        with:
-          path: .build
-          key: macos-test-${{ hashFiles('Package.resolved') }}-${{ env.HEAD_SHA }}
-          restore-keys: macos-test-${{ hashFiles('Package.resolved') }}-
-      - name: Package tests
-        run: swift test 2>&1 | tee package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
-        shell: zsh {0}
-
-  unit:
-    name: App unit tests
-    needs: build
-    runs-on: xcode-27
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.HEAD_SHA }}
-      - name: Tools
-        run: brew install --quiet xcodegen ffmpeg
-      - uses: actions/download-artifact@v4
-        with:
-          name: build
-          path: ${{ runner.temp }}
-      - name: The build of this commit
-        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd && zsh ci/build.sh
-      - name: Unit tests (and the PhotoKit ones, in the app)
-        run: zsh ci/unit.sh
-      - name: Summary
-        if: always()
-        run: python3 ci/summary.py ci-results "App unit tests"
-      - name: Keep the results of a failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: unit-${{ github.run_id }}
-          path: ci-results
-          retention-days: 5
-
-  ui:
-    name: UI (${{ matrix.run }})
-    needs: [plan, build]
-    if: needs.plan.outputs.ui != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        run: ${{ fromJSON(needs.plan.outputs.ui) }}
-    runs-on: xcode-27
-    timeout-minutes: 120
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.HEAD_SHA }}
-      - name: Tools
-        run: brew install --quiet xcodegen ffmpeg
-      - uses: actions/download-artifact@v4
-        with:
-          name: build
-          path: ${{ runner.temp }}
-      - name: The build of this commit
-        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd && zsh ci/build.sh
-      - name: UI tests
-        run: zsh ci/lane.sh ${{ matrix.run }}
-      - name: Summary
-        if: always()
-        run: python3 ci/summary.py ci-results "UI (${{ matrix.run }})"
-      - name: Keep the results of a failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ui-${{ matrix.run }}-${{ github.run_id }}
-          path: ci-results
-          retention-days: 5
-
-  site:
-    name: Website
-    needs: plan
-    if: needs.plan.outputs.site == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.HEAD_SHA }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - name: Pages, links and the Content-Security-Policy
-        run: python3 ci/site-check.py site
-      - name: Valid HTML
-        run: npx --yes html-validate@9.7.1 --config ci/htmlvalidate.json site/*.html
 
   deploy-site:
     name: Publish homespun.photos
-    needs: [plan, site]
-    if: needs.plan.outputs.deploy == 'true'
+    needs: plan
+    if: github.event_name == 'push' && needs.plan.outputs.site == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:
@@ -280,6 +86,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check it first
+        run: |
+          python3 ci/site-check.py site
+          npx --yes html-validate@9.7.1 --config ci/htmlvalidate.json site/*.html
       - name: Deploy to Cloudflare Pages
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -298,22 +108,33 @@ jobs:
           done
           echo "homespun.photos is up to date." >> $GITHUB_STEP_SUMMARY
 
-  result:
-    name: CI result
-    if: always()
-    needs: [plan, server-linux, telemetry, build, package, unit, ui, site, deploy-site]
+  report:
+    name: Report on main
+    needs: suite
+    if: always() && github.event_name == 'push' && needs.suite.result != 'skipped'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      issues: write
     steps:
-      - name: Every job that ran passed
+      - name: Open, update or close "main is failing"
         env:
-          NEEDS: ${{ toJSON(needs) }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.suite.result }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          python3 - <<'EOF'
-          import json, os
-          results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
-          print("\n".join(f"{name}: {result}" for name, result in results.items()))
-          bad = [name for name, result in results.items() if result in ("failure", "cancelled")]
-          if bad:
-              raise SystemExit(f"Not passed: {', '.join(bad)}")
-          EOF
+          title="main is failing"
+          issue=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          commit=$(echo "$GITHUB_SHA" | cut -c1-7)
+          if [[ $RESULT == success ]]; then
+            [[ -n $issue ]] && gh issue close $issue --comment "Passing again at $commit: $RUN"
+            exit 0
+          fi
+          [[ $RESULT == cancelled ]] && exit 0
+          body="The extended suite failed at $commit: $RUN"
+          if [[ -n $issue ]]; then
+            gh issue comment $issue --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
