@@ -71,13 +71,20 @@ final class ServerTabUITests: XCTestCase {
             }
             app.goBack(from: title)
         }
-        // Debug builds have Premium, so automatic mode is a switch.
-        let lower = [app.automaticToggle] + ["settings.connectors", "settings.compactCopies",
-                     "settings.devices", "settings.notifications", "settings.premium", "settings.help",
-                     "server.unpair"].map { app.buttons[$0] }
+        let lower = ["settings.automatic", "settings.connectors", "settings.compactCopies", "settings.devices",
+                     "settings.notifications", "settings.premium", "settings.help", "server.unpair"].map { app.buttons[$0] }
         for row in lower {
             XCTAssertTrue(app.reveal(row), "no \(row)")
         }
+        // Automatic mode and cloud copies say whether they're on (their switches are on their pages).
+        for (row, title) in [("settings.automatic", "Automatic Mode"), ("settings.connectors", "Cloud Copies")] {
+            let element = app.buttons[row]
+            XCTAssertTrue(app.reveal(element), "no \(row)")
+            let status = NSPredicate(format: "label BEGINSWITH %@ AND (label CONTAINS 'Off' OR label CONTAINS 'On')", title)
+            XCTAssertTrue(waitFor { status.evaluate(with: element) }, element.label)
+            XCTAssertFalse(element.label.contains("Premium"), element.label)
+        }
+        XCTAssertFalse(app.switches["automatic.toggle"].exists, "a switch for automatic mode in the list")
         attach(app, "Server, scrolled")
         for (row, title) in [("settings.automatic", "Automatic Mode"), ("settings.connectors", "Cloud Copies"),
                              ("settings.compactCopies", "Compact Copies"), ("settings.notifications", "Notifications"),

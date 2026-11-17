@@ -47,15 +47,9 @@ final class CompactLaterUITests: XCTestCase {
         let slider = app.sliders["automatic.cutoff"]
         XCTAssertEqual(slider.value as? String, "After 1 month")
         attach(app, "Automatic Mode, before")
-        app.goBack(from: "Automatic Mode")
 
-        app.openTab("Server")
-        let toggle = app.automaticToggle
-        XCTAssertTrue(app.scrollTo(toggle), "automatic mode isn't offered")
-        if toggle.switches.firstMatch.exists { toggle.switches.firstMatch.tap() } else { toggle.tap() }
-        app.buttons["Everything not backed up yet"].firstMatch.tap()
-        let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.buttons["Allow"]
-        if allow.waitForExistence(timeout: 10) { allow.tap() }
+        // Its switch is on the same page.
+        app.turnOnAutomaticMode()
         app.openTab("Library")
 
         // Old items get compact copies; the recent ones are backed up and wait.
