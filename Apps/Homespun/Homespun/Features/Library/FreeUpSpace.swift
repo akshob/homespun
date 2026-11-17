@@ -85,9 +85,9 @@ struct FreeUpSpaceScreen: View {
                     VStack(spacing: 0) {
                         comparison
                         Divider()
-                        FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, selected: selected,
+                        FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, selected: selected, brief: true,
                                          close: { dismiss() }) { selected = $0 }
-                            .frame(height: min(360, proxy.size.height * 0.4))
+                            .frame(height: min(300, proxy.size.height * 0.34))
                     }
                 } else {
                     HStack(spacing: 0) {
@@ -178,6 +178,9 @@ struct FreeUpSpacePanel: View {
     var selected: FreeUpPair? = nil
     /// The compact copies as a grid (a column beside the comparison) rather than a row.
     var grid = false
+    /// Under the comparison on the open iPhone Duo held tall: one line and the row of compact
+    /// copies, so the comparison gets the room.
+    var brief = false
     var close: () -> Void
     var compare: (FreeUpPair) -> Void = { _ in }
     @State private var somethingWrong = false
@@ -199,14 +202,14 @@ struct FreeUpSpacePanel: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: brief ? 10 : 20) {
                 switch controller.removal {
                 case .idle: review
                 case .checking(let message): checking(message)
                 case .done(let report): result(report)
                 }
             }
-            .padding(24)
+            .padding(brief ? 16 : 24)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.background)
@@ -219,6 +222,14 @@ struct FreeUpSpacePanel: View {
         if originals.isEmpty {
             ContentUnavailableView("Nothing to free up yet", systemImage: "circle.lefthalf.filled",
                                    description: Text("Back up some photos first. Their originals can then be removed here."))
+        } else if brief {
+            Text("\(LibraryController.bytes(bytes)) · \(count) original\(count == 1 ? "" : "s") safe on \(controller.serverName)")
+                .font(.headline).monospacedDigit().foregroundStyle(Theme.label)
+                .accessibilityIdentifier("remove.bytes")
+            Text("Homespun checks each original with \(controller.serverName) again, then iOS asks you. "
+                 + "Removed originals stay in Recently Deleted for 30 days.")
+                .font(.footnote).foregroundStyle(Theme.secondaryLabel)
+            if !pairs.isEmpty { strip }
         } else {
             Text(LibraryController.bytes(bytes)).font(.system(size: 44, weight: .semibold, design: .rounded))
                 .monospacedDigit().foregroundStyle(Theme.label)
@@ -265,15 +276,19 @@ struct FreeUpSpacePanel: View {
                     ForEach(pairs) { thumbnail($0) }
                 }
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 8) {
-                        ForEach(pairs) { thumbnail($0) }
-                    }
-                }
-                .frame(height: 76)
+                strip
             }
         }
         .card()
+    }
+
+    private var strip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 8) {
+                ForEach(pairs) { thumbnail($0) }
+            }
+        }
+        .frame(height: 76)
     }
 
     private func thumbnail(_ pair: FreeUpPair) -> some View {
