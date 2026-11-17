@@ -81,8 +81,8 @@ import Testing
 }
 
 @Test func pairingLinksRoundTripAndParseFromText() throws {
-    let link = PairingLink(serverURL: URL(string: "http://10.0.0.116:8787")!, code: "K7Q4-M9XT", name: "hydrogen (test)")
-    #expect(link.url.absoluteString == "homespun://pair?server=10.0.0.116:8787&code=K7Q4-M9XT&name=hydrogen%20(test)")
+    let link = PairingLink(serverURL: URL(string: "http://10.0.0.116:8787")!, code: "K7Q4-M9XT", name: "Linux Box (test)")
+    #expect(link.url.absoluteString == "homespun://pair?server=10.0.0.116:8787&code=K7Q4-M9XT&name=Linux%20Box%20(test)")
     #expect(PairingLink(link.url) == link)
     #expect(PairingLink(text: "Pairing link: \(link.url.absoluteString)\n") == link)
     let https = PairingLink(serverURL: URL(string: "https://home.example.com")!, code: "ABCD-EFGH")

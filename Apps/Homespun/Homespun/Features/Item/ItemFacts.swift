@@ -48,7 +48,7 @@ enum ItemText {
         }
     }
 
-    /// The sentence for VoiceOver: "Ready to free up, original on polonium."
+    /// The sentence for VoiceOver: "Ready to free up, original on Home Mac."
     static func spoken(_ sentence: String) -> String {
         sentence.replacingOccurrences(of: " · ", with: ", ") + "."
     }

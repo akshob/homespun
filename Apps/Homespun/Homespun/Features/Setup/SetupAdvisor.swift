@@ -108,7 +108,7 @@ enum SetupAdvisor {
         }
     }
 
-    /// Another way to go, never hidden (rule 5: never trap): "Use hydrogen Anyway", "Use Your NAS
+    /// Another way to go, never hidden (rule 5: never trap): "Use Linux Box Anyway", "Use Your NAS
     /// Instead", "Use Both (Later)".
     struct Alternative: Hashable, Sendable, Identifiable {
         enum Target: Hashable, Sendable {

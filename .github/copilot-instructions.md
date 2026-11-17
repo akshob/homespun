@@ -102,13 +102,10 @@ and may not exist in other checkouts.
   `gh run view <id> --log-failed`, `gh run download` for a failure's screenshots). Run tests
   locally only to reproduce a failure.
 - Everything runs on GitHub's machines (the repository is public). Never attach a self-hosted
-  runner to this repository; polonium runs only the nightly performance budgets, from the private
-  `akshob/homespun-perf`. Test servers use their own data and ports, never the real server's
-  (`/Volumes/Homespun`, port 8787).
+  runner to this repository; performance budgets run from a separate private repository. Test
+  servers use their own data and ports, never a real server's (port 8787).
 - A new UI test class goes into a run in `ci/lane.sh` (with a free port); a new run also goes into
   the `ui` job's matrix in `.github/workflows/ci.yml`. New test media goes into `ci/`.
-- On polonium, take a simulator slot for any simulator you boot by hand
-  (`/Users/Shared/homespun-sim-slots/with-sim-slot.sh <command>`); it has 16 GB.
 
 ## Build and test
 

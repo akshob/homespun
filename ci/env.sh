@@ -1,4 +1,4 @@
-# Sourced by the CI scripts (polonium's `homespun-ci` account, or anyone's Mac): paths and tools.
+# Sourced by the CI scripts (GitHub's macOS machines, or any Mac): paths and tools.
 #   ROOT      the checkout
 #   CI_STATE  what lasts between runs: built products, the duoctl cache, the perf simulator (~/ci)
 #   DD        Xcode's derived data for this commit (shared by the jobs of one run)
@@ -33,12 +33,12 @@ fits.sort(key=lambda r: [int(part) for part in r["version"].split(".")])
 print(fits[-1]["identifier"] if fits else "")' $1
 }
 
-# polonium has 16 GB: past two simulators at once (CI's lanes, anyone's tests) it swaps and tests
-# time out. A script takes one of the machine's simulator slots (shared by every account) before it
-# boots a simulator, in its own shell (not in $(...)), and holds it until it ends.
+# On a shared Mac, SIM_SLOTS_DIR (a folder every account can write) limits how many simulators run at
+# once (SIM_SLOTS, default 2): a script takes a slot before it boots a simulator, in its own shell
+# (not in $(...)), and holds it until it ends. Unset (GitHub's machines, one job each): no limit.
 SIM_SLOTS=${SIM_SLOTS:-2}
-SIM_SLOTS_DIR=${SIM_SLOTS_DIR:-/Users/Shared/homespun-sim-slots}
 take_sim_slot() {
+    [[ -n ${SIM_SLOTS_DIR:-} ]] || return 0
     zmodload zsh/system
     [[ -d $SIM_SLOTS_DIR ]] || { mkdir -p $SIM_SLOTS_DIR && chmod 1777 $SIM_SLOTS_DIR; }
     local waited=0 slot file
@@ -56,10 +56,11 @@ take_sim_slot() {
     done
 }
 
-# What this runner's job started (scripts, simulators), so ci/reset.sh can stop it when a job is
-# cancelled: GitHub stops only the step's own shell, and the scripts under it kept going for hours.
-JOB_STATE=$CI_STATE/jobs/${RUNNER_NAME:-}
-if [[ -n ${RUNNER_NAME:-} ]]; then
+# On a machine that keeps running after a job (a self-hosted runner, JOB_RECORD=1): what the job
+# started (scripts, simulators), so a cancelled job's leftovers can be stopped (GitHub stops only the
+# step's own shell). JOB_STATE.pids and .sims list them.
+JOB_STATE=$CI_STATE/jobs/${RUNNER_NAME:-local}
+if [[ -n ${JOB_RECORD:-} ]]; then
     mkdir -p ${JOB_STATE:h}
     print -r -- "$$ ${(j: :)${=$(ps -o lstart= -p $$)}}" >> $JOB_STATE.pids
 fi
@@ -67,7 +68,7 @@ fi
 # A fresh simulator of a device type; prints its UDID. (KEEP_SIM=1: one that outlives the job.)
 new_simulator() {
     local sim=$(xcrun simctl create "$2" com.apple.CoreSimulator.SimDeviceType.$1 $(runtime_for $1))
-    [[ -n ${RUNNER_NAME:-} && -z ${KEEP_SIM:-} ]] && print -r -- $sim >> $JOB_STATE.sims
+    [[ -n ${JOB_RECORD:-} && -z ${KEEP_SIM:-} ]] && print -r -- $sim >> $JOB_STATE.sims
     xcrun simctl boot $sim && xcrun simctl bootstatus $sim -b >/dev/null
     echo $sim
 }

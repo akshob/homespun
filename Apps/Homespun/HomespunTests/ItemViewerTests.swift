@@ -40,15 +40,15 @@ import Testing
     }
 
     @Test func sentenceSaysWhereTheOriginalIs() {
-        #expect(ItemText.sentence(.originalOnPhone, server: "polonium", immich: false)
-            == "Ready to free up · original on polonium")
-        #expect(ItemText.sentence(.originalOnPhone, server: "polonium", immich: true) == "Ready to free up · original in Immich")
-        #expect(ItemText.sentence(.backedUp, server: "polonium", immich: false) == "Original at home · on polonium")
-        #expect(ItemText.sentence(.working, server: "polonium", immich: false, job: .working("Uploading 62%"))
+        #expect(ItemText.sentence(.originalOnPhone, server: "Home Mac", immich: false)
+            == "Ready to free up · original on Home Mac")
+        #expect(ItemText.sentence(.originalOnPhone, server: "Home Mac", immich: true) == "Ready to free up · original in Immich")
+        #expect(ItemText.sentence(.backedUp, server: "Home Mac", immich: false) == "Original at home · on Home Mac")
+        #expect(ItemText.sentence(.working, server: "Home Mac", immich: false, job: .working("Uploading 62%"))
             == "Backing up · Uploading 62%")
-        #expect(ItemText.sentence(.none, server: "polonium", immich: false, job: .notYet("Not in Immich yet"))
+        #expect(ItemText.sentence(.none, server: "Home Mac", immich: false, job: .notYet("Not in Immich yet"))
             == "Not backed up yet · Not in Immich yet")
-        #expect(ItemText.spoken("Ready to free up · original on polonium") == "Ready to free up, original on polonium.")
+        #expect(ItemText.spoken("Ready to free up · original on Home Mac") == "Ready to free up, original on Home Mac.")
     }
 
     @Test func oneActionForEachState() {
@@ -147,12 +147,12 @@ import Testing
                                         savedAt: Date(), serverAssetID: "s")
         var details = ItemDetails(isLive: true, entry: entry)
         details.originalOnPhone = true
-        #expect(plain(details.footer(server: "polonium", backedUp: true) ?? "")
-            == "Motion was compressed on polonium. Saves 12.6 MB when you free up space.")
+        #expect(plain(details.footer(server: "Home Mac", backedUp: true) ?? "")
+            == "Motion was compressed on Home Mac. Saves 12.6 MB when you free up space.")
         details.originalOnPhone = false
         details.motionOnPhone = true
-        #expect(plain(details.footer(server: "polonium", backedUp: true) ?? "")
+        #expect(plain(details.footer(server: "Home Mac", backedUp: true) ?? "")
             == "Motion was compressed on this iPhone. Saved 12.6 MB on this iPhone.")
-        #expect(ItemDetails().footer(server: "polonium", backedUp: false) == nil)
+        #expect(ItemDetails().footer(server: "Home Mac", backedUp: false) == nil)
     }
 }

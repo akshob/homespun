@@ -66,7 +66,7 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
 @MainActor @Test func needsAttentionFollowsEachItemsLatestResult() {
     let start = Date(timeIntervalSince1970: 1_800_000_000)
     let runs = [
-        backUp([item("a", .saved, original: 1, compact: 1), item("b", .failed, reason: "Can't reach polonium")],
+        backUp([item("a", .saved, original: 1, compact: 1), item("b", .failed, reason: "Can't reach Home Mac")],
                at: start.addingTimeInterval(60)),
         backUp([item("a", .failed, reason: "The server is full"), item("b", .failed, reason: "full"),
                 item("c", .notYet, reason: "Not in Immich yet"), item("d", .failed, reason: "Couldn't download from iCloud")],
@@ -75,13 +75,13 @@ private func backUp(_ items: [RunHistory.Item], at end: Date, trigger: RunHistor
     // b was tried again and failed again; a worked the second time.
     let items = RunHistory.needsAttention(runs)
     #expect(items.map(\.assetID).sorted() == ["b", "c", "d"])
-    #expect(items.first { $0.assetID == "b" }?.reason == "Can't reach polonium")
+    #expect(items.first { $0.assetID == "b" }?.reason == "Can't reach Home Mac")
 
-    let groups = AttentionCause.group(items, server: "polonium")
+    let groups = AttentionCause.group(items, server: "Home Mac")
     #expect(groups.map(\.cause.section) == ["Server", "Immich", "This iPhone"])
-    #expect(groups.map(\.cause.title) == ["Couldn't reach polonium", "Not in Immich yet", "Couldn't download from iCloud"])
-    #expect(AttentionCause.of(item("x", .failed, reason: "polonium is almost full (3.1 GB free)."), server: "polonium").title
-            == "polonium is almost full")
+    #expect(groups.map(\.cause.title) == ["Couldn't reach Home Mac", "Not in Immich yet", "Couldn't download from iCloud"])
+    #expect(AttentionCause.of(item("x", .failed, reason: "Home Mac is almost full (3.1 GB free)."), server: "Home Mac").title
+            == "Home Mac is almost full")
 }
 
 @Test func runTitlesAndSummariesUseEverydayWords() throws {
