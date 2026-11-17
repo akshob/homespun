@@ -12,16 +12,20 @@
 <body>
   <header>
     <a class="name" href="/">Homespun</a>
-    <nav><a href="/setup">Setup</a><a href="/privacy">Privacy</a><a href="/support" aria-current="page">Support</a></nav>
+    <nav><a href="/setup">Setup</a><a href="/privacy">Privacy</a><a href="/support" aria-current="page">Support</a><a href="https://github.com/akshob/homespun">Source</a></nav>
   </header>
   <main>
     <h1>Support</h1>
-    <p class="lead">Homespun is in development and not yet on the App Store.</p>
+    <p class="lead">Homespun is in testing on TestFlight and not yet on the App Store.</p>
 
     <h2>Report a problem</h2>
     <p>In the app, open <strong>Server › Help and About › Report a Problem</strong>. Say what happened; you can see
       the diagnostics that go with it before you send it, and you get a report number. You can also email
-      <!--email_off--><a href="mailto:support@homespun.photos">support@homespun.photos</a><!--/email_off-->.</p>
+      <!--email_off--><a href="mailto:support@homespun.photos">support@homespun.photos</a><!--/email_off-->.
+      The reports you've sent are listed under <strong>Server › Help and About › Sent Reports</strong>.</p>
+    <p>Bugs and ideas are also welcome as <a href="https://github.com/akshob/homespun/issues">GitHub issues</a>.
+      Found a security problem? Please report it privately on GitHub:
+      <a href="https://github.com/akshob/homespun/security/advisories/new">Report a vulnerability</a>.</p>
 
     <h2>Common questions</h2>
 
@@ -30,11 +34,20 @@
       iOS asks you to confirm, and deleted items stay in Recently Deleted. Homespun never empties Recently Deleted.</p>
 
     <h3>Do I need a server?</h3>
-    <p>Yes. Homespun Server runs on a Mac or Linux computer you already have, keeps your originals at home, and
-      makes the compact copies. If you use Immich, Homespun Server can work with the originals already there.</p>
+    <p>Yes. Homespun Server runs on a Mac, a Linux computer, or a NAS you already have, keeps your originals at home,
+      and makes the compact copies. If you use Immich, Homespun Server can work with the originals already there.</p>
 
     <h3>How do I set up a server?</h3>
-    <p>See <a href="/setup">Set up a server</a>, or choose "Set one up" in the app. A Mac or a Linux computer works.</p>
+    <p>See <a href="/setup">Set up a server</a>, or tap <strong>Find My Home Computer</strong> in the app. A Mac, a Linux computer, or a NAS with Docker works.</p>
+
+    <h3>Can I get an original back on my iPhone?</h3>
+    <p>Yes. Open the item and choose <strong>Restore Original</strong>, or select several. Homespun downloads each
+      original from your server, checks it, adds it to Photos with its favorite and albums, and only then removes the
+      compact copy. When you free up space, you can also keep any original full size instead.</p>
+
+    <h3>What does the purchase unlock?</h3>
+    <p>Automatic Mode and Cloud Copies, together, with one purchase on all your devices with your Apple Account. Everything
+      else is free. Turning either on asks for it; <strong>Restore Purchase</strong> is right there if you already bought it.</p>
 
     <h3>How small are the compact copies?</h3>
     <p>Photos fit within 2048 pixels on the long edge. Videos fit within 720p and use HEVC. Copies keep the date,

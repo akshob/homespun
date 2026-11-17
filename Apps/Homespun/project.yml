@@ -113,7 +113,7 @@ schemes:
       storeKitConfiguration: Homespun.storekit
     test:
       targets: [HomespunTests, HomespunUITests]
-  # The performance tests (homespun-test/perf-ui.sh): no automatic screenshots or UI snapshots,
+  # The performance tests (ci/perf.sh): no automatic screenshots or UI snapshots,
   # which make the app walk its accessibility tree on the main thread at every gesture.
   HomespunPerf:
     build:

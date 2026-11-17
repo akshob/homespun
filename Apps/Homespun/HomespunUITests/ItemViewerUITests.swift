@@ -114,7 +114,8 @@ final class ItemViewerUITests: XCTestCase {
 
         // The same item now has its original only at home.
         XCTAssertTrue(waitFor(state, prefix: "Original at home · on"), state.label)
-        XCTAssertFalse(app.buttons["item.action"].exists, "an action for an item already freed")
+        // Its one action brings the original back (Restore Original).
+        XCTAssertTrue(app.buttons["item.action"].label.contains("Restore Original"), "no Restore Original for an item freed")
         attach(app, "Viewer, original at home")
         app.buttons["item.details"].tap()
         XCTAssertTrue(row(app, "Not on this iPhone").waitForExistence(timeout: 10))

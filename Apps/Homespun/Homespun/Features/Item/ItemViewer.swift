@@ -208,7 +208,7 @@ struct ItemViewer: View {
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
-        if let cell, ItemAction.for(cell) != .none {
+        if let cell, ItemAction.for(cell) != .none || ItemAction.canRestore(cell, immich: immich) {
             ToolbarItem(placement: .bottomBar) { action(cell) }
         }
     }

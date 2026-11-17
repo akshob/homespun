@@ -2,7 +2,7 @@
 import XCTest
 
 /// Smoothness on a library the size of a real one (35,000 photos on the HS Perf simulator, built
-/// for profiling: `homespun-test/perf-ui.sh`). The app measures itself (`-perfMonitor`): frames
+/// for profiling: `ci/perf.sh`). The app measures itself (`-perfMonitor`): frames
 /// while something scrolls, and how long each interaction takes. Budgets follow Apple's guidance
 /// ("Improving app responsiveness", "Understanding hitches in your app"): scrolling at most
 /// 10 ms of hitches per second (Apple's "good"), no frame longer than a few refreshes, and a tap
@@ -29,7 +29,7 @@ final class PerformanceUITests: XCTestCase {
 
     @MainActor private func launch(_ extra: [String] = []) throws {
         guard ProcessInfo.processInfo.environment["HOMESPUN_PERF"] != nil else {
-            throw XCTSkip("Run with homespun-test/perf-ui.sh (a 35,000-photo simulator, Profile build).")
+            throw XCTSkip("Run with ci/perf.sh (a 35,000-photo simulator, Profile build).")
         }
         app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "YES", "-perfMonitor", "YES",

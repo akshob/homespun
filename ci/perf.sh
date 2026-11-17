@@ -5,12 +5,15 @@ set -u
 source ${0:A:h}/env.sh
 PERF_DD=$CI_STATE/dd-profile
 PERF_SIM=$(cat $CI_STATE/perf-udid 2>/dev/null) || { echo "No performance simulator: run ci/setup-perf-sim.sh once."; exit 1; }
+# Its slot ends with the script, so the simulator shuts down too.
+trap "xcrun simctl shutdown $PERF_SIM 2>/dev/null" EXIT
 failed=()
 cd $APP && xcodegen generate --quiet
 echo "::group::build (Profile)"
 xcodebuild build-for-testing -project Homespun.xcodeproj -scheme HomespunPerf -configuration Profile -destination id=$PERF_SIM \
   -derivedDataPath $PERF_DD 2>&1 | filter
 echo "::endgroup::"
+take_sim_slot
 echo "::group::unit budgets"
 UNIT=$(new_simulator iPhone-18-Pro "HS CI Perf Unit")
 rm -rf $RESULTS/perf-unit.xcresult

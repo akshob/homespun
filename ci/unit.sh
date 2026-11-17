@@ -3,6 +3,7 @@
 # with Photos access. Performance budgets run in perf.sh (Profile build).
 set -uo pipefail
 source ${0:A:h}/env.sh
+take_sim_slot
 SIM=$(new_simulator iPhone-18-Pro "HS CI Unit $SHA")
 trap "remove_simulator $SIM" EXIT
 xcrun simctl privacy $SIM grant photos photos.homespun.app.dev

@@ -2,7 +2,7 @@
 import Foundation
 
 /// The link `homespun-server pair` prints (and shows as a QR code):
-/// `homespun://pair?server=192.168.1.20:8787&code=K7Q4-M9XT&name=hydrogen`.
+/// `homespun://pair?server=192.168.1.20:8787&code=K7Q4-M9XT&name=Linux%20Box`.
 /// Scanning it with the Camera app, or pasting it, opens Homespun and pairs.
 public struct PairingLink: Equatable, Sendable {
     public static let scheme = "homespun"

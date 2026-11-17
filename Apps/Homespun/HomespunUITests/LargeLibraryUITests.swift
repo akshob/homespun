@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 
-/// A library of thousands of items (`homespun-test/large-library.sh` adds them): opening an item
+/// A library of thousands of items (`EXTRA=3000 ci/ui.sh` adds them): opening an item
 /// and swiping between items stays quick. 0.1.0 froze here on a real library (33,593 items).
 final class LargeLibraryUITests: XCTestCase {
     @MainActor func testOpeningAnItemInALargeLibrary() throws {
         guard let expected = ProcessInfo.processInfo.environment["HOMESPUN_LIBRARY_SIZE"].flatMap(Int.init) else {
-            throw XCTSkip("Run with homespun-test/large-library.sh.")
+            throw XCTSkip("Run with EXTRA=3000 ci/ui.sh.")
         }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]

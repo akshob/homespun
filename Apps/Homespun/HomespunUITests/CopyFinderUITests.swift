@@ -2,7 +2,7 @@
 import XCTest
 
 /// Finds compact copies made elsewhere through Server › Existing Library, against a server that imported their
-/// originals (`homespun-test/e2e-copies.sh` sets it up). Needs `HOMESPUN_SERVER`,
+/// originals (`ci/copies.sh` sets it up). Needs `HOMESPUN_SERVER`,
 /// `HOMESPUN_PAIRING_CODE` and `HOMESPUN_COPIES` (how many copies the library holds), passed
 /// to `xcodebuild test` with a `TEST_RUNNER_` prefix.
 final class CopyFinderUITests: XCTestCase {

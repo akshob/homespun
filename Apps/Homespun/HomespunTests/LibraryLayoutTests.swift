@@ -42,6 +42,22 @@ import Testing
     #expect(CompareView.knobY(middle: 390, line: 200...440, fold: fold) == 373.5 - 22 - 8)
 }
 
+/// Side by side puts the two photos where they show larger: a tall photo next to each other, a wide
+/// one stacked, whatever the stage's shape; an active fold still decides, and without a photo the
+/// stage's shape does.
+@Test func sideBySideFitsThePhoto() {
+    let stage = CGSize(width: 669, height: 400)
+    let tall = SideBySide.panes(size: stage, fold: nil, photo: CGSize(width: 1668, height: 2500))
+    #expect(tall.first.maxX <= tall.second.minX && tall.first.height == 400)
+    let wide = SideBySide.panes(size: CGSize(width: 669, height: 860), fold: nil, photo: CGSize(width: 4032, height: 3024))
+    #expect(wide.first.maxY <= wide.second.minY && wide.first.width == 669)
+    let none = SideBySide.panes(size: stage, fold: nil)
+    #expect(none.first.maxX <= none.second.minX)
+    let crease = CGRect(x: 0, y: 180, width: 669, height: 40)
+    let folded = SideBySide.panes(size: CGSize(width: 669, height: 860), fold: crease, photo: CGSize(width: 1668, height: 2500))
+    #expect(folded.first.maxY == 180 && folded.second.minY == 220)
+}
+
 /// Cells of a longer grid can still report themselves after a filter made it shorter (or while
 /// iPhone Duo unfolds): the preheat window ignores them instead of trapping (reports HS-UHJXHW,
 /// HS-5MX4AG).

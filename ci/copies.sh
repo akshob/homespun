@@ -6,6 +6,7 @@
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 PORT=$2
+take_sim_slot
 SIM=$(new_simulator iPhone-18-Pro "HS CI $NAME $PORT")
 DATA=$CI_STATE/servers/$NAME-$PORT ORIG=$CI_STATE/servers/$NAME-$PORT-originals
 rm -rf $DATA $ORIG; mkdir -p $DATA/originals $ORIG
@@ -20,11 +21,13 @@ cat > $DATA/copies.jsonl <<JSONL
 {"kind":"photo","originals":[{"role":"photo","path":"$ORIG/IMG_2002.JPG"}],"copies":[{"role":"photo","sha256":"$(h IMG_2002.JPG)"}]}
 {"kind":"video","originals":[{"role":"video","path":"$ORIG/IMG_2003.MOV"}],"copies":[{"role":"video","sha256":"$(h IMG_2003.MOV)"}]}
 JSONL
-export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="polonium (copies)"
+export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="Home Mac (copies)"
 $SERVER_BIN import $DATA/copies.jsonl
 $SERVER_BIN serve > $DATA.log 2>&1 &
-SERVER=$!; sleep 3
-CODE=$($SERVER_BIN pair --minutes 180 | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
+SERVER=$!
+wait_for_server $PORT || exit 1
+CODE=$(pairing_output | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
+[[ -n $CODE ]] || { echo "no pairing code"; exit 1; }
 RESULT=$RESULTS/$NAME.xcresult; rm -rf $RESULT
 cd $APP
 TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_COPIES=3 \

@@ -68,6 +68,10 @@ final class ServerModeUITests: XCTestCase {
         let before = proceed.label
         let compare = app.buttons["remove.compare"].firstMatch
         XCTAssertTrue(compare.waitForExistence(timeout: 5), "no compact copies to compare")
+        // On a small screen (iPhone Duo's cover) the sheet opens at half height, the photos under its
+        // buttons: bring them up first.
+        var lifts = 4
+        while compare.frame.maxY > app.frame.maxY - 200, lifts > 0 { app.swipeUpInContent(); lifts -= 1 }
         compare.tap()
         XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
         attach(app, "Compare before freeing up")
@@ -152,8 +156,23 @@ final class ServerModeUITests: XCTestCase {
         let filter = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Original at Home")).firstMatch
         XCTAssertTrue(filter.waitForExistence(timeout: 5), "no Original at Home filter")
         filter.tap()
-        app.buttons["select.start"].tap()
-        guard let pick = atHome.allElementsBoundByIndex.last(where: { app.isOnScreen($0) }) else { return XCTFail("nothing to select") }
+        // The menu closes and the grid shows only what's at home before Select can start.
+        let shown = Date().addingTimeInterval(10)
+        while filter.exists || !atHome.firstMatch.exists, Date() < shown { sleep(1) }
+        let start = app.buttons["select.start"]
+        let done = app.buttons["select.done"]
+        for _ in 0..<3 where !done.exists {
+            start.tap()
+            _ = done.waitForExistence(timeout: 3)
+        }
+        XCTAssertTrue(done.exists, "Select didn't start")
+        guard let pick = atHome.allElementsBoundByIndex.last(where: { app.isOnScreen($0) }) else {
+            attach(app, "nothing to select")
+            let tree = XCTAttachment(string: app.debugDescription)
+            tree.name = "screen elements"; tree.lifetime = .keepAlways
+            add(tree)
+            return XCTFail("nothing to select")
+        }
         pick.tap()
         let selected = app.buttons["restore.selected"]
         XCTAssertTrue(selected.waitForExistence(timeout: 5) && selected.label.contains("1"), selected.label)
