@@ -1,7 +1,7 @@
-# Uploads a TestFlight build of main, on request only, and only when the owner starts it. The
-# `testflight` environment (main only) holds the App Store Connect API key and the team; they exist
-# on the runner only for the run and are deleted afterwards. (When the repository is public, also make
-# the owner a required reviewer of the environment: GitHub's free plan has that only for public ones.)
+# Uploads a TestFlight build of main, on request only: only the owner can start it, and the
+# `testflight` environment (main only, the owner approves each run) holds the App Store Connect API
+# key and the team. It runs on a fresh GitHub machine that's discarded afterwards; the build's
+# symbols (for crash reports, scripts/symbolicate.py) are kept as the run's `dsyms-<build>` artifact.
 name: TestFlight
 
 on:
@@ -17,12 +17,17 @@ concurrency:
 jobs:
   upload:
     name: Upload to TestFlight
-    runs-on: [self-hosted, macOS, homespun-ci]
+    runs-on: xcode-27
     if: github.actor == github.repository_owner
     environment: testflight
     timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - uses: actions/checkout@v4
+      - name: Tools
+        run: brew install --quiet xcodegen
       - name: Signing inputs
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
@@ -37,12 +42,19 @@ jobs:
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          HOMESPUN_BUILDS: /Users/Shared/homespun-builds
+          HOMESPUN_BUILDS: ${{ runner.temp }}/builds
         run: |
           zsh Apps/Homespun/scripts/testflight.sh | tee upload.log
           build=$(sed -n 's/^Uploaded build \([0-9]*\).*/\1/p' upload.log)
+          echo "BUILD=$build" >> $GITHUB_ENV
           echo "### TestFlight build $build" >> $GITHUB_STEP_SUMMARY
           python3 Apps/Homespun/scripts/asc.py wait $build | tail -1 >> $GITHUB_STEP_SUMMARY
+      - name: Keep the symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsyms-${{ env.BUILD }}
+          path: ${{ runner.temp }}/builds/${{ env.BUILD }}
+          retention-days: 90
       - name: Remove signing inputs
         if: always()
         run: rm -f ~/.appstoreconnect/private_keys/AuthKey_*.p8 Apps/Homespun/Local.xcconfig
