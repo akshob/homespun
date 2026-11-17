@@ -25,7 +25,8 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 |---|---|
 | `build.sh` | release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it) |
 | `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access |
-| `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DUO_POSES=1`, `STUB_PORT=`) |
+| `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DATED=`, `DUO_POSES=1`, `STUB_PORT=`) |
+| `dated-photos.swift` | small synthetic photos taken over the past months (EXIF dates) for `DATED=`: month headers, scrolling across months |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
 | `lane.sh smoke\|iphone\|duo` | the sets of runs the workflows use |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
