@@ -983,6 +983,21 @@ extension Catalog {
     #expect(await run("import", manifest.path) == 0)
 }
 
+@Test func pairCodesLastTenMinutesOrAsLongAsAsked() async throws {
+    #expect(ServerCommand.pairingMinutes([]) == 10)
+    #expect(ServerCommand.pairingMinutes(["--minutes", "180"]) == 180)
+    for bad in [["--minutes"], ["--minutes", "0"], ["--minutes", "1441"], ["--minutes", "soon"]] {
+        #expect(ServerCommand.pairingMinutes(bad) == nil, "\(bad)")
+    }
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let data = directory.appendingPathComponent("data").path
+    #expect(await ServerCommand.run(commandLine: ["homespun-server", "pair", "--minutes", "0", "--data", data]) == 2)
+    #expect(await ServerCommand.run(commandLine: ["homespun-server", "pair", "--minutes", "180", "--data", data]) == 0)
+    let server = try await HomespunServer(configuration: ServerConfiguration(dataDirectory: URL(fileURLWithPath: data)))
+    #expect(server.pairingInstructions(code: "K7Q4-M9XT", minutes: 180).contains("expires in 180 minutes"))
+}
+
 final class ProblemLog: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [String] = []

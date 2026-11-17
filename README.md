@@ -244,7 +244,7 @@ sudo apt install -y git libvips-dev libsqlite3-dev ffmpeg avahi-utils
 git clone https://github.com/akshob/homespun.git ~/homespun
 cd ~/homespun && swift build -c release --product homespun-server
 .build/release/homespun-server install-service --data ~/Pictures/Homespun   # copies to ~/.local/bin, starts it
-~/.local/bin/homespun-server pair                                   # QR code + homespun:// link, 10 minutes
+~/.local/bin/homespun-server pair                                   # QR code + homespun:// link, 10 minutes (--minutes N)
 ~/.local/bin/homespun-server devices                                # paired devices; `revoke <id>` removes one
 ```
 

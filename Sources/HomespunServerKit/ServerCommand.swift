@@ -8,7 +8,8 @@ public enum ServerCommand {
         usage: homespun-server [serve | pair | install-service | devices | revoke <device-id> | import <manifest>] [options]
 
           serve              Run the server (default).
-          pair               Show a QR code and link to pair the Homespun app (one use, 10 minutes).
+          pair               Show a QR code and link to pair the Homespun app (one use, 10 minutes;
+                             --minutes N keeps it longer, up to a day, e.g. for a test run).
           install-service    Copy the server to ~/.local/bin and start it now and whenever this
                              computer starts (systemd user service on Linux, LaunchAgent on macOS).
           devices            List paired devices.
@@ -34,6 +35,13 @@ public enum ServerCommand {
         Connect Immich from the app (Settings > Server), or set HOMESPUN_IMMICH_URL and
         HOMESPUN_IMMICH_API_KEY_FILE.
         """
+
+    /// How long a code from `pair` lasts: 10 minutes, or `--minutes N` (1 to 1440).
+    static func pairingMinutes(_ options: [String]) -> Int? {
+        guard let index = options.firstIndex(of: "--minutes") else { return 10 }
+        guard index + 1 < options.count, let minutes = Int(options[index + 1]), (1...1440).contains(minutes) else { return nil }
+        return minutes
+    }
 
     /// Runs the command and returns its exit status.
     public static func run(connectors: [any Connector] = [], commandLine: [String] = CommandLine.arguments) async -> Int32 {
@@ -73,7 +81,12 @@ public enum ServerCommand {
                       + "data in \(configuration.dataDirectory.path)")
                 try await server.run()
             case "pair":
-                print(server.pairingInstructions(code: try await server.newPairingCode()))
+                guard let minutes = pairingMinutes(Array(arguments.dropFirst())) else {
+                    FileHandle.standardError.write(Data("pair: --minutes takes a number from 1 to 1440.\n".utf8))
+                    return 2
+                }
+                let code = try await server.newPairingCode(lifetime: TimeInterval(minutes * 60))
+                print(server.pairingInstructions(code: code, minutes: minutes))
             case "install-service":
                 let executable = URL(fileURLWithPath: Bundle.main.executablePath ?? commandLine[0])
                     .resolvingSymlinksInPath().path
