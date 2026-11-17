@@ -21,6 +21,8 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
+      - name: Stop what an earlier job left running
+        run: zsh ci/reset.sh
       - name: Performance
         run: zsh ci/perf.sh
       - name: Summary
@@ -33,3 +35,6 @@ jobs:
           name: perf-${{ github.run_id }}
           path: ci-results
           retention-days: 7
+      - name: Clean up (also when cancelled)
+        if: always()
+        run: zsh ci/reset.sh

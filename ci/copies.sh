@@ -6,6 +6,7 @@
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 PORT=$2
+take_sim_slot
 SIM=$(new_simulator iPhone-18-Pro "HS CI $NAME $PORT")
 DATA=$CI_STATE/servers/$NAME-$PORT ORIG=$CI_STATE/servers/$NAME-$PORT-originals
 rm -rf $DATA $ORIG; mkdir -p $DATA/originals $ORIG

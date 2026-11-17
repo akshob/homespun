@@ -11,6 +11,7 @@
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 TYPE=$2 ONLY=$3 PORT=$4 POSE=${5:-}
+take_sim_slot
 SIM=$(new_simulator $TYPE "HS CI $NAME $PORT")
 DATA=$CI_STATE/servers/$NAME-$PORT; rm -rf $DATA; mkdir -p $DATA/originals
 SERVER="" STUB="" WATCH=""

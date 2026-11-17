@@ -31,8 +31,16 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `lane.sh smoke\|iphone\|duo` | the sets of runs the workflows use |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
 | `summary.py <results>` | the Markdown report each job adds to its summary |
+| `reset.sh` | stops what a cancelled job of this runner left running |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
+
+polonium has 16 GB, so at most two simulators run at once on the whole Mac, whoever starts them:
+every script that boots one first takes a slot (`take_sim_slot` in `env.sh`, lock files in
+`/Users/Shared/homespun-sim-slots`) and waits for a free one. Anyone running simulators there by
+hand takes a slot the same way. Cancelling a job stops only its step's shell, so each job records
+what it starts and `reset.sh` (first and last step of every Apple job, also when cancelled) stops
+what an earlier job of the same runner left running and deletes its simulators.
 
 ## Setting up the runner account (once, on polonium)
 
