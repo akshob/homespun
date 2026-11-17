@@ -73,6 +73,28 @@ new_simulator() {
     echo $sim
 }
 
+# Waits until the temporary server on this port answers.
+wait_for_server() {
+    local tries=0
+    until curl -fs -o /dev/null http://127.0.0.1:$1/api/v1/health; do
+        (( ++tries > 90 )) && { echo "the test server on port $1 didn't start"; return 1; }
+        sleep 1
+    done
+}
+
+# `homespun-server pair` for a code that lasts 3 hours (a run can spend longer than 10 minutes
+# before its first test pairs); tries again if the catalog is busy. Prints its output.
+pairing_output() {
+    local out tries=0
+    while (( tries++ < 6 )); do
+        out=$($SERVER_BIN pair --minutes 180 2>&1)
+        [[ $out == *"Pairing code: "* ]] && { print -r -- $out; return 0; }
+        print -r -- "pair didn't give a code: $out" >&2
+        sleep 5
+    done
+    return 1
+}
+
 remove_simulator() { xcrun simctl shutdown $1 2>/dev/null; xcrun simctl delete $1 2>/dev/null; true; }
 
 # Lines of xcodebuild's output worth keeping in the log.

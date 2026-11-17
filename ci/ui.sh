@@ -38,9 +38,9 @@ fi
 export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
        HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
 $SERVER_BIN serve > $DATA.log 2>&1 &
-SERVER=$!; sleep 3
-# Codes last 10 minutes; a run can spend longer than that before its first test pairs.
-OUT=$($SERVER_BIN pair --minutes 180)
+SERVER=$!
+wait_for_server $PORT || exit 1
+OUT=$(pairing_output) || { echo "no pairing code"; exit 1; }
 CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
 if [[ -n ${STUB_PORT:-} ]]; then
     STUBLOG=$DATA/telemetry.jsonl; : > $STUBLOG

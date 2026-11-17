@@ -68,6 +68,10 @@ final class ServerModeUITests: XCTestCase {
         let before = proceed.label
         let compare = app.buttons["remove.compare"].firstMatch
         XCTAssertTrue(compare.waitForExistence(timeout: 5), "no compact copies to compare")
+        // On a small screen (iPhone Duo's cover) the sheet opens at half height, the photos under its
+        // buttons: bring them up first.
+        var lifts = 4
+        while compare.frame.maxY > app.frame.maxY - 200, lifts > 0 { app.swipeUpInContent(); lifts -= 1 }
         compare.tap()
         XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
         attach(app, "Compare before freeing up")
@@ -184,7 +188,8 @@ final class ServerModeUITests: XCTestCase {
 
         app.openTab("Server")
         let toggle = app.automaticToggle
-        XCTAssertTrue(app.scrollTo(toggle), "automatic mode isn't offered")
+        // Clear of the status bar at the bottom (iPhone Duo's cover is short).
+        XCTAssertTrue(app.reveal(toggle), "automatic mode isn't offered")
         // A switch's knob on an iPhone; the checkbox itself on iPhone Duo's inner display.
         if toggle.switches.firstMatch.exists { toggle.switches.firstMatch.tap() } else { toggle.tap() }
         app.buttons["Everything not backed up yet"].firstMatch.tap()
