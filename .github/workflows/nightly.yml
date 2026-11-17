@@ -1,0 +1,57 @@
+# Every night, everything on main: all the checks, every UI run, and the long runs kept out of the
+# pull request and merge paths (a library of thousands of photos). A failure opens (or updates) the
+# "nightly is failing" issue; a pass closes it. Performance budgets run elsewhere (ci/README.md).
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 10 * * *"   # 2:00 Pacific
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  suite:
+    name: Nightly
+    uses: ./.github/workflows/suite.yml
+    with:
+      ref: ${{ github.sha }}
+      server: true
+      telemetry: true
+      site: true
+      app: true
+      package: true
+      ui: '["iphone","library","later","copies","onboarding","telemetry","duo-cover","duo-open","large"]'
+      retry: true
+
+  report:
+    name: Report
+    needs: suite
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open, update or close "nightly is failing"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RESULT: ${{ needs.suite.result }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="nightly is failing"
+          issue=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          commit=$(echo "$GITHUB_SHA" | cut -c1-7)
+          if [[ $RESULT == success ]]; then
+            [[ -n $issue ]] && gh issue close $issue --comment "Passing again at $commit: $RUN"
+            exit 0
+          fi
+          [[ $RESULT == cancelled ]] && exit 0
+          body="The nightly run failed at $commit: $RUN"
+          if [[ -n $issue ]]; then gh issue comment $issue --body "$body"; else gh issue create --title "$title" --body "$body"; fi

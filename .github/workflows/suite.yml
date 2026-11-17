@@ -1,0 +1,241 @@
+# The jobs every pipeline shares, called by pr.yml (quick checks of a pull request), ci.yml (the
+# extended suite after a merge, or Run workflow) and nightly.yml (everything). The caller decides what
+# runs (ci/plan.py); "Result" sums it up.
+name: Suite
+
+on:
+  workflow_call:
+    inputs:
+      ref: {type: string, required: true, description: The commit to test}
+      server: {type: boolean, default: false, description: Server tests on Linux}
+      telemetry: {type: boolean, default: false, description: The telemetry Worker's tests}
+      site: {type: boolean, default: false, description: The website's checks}
+      app: {type: boolean, default: false, description: macOS build and the app's unit tests}
+      package: {type: boolean, default: false, description: The package's tests on macOS}
+      ui: {type: string, default: "[]", description: UI runs (ci/lane.sh) as a JSON list}
+      retry: {type: boolean, default: true, description: A failed UI run gets one more try}
+
+permissions:
+  contents: read
+
+env:
+  HEAD_SHA: ${{ inputs.ref }}
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+jobs:
+  server-linux:
+    name: Server (Linux)
+    if: inputs.server
+    runs-on: ubuntu-24.04
+    container: swift:6.3-noble
+    timeout-minutes: 45
+    env:
+      # The server notices it's in a container (/.dockerenv) and acts like a Docker install; the tests
+      # describe a Linux computer.
+      HOMESPUN_HARDWARE_KIND: desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Libraries and tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libvips-dev libsqlite3-dev libheif-plugin-libde265 ffmpeg
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: linux-build-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
+          restore-keys: linux-build-${{ hashFiles('Package.resolved') }}-
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: |
+          swift test --skip-build 2>&1 | tee test.log
+          echo "### Server (Linux)" >> $GITHUB_STEP_SUMMARY
+          grep -E "Test run with|✘" test.log | tail -20 | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
+          ! grep -q "✘" test.log
+
+  telemetry:
+    name: Telemetry Worker
+    if: inputs.telemetry
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: services/telemetry
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: services/telemetry/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  build:
+    name: Build (macOS)
+    if: inputs.app
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Tools
+        run: brew install --quiet xcodegen ffmpeg
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: macos-build-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
+          restore-keys: macos-build-${{ hashFiles('Package.resolved') }}-
+      - name: Build (server and app)
+        run: BUILD_ARCHIVE=${{ runner.temp }}/build.tgz zsh ci/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: ${{ runner.temp }}/build.tgz
+          retention-days: 2
+          compression-level: 0
+      - name: Keep the results of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-results-${{ github.run_id }}
+          path: ci-results
+          retention-days: 5
+
+  package:
+    name: Package tests (macOS)
+    if: inputs.package
+    runs-on: xcode-27
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Tools
+        run: brew install --quiet ffmpeg
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: macos-test-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
+          restore-keys: macos-test-${{ hashFiles('Package.resolved') }}-
+      - name: Package tests
+        run: swift test 2>&1 | tee package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
+        shell: zsh {0}
+
+  unit:
+    name: App unit tests
+    needs: build
+    runs-on: xcode-27
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Tools
+        run: brew install --quiet xcodegen ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: ${{ runner.temp }}
+      - name: The build of this commit
+        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd && zsh ci/build.sh
+      - name: Unit tests (and the PhotoKit ones, in the app)
+        run: zsh ci/unit.sh
+      - name: Summary
+        if: always()
+        run: python3 ci/summary.py ci-results "App unit tests"
+      - name: Keep the results of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-${{ github.run_id }}
+          path: ci-results
+          retention-days: 5
+
+  ui:
+    name: UI (${{ matrix.run }})
+    needs: build
+    if: inputs.ui != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        run: ${{ fromJSON(inputs.ui) }}
+    runs-on: xcode-27
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Tools
+        run: brew install --quiet xcodegen ffmpeg
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+          path: ${{ runner.temp }}
+      - name: The build of this commit
+        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd && zsh ci/build.sh
+      - name: UI tests
+        env:
+          RETRY_UI: ${{ inputs.retry && '1' || '' }}
+        run: zsh ci/lane.sh ${{ matrix.run }}
+      - name: Summary
+        if: always()
+        run: python3 ci/summary.py ci-results "UI (${{ matrix.run }})"
+      - name: Keep the results of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-${{ matrix.run }}-${{ github.run_id }}
+          path: ci-results
+          retention-days: 5
+
+  site:
+    name: Website
+    if: inputs.site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Pages, links and the Content-Security-Policy
+        run: python3 ci/site-check.py site
+      - name: Valid HTML
+        run: npx --yes html-validate@9.7.1 --config ci/htmlvalidate.json site/*.html
+
+  result:
+    name: Result
+    if: always()
+    needs: [server-linux, telemetry, build, package, unit, ui, site]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every job that ran passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
+          print("\n".join(f"{name}: {result}" for name, result in results.items()))
+          bad = [name for name, result in results.items() if result in ("failure", "cancelled")]
+          if bad:
+              raise SystemExit(f"Not passed: {', '.join(bad)}")
+          PY
