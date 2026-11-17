@@ -185,9 +185,9 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10), "\(pose): no grid after closing")
     }
 
-    /// Free Up Space takes the whole screen: the review beside the chosen item compared side by side
-    /// (original left and copy right held wide, original above held tall), Keep Original under it;
-    /// never a sheet over a sheet.
+    /// Free Up Space takes the whole screen: the chosen item compared side by side (beside or
+    /// stacked, whichever shows the photo larger) with the review beside it held wide and under it
+    /// held tall, Keep Original under it; never a sheet over a sheet.
     @MainActor private func checkFreeUp(_ app: XCUIApplication, pose: String) {
         app.openTab("Library")
         let offer = app.buttons["accessory.action"]
@@ -201,12 +201,15 @@ final class DuoLayoutUITests: XCTestCase {
         sleep(2)
         attach(app, "\(pose), Free Up Space")
         let screen = app.windows.firstMatch.frame
+        // The original first, the copy after it: beside it or under it, whichever shows the photo larger.
+        XCTAssertTrue(original.frame.maxX <= compact.frame.minX + 1 || original.frame.maxY <= compact.frame.minY + 1,
+                      "\(pose): the original and the copy overlap, or the copy comes first")
         if pose == "landscape" {
-            XCTAssertLessThanOrEqual(original.frame.maxX, compact.frame.minX + 1, "\(pose): original isn't left of the copy")
             XCTAssertTrue(app.buttons["remove.compare"].firstMatch.frame.maxX < original.frame.minX + 1,
                           "\(pose): the review isn't beside the comparison")
         } else {
-            XCTAssertLessThanOrEqual(original.frame.maxY, compact.frame.minY + 1, "\(pose): original isn't above the copy")
+            XCTAssertTrue(app.buttons["remove.compare"].firstMatch.frame.minY > max(original.frame.maxY, compact.frame.maxY) - 1,
+                          "\(pose): the review isn't under the comparison")
         }
         // Each photo fills its pane one way (a portrait photo its height, a landscape one its width).
         for image in [original, compact] {

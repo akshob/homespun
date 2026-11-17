@@ -44,9 +44,9 @@ fi
 export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
        HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
 $SERVER_BIN serve > $DATA.log 2>&1 &
-SERVER=$!; sleep 3
-# Codes last 10 minutes; a run can spend longer than that before its first test pairs.
-OUT=$($SERVER_BIN pair --minutes 180)
+SERVER=$!
+wait_for_server $PORT || exit 1
+OUT=$(pairing_output) || { echo "no pairing code"; exit 1; }
 CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
 if [[ -n ${STUB_PORT:-} ]]; then
     STUBLOG=$DATA/telemetry.jsonl; : > $STUBLOG
@@ -64,20 +64,31 @@ if [[ -n ${DUO_POSES:-} ]]; then
             portrait) $DUOCTL -d $SIM hinge 180; turn portrait;;
             laptop) $DUOCTL -d $SIM hinge 180; turn portrait; $DUOCTL -d $SIM hinge 100;;
             folded) $DUOCTL -d $SIM hinge 0; sleep 2; turn portrait;;
-          esac >> $DATA.poses 2>&1
+          esac >> $RESULTS/$NAME-poses.log 2>&1
           rm -f $POSEFILE
         fi
         sleep 0.5
       done ) & WATCH=$!
     export TEST_RUNNER_DUO_POSE_FILE=$POSEFILE
 fi
-RESULT=$RESULTS/$NAME.xcresult; rm -rf $RESULT
+RESULT=$RESULTS/$NAME.xcresult
 cd $APP
-TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_PAIR_LINK="$LINK" \
-TEST_RUNNER_HOMESPUN_REMOVE=1 \
-  xcodebuild test-without-building -project Homespun.xcodeproj -scheme Homespun -destination id=$SIM -derivedDataPath $DD \
-  -resultBundlePath $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} 2>&1 | tee $RESULTS/$NAME.log | filter
-STATUS=${pipestatus[1]}
+run_tests() {
+    rm -rf $RESULT
+    TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_PAIR_LINK="$LINK" \
+    TEST_RUNNER_HOMESPUN_REMOVE=1 \
+      xcodebuild test-without-building -project Homespun.xcodeproj -scheme Homespun -destination id=$SIM -derivedDataPath $DD \
+      -resultBundlePath $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} 2>&1 | tee $RESULTS/$NAME.log | filter
+    return ${pipestatus[1]}
+}
+run_tests; STATUS=$?
+# Now and then the simulator can't start or reach the test runner, and no test runs: once more, rebooted.
+if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
+    && grep -qE "failed to launch|Failed to establish communication|Channel disconnected|crashed while preparing" $RESULTS/$NAME.log; then
+    echo "the test runner didn't start; rebooting the simulator and trying once more"
+    xcrun simctl shutdown $SIM; xcrun simctl boot $SIM && xcrun simctl bootstatus $SIM -b >/dev/null
+    run_tests; STATUS=$?
+fi
 if [[ -n ${STUB_PORT:-} ]]; then
     python3 ${0:A:h}/telemetry-check.py $STUBLOG "Home Mac" "127.0.0.1:$PORT" "IMG_200" || STATUS=1
 fi
