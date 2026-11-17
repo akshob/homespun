@@ -21,6 +21,14 @@ and may not exist in other checkouts.
   (Release); Debug uses `photos.homespun.app.dev` so free Personal Teams never register
   the App Store ID. `Signing.xcconfig` includes the git-ignored `Local.xcconfig`, which
   holds `DEVELOPMENT_TEAM`. Never put a team ID in `project.yml`.
+- App sources (`Apps/Homespun/Homespun`) are grouped by layer; XcodeGen picks up any folder:
+  - `App/`: entry point, `AppModel` (composition root), root and tab shell, settings, journey/tips.
+  - `Features/<Library|Item|Activity|Server|Setup|Premium|Feedback>/`: screens and their controllers.
+  - `Backup/`: the engine (job queue, server pipeline, ledger, schedule, automatic mode, background runs,
+    history, original removal, copy finder). No views.
+  - `Services/`: PhotoKit, server client and discovery, Keychain, telemetry, diagnostics, performance monitor.
+  - `DesignSystem/`: theme, shared controls, adaptive layout (grid columns, `SplitNavigation`).
+  - `Support/` (Objective-C bridging) and `Resources/` (app icon, privacy manifest).
 - Everything is Swift. Do not add Python, Node, or shell pipelines to the product.
 - `site/` is the homespun.photos website: static HTML and CSS only (no JavaScript, no
   third-party assets or analytics; `_headers` sets a strict CSP). The privacy policy there
