@@ -1,0 +1,58 @@
+# Quick checks of a pull request to main (about 20–25 minutes): only what it changes (ci/plan.py):
+# the server on Linux, the telemetry Worker, the website, the app's build and unit tests, and two
+# short UI runs side by side: iPhone (`quick`) and iPhone Duo open in every pose (`quick-duo`).
+# A draft gets the build and unit tests only. "PR / Result" sums it up; main requires it.
+# The extended suite runs after the merge (ci.yml). Pull requests from forks run after the owner
+# approves them and never see secrets.
+name: PR
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      server: ${{ steps.plan.outputs.server }}
+      telemetry: ${{ steps.plan.outputs.telemetry }}
+      site: ${{ steps.plan.outputs.site }}
+      app: ${{ steps.plan.outputs.app }}
+      package: ${{ steps.plan.outputs.package }}
+      ui: ${{ steps.plan.outputs.ui }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - id: plan
+        env:
+          MODE: pr
+          BASE_REF: ${{ github.base_ref }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          DRAFT: ${{ github.event.pull_request.draft }}
+        run: python3 ci/plan.py
+
+  checks:
+    name: PR
+    needs: plan
+    uses: ./.github/workflows/suite.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha }}
+      server: ${{ needs.plan.outputs.server == 'true' }}
+      telemetry: ${{ needs.plan.outputs.telemetry == 'true' }}
+      site: ${{ needs.plan.outputs.site == 'true' }}
+      app: ${{ needs.plan.outputs.app == 'true' }}
+      package: ${{ needs.plan.outputs.package == 'true' }}
+      ui: ${{ needs.plan.outputs.ui }}
+      retry: true
