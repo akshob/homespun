@@ -1,6 +1,7 @@
-# Uploads a TestFlight build of a commit (main by default), on request only. The `testflight`
-# environment asks the owner to approve each run; its secrets (the App Store Connect API key and the
-# team) exist only for the run and are deleted afterwards.
+# Uploads a TestFlight build of main, on request only, and only when the owner starts it. The
+# `testflight` environment (main only) holds the App Store Connect API key and the team; they exist
+# on the runner only for the run and are deleted afterwards. (When the repository is public, also make
+# the owner a required reviewer of the environment: GitHub's free plan has that only for public ones.)
 name: TestFlight
 
 on:
@@ -17,6 +18,7 @@ jobs:
   upload:
     name: Upload to TestFlight
     runs-on: [self-hosted, macOS, homespun-ci]
+    if: github.actor == github.repository_owner
     environment: testflight
     timeout-minutes: 60
     steps:

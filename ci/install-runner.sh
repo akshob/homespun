@@ -25,5 +25,11 @@ fi
 # The launch agent doesn't read a login shell's PATH: Homebrew (xcodegen, ffmpeg, axe) first.
 print /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin > .path
 ./svc.sh install >/dev/null
-./svc.sh start
-./svc.sh status | tail -3
+# Simulators need the account's desktop session: the launch agent starts with it (log in once on the
+# Mac's screen, then switch users without logging out).
+if launchctl print gui/$(id -u) >/dev/null 2>&1; then
+    ./svc.sh start
+    ./svc.sh status | tail -3
+else
+    echo "$name is installed; it starts when $(id -un) logs in on the Mac's screen."
+fi
