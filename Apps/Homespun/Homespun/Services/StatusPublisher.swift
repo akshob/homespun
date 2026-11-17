@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Observation
+import UIKit
 import WatchConnectivity
 import WidgetKit
 
@@ -86,6 +87,18 @@ final class StatusPublisher {
         await publish()
     }
 
+    /// Going to the background: a change still waiting for its turn is published now.
+    func publishInBackground() {
+        guard let waiting = pending, !waiting.isCancelled else { return }
+        waiting.cancel()
+        pending = nil
+        let task = UIApplication.shared.beginBackgroundTask(withName: "Widgets")
+        Task {
+            await publish()
+            UIApplication.shared.endBackgroundTask(task)
+        }
+    }
+
     // MARK: Watching for changes
 
     private func observe() {
@@ -126,6 +139,7 @@ final class StatusPublisher {
         pending = Task { [weak self] in
             try? await Task.sleep(for: Self.debounce)
             guard !Task.isCancelled else { return }
+            self?.pending = nil
             await self?.publish()
         }
     }

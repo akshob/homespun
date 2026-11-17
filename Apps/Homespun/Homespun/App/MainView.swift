@@ -77,6 +77,7 @@ struct RootView: View {
                 wasBackground = true
                 SessionMarker.shared.background()
                 model.automatic.schedule()
+                model.status.publishInBackground()
                 Telemetry.shared.flushInBackground()
             default: break
             }
