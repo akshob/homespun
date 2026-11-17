@@ -24,9 +24,41 @@ mkdir -p $CI_STATE $RESULTS
 
 runtime_for() { [[ $1 == iPhone-Duo ]] && echo $RUNTIME_DUO || echo $RUNTIME_IPHONE; }
 
-# A fresh simulator of a device type; prints its UDID.
+# polonium has 16 GB: past two simulators at once (CI's lanes, anyone's tests) it swaps and tests
+# time out. A script takes one of the machine's simulator slots (shared by every account) before it
+# boots a simulator, in its own shell (not in $(...)), and holds it until it ends.
+SIM_SLOTS=${SIM_SLOTS:-2}
+SIM_SLOTS_DIR=${SIM_SLOTS_DIR:-/Users/Shared/homespun-sim-slots}
+take_sim_slot() {
+    zmodload zsh/system
+    [[ -d $SIM_SLOTS_DIR ]] || { mkdir -p $SIM_SLOTS_DIR && chmod 1777 $SIM_SLOTS_DIR; }
+    local waited=0 slot file
+    typeset -g SIM_SLOT_FD
+    while true; do
+        for slot in {1..$SIM_SLOTS}; do
+            file=$SIM_SLOTS_DIR/slot-$slot
+            [[ -e $file ]] || { : >> $file && chmod 666 $file; } 2>/dev/null
+            if zsystem flock -t 0 -f SIM_SLOT_FD $file 2>/dev/null; then
+                (( waited == 0 )) || echo "simulator slot $slot after waiting ${waited}s"
+                return 0
+            fi
+        done
+        sleep 15; (( waited += 15 ))
+    done
+}
+
+# What this runner's job started (scripts, simulators), so ci/reset.sh can stop it when a job is
+# cancelled: GitHub stops only the step's own shell, and the scripts under it kept going for hours.
+JOB_STATE=$CI_STATE/jobs/${RUNNER_NAME:-}
+if [[ -n ${RUNNER_NAME:-} ]]; then
+    mkdir -p ${JOB_STATE:h}
+    print -r -- "$$ ${(j: :)${=$(ps -o lstart= -p $$)}}" >> $JOB_STATE.pids
+fi
+
+# A fresh simulator of a device type; prints its UDID. (KEEP_SIM=1: one that outlives the job.)
 new_simulator() {
     local sim=$(xcrun simctl create "$2" com.apple.CoreSimulator.SimDeviceType.$1 $(runtime_for $1))
+    [[ -n ${RUNNER_NAME:-} && -z ${KEEP_SIM:-} ]] && print -r -- $sim >> $JOB_STATE.sims
     xcrun simctl boot $sim && xcrun simctl bootstatus $sim -b >/dev/null
     echo $sim
 }
