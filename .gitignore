@@ -7,3 +7,7 @@ Apps/Homespun/*.xcodeproj/
 Apps/Homespun/Local.xcconfig
 .wrangler/
 Apps/Homespun/Homespun/Info.plist
+
+# CI results and Python caches (ci/)
+ci-results/
+__pycache__/

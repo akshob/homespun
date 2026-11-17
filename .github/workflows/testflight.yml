@@ -1,0 +1,46 @@
+# Uploads a TestFlight build of a commit (main by default), on request only. The `testflight`
+# environment asks the owner to approve each run; its secrets (the App Store Connect API key and the
+# team) exist only for the run and are deleted afterwards.
+name: TestFlight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Upload to TestFlight
+    runs-on: [self-hosted, macOS, homespun-ci]
+    environment: testflight
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signing inputs
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          umask 077
+          printf '%s\n' "$ASC_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_$ASC_KEY_ID.p8
+          printf 'DEVELOPMENT_TEAM = %s\n' "$DEVELOPMENT_TEAM" > Apps/Homespun/Local.xcconfig
+      - name: Archive and upload
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          HOMESPUN_BUILDS: /Users/Shared/homespun-builds
+        run: |
+          zsh Apps/Homespun/scripts/testflight.sh | tee upload.log
+          build=$(sed -n 's/^Uploaded build \([0-9]*\).*/\1/p' upload.log)
+          echo "### TestFlight build $build" >> $GITHUB_STEP_SUMMARY
+          python3 Apps/Homespun/scripts/asc.py wait $build | tail -1 >> $GITHUB_STEP_SUMMARY
+      - name: Remove signing inputs
+        if: always()
+        run: rm -f ~/.appstoreconnect/private_keys/AuthKey_*.p8 Apps/Homespun/Local.xcconfig

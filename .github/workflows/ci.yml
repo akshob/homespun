@@ -1,0 +1,140 @@
+# Validation for every change, so it runs here and not by hand.
+#   Every push: the server on Linux, the telemetry Worker, the package on macOS, the app's build
+#   and unit tests, and a smoke run of the UI tests.
+#   A pull request to main (or "full" from Run workflow): the whole UI suite on iPhone and on
+#   iPhone Duo (folded and open), two lanes at once.
+# Apple jobs run on polonium's `homespun-ci` account (ci/README.md), and only for this repository's
+# own branches: never for a pull request from a fork, whose code must not run on that Mac.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ui:
+        description: UI tests
+        type: choice
+        options: [smoke, full]
+        default: smoke
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-linux:
+    name: Server (Linux)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    container: swift:6.3-noble
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Libraries and tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libvips-dev libsqlite3-dev libheif-plugin-libde265 ffmpeg
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: linux-build-${{ hashFiles('Package.resolved') }}-${{ github.sha }}
+          restore-keys: linux-build-${{ hashFiles('Package.resolved') }}-
+      - name: Build
+        run: swift build --build-tests
+      - name: Test
+        run: |
+          swift test --skip-build 2>&1 | tee test.log
+          echo "### Server (Linux)" >> $GITHUB_STEP_SUMMARY
+          grep -E "Test run with|✘" test.log | tail -20 | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
+          ! grep -q "✘" test.log
+
+  telemetry:
+    name: Telemetry Worker
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: services/telemetry
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: services/telemetry/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  apple:
+    name: Apple (build, unit, UI smoke)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, homespun-ci]
+    timeout-minutes: 90
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build (server and app)
+        run: zsh ci/build.sh
+      - name: Package tests (macOS)
+        if: github.event_name != 'pull_request'
+        run: swift test 2>&1 | tee ci-results/package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
+        shell: zsh {0}
+      - name: App unit tests
+        if: github.event_name != 'pull_request'
+        run: zsh ci/unit.sh
+      - name: UI smoke
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ui == 'smoke')
+        run: zsh ci/lane.sh smoke
+      - name: Summary
+        if: always()
+        run: python3 ci/summary.py ci-results "Apple (build, unit, UI smoke)"
+      - name: Keep the results of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-${{ github.run_id }}
+          path: ci-results
+          retention-days: 5
+
+  ui:
+    name: UI (${{ matrix.lane }})
+    needs: apple
+    if: >-
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'workflow_dispatch' && inputs.ui == 'full')
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [iphone, duo]
+    runs-on: [self-hosted, macOS, homespun-ci]
+    timeout-minutes: 240
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build (reused when this commit was built)
+        run: zsh ci/build.sh
+      - name: UI tests
+        run: zsh ci/lane.sh ${{ matrix.lane }}
+      - name: Summary
+        if: always()
+        run: python3 ci/summary.py ci-results "UI (${{ matrix.lane }})"
+      - name: Keep the results of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-${{ matrix.lane }}-${{ github.run_id }}
+          path: ci-results
+          retention-days: 5

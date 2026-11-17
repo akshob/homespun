@@ -30,7 +30,9 @@ def frames(roots, depth=0):
 for kind, report in reports:
     meta = report.get("diagnosticMetaData", {})
     build = sys.argv[2] if len(sys.argv) > 2 else meta.get("appBuildVersion", "")
-    dwarf = glob.glob(os.path.expanduser(f"~/homespun-builds/{build}/Homespun.app.dSYM/Contents/Resources/DWARF/Homespun"))
+    # testflight.sh keeps them in ~/homespun-builds; the TestFlight workflow in /Users/Shared/homespun-builds.
+    dwarf = [path for folder in ("~/homespun-builds", "/Users/Shared/homespun-builds")
+             for path in glob.glob(os.path.expanduser(f"{folder}/{build}/Homespun.app.dSYM/Contents/Resources/DWARF/Homespun"))]
     print(f"== {kind}: {meta.get('appVersion')} ({build}) on {meta.get('deviceType')}, {meta.get('osVersion')}")
     print(f"   {meta.get('terminationReason') or ''} exception {meta.get('exceptionType')} signal {meta.get('signal')}")
     reason = meta.get("objectiveCexceptionReason") or {}
