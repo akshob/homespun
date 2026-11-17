@@ -75,8 +75,8 @@ final class PagerLayout: UICollectionViewLayout {
 }
 
 /// The viewer's pages: a paging collection view over every item the viewer goes through (cells are
-/// reused, so a library of tens of thousands costs no more than a few pages). Each page is
-/// `ItemViewerPage`, hosted in its cell (a video's in a hosting controller, which its player needs).
+/// reused, so a library of tens of thousands costs no more than a few pages): `PhotoPageCell` for a
+/// photo or Live Photo, `VideoPageCell` for a video.
 struct ItemPager: UIViewControllerRepresentable {
     let ids: [String]
     let start: String
@@ -170,8 +170,8 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         collectionView.decelerationRate = .fast
         collectionView.dataSource = self
         collectionView.delegate = self
-        collectionView.register(PageCell.self, forCellWithReuseIdentifier: PageCell.photo)
-        collectionView.register(PageCell.self, forCellWithReuseIdentifier: PageCell.video)
+        collectionView.register(PhotoPageCell.self, forCellWithReuseIdentifier: PhotoPageCell.reuse)
+        collectionView.register(VideoPageCell.self, forCellWithReuseIdentifier: VideoPageCell.reuse)
         collectionView.accessibilityIdentifier = "item.viewer"
         view.addSubview(collectionView)
         swipeDown.attach(to: collectionView)
@@ -239,7 +239,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     func refresh() {
         guard isViewLoaded else { return }
         for path in collectionView.indexPathsForVisibleItems {
-            if let cell = collectionView.cellForItem(at: path) as? PageCell { configure(cell, at: path.item) }
+            if let cell = collectionView.cellForItem(at: path) { configure(cell, at: path.item) }
         }
     }
 
@@ -249,27 +249,27 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let asset = ids.indices.contains(indexPath.item) ? asset(ids[indexPath.item]) : nil
-        let kind = asset?.mediaType == .video ? PageCell.video : PageCell.photo
+        let kind = asset?.mediaType == .video ? VideoPageCell.reuse : PhotoPageCell.reuse
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: kind, for: indexPath)
-        if let cell = cell as? PageCell { configure(cell, at: indexPath.item, asset: asset) }
+        configure(cell, at: indexPath.item, asset: asset)
         return cell
     }
 
-    /// A photo's page is hosted in the cell (lighter); a video's in a hosting controller, which its
-    /// player needs.
-    private func configure(_ cell: PageCell, at item: Int, asset known: PHAsset? = nil) {
+    /// A photo's page is UIKit; a video's is SwiftUI in a hosting controller, which its player needs.
+    private func configure(_ cell: UICollectionViewCell, at item: Int, asset known: PHAsset? = nil) {
         guard ids.indices.contains(item) else { return }
-        let id = ids[item]
-        let placeholder = images.image(id)
-        let key = PageCell.Key(id: id, current: item == index, label: label(id), placeholder: placeholder != nil)
-        guard cell.key != key else { return }
-        cell.key = key
-        let page = ItemViewerPage(asset: known ?? asset(id), isCurrent: key.current, label: key.label, placeholder: placeholder,
-                                  images: images) { [weak self] zoomed in self?.zoomed(id, zoomed) }
-        guard cell.reuseIdentifier == PageCell.video else {
-            cell.contentConfiguration = UIHostingConfiguration { page.ignoresSafeArea() }.margins(.all, 0)
+        let id = ids[item], current = item == index, placeholder = images.image(id)
+        if let cell = cell as? PhotoPageCell {
+            cell.show(id: id, asset: { known ?? self.asset(id) }, current: current, label: label(id), placeholder: placeholder,
+                      images: images) { [weak self] zoomed in self?.zoomed(id, zoomed) }
             return
         }
+        guard let cell = cell as? VideoPageCell else { return }
+        let key = VideoPageCell.Key(id: id, current: current, label: label(id), placeholder: placeholder != nil)
+        guard cell.key != key else { return }
+        cell.key = key
+        let page = ItemVideoPage(asset: known ?? asset(id), isCurrent: current, label: key.label, placeholder: placeholder,
+                                 images: images)
         if let host = cell.host {
             host.rootView = page
         } else {
@@ -293,7 +293,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
 
     private func imageReady(_ id: String) {
         for path in collectionView.indexPathsForVisibleItems where ids.indices.contains(path.item) && ids[path.item] == id {
-            if let cell = collectionView.cellForItem(at: path) as? PageCell { configure(cell, at: path.item) }
+            if let cell = collectionView.cellForItem(at: path) { configure(cell, at: path.item) }
         }
     }
 
@@ -332,9 +332,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         middle = page
         layout.anchor = page
         for item in [old, page] {
-            if let cell = collectionView.cellForItem(at: IndexPath(item: item, section: 0)) as? PageCell {
-                configure(cell, at: item)
-            }
+            if let cell = collectionView.cellForItem(at: IndexPath(item: item, section: 0)) { configure(cell, at: item) }
         }
         preload()
         tellPosition()
@@ -367,26 +365,6 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         guard moving else { return }
         moving = false
         PerfMonitor.shared.scrollEnded()
-    }
-
-    /// One reusable page: its SwiftUI content stays and takes the next item.
-    final class PageCell: UICollectionViewCell {
-        static let photo = "photo"
-        static let video = "video"
-
-        struct Key: Equatable {
-            var id: String
-            var current: Bool
-            var label: String
-            var placeholder: Bool
-        }
-
-        var host: UIHostingController<ItemViewerPage>?
-        var key: Key?
-
-        /// Exactly the layout's page: nothing to measure.
-        override func preferredLayoutAttributesFitting(_ attributes: UICollectionViewLayoutAttributes)
-            -> UICollectionViewLayoutAttributes { attributes }
     }
 }
 
