@@ -77,12 +77,12 @@ final class ItemPagingUITests: XCTestCase {
         // Zoomed in, a swipe pans the photo instead of paging; zoomed out, it pages again.
         let state = app.staticTexts["item.state"]
         XCTAssertTrue(state.waitForExistence(timeout: 5), "no state line")
-        viewer.doubleTap()
+        app.shownPage().doubleTap()
         XCTAssertTrue(state.waitForNonExistence(timeout: 5), "didn't zoom in")
         viewer.swipeRight()
         sleep(1)
         XCTAssertEqual(position(viewer)?.index, shown + 1, "a swipe paged while zoomed in")
-        viewer.doubleTap()
+        app.shownPage().doubleTap()
         XCTAssertTrue(state.waitForExistence(timeout: 5), "didn't zoom out")
         viewer.swipeRight()
         check(app, viewer, at: shown, "zoomed out, 1 back")

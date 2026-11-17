@@ -168,6 +168,8 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         collectionView.contentInsetAdjustmentBehavior = .never
         collectionView.insetsLayoutMarginsFromSafeArea = false
         collectionView.decelerationRate = .fast
+        // Pages are paged through, never chosen.
+        collectionView.allowsSelection = false
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(PhotoPageCell.self, forCellWithReuseIdentifier: PhotoPageCell.reuse)

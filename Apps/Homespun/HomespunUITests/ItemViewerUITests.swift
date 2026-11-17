@@ -81,7 +81,7 @@ final class ItemViewerUITests: XCTestCase {
         viewer.swipeLeft()
         XCTAssertTrue(waitFor(state, prefix: "Ready to free up"), state.label)
         // Double-tap zooms; the state line steps aside while zoomed.
-        viewer.doubleTap()
+        app.shownPage().doubleTap()
         XCTAssertTrue(state.waitForNonExistence(timeout: 5), "the state line stayed over a zoomed photo")
         attach(app, "Zoomed")
     }

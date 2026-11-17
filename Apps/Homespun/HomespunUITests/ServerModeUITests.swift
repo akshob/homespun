@@ -68,7 +68,7 @@ final class ServerModeUITests: XCTestCase {
         let before = proceed.label
         let compare = app.buttons["remove.compare"].firstMatch
         XCTAssertTrue(compare.waitForExistence(timeout: 5), "no compact copies to compare")
-        compare.tap()
+        app.tapCompactCopy(compare)
         XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
         attach(app, "Compare before freeing up")
         let keep = app.buttons["remove.keepOriginal"]
