@@ -868,6 +868,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                 PerfMonitor.shared.note([
                     "grid.offset": self.collectionView.contentOffset.y, "grid.top": range.lowerBound, "grid.bottom": range.upperBound,
                     "grid.jumps": Double(self.jumps), "grid.count": Double(geometry.count), "grid.columns": Double(geometry.columns),
+                    "grid.width": geometry.metrics.width,
                     "grid.first": Double(items.lowerBound), "grid.last": Double(items.upperBound - 1),
                     "grid.anchor": Double(geometry.anchor(in: visible)?.item ?? -1), "grid.blank": Double(self.blankCells().blank),
                     "grid.shown": Double(self.viewerItem.flatMap { self.data.positions[$0] } ?? -1),

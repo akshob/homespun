@@ -110,16 +110,29 @@ final class GridScrollUITests: XCTestCase {
         guard start.value("grid.bottom") - start.value("grid.top") > 2_000 else { throw XCTSkip("The library is short.") }
         for _ in 0..<3 { swipe(by: 250) }
         let middle = try settled(changedFrom: start)
-        let anchor = middle.value("grid.anchor")
+        let anchor = middle.value("grid.anchor"), columns = middle.value("grid.columns")
         shot("mid-library, folded")
-        // Unfolded, turned, folded again.
+        // Unfolded, turned, folded again: the grid fills the screen it's on (beside the tabs' strip, if
+        // any), with more columns open.
         for (name, wide) in [("landscape", true), ("portrait", false), ("folded", false)] {
             pose(name)
             XCTAssertTrue(waitForWindow { name == "folded" ? $0.width < 500 : $0.width > 500 && ($0.width > $0.height) == wide },
                           "the screen didn't turn \(name)")
-            sleep(2)
             XCTAssertEqual(app.state, .runningForeground, "crashed: \(name)")
-            let now = report()
+            let window = app.windows.firstMatch.frame.width
+            func fills(_ report: Report) -> Bool {
+                let width = report.value("grid.width")
+                return width <= window && width > window - 120 && (name == "folded") == (report.value("grid.columns") == columns)
+            }
+            let deadline = Date().addingTimeInterval(20)
+            var now = report()
+            while !fills(now), Date() < deadline {
+                sleep(1)
+                now = report()
+            }
+            XCTAssertTrue(fills(now), "\(name): the grid is \(now.value("grid.width")) wide in \(now.value("grid.columns")) columns, the screen \(window)")
+            sleep(2)
+            now = report()
             XCTAssertTrue(now.value("grid.first") <= anchor && anchor <= now.value("grid.last"),
                           "\(name): item \(anchor) isn't in view (\(now.value("grid.first"))–\(now.value("grid.last")))")
             XCTAssertEqual(now.value("grid.jumps"), middle.value("grid.jumps"), "\(name): the grid jumped")
