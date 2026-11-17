@@ -23,7 +23,7 @@ its deploy, on main).
 """
 import json, os, subprocess, sys
 
-FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "duo-cover", "duo-open"]
+FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "duo-cover", "duo-open", "demo"]
 ZERO = "0" * 40
 
 

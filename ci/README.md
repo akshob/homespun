@@ -4,7 +4,7 @@ Every change is validated by GitHub Actions (`.github/workflows`), not by hand:
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | pull request to `main` | what changed: the server on Linux and macOS, the telemetry Worker, the app's build and unit tests (PhotoKit ones included), and the whole UI suite, one run per machine at once: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`) and iPhone Duo (`duo-cover`, `duo-open` in every pose). A draft pull request gets UI smoke only. |
+| `ci.yml` | pull request to `main` | what changed: the server on Linux and macOS, the telemetry Worker, the app's build and unit tests (PhotoKit ones included), and the whole UI suite, one run per machine at once: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`), iPhone Duo (`duo-cover`, `duo-open` in every pose), and Try the Demo on both (`demo`, no server). A draft pull request gets UI smoke only. |
 | `ci.yml` | push to `main` | what changed, with UI smoke |
 | `ci.yml` | push to another branch | build and unit tests, or nothing if the branch has an open pull request (that run covers it) |
 | `ci.yml` | Run workflow (any branch) | everything, with UI runs `none`, `smoke` or `full` |
@@ -35,7 +35,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 |---|---|
 | `build.sh` | release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it) |
 | `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access |
-| `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DUO_POSES=1`, `STUB_PORT=`) |
+| `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DUO_POSES=1`, `STUB_PORT=`; `SERVERLESS=1`: no server and no Photos access, for the demo) |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
 | `lane.sh <run\|group> ...` | UI runs by name (`smoke`, `iphone`, `library`, …) or group (`iphone-all`, `duo-all`, `full`) |
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |

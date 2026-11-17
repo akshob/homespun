@@ -2,7 +2,7 @@
 # UI test runs, each on its own simulator and temporary server; fails if any did. GitHub's machines
 # take one run each (the ci workflow's matrix); on one Mac, name several, or a group.
 #   lane.sh <run|group> ...
-#   runs:   smoke iphone library later copies onboarding telemetry duo-cover duo-open
+#   runs:   smoke iphone library later copies onboarding telemetry duo-cover duo-open demo
 #   groups: iphone-all (every iPhone run), duo-all (both Duo runs), full (all of them)
 # Ports differ, so runs of different jobs can share a Mac.
 set -u
@@ -14,7 +14,7 @@ for name in "$@"; do
   case $name in
     iphone-all) runs+=(iphone library later copies onboarding telemetry) ;;
     duo-all) runs+=(duo-cover duo-open) ;;
-    full) runs+=(iphone library later copies onboarding telemetry duo-cover duo-open) ;;
+    full) runs+=(iphone library later copies onboarding telemetry duo-cover duo-open demo) ;;
     *) runs+=($name) ;;
   esac
 done
@@ -42,6 +42,10 @@ for one in $runs; do
         HomespunUITests/LibraryUITests,HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests 8795 ;;
     duo-open)
       run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo HomespunUITests/DuoLayoutUITests 8793 open ;;
+    demo)
+      # Try the Demo needs no server and no Photos access: on an iPhone, then on iPhone Duo's cover.
+      run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests 8800
+      run demo-duo env SERVERLESS=1 zsh $D/ui.sh demo-duo iPhone-Duo HomespunUITests/DemoModeUITests 8801 ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;
   esac
