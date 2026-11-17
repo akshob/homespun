@@ -18,7 +18,7 @@ xcrun simctl addmedia $SIM $SEED/IMG_2001.HEIC $SEED/IMG_2001.MOV $SEED/IMG_2002
 export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT HOMESPUN_NAME="polonium (test)"
 $SERVER_BIN serve > $DATA.log 2>&1 &
 SERVER=$!; sleep 3
-CODE=$($SERVER_BIN pair | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
+CODE=$($SERVER_BIN pair --minutes 180 | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
 RESULT=$RESULTS/$NAME.xcresult; rm -rf $RESULT
 cd $APP
 TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_RECENT=3 \

@@ -115,7 +115,7 @@ public struct HomespunServer: Sendable {
     }
 
     /// The pairing link and QR code `homespun-server pair` prints.
-    public func pairingInstructions(code: String) -> String {
+    public func pairingInstructions(code: String, minutes: Int = 10) -> String {
         guard let url = Network.publicURL(configuration: configuration) else {
             return "Pairing code: \(code)\nSet HOMESPUN_PUBLIC_URL to the address your iPhone uses to reach this server."
         }
@@ -125,7 +125,7 @@ public struct HomespunServer: Sendable {
         if let qr = try? TerminalQR.render(link) { text += qr + "\n\n" }
         text += "Or open this link on the iPhone (on a simulator, paste it in the app):\n  \(link)\n\n"
         text += "Or enter the address \(address) and the code \(code) in the app.\n"
-        text += "Pairing code: \(code)  (works once, expires in 10 minutes)\n"
+        text += "Pairing code: \(code)  (works once, expires in \(minutes == 1 ? "1 minute" : "\(minutes) minutes"))\n"
         if ["127.0.0.1", "::1", "localhost"].contains(configuration.host) {
             text += "\nNote: the server listens only on this computer. Set HOMESPUN_HOST=0.0.0.0 (install-service does).\n"
         }
