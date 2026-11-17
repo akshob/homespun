@@ -176,8 +176,7 @@ struct MainTabView: View {
             open(link)
         }
         .task {
-            await model.library.start()
-            model.status.start()
+            await model.library.start { model.status.start() }
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-deleteNewestBackedUp") {
                 await model.library.deleteNewestBackedUpForTesting()
@@ -203,11 +202,15 @@ struct MainTabView: View {
             tab = .server
             model.router.serverRoute = .automatic
         case .unlock(let feature):
-            if model.premium.isUnlocked {
-                tab = .server
-                model.router.serverRoute = .premium
-            } else {
-                sheet = .unlock(PremiumFeature(rawValue: feature) ?? .widgets)
+            // Opened from a widget at launch: Premium may not have been checked yet.
+            Task {
+                await model.premium.refresh()
+                if model.premium.isUnlocked {
+                    tab = .server
+                    model.router.serverRoute = .premium
+                } else {
+                    sheet = .unlock(PremiumFeature(rawValue: feature) ?? .widgets)
+                }
             }
         }
     }

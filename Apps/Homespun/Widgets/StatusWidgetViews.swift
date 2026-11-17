@@ -167,7 +167,7 @@ private struct FactCell: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .accessibilityLabel("\(title): \(value.replacingOccurrences(of: " · ", with: ", "))")
+        .accessibilityLabel("\(title): \(StatusWords.spokenFact(value))")
     }
 }
 
@@ -255,18 +255,18 @@ struct RectangularStatusView: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(StatusWords.readyHeadline(snapshot.ready)).font(.headline).lineLimit(1).minimumScaleFactor(0.7)
                         .widgetAccentable()
-                        .accessibilityLabel("Ready to free up: \(StatusWords.ready(snapshot.ready).replacingOccurrences(of: " · ", with: ", "))")
+                        .accessibilityLabel("Ready to free up: \(StatusWords.spokenFact(StatusWords.ready(snapshot.ready)))")
                     ViewThatFits(in: .horizontal) {
                         FactLine(symbol: FactSymbol.backup, text: StatusWords.lastBackup(snapshot.lastBackup, now: entry.date))
                         FactLine(symbol: FactSymbol.backup,
                                  text: snapshot.lastBackup.map { StatusWords.day($0.date, now: entry.date) } ?? "No backups yet")
                     }
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Last backup: \(StatusWords.lastBackup(snapshot.lastBackup, now: entry.date).replacingOccurrences(of: " · ", with: ", "))")
+                    .accessibilityLabel("Last backup: \(StatusWords.spokenFact(StatusWords.lastBackup(snapshot.lastBackup, now: entry.date)))")
                     HStack(spacing: 8) {
                         ServerLine(server: server)
                             .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("Server: \(StatusWords.server(server).replacingOccurrences(of: " · ", with: ", "))")
+                            .accessibilityLabel("Server: \(StatusWords.spokenFact(StatusWords.server(server)))")
                         if server.reachable {
                             FactLine(symbol: FactSymbol.automatic, text: StatusWords.automaticShort(snapshot.automatic))
                                 .accessibilityElement(children: .ignore)

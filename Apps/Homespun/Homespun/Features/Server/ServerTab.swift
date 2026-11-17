@@ -58,15 +58,11 @@ struct ServerTab: View {
         } message: {
             Text(AutomaticModeView.scopeMessage(count: model.library.library.state.count(.notBackedUp)))
         }
-        // A widget's link to one of these pages.
+        // A widget's link to one of these pages (Automatic Mode's own page says if it's locked).
         .onChange(of: model.router.serverRoute, initial: true) { _, route in
             guard let route else { return }
             model.router.serverRoute = nil
-            if route == .automatic, !model.premium.isUnlocked {
-                locked = .automatic
-            } else {
-                path = [route]
-            }
+            path = [route]
         }
     }
 

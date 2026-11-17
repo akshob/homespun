@@ -41,7 +41,7 @@ final class AppModel {
                 let summary = await model.automatic.run(settings: model.settings, job: model.job, premium: model.premium,
                                                         notify: true)
                 // The widgets and the watch show what the run did (the screen isn't there to start them).
-                if summary.skipped == nil, model.settings.isPaired, !Task.isCancelled { await model.library.refreshReady() }
+                if model.settings.isPaired, !Task.isCancelled { await model.library.refreshReady() }
                 await model.status.publishNow()
                 box.task.setTaskCompleted(success: summary.skipped == nil)
             }

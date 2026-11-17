@@ -50,7 +50,7 @@ struct WatchStatusView: View {
             Text(value).font(.body)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title): \(value.replacingOccurrences(of: " · ", with: ", "))")
+        .accessibilityLabel("\(title): \(StatusWords.spokenFact(value))")
     }
 
     private func message(_ symbol: String, _ text: String) -> some View {

@@ -36,6 +36,8 @@ final class LibraryController {
     private(set) var loaded = false
     /// Everything ready to free up now.
     private(set) var ready = Ready()
+    /// `ready` has been worked out (a background run that launched the app may not have).
+    private(set) var readyChecked = false
     /// What the last Back Up finished with, until it's freed or dismissed (02·2.3).
     private(set) var finished: Ready?
     private(set) var removal = Removal.idle
@@ -90,14 +92,16 @@ final class LibraryController {
 
     // MARK: Starting and refreshing
 
-    /// Called once when the main screen appears.
-    func start() async {
+    /// Called once when the main screen appears. `loaded`: once what's ready to free up and Premium are
+    /// known, before automatic mode catches up (which can take a while).
+    func start(loaded: () -> Void = {}) async {
         guard !started else { return }
         started = true
         library.onChange = { @MainActor [weak self] in Task { await self?.refreshGrid() } }
         await refresh()
         // Only what this Apple Account owns; the product itself loads on the Premium screen.
         await premium.refresh()
+        loaded()
         await runAutomatic()
     }
 
@@ -198,6 +202,7 @@ final class LibraryController {
     }
 
     func refreshReady() async {
+        defer { readyChecked = true }
         guard let remover = settings.remover(ledger: job.ledger) else {
             ready = Ready()
             return

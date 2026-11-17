@@ -21,6 +21,8 @@ private func time(_ date: Date) -> String {
 }
 
 private let now = date(2026, 11, 17, 15)
+/// " · ", which keeps to the words before it.
+private let dot = StatusWords.separator
 
 private func snapshot(unlocked: Bool = true, ready: Int = 0, readyBytes: Int = 0, backup: Date? = nil,
                       server: StatusSnapshot.Server? = .init(name: "Home Mac", reachable: true, checkedAt: now),
@@ -61,21 +63,21 @@ private func snapshot(unlocked: Bool = true, ready: Int = 0, readyBytes: Int = 0
 }
 
 @Test func statusWordsSayEachFact() {
-    #expect(StatusWords.ready(.init(bytes: 1_200_000_000, count: 48)) == "1.2 GB · 48 items")
-    #expect(StatusWords.ready(.init(bytes: 3_400_000, count: 1)) == "3.4 MB · 1 item")
+    #expect(StatusWords.ready(.init(bytes: 1_200_000_000, count: 48)) == "1.2 GB\(dot)48 items")
+    #expect(StatusWords.ready(.init(bytes: 3_400_000, count: 1)) == "3.4 MB\(dot)1 item")
     #expect(StatusWords.ready(.init(bytes: 0, count: 0)) == "Nothing to free up")
     #expect(StatusWords.readyHeadline(.init(bytes: 1_200_000_000, count: 48)) == "1.2 GB to free up")
     #expect(StatusWords.bytesParts(1_200_000_000) == ("1.2", "GB"))
 
     let today = date(2026, 11, 17, 9, 12), yesterday = date(2026, 11, 16, 23, 40)
-    #expect(StatusWords.lastBackup(.init(date: today, count: 12), now: now, calendar: utc) == "Today, \(time(today)) · 12 items")
+    #expect(StatusWords.lastBackup(.init(date: today, count: 12), now: now, calendar: utc) == "Today, \(time(today))\(dot)12 items")
     #expect(StatusWords.lastBackup(.init(date: yesterday, count: 1), now: now, calendar: utc)
-            == "Yesterday, \(time(yesterday)) · 1 item")
-    #expect(StatusWords.lastBackup(.init(date: date(2026, 11, 11), count: 120), now: now, calendar: utc) == "Nov 11 · 120 items")
-    #expect(StatusWords.lastBackup(.init(date: date(2025, 12, 30), count: 2), now: now, calendar: utc) == "Dec 30, 2025 · 2 items")
+            == "Yesterday, \(time(yesterday))\(dot)1 item")
+    #expect(StatusWords.lastBackup(.init(date: date(2026, 11, 11), count: 120), now: now, calendar: utc) == "Nov 11\(dot)120 items")
+    #expect(StatusWords.lastBackup(.init(date: date(2025, 12, 30), count: 2), now: now, calendar: utc) == "Dec 30, 2025\(dot)2 items")
     #expect(StatusWords.lastBackup(nil, now: now) == "No backups yet")
 
-    #expect(StatusWords.server(.init(name: "Home Mac", reachable: true)) == "Home Mac · Connected")
+    #expect(StatusWords.server(.init(name: "Home Mac", reachable: true)) == "Home Mac\(dot)Connected")
     #expect(StatusWords.server(.init(name: "Home Mac", reachable: false)) == "Can't reach Home Mac")
     #expect(StatusWords.server(nil) == "No server yet")
     #expect(StatusWords.automatic(.init(enabled: true)) == "Tonight while charging")
@@ -162,7 +164,7 @@ private func snapshot(unlocked: Bool = true, ready: Int = 0, readyBytes: Int = 0
     ])
     #expect(StatusPublisher.backedUp(in: run) == 3)
 
-    var inputs = StatusPublisher.Inputs(unlocked: true, readyBytes: 1_200_000_000, readyCount: 48,
+    var inputs = StatusPublisher.Inputs(unlocked: true, ready: (1_200_000_000, 48),
                                         lastBackup: (run.end, StatusPublisher.backedUp(in: run)), historyLoaded: true,
                                         serverName: "Home Mac", status: .unreachable("Can't reach Home Mac."),
                                         checkedAt: now - 60, automatic: true, lastRun: now - 3600)
@@ -171,11 +173,15 @@ private func snapshot(unlocked: Bool = true, ready: Int = 0, readyBytes: Int = 0
                                    lastBackup: .init(date: now, count: 3),
                                    server: .init(name: "Home Mac", reachable: false, checkedAt: now - 60),
                                    automatic: .init(enabled: true, lastRun: now - 3600), updatedAt: now))
-    // While it's being checked again, the last answer stays.
+    // While it's being checked again, the last answer stays; so does what's ready to free up until
+    // it's been worked out (a background run that launched the app).
     inputs.status = .checking
     inputs.checkedAt = nil
-    #expect(StatusPublisher.snapshot(inputs, previous: away, now: now + 5).server
-            == .init(name: "Home Mac", reachable: false, checkedAt: now - 60))
+    inputs.ready = nil
+    let checking = StatusPublisher.snapshot(inputs, previous: away, now: now + 5)
+    #expect(checking.server == .init(name: "Home Mac", reachable: false, checkedAt: now - 60))
+    #expect(checking.ready == .init(bytes: 1_200_000_000, count: 48))
+    #expect(StatusPublisher.snapshot(inputs, previous: nil, now: now).ready == .init(bytes: 0, count: 0))
     inputs.serverName = nil
     #expect(StatusPublisher.snapshot(inputs, previous: away, now: now).server == nil)
 }

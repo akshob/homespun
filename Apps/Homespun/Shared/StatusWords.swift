@@ -13,6 +13,8 @@ enum StatusWords {
     static let notStarted = "Open Homespun to get started"
     static let openOnPhone = "Open Homespun on your iPhone"
     static let notPaired = "Set up your home computer in Homespun"
+    /// Between two parts of a fact; it stays with the part before it, so a line breaks after the dot.
+    static let separator = "\u{00A0}· "
 
     static func isStale(_ snapshot: StatusSnapshot, now: Date) -> Bool {
         now.timeIntervalSince(snapshot.updatedAt) > staleAfter
@@ -22,7 +24,7 @@ enum StatusWords {
 
     /// "1.2 GB · 48 items", "Nothing to free up".
     static func ready(_ ready: StatusSnapshot.Ready) -> String {
-        ready.count > 0 ? "\(bytes(ready.bytes)) · \(items(ready.count))" : "Nothing to free up"
+        ready.count > 0 ? "\(bytes(ready.bytes))\(separator)\(items(ready.count))" : "Nothing to free up"
     }
 
     /// "1.2 GB to free up", "Nothing to free up".
@@ -33,13 +35,13 @@ enum StatusWords {
     /// "Today, 9:12 AM · 12 items", "No backups yet".
     static func lastBackup(_ backup: StatusSnapshot.Backup?, now: Date, calendar: Calendar = .current) -> String {
         guard let backup else { return "No backups yet" }
-        return "\(day(backup.date, now: now, calendar: calendar)) · \(items(backup.count))"
+        return "\(day(backup.date, now: now, calendar: calendar))\(separator)\(items(backup.count))"
     }
 
     /// "Home Mac · Connected", "Can't reach Home Mac", "No server yet".
     static func server(_ server: StatusSnapshot.Server?) -> String {
         guard let server else { return "No server yet" }
-        return server.reachable ? "\(server.name) · Connected" : "Can't reach \(server.name)"
+        return server.reachable ? "\(server.name)\(separator)Connected" : "Can't reach \(server.name)"
     }
 
     /// Automatic Mode runs in the background when iOS allows, usually overnight while charging.
@@ -50,6 +52,9 @@ enum StatusWords {
     static func automaticShort(_ automatic: StatusSnapshot.Automatic) -> String {
         automatic.enabled ? "Tonight" : "Off"
     }
+
+    /// A fact as VoiceOver reads it: "1.2 GB, 48 items".
+    static func spokenFact(_ text: String) -> String { text.replacingOccurrences(of: separator, with: ", ") }
 
     // MARK: Pieces
 
@@ -151,7 +156,7 @@ enum StatusWords {
                          "Server: \(server(snapshot.server))",
                          "Automatic Mode: \(automatic(snapshot.automatic))"]
             if watch { parts.append("Updated \(ago(snapshot.updatedAt, now: now))") }
-            return parts.map { $0.replacingOccurrences(of: " · ", with: ", ") }.joined(separator: ". ") + "."
+            return parts.map(spokenFact).joined(separator: ". ") + "."
         }
     }
 

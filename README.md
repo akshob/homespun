@@ -154,7 +154,8 @@ Debug builds add `.dev` after `photos.homespun.app`, like the app. Links from th
 `homespun://free-up`, `activity`, `server`, `automatic` and `unlock?feature=widgets`. Debug builds
 launched with `-widgetDemo ready|away|nothing|locked|unpaired` show made-up facts in the widgets.
 `HomespunWidgetTests` draws every size in every state; with `TEST_RUNNER_HOMESPUN_WIDGET_SHOTS=<folder>`
-it saves them as PNGs.
+it saves them as PNGs, and `WidgetGalleryUITests` (not in CI) adds the real widgets to the simulator's
+Home Screen from the widget gallery and saves screenshots there too.
 
 ### TestFlight
 
