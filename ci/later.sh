@@ -8,6 +8,7 @@ NAME=$1 TYPE=$2 PORT=$3 POSE=${4:-}
 MEDIA=$CI_STATE/media/later-$PORT; rm -rf $MEDIA; mkdir -p $MEDIA
 ffmpeg -v error -f lavfi -i testsrc2=size=1600x1200 -frames:v 1 -q:v 2 $MEDIA/RECENT_1.JPG
 ffmpeg -v error -f lavfi -i testsrc2=size=1280x720:rate=30:duration=2 -c:v libx264 -pix_fmt yuv420p $MEDIA/RECENT_2.MP4
+take_sim_slot
 SIM=$(new_simulator $TYPE "HS CI $NAME $PORT")
 DATA=$CI_STATE/servers/$NAME-$PORT; rm -rf $DATA; mkdir -p $DATA/originals
 SERVER=""
