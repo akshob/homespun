@@ -102,7 +102,7 @@ Backing up, compact copies, Compare, Free Up Space (with a question that says no
 Keep Original, Restore Original, Activity and the Server tab all work on them. The demo never reads or
 changes Photos, asks iOS for nothing, records no analytics and sends no reports; its settings and
 records are kept apart and deleted by Leave the Demo (the Server tab, or the Demo mark in setup).
-The Premium purchase in the demo is the real one.
+Turning on Automatic Mode or Cloud Copies in the demo asks for the real one-time purchase.
 
 **Premium** (one-time In-App Purchase; everything above stays free):
 

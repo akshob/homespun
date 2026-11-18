@@ -222,7 +222,9 @@ struct ItemViewer: View {
                 TitleAndIcon(title: "Free Up Space", systemImage: "iphone")
             }
             .buttonStyle(.glassProminent).tint(Theme.accent)
-            .accessibilityHint("Removes this original from this iPhone. Its compact copy stays. Recently Deleted keeps it for 30 days.")
+            .accessibilityHint(model.settings.isDemo
+                               ? "Removes this original from the demo. Its compact copy stays. Nothing is deleted."
+                               : "Removes this original from this iPhone. Its compact copy stays. Recently Deleted keeps it for 30 days.")
             .accessibilityIdentifier("item.action")
         case .backUp, .tryAgain:
             let again = ItemAction.for(cell) == .tryAgain
@@ -247,7 +249,9 @@ struct ItemViewer: View {
                     TitleAndIcon(title: "Restore Original", systemImage: "arrow.uturn.backward.circle")
                 }
                 .buttonStyle(.glassProminent).tint(Theme.accent)
-                .accessibilityHint("Brings the full-size original back from \(server) and deletes this compact copy. iOS asks first.")
+                .accessibilityHint(model.settings.isDemo
+                                   ? "Brings the full-size original back from \(server) and deletes this compact copy from the demo. You're asked first."
+                                   : "Brings the full-size original back from \(server) and deletes this compact copy. iOS asks first.")
                 .accessibilityIdentifier("item.action")
             }
         }

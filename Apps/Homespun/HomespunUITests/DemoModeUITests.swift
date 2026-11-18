@@ -5,7 +5,8 @@ import XCTest
 /// the pretend server found and paired, a few samples backed up and their compact copies, one opened and
 /// compared, Free Up Space (compare, keep one original, free the rest, with the demo's own question),
 /// Restore Original, Activity's runs, then Leave the Demo back to Welcome, and the demo starting afresh.
-/// iOS never asks for anything (no Photos access, no Local Network). Screenshots are attached.
+/// iOS never asks for anything (no Photos access, no Local Network). And without the purchase, turning on
+/// Automatic Mode or Cloud Copies in the demo asks for the real one. Screenshots are attached.
 final class DemoModeUITests: XCTestCase {
     private var app: XCUIApplication!
     @MainActor private var springboard: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.springboard") }
@@ -167,7 +168,61 @@ final class DemoModeUITests: XCTestCase {
         XCTAssertFalse(app.buttons["demo.menu"].exists, "still in the demo")
     }
 
+    /// The purchase in the demo is the real one: without it (`-premiumLocked YES`), turning on Automatic
+    /// Mode or signing in to a cloud service asks for it, as in the person's own Homespun; Close leaves it off.
+    @MainActor func testTurningOnAsksForThePurchaseInTheDemo() throws {
+        app = XCUIApplication()
+        app.launchArguments += ["-hideTips", "-resetDemo", "-premiumLocked", "YES"]
+        app.launch()
+        let demo = app.buttons["setup.demo"]
+        XCTAssertTrue(demo.waitForExistence(timeout: 20), "no Try the Demo on Welcome")
+        demo.tap()
+        pairWithDemo()
+        let notNow = app.buttons["estimate.notNow"]
+        XCTAssertTrue(notNow.waitForExistence(timeout: 30), "no estimate of the sample photos")
+        notNow.tap()
+
+        app.openAutomaticMode()
+        let toggle = app.automaticToggle
+        XCTAssertEqual(toggle.value as? String, "0")
+        app.tapSwitch(toggle)
+        expectUnlockSheet("Turn On Automatic Mode")
+        XCTAssertEqual(toggle.value as? String, "0", "on without the purchase")
+        app.goBack(from: "Automatic Mode")
+
+        let cloud = app.buttons["settings.connectors"]
+        XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
+        cloud.tap()
+        let oneDrive = app.buttons["connector.onedrive"]
+        XCTAssertTrue(oneDrive.waitForExistence(timeout: 15), "no OneDrive on the Cloud Copies page")
+        oneDrive.tap()
+        let signIn = app.buttons["connector.signIn"]
+        XCTAssertTrue(signIn.waitForExistence(timeout: 10), "no Sign In")
+        signIn.tap()
+        expectUnlockSheet("Turn On Cloud Copies")
+        nothingAsked("unlock")
+
+        app.goBack(from: "OneDrive")
+        app.goBack(from: "Cloud Copies")
+        let leaveButton = app.buttons["demo.leave"].firstMatch
+        XCTAssertTrue(app.reveal(leaveButton), "no Leave the Demo in the Server tab")
+        leave(leaveButton)
+        XCTAssertTrue(app.buttons["setup.demo"].waitForExistence(timeout: 20), "Leave the Demo didn't return to Welcome")
+    }
+
     // MARK: Steps
+
+    /// The purchase sheet (the real StoreKit product): buy, restore, that one purchase unlocks both; then Close.
+    @MainActor private func expectUnlockSheet(_ title: String, file: StaticString = #filePath, line: UInt = #line) {
+        let buy = app.buttons["unlock.buy"]
+        XCTAssertTrue(buy.waitForExistence(timeout: 10), "turning it on didn't ask for the purchase", file: file, line: line)
+        XCTAssertTrue(app.staticTexts[title].exists, "no \(title)", file: file, line: line)
+        XCTAssertTrue(app.staticTexts["unlock.both"].exists, file: file, line: line)
+        XCTAssertTrue(app.buttons["unlock.restore"].exists, "no Restore Purchase", file: file, line: line)
+        attach(title)
+        app.buttons["unlock.close"].tap()
+        XCTAssertTrue(buy.waitForNonExistence(timeout: 10), "the sheet didn't close", file: file, line: line)
+    }
 
     @MainActor private func pairWithDemo() {
         let use = app.buttons["found.use"]

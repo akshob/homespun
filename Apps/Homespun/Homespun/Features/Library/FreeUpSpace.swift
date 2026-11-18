@@ -158,7 +158,9 @@ struct KeepOriginalButton: View {
             }
             .buttonStyle(.glass)
             .disabled(working || controller.isRemoving)
-            .accessibilityHint("Keeps this original on this iPhone full size and deletes its compact copy. iOS asks first.")
+            .accessibilityHint(controller.settings.isDemo
+                               ? "Keeps this original full size and deletes its compact copy from the demo. You're asked first."
+                               : "Keeps this original on this iPhone full size and deletes its compact copy. iOS asks first.")
             .accessibilityIdentifier("remove.keepOriginal")
             Text("Keeps this one full size here; its compact copy is deleted.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
@@ -226,8 +228,10 @@ struct FreeUpSpacePanel: View {
             Text("\(LibraryController.bytes(bytes)) · \(count) original\(count == 1 ? "" : "s") safe on \(controller.serverName)")
                 .font(.headline).monospacedDigit().foregroundStyle(Theme.label)
                 .accessibilityIdentifier("remove.bytes")
-            Text("Homespun checks each original with \(controller.serverName) again, then iOS asks you. "
-                 + "Removed originals stay in Recently Deleted for 30 days.")
+            Text(demo ? "Homespun checks each original with \(controller.serverName) again, then asks you, as iOS would. "
+                    + "In the demo, nothing is deleted."
+                 : "Homespun checks each original with \(controller.serverName) again, then iOS asks you. "
+                    + "Removed originals stay in Recently Deleted for 30 days.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel)
             if !pairs.isEmpty { strip }
         } else {
@@ -237,12 +241,14 @@ struct FreeUpSpacePanel: View {
                 .accessibilityIdentifier("remove.bytes")
             Text("\(count) original\(count == 1 ? " is" : "s are") safe on \(controller.serverName). "
                  + (trial ? "Their compact copies stay in Photos."
+                    : demo ? "Homespun checks each one again, then asks you, as iOS would."
                     : "Homespun checks each one again, then iOS asks you."))
                 .foregroundStyle(Theme.secondaryLabel)
             if trial {
                 compareCard
                 promise("checkmark.shield", "First, Homespun checks each original with \(controller.serverName) again, byte for byte.")
-                promise("trash", "Then iOS asks you. Removed originals stay in Recently Deleted for 30 days.")
+                promise("trash", demo ? "Then Homespun asks you, as iOS would. In the demo, nothing is deleted."
+                        : "Then iOS asks you. Removed originals stay in Recently Deleted for 30 days.")
                 promise("icloud", "With iCloud Photos, they're also removed from iCloud and your other devices. Compact copies stay.")
                 if somethingWrong {
                     InlineNotice(tone: .info, title: "Nothing has been removed",
@@ -264,10 +270,12 @@ struct FreeUpSpacePanel: View {
         }
     }
 
+    private var demo: Bool { controller.settings.isDemo }
+
     @ViewBuilder private var demoNotice: some View {
-        if controller.settings.isDemo {
+        if demo {
             InlineNotice(tone: .info, title: "In the demo, nothing is deleted",
-                         message: "You'll see every step and the question iOS asks; the sample photos only leave the demo.")
+                         message: "You'll see every step and a question like the one iOS asks; the sample photos only leave the demo.")
                 .accessibilityIdentifier("remove.demo")
         }
     }
@@ -326,7 +334,9 @@ struct FreeUpSpacePanel: View {
         ProgressView().frame(maxWidth: .infinity)
         Text(message).font(.subheadline.monospacedDigit()).foregroundStyle(Theme.secondaryLabel)
             .accessibilityIdentifier("remove.progress")
-        Text("Each original on this iPhone must match the server's copy exactly (SHA-256). Nothing is removed until iOS asks you.")
+        Text(demo ? "Each original must match the server's copy exactly (SHA-256). Nothing is removed until you say so, "
+                + "and in the demo nothing is deleted."
+             : "Each original on this iPhone must match the server's copy exactly (SHA-256). Nothing is removed until iOS asks you.")
             .font(.footnote).foregroundStyle(Theme.secondaryLabel)
     }
 

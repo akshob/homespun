@@ -71,7 +71,9 @@ struct RestoreOriginalSheet: View {
                     .foregroundStyle(Theme.secondaryLabel)
                 promise("checkmark.shield", "Each one is checked against \(server)'s copy as it arrives, and again in Photos.")
                 promise("heart", "Favorites, hidden photos and albums stay as they are.")
-                promise("trash", "Then iOS asks to delete the compact copies. They stay in Recently Deleted for 30 days.")
+                promise("trash", controller.settings.isDemo
+                        ? "Then Homespun asks to delete the compact copies, as iOS would. In the demo, nothing is deleted."
+                        : "Then iOS asks to delete the compact copies. They stay in Recently Deleted for 30 days.")
                 promise("lock", "It stays full size: Free Up Space and automatic mode leave it alone until you make a compact copy again.")
                 if edited > 0 {
                     InlineNotice(tone: .warning, title: edited == 1 && items.count == 1 ? "You edited this compact copy"
@@ -98,7 +100,9 @@ struct RestoreOriginalSheet: View {
         ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1)))
             .accessibilityValue("\(progress.done) of \(progress.total)")
             .accessibilityIdentifier("restore.progress")
-        Text("Keep Homespun open. Nothing is deleted until every original is safely in Photos and iOS asks you.")
+        Text(controller.settings.isDemo
+             ? "Keep Homespun open. Nothing is removed until every original is safely back and you say so; in the demo, nothing is deleted."
+             : "Keep Homespun open. Nothing is deleted until every original is safely in Photos and iOS asks you.")
             .font(.footnote).foregroundStyle(Theme.secondaryLabel)
     }
 

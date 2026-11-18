@@ -23,7 +23,12 @@ struct DemoHelpSection: View {
     @State private var confirming = false
 
     /// The demo takes the screen: not while the person's own backup, freeing up or restoring runs.
-    private var busy: Bool { model.job.isRunning || model.library.isRemoving || model.library.isRestoring }
+    private var busy: String? {
+        if model.job.isRunning { return "backing up" }
+        if model.library.isRemoving { return "freeing up space" }
+        if model.library.isRestoring { return "restoring originals" }
+        return nil
+    }
 
     var body: some View {
         Section {
@@ -34,15 +39,16 @@ struct DemoHelpSection: View {
                     ServerRow(title: "Try the Demo", symbol: "play.rectangle", value: nil, chevron: true)
                 }
                 .buttonStyle(.plain)
-                .disabled(busy)
+                .disabled(busy != nil)
+                .accessibilityHint(busy.map { "Available once Homespun has finished \($0)." } ?? "")
                 .accessibilityIdentifier("help.demo")
             }
         } footer: {
             if model.settings.isDemo {
                 Text("You're in the demo: sample photos and a pretend server. Leaving clears it and returns to your own Homespun.")
             } else {
-                Text(busy ? "Available once Homespun has finished what it's doing."
-                     : "See how Homespun works with sample photos and a pretend server. Your own photos, server and settings "
+                Text(busy.map { "Try the Demo is available once Homespun has finished \($0), so it doesn't interrupt it." }
+                     ?? "See how Homespun works with sample photos and a pretend server. Your own photos, server and settings "
                         + "stay as they are.")
             }
         }

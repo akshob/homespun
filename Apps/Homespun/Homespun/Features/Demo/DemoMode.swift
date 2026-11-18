@@ -128,8 +128,8 @@ struct DemoTokens: TokenStore, @unchecked Sendable {
     }
 }
 
-/// The demo's stand-in for the question iOS asks before deleting: the same words, saying it's pretend,
-/// above everything on screen (sheets included), as iOS's is.
+/// The demo's stand-in for the question iOS asks before deleting: its own words (so it never passes
+/// for iOS's), saying it's pretend, above everything on screen (sheets included), as iOS's is.
 @MainActor
 enum DemoPrompt {
     private static var window: UIWindow?
