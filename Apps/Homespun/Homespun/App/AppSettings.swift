@@ -136,7 +136,8 @@ final class AppSettings {
     func refreshServerInfo() async {
         guard var client else { return }
         let before = serverStatus
-        if serverStatus != .reachable { serverStatus = .checking }
+        // A retry keeps the last result on screen until it learns something new.
+        if serverStatus == .unknown { serverStatus = .checking }
         client.timeout = 6
         do {
             let info = try await client.info()

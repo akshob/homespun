@@ -55,6 +55,7 @@ final class ItemViewerUITests: XCTestCase {
         let original = app.staticTexts["compare.original"], compact = app.staticTexts["compare.compact"]
         XCTAssertTrue(original.waitForExistence(timeout: 30), "the original didn't load")
         XCTAssertTrue(compact.waitForExistence(timeout: 30), "the compact copy didn't load")
+        XCTAssertFalse(app.isOnScreen(app.tab("Library")), "the tab bar shows over Compare")
         XCTAssertTrue(original.label.contains("on this iPhone"), original.label)
         let split = app.descendants(matching: .any)["compare.split"]
         XCTAssertEqual(split.value as? String, "Split at 50 percent")
@@ -84,6 +85,23 @@ final class ItemViewerUITests: XCTestCase {
         app.shownPage().doubleTap()
         XCTAssertTrue(state.waitForNonExistence(timeout: 5), "the state line stayed over a zoomed photo")
         attach(app, "Zoomed")
+        app.goBack()
+        let library = app.tab("Library")
+        XCTAssertTrue(library.waitForExistence(timeout: 0.2), "the tabs disappeared while the viewer closed")
+        if app.tabBars.firstMatch.exists { XCTAssertTrue(library.isHittable) }
+        let screen = app.windows.firstMatch.frame
+        guard let item = app.gridItems().allElementsBoundByIndex.first(where: {
+            app.isOnScreen($0) && $0.frame.minY > screen.minY + 150 && $0.frame.maxY < screen.maxY - 150
+        }) else {
+            return XCTFail("no item for Show Details")
+        }
+        item.press(forDuration: 0.7)
+        app.buttons["Show Details"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["details.list"].waitForExistence(timeout: 5),
+                      "Show Details didn't open the viewer's inspector")
+        app.buttons["details.done"].tap()
+        app.goBack()
+        XCTAssertTrue(library.waitForExistence(timeout: 0.2), "the tabs disappeared after Show Details")
     }
 
     /// Frees one original from the viewer, then Compare downloads it from the server.

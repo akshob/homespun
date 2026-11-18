@@ -95,6 +95,8 @@ copies to compare with their originals (from the server); "They Look Right" free
 and the Get Started card open the Library to pick a few items to try.
 
 Videos play in the item viewer, with Play/Pause and a position slider below the picture.
+The viewer zooms over the whole app from the tapped thumbnail, without changing the tabs or
+the Library's layout. Back or a downward swipe returns it to the thumbnail of the item shown.
 Autoplay follows the iPhone's accessibility setting. On the open iPhone Duo, Compare can show
 both videos side by side: they play, pause, seek and zoom together, with sound from one copy
 at a time. Sound switches between the original and the compact copy.

@@ -200,6 +200,7 @@ final class DuoLayoutUITests: XCTestCase {
     /// The viewer fills the screen; Details opens beside the photo and closes again.
     @MainActor private func checkItem(_ app: XCUIApplication, pose: String) {
         app.openTab("Library")
+        let tabs = app.tabFrames()
         XCTAssertTrue(app.openItem(), "\(pose): no item viewer")
         let viewer = app.descendants(matching: .any)["item.viewer"], screen = app.windows.firstMatch.frame
         XCTAssertGreaterThan(viewer.frame.width, screen.width * 0.85, "\(pose): the viewer isn't full width")
@@ -215,6 +216,11 @@ final class DuoLayoutUITests: XCTestCase {
         app.buttons["details.done"].tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5), "\(pose): Details didn't close")
         app.closeItem()
+        XCTAssertEqual(app.tabFrames(), tabs, "\(pose): closing the viewer changed the tabs")
+        let monitor = app.descendants(matching: .any)["perf.monitor"].firstMatch
+        if monitor.exists {
+            XCTAssertEqual(app.behind().changes, 0, "\(pose): the app behind the viewer changed")
+        }
         XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10), "\(pose): no grid after closing")
     }
 

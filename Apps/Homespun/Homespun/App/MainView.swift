@@ -30,11 +30,13 @@ struct RootView: View {
             if phase == .active { SessionMarker.shared.active() }
         }
         .onOpenURL { url in
-            if let link = PairingLink(url) {
-                // The demo pairs only with its pretend server: a link is for the person's own Homespun.
-                if settings.isDemo { linkInDemo = true } else { settings.pendingLink = link }
-            } else if let link = AppLink(url) {
-                model.router.pending = link
+            ItemViewerPresence.shared.close(animated: false) {
+                if let link = PairingLink(url) {
+                    // The demo pairs only with its pretend server: a link is for the person's own Homespun.
+                    if settings.isDemo { linkInDemo = true } else { settings.pendingLink = link }
+                } else if let link = AppLink(url) {
+                    model.router.pending = link
+                }
             }
         }
         .alert("You're in the demo", isPresented: $linkInDemo) {
@@ -101,24 +103,16 @@ struct MainTabView: View {
     let model: AppModel
     @SceneStorage("tab") private var tab = TabID.library
     @State private var sheet: Sheet?
-    /// Free Up Space on the open iPhone Duo: the whole screen (a sheet everywhere else).
-    @State private var cover: Cover?
+    @State private var freeUp: FreeUpRequest?
     @Environment(\.horizontalSizeClass) private var sizeClass
 
-    enum Cover: Identifiable {
-        case freeUp(Set<String>?)
-        var id: String { "freeUp" }
-    }
-
     enum Sheet: Identifiable {
-        case freeUp(only: Set<String>?)
         case backUp([String])
         case pair(PairingLink)
         /// The purchase, from a locked widget's tap (`homespun://unlock?feature=widgets`).
         case unlock(PremiumFeature)
         var id: String {
             switch self {
-            case .freeUp: "freeUp"
             case .backUp: "backUp"
             case .pair(let link): link.id
             case .unlock(let feature): "unlock." + feature.rawValue
@@ -153,17 +147,13 @@ struct MainTabView: View {
         }
         .tabBarMinimizeBehavior(.onScrollDown)
         // Get Started's Choose Items opens the Library (in Select mode).
-        .onChange(of: model.library.choosePending, initial: true) { _, pending in if pending { tab = .library } }
-        .modifier(StatusAccessoryModifier(model: model, open: openFromAccessory))
-        .fullScreenCover(item: $cover, onDismiss: dismissed) { cover in
-            switch cover {
-            case .freeUp(let scope): FreeUpSpaceScreen(controller: model.library, scope: scope)
-            }
+        .onChange(of: model.library.choosePending, initial: true) { _, pending in
+            if pending { ItemViewerPresence.shared.close(animated: false) { tab = .library } }
         }
+        .modifier(StatusAccessoryModifier(model: model, open: openFromAccessory))
+        .modifier(FreeUpPresentation(model: model, request: $freeUp, onDismiss: { model.settings.pendingLink = nil }))
         .sheet(item: $sheet, onDismiss: dismissed) { sheet in
             switch sheet {
-            case .freeUp(let scope):
-                FreeUpSpaceScreen(controller: model.library, scope: scope)
             case .backUp(let ids):
                 BackUpSheet(controller: model.library, identifiers: ids) {}
             case .pair(let link):
@@ -174,12 +164,12 @@ struct MainTabView: View {
             }
         }
         .onChange(of: settings.pendingLink, initial: true) { _, link in
-            if let link { sheet = .pair(link) }
+            if let link { ItemViewerPresence.shared.close(animated: false) { sheet = .pair(link) } }
         }
         .onChange(of: model.router.pending, initial: true) { _, link in
             guard let link else { return }
             model.router.pending = nil
-            open(link)
+            ItemViewerPresence.shared.close(animated: false) { open(link) }
         }
         .task {
             await model.library.start { model.status?.start() }
@@ -195,7 +185,7 @@ struct MainTabView: View {
     /// for comparing side by side. Decided when it opens: folding or unfolding later changes its
     /// layout, never its presentation (that would interrupt a removal).
     private func openFreeUp(_ scope: Set<String>?) {
-        if sizeClass == .regular { cover = .freeUp(scope) } else { sheet = .freeUp(only: scope) }
+        freeUp = FreeUpRequest(scope: scope, wide: sizeClass == .regular)
     }
 
     /// Where a widget's link leads.
@@ -241,6 +231,39 @@ struct MainTabView: View {
     }
 }
 
+struct FreeUpRequest: Identifiable {
+    let id = UUID()
+    let scope: Set<String>?
+    let wide: Bool
+}
+
+/// Choose once on opening: folding changes the layout, not the presentation.
+struct FreeUpPresentation: ViewModifier {
+    let model: AppModel
+    @Binding var request: FreeUpRequest?
+    var onDismiss: () -> Void = {}
+
+    func body(content: Content) -> some View {
+        content
+            .fullScreenCover(item: presentation(wide: true), onDismiss: dismissed) {
+                FreeUpSpaceScreen(controller: model.library, scope: $0.scope)
+            }
+            .sheet(item: presentation(wide: false), onDismiss: dismissed) {
+                FreeUpSpaceScreen(controller: model.library, scope: $0.scope)
+            }
+    }
+
+    private func presentation(wide: Bool) -> Binding<FreeUpRequest?> {
+        Binding(get: { request?.wide == wide ? request : nil }, set: { request = $0 })
+    }
+
+    private func dismissed() {
+        model.library.dismissRemoval()
+        Task { await model.library.refresh() }
+        onDismiss()
+    }
+}
+
 /// After Homespun quit while on screen: asks once whether to report it (in setup, too).
 private struct QuitUnexpectedly: ViewModifier {
     let model: AppModel
@@ -277,10 +300,8 @@ private struct StatusAccessoryModifier: ViewModifier {
     func body(content: Content) -> some View {
         let status = AccessoryLadder.pick(model.library.accessoryInputs)
         if #available(iOS 26.1, *) {
-            // Hidden while an item is open full screen or the Library is selecting: it would cover
-            // their bottom toolbar (the item's actions, Select mode's Back Up).
-            content.tabViewBottomAccessory(isEnabled: status != nil && !ItemPresence.shared.isOpen
-                                           && !model.library.isSelecting) {
+            // The viewer covers this without changing the tabs' layout behind it.
+            content.tabViewBottomAccessory(isEnabled: status != nil && !model.library.isSelecting) {
                 StatusAccessory(status: status, serverName: model.library.serverName, open: open)
             }
         } else {
