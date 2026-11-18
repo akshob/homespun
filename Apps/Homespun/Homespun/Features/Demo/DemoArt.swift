@@ -42,9 +42,9 @@ enum DemoArt {
             case .video: (1920, 1080)
             default: portrait ? (3024, 4032) : (4032, 3024)
             }
-            private typealias Sample = Recipe
         }
     }
+    private typealias Sample = Recipe
 
     /// Days out over a few years, a few photos each (a walk, a beach week, holidays, a festival), as a
     /// library has them; the newest include a Live Photo, a video and a screenshot.
