@@ -41,7 +41,7 @@ final class PerformanceUITests: XCTestCase {
 
     // MARK: Reading the monitor
 
-    private var monitorElement: XCUIElement { app.descendants(matching: .any)["perf.monitor"] }
+    private var monitorElement: XCUIElement { app.descendants(matching: .any)["perf.monitor"].firstMatch }
 
     @MainActor private func monitor() -> [String: Double] {
         var values: [String: Double] = [:]

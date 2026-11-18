@@ -98,6 +98,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var tracking = false
     private var appeared = false
     private var viewportSize = CGSize.zero
+    private var windowSize: CGSize?
+    private var resizeAnchor: Place?
     private var behindProbe: BehindProbe?
     private weak var presentedViewer: ItemViewerController?
     private var openedPosition: Int?
@@ -192,6 +194,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         if !appeared {
             appeared = true
             if placed, pinned { setOffset(offsetRange.upperBound) }
+        } else if let resizeAnchor {
+            restore(resizeAnchor)
         }
     }
 
@@ -214,7 +218,9 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         let old = input
         input = new
         self.actions = actions
+        if new.selecting != old.selecting { resizeAnchor = nil }
         if new.accessoryInset != old.accessoryInset {
+            resizeAnchor = nil
             let offset = collectionView.contentOffset
             collectionView.contentInset.bottom = new.accessoryInset
             collectionView.contentOffset = offset
@@ -224,12 +230,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             }
         }
         if new.noticeKey != old.noticeKey {
+            resizeAnchor = nil
             noticeHost.rootView = new.notice
             noticeMeasured = nil
             view.setNeedsLayout()
         }
         if new.dataVersion != dataVersion { apply(data: new.data, version: new.dataVersion) }
         if new.density != old.density {
+            resizeAnchor = nil
             view.setNeedsLayout()
             view.layoutIfNeeded()
             PerfMonitor.shared.endAfterFrame("gridSize")
@@ -248,6 +256,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// the newest end stays in view.
     private func apply(data new: GridData, version: Int) {
         let place = turning ?? currentPlace()
+        resizeAnchor = nil
         held = nil
         let old = data
         data = new
@@ -270,6 +279,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         let place = heldPlace() ?? currentPlace()
+        resizeAnchor = place
         turning = place
         turns += 1
         coordinator.animate(alongsideTransition: nil) { [weak self] _ in
@@ -316,8 +326,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private func relayout() {
         let size = collectionView.bounds.size
         let resized = size != viewportSize
-        guard let metrics = metrics(), metrics != layout.geometry.metrics || resized || !placed && data.ids.count > 0 else { return }
-        let place = heldPlace() ?? (resized && viewportSize != .zero ? (pinned ? .newest : lastPlace) : currentPlace(at: pinchPoint))
+        let currentWindow = view.window?.bounds.size
+        let changedWindow = currentWindow != nil && currentWindow != windowSize
+        if changedWindow {
+            resizeAnchor = heldPlace() ?? (pinned ? .newest : lastPlace)
+            windowSize = currentWindow
+        }
+        guard let metrics = metrics(), metrics != layout.geometry.metrics || resized || changedWindow || !placed && data.ids.count > 0 else { return }
+        let place = resizeAnchor ?? heldPlace() ?? (resized && viewportSize != .zero ? (pinned ? .newest : lastPlace) : currentPlace(at: pinchPoint))
         viewportSize = size
         held = (place, CACurrentMediaTime() + 1)
         pinchPoint = nil
@@ -428,6 +444,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     /// The newest items at the bottom, like when the Library opens.
     private func showNewest() {
+        resizeAnchor = nil
         let range = offsetRange
         let distance = range.upperBound - collectionView.contentOffset.y
         let animated = distance < collectionView.bounds.height * 2
@@ -595,6 +612,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private func openViewer(at position: Int, details: Bool = false) {
         guard presentedViewer == nil, presentedViewController == nil, data.cells.indices.contains(position),
               view.window != nil else { return }
+        resizeAnchor = nil
         let id = data.cells[position].id
         let viewer = actions.viewer(id, data.ids, details)
         lastZoomSource = nil
@@ -666,6 +684,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// paging pauses, so closing zooms into it; paging itself costs the grid nothing.
     private func viewerChanged(_ id: String?) {
         guard id != viewerItem else { return }
+        resizeAnchor = nil
         viewerItem = id
         following?.cancel()
         guard let id else { return }
@@ -690,6 +709,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool { false }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        resizeAnchor = nil
         held = nil
         placedAt = nil
         if !tracking {
@@ -738,8 +758,9 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) {
         guard scrollView.window != nil, isFront else { return }
-        // Bars float above the cells. Their insets change the scroll range, never the place shown.
-        // Size changes restore their anchor in relayout(), not here.
+        // A fold can deliver its final insets after its final bounds. Only that resize restores an
+        // anchor; changing an accessory clears it and merely changes the scroll range.
+        if let resizeAnchor { restore(resizeAnchor) }
         view.setNeedsLayout()
         publishProbe()
     }

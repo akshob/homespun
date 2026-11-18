@@ -204,7 +204,7 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(app.openItem(), "\(pose): no item viewer")
         let viewer = app.descendants(matching: .any)["item.viewer"], screen = app.windows.firstMatch.frame
         XCTAssertGreaterThan(viewer.frame.width, screen.width * 0.85, "\(pose): the viewer isn't full width")
-        XCTAssertFalse(app.isOnScreen(app.tab("Activity")), "\(pose): the tabs show over the viewer")
+        XCTAssertFalse(app.tab("Activity").isHittable, "\(pose): the tabs are reachable through the viewer")
         attach(app, "\(pose), item")
         app.buttons["item.details"].tap()
         let details = app.descendants(matching: .any)["details.list"]

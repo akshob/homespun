@@ -458,6 +458,10 @@ final class GridScrollUITests: XCTestCase {
     /// Asks `ui.sh` to fold or turn iPhone Duo (nothing elsewhere), then waits until it has.
     @MainActor private func pose(_ name: String) {
         guard let poses else { return }
+        // A timed-out test can leave the driver finishing a fold. Don't overwrite its request.
+        let prior = Date().addingTimeInterval(90)
+        while FileManager.default.fileExists(atPath: poses), Date() < prior { usleep(250_000) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: poses), "the previous simulator request didn't finish")
         XCTAssertNoThrow(try name.write(toFile: poses, atomically: true, encoding: .utf8))
         let deadline = Date().addingTimeInterval(90)
         while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
@@ -493,7 +497,7 @@ final class GridScrollUITests: XCTestCase {
     /// The grid's report (`perf.monitor`): where it is, its ends, the items in view, jumps, cells without pictures.
     @MainActor private func report() -> Report {
         var values: [String: Double] = [:]
-        for part in app.descendants(matching: .any)["perf.monitor"].label.split(separator: ";") {
+        for part in app.descendants(matching: .any)["perf.monitor"].firstMatch.label.split(separator: ";") {
             let pair = part.split(separator: "=", maxSplits: 1)
             if pair.count == 2, let value = Double(pair[1]) { values[String(pair[0])] = value }
         }

@@ -55,7 +55,7 @@ final class ItemViewerUITests: XCTestCase {
         let original = app.staticTexts["compare.original"], compact = app.staticTexts["compare.compact"]
         XCTAssertTrue(original.waitForExistence(timeout: 30), "the original didn't load")
         XCTAssertTrue(compact.waitForExistence(timeout: 30), "the compact copy didn't load")
-        XCTAssertFalse(app.isOnScreen(app.tab("Library")), "the tab bar shows over Compare")
+        XCTAssertFalse(app.tab("Library").isHittable, "the tab bar is reachable through Compare")
         XCTAssertTrue(original.label.contains("on this iPhone"), original.label)
         let split = app.descendants(matching: .any)["compare.split"]
         XCTAssertEqual(split.value as? String, "Split at 50 percent")
@@ -106,6 +106,7 @@ final class ItemViewerUITests: XCTestCase {
         app.open(URL(string: "homespun://activity")!)
         XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "an app link left the viewer over the app")
         XCTAssertTrue(app.hasScreen("Activity"))
+        app.openTab("Library")
     }
 
     /// Frees one original from the viewer, then Compare downloads it from the server.
