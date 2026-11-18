@@ -73,6 +73,35 @@ new_simulator() {
     echo $sim
 }
 
+# Waits until nothing answers on this port (a server from an earlier try may still be stopping).
+wait_port_free() {
+    local tries=0
+    while curl -fs -o /dev/null --max-time 2 http://127.0.0.1:$1/api/v1/health; do
+        (( ++tries > 30 )) && { echo "port $1 is still in use"; return 1; }
+        sleep 1
+    done
+}
+
+# Tests listed in quarantine.txt (known failures, each with its issue) that fall within these
+# -only-testing ids: prints -skip-testing arguments, and writes them to $2 for the summary.
+quarantined() {
+    local only=(${(s:,:)1}) line id
+    : > $2
+    while read -r id issue; do
+        [[ -z $id || $id == \#* ]] && continue
+        for line in $only; do
+            if [[ $id == $line || $id == $line/* ]]; then
+                print -r -- "$id $issue" >> $2
+                print -r -- "-skip-testing:$id"
+            fi
+        done
+    done < $ROOT/ci/quarantine.txt
+}
+
+# Xcode's own retry: a failing test runs once more in place (RETRY_UI=1), so a flaky query or a slow
+# machine doesn't fail the run, and a real failure still does.
+test_retries() { [[ -n ${RETRY_UI:-} ]] && print -r -- "-retry-tests-on-failure -test-iterations 2"; }
+
 # Waits until the temporary server on this port answers.
 wait_for_server() {
     local tries=0
