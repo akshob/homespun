@@ -215,7 +215,8 @@ struct MainTabView: View {
                     tab = .server
                     model.router.serverRoute = .premium
                 } else {
-                    sheet = .unlock(PremiumFeature(rawValue: feature) ?? .widgets)
+                    let requested = PremiumFeature(rawValue: feature) ?? .widgets
+                    sheet = .unlock(requested.isAvailable ? requested : .widgets)
                 }
             }
         }

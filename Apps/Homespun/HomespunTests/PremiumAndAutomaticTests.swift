@@ -3,6 +3,13 @@ import Foundation
 import Testing
 @testable import Homespun
 
+@Test func premiumRowsAndPurchaseCopyExcludeUnavailableFeatures() {
+    #expect(PremiumFeature.available == [.automatic, .widgets])
+    #expect(PremiumFeature.backupFeatures == [.automatic])
+    #expect(!PremiumFeature.cloudCopies.isAvailable)
+    #expect(PremiumFeature.purchaseDescription == "Automatic Mode and widgets")
+}
+
 @Test func automaticModePicksNewItemsNotYetBackedUp() {
     let day: TimeInterval = 86_400
     let enabled = Date(timeIntervalSince1970: 1_800_000_000)

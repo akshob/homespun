@@ -209,19 +209,23 @@ final class DemoModeUITests: XCTestCase {
         app.goBack(from: "Automatic Mode")
 
         let cloud = app.buttons["settings.connectors"]
-        XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
-        cloud.tap()
-        let oneDrive = app.buttons["connector.onedrive"]
-        XCTAssertTrue(oneDrive.waitForExistence(timeout: 15), "no OneDrive on the Cloud Copies page")
-        oneDrive.tap()
-        let signIn = app.buttons["connector.signIn"]
-        XCTAssertTrue(signIn.waitForExistence(timeout: 10), "no Sign In")
-        signIn.tap()
-        expectUnlockSheet("Turn On Cloud Copies")
+        if AppFeatures.cloudCopies {
+            XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
+            cloud.tap()
+            let oneDrive = app.buttons["connector.onedrive"]
+            XCTAssertTrue(oneDrive.waitForExistence(timeout: 15), "no OneDrive on the Cloud Copies page")
+            oneDrive.tap()
+            let signIn = app.buttons["connector.signIn"]
+            XCTAssertTrue(signIn.waitForExistence(timeout: 10), "no Sign In")
+            signIn.tap()
+            expectUnlockSheet("Turn On Cloud Copies")
+            app.goBack(from: "OneDrive")
+            app.goBack(from: "Cloud Copies")
+        } else {
+            XCTAssertFalse(cloud.exists, "Cloud Copies is hidden in this release")
+        }
         nothingAsked("unlock")
 
-        app.goBack(from: "OneDrive")
-        app.goBack(from: "Cloud Copies")
         let leaveButton = app.buttons["demo.leave"].firstMatch
         XCTAssertTrue(app.reveal(leaveButton), "no Leave the Demo in the Server tab")
         leave(leaveButton)

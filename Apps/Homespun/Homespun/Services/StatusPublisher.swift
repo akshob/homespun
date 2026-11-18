@@ -16,9 +16,12 @@ final class StatusPublisher {
     private let history: RunHistory
     private let automatic: AutomaticMode
     private let premium: Premium
-    private let watch = WatchLink()
+    private let destination: Destination
+    private weak var demo: AppModel?
     private var started = false
     private var pending: Task<Void, Never>?
+    private var publication: Task<Void, Never>?
+    private var observationVersion = 0
     /// What was last written, and what the widgets were last asked to draw (and when).
     private var written: StatusSnapshot?
     private var drawn: StatusSnapshot?
@@ -33,13 +36,41 @@ final class StatusPublisher {
     /// The watch gets unchanged facts again after this long, so it can say they're recent.
     static let resendInterval: TimeInterval = 15 * 60
 
-    init(settings: AppSettings, library: LibraryController, history: RunHistory, automatic: AutomaticMode, premium: Premium) {
+    struct Destination: Sendable {
+        var read: @Sendable () -> StatusSnapshot?
+        var write: @Sendable (StatusSnapshot) -> Bool
+        var reload: @MainActor @Sendable () -> Void
+        var send: @Sendable (Data, Bool) async -> Void
+
+        static var live: Self {
+            let watch = WatchLink()
+            return Self(read: { StatusStore.read() }, write: { StatusStore.write($0) },
+                        reload: { WidgetCenter.shared.reloadTimelines(ofKind: StatusStore.widgetKind) },
+                        send: { await watch.send($0, complication: $1) })
+        }
+    }
+
+    init(settings: AppSettings, library: LibraryController, history: RunHistory, automatic: AutomaticMode, premium: Premium,
+         destination: Destination = .live) {
         self.settings = settings
         self.library = library
         self.history = history
         self.automatic = automatic
         self.premium = premium
+        self.destination = destination
     }
+
+    /// Only an unpaired iPhone shares demo facts. Leaving publishes its own empty status again,
+    /// including to the watch; a paired person's status is never replaced.
+    func showDemo(_ model: AppModel?) {
+        guard model == nil || !settings.isPaired else { return }
+        guard model != nil || demo != nil else { return }
+        demo = model
+        if started { observe() } else { start() }
+        Task { await publishNow() }
+    }
+
+    private var activeDemo: AppModel? { settings.isPaired ? nil : demo }
 
     /// From here on, every change is published (the first one shortly after).
     func start() {
@@ -47,10 +78,10 @@ final class StatusPublisher {
         started = true
         #if DEBUG
         if let demo = Self.demo(UserDefaults.standard.string(forKey: "widgetDemo"), now: Date()) {
-            StatusStore.write(demo)
-            WidgetCenter.shared.reloadTimelines(ofKind: StatusStore.widgetKind)
+            destination.write(demo)
+            destination.reload()
             // The watch gets them the way it gets real ones.
-            if let data = StatusStore.encode(demo) { Task { [watch] in await watch.send(data, complication: true) } }
+            if let data = StatusStore.encode(demo) { Task { [destination] in await destination.send(data, true) } }
             return
         }
         #endif
@@ -86,7 +117,7 @@ final class StatusPublisher {
     func publishNow() async {
         pending?.cancel()
         pending = nil
-        await history.load()
+        await (activeDemo?.history ?? history).load()
         await publish()
         reloadPostponed()
     }
@@ -112,24 +143,31 @@ final class StatusPublisher {
     // MARK: Watching for changes
 
     private func observe() {
+        observationVersion += 1
+        let version = observationVersion
         withObservationTracking {
             _ = inputs()
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
-                self?.observe()
-                self?.schedule()
+                guard let self, observationVersion == version else { return }
+                observe()
+                schedule()
             }
         }
     }
 
     /// Everything the snapshot is made of (reading it is what's observed).
     private func inputs() -> Inputs {
+        let demo = activeDemo
+        let settings = demo?.settings ?? self.settings, library = demo?.library ?? self.library
+        let history = demo?.history ?? self.history, automatic = demo?.automatic ?? self.automatic
         let run = history.lastBackUp
         let ready = library.readyChecked ? (library.ready.bytes, library.ready.count) : nil
-        return Inputs(unlocked: premium.isUnlocked, ready: ready,
+        return Inputs(unlocked: demo != nil || premium.isUnlocked, ready: ready,
                       lastBackup: run.map { ($0.end, Self.backedUp(in: $0)) }, historyLoaded: history.loaded,
                       serverName: settings.serverURL == nil ? nil : settings.server?.name, status: settings.serverStatus,
-                      checkedAt: settings.serverCheckedAt, automatic: automatic.enabled, lastRun: automatic.state.lastRun)
+                      checkedAt: settings.serverCheckedAt, automatic: automatic.enabled, lastRun: automatic.state.lastRun,
+                      isDemo: demo != nil)
     }
 
     struct Inputs: Sendable {
@@ -143,6 +181,7 @@ final class StatusPublisher {
         var checkedAt: Date?
         var automatic: Bool
         var lastRun: Date?
+        var isDemo = false
     }
 
     private func schedule() {
@@ -165,6 +204,7 @@ final class StatusPublisher {
     /// The snapshot for these inputs. While the server is being checked (or not yet), it keeps the
     /// last answer; so does what's ready to free up, until it's been worked out.
     nonisolated static func snapshot(_ inputs: Inputs, previous: StatusSnapshot?, now: Date) -> StatusSnapshot {
+        let previous = (previous?.demo == true) == inputs.isDemo ? previous : nil
         var server: StatusSnapshot.Server?
         if let name = inputs.serverName {
             let reachable: Bool = switch inputs.status {
@@ -178,19 +218,32 @@ final class StatusPublisher {
             ?? StatusSnapshot.Ready(bytes: 0, count: 0)
         return StatusSnapshot(unlocked: inputs.unlocked, ready: ready,
                               lastBackup: inputs.lastBackup.map { .init(date: $0.date, count: $0.count) }, server: server,
-                              automatic: .init(enabled: inputs.automatic, lastRun: inputs.lastRun), updatedAt: now)
+                              automatic: .init(enabled: inputs.automatic, lastRun: inputs.lastRun), updatedAt: now,
+                              demo: inputs.isDemo ? true : nil)
     }
 
     private func publish() async {
+        // A demo write or WatchConnectivity activation already in flight must finish before the
+        // status that clears it. Each queued write reads the latest source, not a departed demo.
+        let previous = publication
+        let task = Task<Void, Never> { [weak self] in
+            await previous?.value
+            await self?.writeLatest()
+        }
+        publication = task
+        await task.value
+    }
+
+    private func writeLatest() async {
         let inputs = inputs()
         // Before the history is read, "no backups yet" would be wrong.
         guard inputs.historyLoaded else { return }
-        let now = Date(), previous = written
+        let now = Date(), previous = written, destination = destination
         // Off the main thread: finding the App Group's folder, reading and writing are file system work.
         let (published, stored) = await Task.detached(priority: .utility) { () -> (StatusSnapshot?, StatusSnapshot?) in
-            let stored = previous == nil ? StatusStore.read() : nil
+            let stored = previous == nil ? destination.read() : nil
             let snapshot = Self.snapshot(inputs, previous: previous ?? stored, now: now)
-            return (StatusStore.write(snapshot) ? snapshot : nil, stored)
+            return (destination.write(snapshot) ? snapshot : nil, stored)
         }.value
         // No App Group (a build without its entitlement): nothing can show it.
         guard let snapshot = published else { return }
@@ -202,7 +255,7 @@ final class StatusPublisher {
         if changed || now.timeIntervalSince(sent?.at ?? .distantPast) > Self.resendInterval,
            let data = StatusStore.encode(snapshot) {
             sent = (snapshot, now)
-            await watch.send(data, complication: changed)
+            await destination.send(data, changed)
         }
     }
 
@@ -221,7 +274,7 @@ final class StatusPublisher {
         }
         drawn = snapshot
         reloadedAt = Date()
-        WidgetCenter.shared.reloadTimelines(ofKind: StatusStore.widgetKind)
+        destination.reload()
     }
 
     /// A reload waiting for the interval to end happens now.
@@ -231,7 +284,7 @@ final class StatusPublisher {
         guard let written, !written.sameFacts(as: drawn) else { return }
         drawn = written
         reloadedAt = Date()
-        WidgetCenter.shared.reloadTimelines(ofKind: StatusStore.widgetKind)
+        destination.reload()
     }
 }
 

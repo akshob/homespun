@@ -25,7 +25,7 @@ stored; per-request invocation logs are turned off (`wrangler.jsonc`).
 
 Retention (by time received, enforced by a daily cron): events 400 days, MetricKit metrics 90
 days, MetricKit diagnostics 365 days, reports 730 days. `DELETE /v1/installs/<install>` removes
-everything for an install immediately (the app calls it when the user stops sharing).
+everything for an install immediately (the app calls it when the person chooses Delete Shared Data).
 
 The Worker also enforces a hard usage budget so the public app key can't run up a bill; see
 [Budget](#budget).
