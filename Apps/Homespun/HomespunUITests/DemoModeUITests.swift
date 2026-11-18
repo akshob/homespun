@@ -252,11 +252,11 @@ final class DemoModeUITests: XCTestCase {
         demo.tap()
         waitForPreparing()
         pairWithDemo()
-        let estimate = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "demo's 30 sample")).firstMatch
+        let estimate = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "demo's 30 sample")).firstMatch
         XCTAssertTrue(estimate.waitForExistence(timeout: 30), "the estimate isn't for 30 samples")
         app.buttons["estimate.notNow"].tap()
         app.openTab("Library")
-        let subtitle = app.staticTexts.containing(NSPredicate(format: "label CONTAINS '30 not backed up'")).firstMatch
+        let subtitle = app.staticTexts.matching(NSPredicate(format: "label CONTAINS '30 not backed up'")).firstMatch
         XCTAssertTrue(subtitle.waitForExistence(timeout: 20))
         XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 20))
 
@@ -283,6 +283,7 @@ final class DemoModeUITests: XCTestCase {
         XCTAssertTrue(preparing.waitForExistence(timeout: 10), "a cold launch didn't draw the media again")
         XCTAssertEqual(app.buttons["demo.prepare.cancel"].label, "Leave the Demo")
         waitForPreparing()
+        XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30), "the resumed demo didn't reach Found")
         let menu = app.buttons["demo.menu"].firstMatch
         XCTAssertTrue(menu.waitForExistence(timeout: 30), "the demo didn't resume")
         menu.tap()

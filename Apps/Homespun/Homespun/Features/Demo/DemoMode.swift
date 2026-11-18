@@ -77,14 +77,13 @@ final class DemoMode {
         let id = UUID(), previous = work
         preparationID = id
         work = Task(priority: .userInitiated) {
-            // A cancelled ImageIO call must finish releasing its buffers before a retry starts.
-            await previous?.value
             guard !Task.isCancelled, preparationID == id else { return }
             do {
                 let ready = await DemoMediaStore.shared.readyFolder()
                 try Task.checkCancellation()
                 guard preparationID == id else { return }
                 if let folder = ready {
+                    await previous?.value
                     try await finish(folder, origin: origin, id: id, drawnSince: nil)
                     return
                 }
@@ -92,6 +91,10 @@ final class DemoMode {
                 let appeared = ContinuousClock.now
                 Announce.say("Preparing the demo.")
                 beginBackgroundTask(id: id)
+                // Show the cover while a cancelled encoder releases its buffers, before retrying.
+                await previous?.value
+                try Task.checkCancellation()
+                guard preparationID == id else { return }
                 let folder = try await DemoMediaStore.shared.prepare { [weak self] progress in
                     guard let self else { return }
                     await MainActor.run {
