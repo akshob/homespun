@@ -2,9 +2,13 @@
 import HomespunCore
 import SwiftUI
 
-/// The server's connectors: places it copies originals to, such as OneDrive (DESIGN 05·3.1).
+/// The server's connectors: places it copies originals to, such as OneDrive (DESIGN 05·3.1). Without
+/// the purchase the page is the same; turning a service on asks for the purchase first.
 struct ConnectorsView: View {
     let settings: AppSettings
+    let premium: Premium
+    /// Each time the list loads (the Server tab's row shows which are on).
+    var loaded: ([ServerAPI.ConnectorInfo]) -> Void = { _ in }
     @State private var connectors: [ServerAPI.ConnectorInfo]?
     @State private var error: String?
 
@@ -14,9 +18,16 @@ struct ConnectorsView: View {
         List {
             Section {
             } header: {
-                Text("\(server) also copies each original to another place, as an extra backup. Freeing up space on "
-                     + "this iPhone still depends only on \(server)'s own copy.")
-                    .font(.body).foregroundStyle(Theme.label).textCase(nil)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("\(server) also copies each original to another place, as an extra backup. Freeing up space "
+                         + "on this iPhone still depends only on \(server)'s own copy.")
+                        .font(.body).foregroundStyle(Theme.label)
+                    if !premium.isUnlocked {
+                        Text("Turning one on is a one-time purchase, which unlocks Automatic Mode too.")
+                            .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                    }
+                }
+                .textCase(nil)
             }
             if let connectors {
                 let on = connectors.filter(\.enabled), off = connectors.filter { !$0.enabled }
@@ -66,7 +77,7 @@ struct ConnectorsView: View {
 
     private func link(_ connector: ServerAPI.ConnectorInfo) -> some View {
         NavigationLink {
-            ConnectorDetailView(settings: settings, connector: connector) { _ in Task { await load() } }
+            ConnectorDetailView(settings: settings, premium: premium, connector: connector) { _ in Task { await load() } }
         } label: {
             ConnectorRow(name: connector.name, symbol: connector.name.contains("Drive") ? "cloud" : "icloud",
                          detail: connector.enabled ? "On · " + countsText(connector.counts) : connector.summary,
@@ -78,8 +89,10 @@ struct ConnectorsView: View {
     private func load() async {
         guard let client = settings.client else { return }
         do {
-            connectors = try await client.connectors()
+            let connectors = try await client.connectors()
+            self.connectors = connectors
             error = nil
+            loaded(connectors)
         } catch {
             self.error = error.localizedDescription
         }
@@ -117,9 +130,11 @@ private func countsText(_ counts: ServerAPI.ConnectorCounts) -> String {
     return parts.joined(separator: " · ")
 }
 
-/// One connector: its settings, sign-in, and turning it on or off.
+/// One connector: its settings, sign-in, and turning it on or off. Without the purchase, signing in
+/// or turning it on asks for the purchase first, then carries on.
 struct ConnectorDetailView: View {
     let settings: AppSettings
+    let premium: Premium
     @State var connector: ServerAPI.ConnectorInfo
     var changed: (ServerAPI.ConnectorInfo?) -> Void
     @State private var values: [String: String] = [:]
@@ -127,10 +142,20 @@ struct ConnectorDetailView: View {
     @State private var working = false
     @State private var error: String?
     @State private var signingIn = false
+    /// What was tapped before the purchase, and whether to carry on with it once the sheet has closed.
+    @State private var unlocking: Step?
+    @State private var afterUnlock: Step?
     @Environment(\.dismiss) private var dismiss
 
-    init(settings: AppSettings, connector: ServerAPI.ConnectorInfo, changed: @escaping (ServerAPI.ConnectorInfo?) -> Void) {
+    enum Step: String, Identifiable {
+        case signIn, turnOn
+        var id: String { rawValue }
+    }
+
+    init(settings: AppSettings, premium: Premium, connector: ServerAPI.ConnectorInfo,
+         changed: @escaping (ServerAPI.ConnectorInfo?) -> Void) {
         self.settings = settings
+        self.premium = premium
         _connector = State(initialValue: connector)
         self.changed = changed
         _values = State(initialValue: Dictionary(uniqueKeysWithValues: connector.fields.map {
@@ -150,7 +175,7 @@ struct ConnectorDetailView: View {
                     Text(connector.summary).font(.subheadline).foregroundStyle(Theme.secondaryLabel)
                 }
                 if connector.signsIn {
-                    Button(connector.account == nil ? "Sign In" : "Sign In Again") { signingIn = true }
+                    Button(connector.account == nil ? "Sign In" : "Sign In Again") { start(.signIn) }
                         .foregroundStyle(Theme.accent)
                         .accessibilityIdentifier("connector.signIn")
                 }
@@ -178,9 +203,7 @@ struct ConnectorDetailView: View {
             }
             .listRowBackground(Theme.card)
             Section {
-                Button {
-                    Task { await save(enable: true) }
-                } label: {
+                Button { start(.turnOn) } label: {
                     BusyLabel(title: connector.enabled ? "Save" : "Turn On", busy: working)
                 }
                 .foregroundStyle(Theme.accent)
@@ -221,6 +244,27 @@ struct ConnectorDetailView: View {
                 connector.account = account
                 changed(connector)
             }
+        }
+        .sheet(item: $unlocking, onDismiss: {
+            guard let step = afterUnlock else { return }
+            afterUnlock = nil
+            run(step)
+        }) { step in
+            UnlockSheet(feature: .cloudCopies, premium: premium, server: settings.server?.name ?? "Your server") {
+                afterUnlock = step
+            }
+        }
+    }
+
+    /// Signing in or turning on a service that isn't on yet starts cloud copies: it needs the purchase.
+    private func start(_ step: Step) {
+        if connector.enabled || premium.isUnlocked { run(step) } else { unlocking = step }
+    }
+
+    private func run(_ step: Step) {
+        switch step {
+        case .signIn: signingIn = true
+        case .turnOn: Task { await save(enable: true) }
         }
     }
 

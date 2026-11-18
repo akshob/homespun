@@ -30,6 +30,29 @@ import Testing
     #expect(AutomaticMode.describe(.init(skipped: "The server wasn't reachable.")) == "Skipped: The server wasn't reachable.")
 }
 
+/// The Server tab's Automatic Mode value: off, on, or when it last ran.
+@Test func automaticModeStatusSaysOffOnAndWhenItRan() throws {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = try #require(TimeZone(identifier: "America/Los_Angeles"))
+    let now = try #require(calendar.date(from: DateComponents(year: 2026, month: 11, day: 17, hour: 10)))
+    func at(day: Int, hour: Int, year: Int = 2026) throws -> Date {
+        try #require(calendar.date(from: DateComponents(year: year, month: 11, day: day, hour: hour)))
+    }
+    #expect(AutomaticMode.status(on: false, lastRun: now, now: now, calendar: calendar) == "Off")
+    #expect(AutomaticMode.status(on: true, lastRun: nil, now: now, calendar: calendar) == "On")
+    #expect(AutomaticMode.status(on: true, lastRun: try at(day: 17, hour: 9), now: now, calendar: calendar) == "On · ran today")
+    #expect(AutomaticMode.status(on: true, lastRun: try at(day: 17, hour: 2), now: now, calendar: calendar)
+        == "On · ran last night")
+    #expect(AutomaticMode.status(on: true, lastRun: try at(day: 16, hour: 23), now: now, calendar: calendar)
+        == "On · ran last night")
+    #expect(AutomaticMode.status(on: true, lastRun: try at(day: 16, hour: 14), now: now, calendar: calendar)
+        == "On · ran yesterday")
+    let older = AutomaticMode.status(on: true, lastRun: try at(day: 11, hour: 14), now: now, calendar: calendar)
+    #expect(older.hasPrefix("On · ran ") && older.contains("11") && !older.contains("2026"), "\(older)")
+    let lastYear = AutomaticMode.status(on: true, lastRun: try at(day: 11, hour: 14, year: 2025), now: now, calendar: calendar)
+    #expect(lastYear.contains("2025"), "\(lastYear)")
+}
+
 /// Stands in for the App Store's answer to "does this account own Premium?".
 private final class Ownership: @unchecked Sendable {
     let lock = NSLock()
