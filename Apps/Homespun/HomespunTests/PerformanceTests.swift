@@ -90,8 +90,8 @@ struct PerformanceTests {
             _ = try await DemoMediaGenerator(bundled: DemoMediaStore.bundledFolder, output: root, limit: 5).run { _ in }
         }
         print("PERF DemoMediaDraw median of 3: \(String(format: "%.0f", ms)) ms")
-        // Initial simulator budget; calibrate to a measured Profile median × 1.3 on the perf machine.
-        #expect(ms < 15_000, "drawing demo media took \(ms) ms")
+        // Profile simulator median of three: 10,505 ms, with 30% headroom.
+        #expect(ms < 13_657, "drawing demo media took \(ms) ms")
     }
 
     @Test func buildingTheLibraryStateIsQuick() {
