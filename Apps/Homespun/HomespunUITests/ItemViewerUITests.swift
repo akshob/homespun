@@ -72,7 +72,7 @@ final class ItemViewerUITests: XCTestCase {
 
         // Swipe back to the item before it: not backed up, with Back Up.
         XCTAssertTrue(state.waitForExistence(timeout: 5))
-        let viewer = app.scrollViews["item.viewer"]
+        let viewer = app.descendants(matching: .any)["item.viewer"]
         viewer.swipeRight()
         XCTAssertTrue(waitFor(state, label: "Not backed up · only on this iPhone"), state.label)
         XCTAssertTrue(app.buttons["item.action"].label.contains("Back Up"))
@@ -81,7 +81,7 @@ final class ItemViewerUITests: XCTestCase {
         viewer.swipeLeft()
         XCTAssertTrue(waitFor(state, prefix: "Ready to free up"), state.label)
         // Double-tap zooms; the state line steps aside while zoomed.
-        viewer.doubleTap()
+        app.shownPage().doubleTap()
         XCTAssertTrue(state.waitForNonExistence(timeout: 5), "the state line stayed over a zoomed photo")
         attach(app, "Zoomed")
     }

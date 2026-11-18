@@ -54,8 +54,10 @@ for one in $runs; do
       run iphone zsh $D/ui.sh iphone iPhone-18-Pro \
         HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests,HomespunUITests/PremiumUITests 8794 ;;
     library)
-      # A bigger library (the newest cells far from the oldest; the filter crash needed it).
-      run library env EXTRA=200 zsh $D/ui.sh library iPhone-18-Pro HomespunUITests/LibraryUITests 8799 ;;
+      # A bigger library (the newest cells far from the oldest; the filter crash needed it; paging
+      # through items and turning the iPhone needs a few).
+      run library env EXTRA=200 zsh $D/ui.sh library iPhone-18-Pro \
+        HomespunUITests/LibraryUITests,HomespunUITests/ItemPagingUITests 8799 ;;
     later)
       run later zsh $D/later.sh later iPhone-18-Pro 8796 ;;
     copies)
@@ -69,7 +71,8 @@ for one in $runs; do
       run duo-cover zsh $D/ui.sh duo-cover iPhone-Duo \
         HomespunUITests/LibraryUITests,HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests 8795 ;;
     duo-open)
-      run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo HomespunUITests/DuoLayoutUITests 8793 open ;;
+      run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo \
+        HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests 8793 open ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;
   esac

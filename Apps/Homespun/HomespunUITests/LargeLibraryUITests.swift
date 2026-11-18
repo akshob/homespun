@@ -26,7 +26,7 @@ final class LargeLibraryUITests: XCTestCase {
         XCTAssertLessThan(seconds, 5, "opening an item took \(seconds) s")
         attach(app, "Item")
 
-        // Swipe back through older items, past the edge of the pages on hand (40 each side).
+        // Swipe back through older items.
         let viewer = app.descendants(matching: .any)["item.viewer"]
         let swiped = Date()
         for _ in 0..<12 { viewer.swipeRight() }

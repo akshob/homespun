@@ -303,4 +303,25 @@ extension XCUIApplication {
         openTab("Library")
         return statuses
     }
+
+    /// Taps one of Free Up Space's compact copies. They're a UIKit row in a SwiftUI page, which
+    /// XCTest doesn't scroll by itself: in a half-height sheet the row can be under the buttons at the
+    /// bottom (a tap there lands on them), so the sheet is pulled up to full height first, by its bar.
+    @MainActor func tapCompactCopy(_ thumbnail: XCUIElement) {
+        let buttons = self.buttons["remove.confirm"], close = self.buttons["remove.close"]
+        for _ in 0..<2 {
+            guard thumbnail.exists, buttons.exists, close.exists, thumbnail.frame.maxY > buttons.frame.minY - 12 else { break }
+            let bar = close.coordinate(withNormalizedOffset: CGVector(dx: 3, dy: 0.5))
+            bar.press(forDuration: 0.1, thenDragTo: bar.withOffset(CGVector(dx: 0, dy: -500)))
+            sleep(1)
+        }
+        thumbnail.tap()
+    }
+
+    /// The item viewer's page on screen (its photo). Tap or double-tap it rather than the viewer: XCTest
+    /// taps a collection view near its corner, which on the viewer is the bottom toolbar.
+    @MainActor func shownPage() -> XCUIElement {
+        let pages = descendants(matching: .any).matching(identifier: "item.page")
+        return pages.allElementsBoundByIndex.first { isOnScreen($0) } ?? pages.firstMatch
+    }
 }
