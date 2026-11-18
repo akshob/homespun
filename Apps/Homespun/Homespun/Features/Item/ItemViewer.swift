@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import AVKit
 import HomespunCore
 import Photos
-import PhotosUI
 import SwiftUI
 
 /// One item, full screen, with its state and the one action that fits it (DESIGN 03·1.1). Swipe
@@ -20,9 +18,6 @@ struct ItemViewer: View {
     @State private var current: String?
     /// Restore Original's sheet is up.
     @State private var restoring = false
-    /// Where in `ids` the pages on hand are centred: only a window around the item shown is laid
-    /// out (a library has tens of thousands of items; laying them all out froze the app).
-    @State private var center: Int
     @State private var zoomed = false
     @State private var comparing: String?
     /// Swipe down to close: how far the item has been dragged.
@@ -39,26 +34,6 @@ struct ItemViewer: View {
         self.onShow = onShow
         _details = details
         _current = State(initialValue: start)
-        _center = State(initialValue: ids.firstIndex(of: start) ?? 0)
-    }
-
-    /// Pages each side of the one shown; the window moves when the person gets near its edge.
-    static let reach = 40
-
-    private var window: ArraySlice<String> {
-        guard !ids.isEmpty else { return [] }
-        let middle = min(max(center, 0), ids.count - 1)
-        return ids[max(0, middle - Self.reach)...min(ids.count - 1, middle + Self.reach)]
-    }
-
-    /// Recentres the window once the item shown is within a quarter of its edge.
-    private func follow(_ id: String?) {
-        let pages = window
-        guard let id, let offset = pages.firstIndex(of: id) else { return }
-        if offset - pages.startIndex < Self.reach / 4 && pages.startIndex > 0
-            || pages.endIndex - offset <= Self.reach / 4 && pages.endIndex < ids.count {
-            center = offset
-        }
     }
 
     private var shown: String { current ?? start }
@@ -88,7 +63,6 @@ struct ItemViewer: View {
         .onAppear { PerfMonitor.shared.endAfterFrame("open") }
         .onChange(of: current) { _, id in
             zoomed = false
-            follow(id)
             guard let id else { return }
             onShow(id)
             // Open Details follow the item shown.
@@ -109,33 +83,17 @@ struct ItemViewer: View {
 
     // MARK: Pages
 
+    /// Every item the viewer goes through, a page each (UIKit: exact pages, reused).
     private var pager: some View {
-        ScrollView(.horizontal) {
-            LazyHStack(spacing: 0) {
-                ForEach(Array(window), id: \.self) { id in
-                    ItemViewerPage(asset: model.library.library.asset(id), isCurrent: id == shown, label: spokenLabel(id)) { zoomed in
-                        if id == shown { self.zoomed = zoomed }
-                    }
-                    .containerRelativeFrame([.horizontal, .vertical])
-                }
+        // From the item shown, should SwiftUI make the pager again while the viewer stays.
+        ItemPager(ids: ids, start: shown, current: $current, zoomed: $zoomed,
+                  asset: { model.library.library.asset($0) }, label: spokenLabel) { drag = $0 } released: { translation, velocity in
+            if translation.height > 120 || velocity.height > 900 {
+                dismiss()
+            } else {
+                withAnimation(.snappy) { drag = .zero }
             }
-            .scrollTargetLayout()
-            // Inside the pager, to reach its scroll view.
-            .background(SwipeDownToClose(enabled: !zoomed) { drag = $0 } ended: { translation, velocity in
-                if translation.height > 120 || velocity.height > 900 {
-                    dismiss()
-                } else {
-                    withAnimation(.snappy) { drag = .zero }
-                }
-            })
         }
-        .scrollTargetBehavior(.paging)
-        .perfScrollTracking()
-        .scrollPosition(id: $current)
-        .scrollIndicators(.hidden)
-        .scrollDisabled(zoomed)
-        .scrollEdgeEffectHidden(true, for: .all)
-        .accessibilityIdentifier("item.viewer")
     }
 
     /// The cell for an item (the library state keeps an index by identifier).
@@ -381,200 +339,5 @@ struct ItemStateLine: View {
         .background {
             if scrim { RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.black.opacity(0.55)) }
         }
-    }
-}
-
-/// One item in the viewer: a zoomable photo or Live Photo, or a video. The page on screen loads
-/// at full size; its neighbours at about screen size.
-struct ItemViewerPage: View {
-    let asset: PHAsset?
-    let isCurrent: Bool
-    let label: String
-    var onZoom: (Bool) -> Void
-    @State private var image: UIImage?
-    @State private var livePhoto: PHLivePhoto?
-    @State private var player: AVPlayer?
-    @Environment(\.displayScale) private var displayScale
-
-    private struct Load: Equatable {
-        var id: String?
-        var current: Bool
-    }
-
-    var body: some View {
-        Group {
-            if asset?.mediaType == .video {
-                if let player {
-                    VideoPlayer(player: player)
-                        .accessibilityLabel(label)
-                } else {
-                    poster
-                }
-            } else {
-                ZoomableMedia(image: image, livePhoto: livePhoto, isCurrent: isCurrent, label: label,
-                              aspect: CGSize(width: asset?.pixelWidth ?? 0, height: asset?.pixelHeight ?? 0), onZoom: onZoom)
-            }
-        }
-        .task(id: Load(id: asset?.localIdentifier, current: isCurrent)) { await load() }
-        .onChange(of: isCurrent) { _, current in if !current { player?.pause() } }
-        .onDisappear { player?.pause() }
-    }
-
-    private var poster: some View {
-        Color.black.overlay {
-            if let image { Image(uiImage: image).resizable().scaledToFit() }
-        }
-        .accessibilityElement()
-        .accessibilityLabel(label)
-        .accessibilityAddTraits(.isImage)
-    }
-
-    private func load() async {
-        guard let asset else { return }
-        let width = Double(asset.pixelWidth), height = Double(asset.pixelHeight)
-        if image == nil {
-            let scale = min(1, 1000 * displayScale / max(width, height, 1))
-            image = await ItemMedia.image(asset, size: CGSize(width: width * scale, height: height * scale))
-        }
-        guard isCurrent, !Task.isCancelled else { return }
-        if asset.mediaType == .video {
-            if player == nil { player = await ItemMedia.player(asset) }
-            return
-        }
-        let scale = min(1, 4096 / max(width, height, 1))
-        let full = CGSize(width: width * scale, height: height * scale)
-        if asset.mediaSubtypes.contains(.photoLive) {
-            if livePhoto == nil { livePhoto = await ItemMedia.livePhoto(asset, size: full) }
-        } else if let sharper = await ItemMedia.image(asset, size: full), !Task.isCancelled {
-            image = sharper
-        }
-    }
-}
-
-/// A photo, or a Live Photo that plays while touched and held, in a `ZoomScrollView`.
-private struct ZoomableMedia: UIViewRepresentable {
-    var image: UIImage?
-    var livePhoto: PHLivePhoto?
-    var isCurrent: Bool
-    var label: String
-    var aspect: CGSize
-    var onZoom: (Bool) -> Void
-
-    final class Content: UIView {
-        let imageView = UIImageView()
-        let liveView = PHLivePhotoView()
-
-        override init(frame: CGRect) {
-            super.init(frame: frame)
-            for view in [imageView, liveView] {
-                view.frame = bounds
-                view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-                view.contentMode = .scaleAspectFit
-                addSubview(view)
-            }
-            liveView.isHidden = true
-            isAccessibilityElement = true
-            accessibilityTraits = .image
-        }
-
-        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    }
-
-    func makeUIView(context: Context) -> ZoomScrollView {
-        ZoomScrollView(content: Content())
-    }
-
-    func updateUIView(_ view: ZoomScrollView, context: Context) {
-        guard let content = view.content as? Content else { return }
-        if content.imageView.image !== image { content.imageView.image = image }
-        if content.liveView.livePhoto !== livePhoto {
-            content.liveView.livePhoto = livePhoto
-            content.liveView.isHidden = livePhoto == nil
-        }
-        view.aspect = aspect.width > 0 ? aspect : image?.size ?? .zero
-        content.accessibilityLabel = label
-        let report = onZoom
-        view.onZoom = { zoomed in Task { @MainActor in report(zoomed) } }
-        if !isCurrent { view.reset() }
-    }
-}
-
-/// Swipe down to close the item, like Photos: a vertical pan on the pager's scroll view (it covers
-/// photos and videos), which the paging and zooming scroll views wait for. A drag that starts
-/// sideways fails it at once, so paging stays immediate; it's off while the item is zoomed in (the
-/// drag pans the photo then).
-struct SwipeDownToClose: UIViewRepresentable {
-    var enabled: Bool
-    var changed: (CGSize) -> Void
-    var ended: (_ translation: CGSize, _ velocity: CGSize) -> Void
-
-    /// Starts only for a drag that's mostly downward; the scroll views' pans wait for it.
-    final class Rules: NSObject, UIGestureRecognizerDelegate {
-        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-            guard let pan = gesture as? UIPanGestureRecognizer else { return false }
-            let velocity = pan.velocity(in: nil)
-            return velocity.y > 0 && velocity.y > abs(velocity.x) * 1.2
-        }
-
-        func gestureRecognizer(_ gesture: UIGestureRecognizer,
-                               shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
-            other is UIPanGestureRecognizer && other.view is UIScrollView
-        }
-    }
-
-    final class Probe: UIView {
-        var changed: (CGSize) -> Void = { _ in }
-        var ended: (CGSize, CGSize) -> Void = { _, _ in }
-        private let rules = Rules()
-        private lazy var pan: UIPanGestureRecognizer = {
-            let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-            pan.delegate = rules
-            pan.maximumNumberOfTouches = 1
-            return pan
-        }()
-
-        var enabled = true {
-            didSet { pan.isEnabled = enabled }
-        }
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            var view = superview
-            while let current = view, !(current is UIScrollView) { view = current.superview }
-            guard let scroll = view as? UIScrollView else {
-                pan.view?.removeGestureRecognizer(pan)
-                return
-            }
-            if pan.view !== scroll {
-                pan.view?.removeGestureRecognizer(pan)
-                scroll.addGestureRecognizer(pan)
-            }
-        }
-
-        @objc private func panned(_ pan: UIPanGestureRecognizer) {
-            let translation = pan.translation(in: nil), velocity = pan.velocity(in: nil)
-            switch pan.state {
-            case .changed: changed(CGSize(width: translation.x, height: translation.y))
-            case .ended: ended(CGSize(width: translation.x, height: translation.y), CGSize(width: velocity.x, height: velocity.y))
-            case .cancelled, .failed: ended(.zero, .zero)
-            default: break
-            }
-        }
-    }
-
-    func makeUIView(context: Context) -> Probe {
-        let probe = Probe()
-        probe.isUserInteractionEnabled = false
-        return probe
-    }
-
-    func updateUIView(_ probe: Probe, context: Context) {
-        probe.enabled = enabled
-        probe.changed = changed
-        probe.ended = ended
-    }
-
-    static func dismantleUIView(_ probe: Probe, coordinator: ()) {
-        probe.removeFromSuperview()
     }
 }

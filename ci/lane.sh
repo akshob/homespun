@@ -54,9 +54,10 @@ for one in $runs; do
       run iphone zsh $D/ui.sh iphone iPhone-18-Pro \
         HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests,HomespunUITests/PremiumUITests 8794 ;;
     library)
-      # A bigger library (the newest cells far from the oldest; the filter crash needed it), over many months.
+      # A bigger library (the newest cells far from the oldest; the filter crash needed it; paging
+      # through items and turning the iPhone needs a few), over many months.
       run library env EXTRA=200 DATED=240 zsh $D/ui.sh library iPhone-18-Pro \
-        HomespunUITests/LibraryUITests,HomespunUITests/GridScrollUITests 8799 ;;
+        HomespunUITests/LibraryUITests,HomespunUITests/ItemPagingUITests,HomespunUITests/GridScrollUITests 8799 ;;
     later)
       run later zsh $D/later.sh later iPhone-18-Pro 8796 ;;
     copies)
@@ -73,7 +74,8 @@ for one in $runs; do
       # The grid over many months: scrolling on the cover, and unfolding, turning and folding mid-library.
       run duo-grid env DATED=240 DUO_POSES=1 zsh $D/ui.sh duo-grid iPhone-Duo HomespunUITests/GridScrollUITests 8791 ;;
     duo-open)
-      run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo HomespunUITests/DuoLayoutUITests 8793 open ;;
+      run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo \
+        HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests 8793 open ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;
   esac

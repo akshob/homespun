@@ -68,11 +68,7 @@ final class ServerModeUITests: XCTestCase {
         let before = proceed.label
         let compare = app.buttons["remove.compare"].firstMatch
         XCTAssertTrue(compare.waitForExistence(timeout: 5), "no compact copies to compare")
-        // On a small screen (iPhone Duo's cover) the sheet opens at half height, the photos under its
-        // buttons: bring them up first.
-        var lifts = 4
-        while compare.frame.maxY > app.frame.maxY - 200, lifts > 0 { app.swipeUpInContent(); lifts -= 1 }
-        compare.tap()
+        app.tapCompactCopy(compare)
         XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
         attach(app, "Compare before freeing up")
         let keep = app.buttons["remove.keepOriginal"]
@@ -201,19 +197,7 @@ final class ServerModeUITests: XCTestCase {
         XCTAssertTrue(remaining.firstMatch.waitForExistence(timeout: 20), "nothing left to compact")
         let before = app.gridItems("Ready to free up").count + app.gridItems("Original at home").count
 
-        app.openTab("Server")
-        let toggle = app.automaticToggle
-        // Clear of the status bar at the bottom (iPhone Duo's cover is short).
-        XCTAssertTrue(app.reveal(toggle), "automatic mode isn't offered")
-        // A switch's knob on an iPhone; the checkbox itself on iPhone Duo's inner display.
-        if toggle.switches.firstMatch.exists { toggle.switches.firstMatch.tap() } else { toggle.tap() }
-        app.buttons["Everything not backed up yet"].firstMatch.tap()
-        // iOS asks once whether Homespun may send notifications.
-        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        let allow = springboard.alerts.buttons["Allow"]
-        if allow.waitForExistence(timeout: 10) { allow.tap() }
-        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
-        XCTAssertEqual(toggle.value as? String, "1")
+        app.turnOnAutomaticMode()
         app.openTab("Library")
 
         // Nothing selected, yet the rest gets compact copies.

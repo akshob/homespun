@@ -111,6 +111,10 @@ and the Get Started card open the Library to pick a few items to try.
     recovering it on the iPhone puts it back. Anything with a compact copy is never trashed.
 - **Cloud copies**: the server's connectors (see below).
 
+Their pages (Server › Backups) open with or without the purchase. Turning either one on (automatic
+mode's switch, or signing in to or turning on a cloud service) asks for the purchase first, with
+Restore Purchase, then carries on; one purchase unlocks both.
+
 Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
 TestFlight builds are unlocked too while the App Store has no Premium product; once it exists,
 TestFlight shows the real purchase (free in the sandbox).

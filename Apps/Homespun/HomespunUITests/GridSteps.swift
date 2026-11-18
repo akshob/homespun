@@ -125,8 +125,42 @@ extension XCUIApplication {
         if inBar.exists, inBar.isHittable { inBar.tap() }
     }
 
-    /// The automatic mode control: a switch on an iPhone, a checkbox on iPhone Duo's inner display.
+    /// The automatic mode control on its page (Server › Automatic Mode): a switch on an iPhone, a
+    /// checkbox on iPhone Duo's inner display.
     @MainActor var automaticToggle: XCUIElement { descendants(matching: .any)["automatic.toggle"] }
+
+    /// Opens Server › Automatic Mode.
+    @MainActor func openAutomaticMode(file: StaticString = #filePath, line: UInt = #line) {
+        openTab("Server")
+        let row = buttons["settings.automatic"]
+        XCTAssertTrue(reveal(row), "no Automatic Mode row", file: file, line: line)
+        row.tap()
+        // A busy simulator can drop the first tap.
+        if !automaticToggle.waitForExistence(timeout: 10), row.exists, row.isHittable { row.tap() }
+        XCTAssertTrue(automaticToggle.waitForExistence(timeout: 10), "no Automatic Mode page", file: file, line: line)
+    }
+
+    /// Flips a switch: its knob on an iPhone (the row's middle is its label), the checkbox itself on
+    /// iPhone Duo's inner display.
+    @MainActor func tapSwitch(_ toggle: XCUIElement) {
+        if toggle.switches.firstMatch.exists { toggle.switches.firstMatch.tap() } else { toggle.tap() }
+    }
+
+    /// Turns automatic mode on from its page for everything not backed up yet (Debug builds have
+    /// the purchase), and lets it send notifications.
+    @MainActor func turnOnAutomaticMode(file: StaticString = #filePath, line: UInt = #line) {
+        if !automaticToggle.exists { openAutomaticMode(file: file, line: line) }
+        tapSwitch(automaticToggle)
+        let everything = buttons["Everything not backed up yet"].firstMatch
+        XCTAssertTrue(everything.waitForExistence(timeout: 10), "turning it on didn't ask what to back up",
+                      file: file, line: line)
+        everything.tap()
+        // iOS asks once whether Homespun may send notifications.
+        let allow = XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.buttons["Allow"]
+        if allow.waitForExistence(timeout: 10) { allow.tap() }
+        XCTAssertTrue(automaticToggle.waitForExistence(timeout: 5), file: file, line: line)
+        XCTAssertEqual(automaticToggle.value as? String, "1", "automatic mode isn't on", file: file, line: line)
+    }
 
     /// On iPhone Duo the tabs are in the vertical bar strip, where they're radio buttons.
     @MainActor func openTab(_ title: String) {
@@ -268,5 +302,26 @@ extension XCUIApplication {
         goBack()
         openTab("Library")
         return statuses
+    }
+
+    /// Taps one of Free Up Space's compact copies. They're a UIKit row in a SwiftUI page, which
+    /// XCTest doesn't scroll by itself: in a half-height sheet the row can be under the buttons at the
+    /// bottom (a tap there lands on them), so the sheet is pulled up to full height first, by its bar.
+    @MainActor func tapCompactCopy(_ thumbnail: XCUIElement) {
+        let buttons = self.buttons["remove.confirm"], close = self.buttons["remove.close"]
+        for _ in 0..<2 {
+            guard thumbnail.exists, buttons.exists, close.exists, thumbnail.frame.maxY > buttons.frame.minY - 12 else { break }
+            let bar = close.coordinate(withNormalizedOffset: CGVector(dx: 3, dy: 0.5))
+            bar.press(forDuration: 0.1, thenDragTo: bar.withOffset(CGVector(dx: 0, dy: -500)))
+            sleep(1)
+        }
+        thumbnail.tap()
+    }
+
+    /// The item viewer's page on screen (its photo). Tap or double-tap it rather than the viewer: XCTest
+    /// taps a collection view near its corner, which on the viewer is the bottom toolbar.
+    @MainActor func shownPage() -> XCUIElement {
+        let pages = descendants(matching: .any).matching(identifier: "item.page")
+        return pages.allElementsBoundByIndex.first { isOnScreen($0) } ?? pages.firstMatch
     }
 }

@@ -39,7 +39,9 @@ struct ActivityTab: View {
                     }
                     .listRowBackground(Theme.card)
                 }
-                JourneyCard(model: model)
+                JourneyCard(model: model) {
+                    if let selection { selection.wrappedValue = .automatic } else { path.append(.automatic) }
+                }
                 readySection
                 if !attention.isEmpty {
                     Section("Needs attention") {
