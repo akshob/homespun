@@ -177,3 +177,17 @@ private func geometry(width: CGFloat = 402, columns: Int = 4, top: CGFloat = 0, 
     thumbnails.keep(0..<40)
     #expect(thumbnails.window.isEmpty)
 }
+
+/// Items prefetched ahead of the window pass to the window when it reaches them, so it lets go of
+/// them once it has moved on (they stayed cached for the rest of the session).
+@MainActor @Test func thumbnailWindowTakesOverPrefetchedItems() {
+    let thumbnails = GridThumbnails(manager: PHCachingImageManager(), source: { AssetSource(result: nil, index: [:]) })
+    thumbnails.reset(order: (0..<100).map { "item-\($0)" }, pixels: 300)
+    thumbnails.keep(0..<20)
+    thumbnails.prefetch([10, 25, 26])
+    #expect(thumbnails.prefetched == ["item-25", "item-26"])
+    thumbnails.keep(10..<30)
+    #expect(thumbnails.prefetched.isEmpty)
+    thumbnails.cancelPrefetching([25])
+    #expect(thumbnails.prefetched.isEmpty)
+}

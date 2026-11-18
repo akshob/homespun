@@ -34,7 +34,7 @@ struct LibraryView: View {
     /// The grid's density: 2 (large), 4 (medium) or 6 (small) columns on an iPhone.
     @AppStorage("gridColumns") private var columns = 4
     /// Drag-to-select: where the drag started, whether it selects or deselects, and the selection before it.
-    @State private var dragAnchor: Int?
+    @State private var dragAnchor: String?
     @State private var dragSelects = true
     @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
@@ -483,16 +483,16 @@ struct LibraryView: View {
         Announce.say(selected.isEmpty ? "None selected" : "\(selected.count) selected")
     }
 
-    /// Drag across cells to select (or deselect) a run, like Photos: from where the drag started to `index`.
-    private func dragSelect(to index: Int) {
-        guard index < data.cells.count else { return }
-        let id = data.cells[index].id
+    /// Drag across cells to select (or deselect) a run, like Photos: from where the drag started to `id`.
+    /// By id: the items can change during the drag (a backup ends, a photo is deleted).
+    private func dragSelect(to id: String) {
+        guard let index = data.positions[id] else { return }
         if dragAnchor == nil {
-            dragAnchor = index
+            dragAnchor = id
             dragBase = selected
             dragSelects = !selected.contains(id)
         }
-        guard let anchor = dragAnchor else { return }
+        guard let anchor = dragAnchor.flatMap({ data.positions[$0] }) else { return }
         let run = data.cells[min(anchor, index)...max(anchor, index)].lazy.map(\.id).filter { counts.selectable.contains($0) }
         selected = dragSelects ? dragBase.union(run) : dragBase.subtracting(run)
     }

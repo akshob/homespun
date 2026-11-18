@@ -16,8 +16,8 @@ final class GridThumbnails {
     private(set) var pixels: CGFloat = 0
     /// The items being kept ready (positions in `order`).
     private(set) var window: Range<Int> = 0..<0
-    /// Items the collection view asked to prefetch that the window didn't cover.
-    private var prefetched = Set<String>()
+    /// Items the collection view asked to prefetch that the window didn't cover (yet).
+    private(set) var prefetched = Set<String>()
     private var order: [String] = []
 
     init(manager: PHCachingImageManager, source: @escaping () -> AssetSource) {
@@ -83,8 +83,10 @@ final class GridThumbnails {
         guard wanted != window, pixels > 0 else { return }
         let (start, stop) = PreheatWindow.changes(from: window, to: wanted)
         window = wanted
-        let starting = start.flatMap { order[$0] }, stopping = stop.flatMap { order[$0] }.filter { !prefetched.contains($0) }
-        cache(start: starting, stop: stopping)
+        // Prefetched ahead of the window, they're cached already: the window takes them over (and
+        // stops them when it moves on).
+        let starting = start.flatMap { order[$0] }.filter { prefetched.remove($0) == nil }
+        cache(start: starting, stop: stop.flatMap { order[$0] })
     }
 
     /// The collection view expects to show these soon (positions in the order).

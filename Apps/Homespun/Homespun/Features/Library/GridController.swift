@@ -32,7 +32,7 @@ struct GridActions {
     /// A cell's menu; the closure it gets goes before anything that opens the item (for the zoom).
     var menu: (LibraryState.Cell, _ opening: @escaping () -> Void) -> UIMenu?
     /// Drag-to-select reached this item (the first call is where the drag started).
-    var dragSelect: (Int) -> Void
+    var dragSelect: (String) -> Void
     var dragEnded: () -> Void
     /// A pinch ended at this scale.
     var resize: (CGFloat) -> Void
@@ -810,7 +810,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private func select(to item: Int) {
         guard item != lastDragged, item < data.cells.count else { return }
         lastDragged = item
-        actions.dragSelect(item)
+        actions.dragSelect(data.cells[item].id)
     }
 
     private func startDragScrolling() {
