@@ -296,7 +296,8 @@ struct Routes: Sendable {
             let hasCompact = !(try await catalog.compact(assetID)).isEmpty
             let importedWithoutCopy = asset.state == .imported && !hasCompact
                 && resources.contains { $0.externalPath != nil || $0.importedFrom != nil }
-            if asset.state == .receiving || importedWithoutCopy, resources.allSatisfy({ $0.state == .verified }) {
+            if [.receiving, .failed].contains(asset.state) || importedWithoutCopy,
+               resources.allSatisfy({ $0.state == .verified }) {
                 // Imported originals were checked at import; enabling a connector copies them.
                 try await originalsComplete(asset, copyToConnectors: !importedWithoutCopy)
             } else if asset.state == .stored, !asset.holdCompact {

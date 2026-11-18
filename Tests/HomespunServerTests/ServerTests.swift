@@ -242,6 +242,81 @@ struct Fixture {
     }
 }
 
+@Test(.enabled(if: ffmpegAvailable), arguments: [false, true], [false, true])
+func registeringFailedFilesRetriesWithoutUploadingAgain(exhaustedRetries: Bool, compact: Bool) async throws {
+    let fixture = try await Fixture()
+    let media = try await Media.make(in: fixture.directory)
+    try await fixture.test { client, token in
+        let movie = try descriptor(.video, media.movie)
+        let request = ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [movie])
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: request)
+        _ = try await fixture.upload(client, token: token, asset: movie.sha256, role: .video, file: media.movie)
+        let catalog = fixture.server.catalog
+        let originals = try await catalog.resources(movie.sha256)
+
+        // Both permanent processing errors and exhausted transient retries leave the asset failed.
+        var job = try #require(try await catalog.claim(owner: "test", lease: 60))
+        if exhaustedRetries {
+            job.attempts = Catalog.maximumAttempts
+            #expect(try await !catalog.fail(job, error: "Test processing failure"))
+        } else {
+            try await catalog.finish(job)
+        }
+        try await catalog.setState(movie.sha256, .failed, message: "Test processing failure")
+
+        let retry = ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [movie], compact: compact)
+        let response = try await client.call("/api/v1/assets", .post, token: token, json: retry)
+        #expect(response.status == .ok)
+        let status = try response.decode(ServerAPI.AssetStatus.self)
+        #expect(status.state == (compact ? .queued : .stored))
+        #expect(status.message == nil)
+        #expect(status.resources.first?.state == .verified)
+        #expect(status.resources.first?.receivedBytes == movie.size)
+        #expect(try await catalog.resources(movie.sha256) == originals)
+        if !compact {
+            #expect(try await catalog.jobStatus(JobRunner.compress, assetID: movie.sha256)
+                    == (exhaustedRetries ? "failed" : "succeeded"))
+        }
+
+        // Asking for the compact copy again neither uploads the original nor duplicates the job.
+        let again = try await client.call("/api/v1/assets", .post, token: token, json: request)
+            .decode(ServerAPI.AssetStatus.self)
+        #expect(again.state == .queued && again.message == nil)
+        #expect(try await catalog.jobStatus(JobRunner.compress, assetID: movie.sha256) == "queued")
+        let queued = try #require(try await catalog.claim(owner: "test", lease: 60))
+        #expect(queued.id == job.id && queued.attempts == 1)
+        #expect(try await catalog.claim(owner: "test", lease: 60) == nil)
+        try await catalog.releaseLeases()
+        try await fixture.server.drainJobs()
+        let ready = try await client.call("/api/v1/assets/\(movie.sha256)", token: token)
+            .decode(ServerAPI.AssetStatus.self)
+        #expect(ready.state == .ready && ready.message == nil && !ready.compact.isEmpty)
+        let unchanged = try await client.call("/api/v1/assets", .post, token: token, json: request)
+            .decode(ServerAPI.AssetStatus.self)
+        #expect(unchanged == ready)
+        #expect(try await catalog.jobStatus(JobRunner.compress, assetID: movie.sha256) == "succeeded")
+    }
+}
+
+@Test(arguments: [ServerAPI.ResourceState.missing, .partial, .mismatch])
+func registeringFailedFilesRequiresEveryOriginalVerified(resourceState: ServerAPI.ResourceState) async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let movie = ServerAPI.ResourceDescriptor(role: .video, filename: "video.mov", size: 100,
+                                                  sha256: String(repeating: "a", count: 64))
+        let request = ServerAPI.RegisterAssetRequest(kind: .video, captureDate: nil, resources: [movie])
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: request)
+        try await fixture.server.catalog.markResource(movie.sha256, role: .video, state: resourceState)
+        try await fixture.server.catalog.setState(movie.sha256, .failed, message: "Original is not verified")
+
+        let status = try await client.call("/api/v1/assets", .post, token: token, json: request)
+            .decode(ServerAPI.AssetStatus.self)
+        #expect(status.state == .failed && status.message == "Original is not verified")
+        #expect(status.resources.first?.state == resourceState)
+        #expect(try await fixture.server.catalog.jobStatus(JobRunner.compress, assetID: movie.sha256) == nil)
+    }
+}
+
 /// A connector that records what it was given, or fails the way a test asks.
 final class FakeConnector: Connector, @unchecked Sendable {
     enum Behaviour { case copy, fail, retryLater, error }
