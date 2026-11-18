@@ -260,7 +260,7 @@ struct DemoMediaGenerator: Sendable {
         let elapsed = ContinuousClock.now - start
         let ms = Double(elapsed.components.seconds) * 1000 + Double(elapsed.components.attoseconds) / 1e15
         Logger(subsystem: "photos.homespun.app", category: "Demo")
-            .info("Drew the demo's media: \(files.count) files in \(ms) ms, \(limit) at once")
+            .info("Drew the demo's media: \(files.count) files in \(ms) ms, \(self.limit) at once")
         return manifest
     }
 

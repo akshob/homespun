@@ -6,8 +6,8 @@ import UIKit
 
 /// Try the Demo: Homespun with sample photos and a pretend server, "Homespun Demo", for anyone curious
 /// (and App Review) without a server at home. The demo runs on a model of its own (`AppModel(demo:)`)
-/// whose photos (`DemoLibrary`), server (`DemoServer`), settings and records all live in one folder and
-/// one settings domain: the person's own photos, pairing, settings, records and analytics are never
+/// whose library changes (`DemoLibrary`), server (`DemoServer`), settings and records live in one folder
+/// and one settings domain: the person's own photos, pairing, settings, records and analytics are never
 /// touched. Leaving deletes the demo's state; its drawn media stays until the next cold launch.
 @MainActor @Observable
 final class DemoMode {
@@ -81,8 +81,11 @@ final class DemoMode {
             await previous?.value
             guard !Task.isCancelled, preparationID == id else { return }
             do {
-                if let folder = await DemoMediaStore.shared.readyFolder() {
-                    try await finish(folder, origin: origin, drawnSince: nil)
+                let ready = await DemoMediaStore.shared.readyFolder()
+                try Task.checkCancellation()
+                guard preparationID == id else { return }
+                if let folder = ready {
+                    try await finish(folder, origin: origin, id: id, drawnSince: nil)
                     return
                 }
                 preparation = .drawing(nil)
@@ -90,13 +93,14 @@ final class DemoMode {
                 Announce.say("Preparing the demo.")
                 beginBackgroundTask(id: id)
                 let folder = try await DemoMediaStore.shared.prepare { [weak self] progress in
+                    guard let self else { return }
                     await MainActor.run {
-                        guard let self, self.preparationID == id, case .drawing = self.preparation else { return }
+                        guard self.preparationID == id, case .drawing = self.preparation else { return }
                         self.preparation = .drawing(progress)
                     }
                 }
                 try Task.checkCancellation()
-                try await finish(folder, origin: origin, drawnSince: appeared)
+                try await finish(folder, origin: origin, id: id, drawnSince: appeared)
             } catch is CancellationError {
                 // Cancel already removed the cover; partial media is available for a retry.
             } catch {
@@ -109,7 +113,7 @@ final class DemoMode {
         }
     }
 
-    private func finish(_ folder: URL, origin: Origin, drawnSince: ContinuousClock.Instant?) async throws {
+    private func finish(_ folder: URL, origin: Origin, id: UUID, drawnSince: ContinuousClock.Instant?) async throws {
         #if DEBUG
         if let drawnSince {
             let minimum = UserDefaults.standard.double(forKey: "demoPrepareMinimum")
@@ -117,6 +121,7 @@ final class DemoMode {
         }
         #endif
         try Task.checkCancellation()
+        guard preparationID == id else { throw CancellationError() }
         let restarted = origin == .launch && !Self.canResume(media: folder, state: Self.folder)
         if origin == .tapped || restarted { Self.wipe() }
         begin(media: folder)
@@ -138,6 +143,7 @@ final class DemoMode {
     }
 
     func cancel() {
+        guard origin != nil, model == nil else { return }
         let wasLaunch = origin == .launch
         work?.cancel()
         preparationID = nil
@@ -151,7 +157,11 @@ final class DemoMode {
         Announce.say(wasLaunch ? "Left the demo." : "The demo didn't start.")
     }
 
-    func retry() { prepare(origin: origin ?? .tapped) }
+    func retry() {
+        guard case .failed = preparation else { return }
+        preparation = .drawing(nil)
+        prepare(origin: origin ?? .tapped)
+    }
 
     private func beginBackgroundTask(id: UUID) {
         endBackgroundTask()
