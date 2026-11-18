@@ -176,6 +176,9 @@ launched with `-widgetDemo ready|away|nothing|locked|unpaired` show made-up fact
 `HomespunWidgetTests` draws every size in every state; with `TEST_RUNNER_HOMESPUN_WIDGET_SHOTS=<folder>`
 it saves them as PNGs, and `WidgetGalleryUITests` (not in CI) adds the real widgets to the simulator's
 Home Screen from the widget gallery and saves screenshots there too.
+The watch's Debug-only `-watchDemo fresh|stale` seeds synthetic status; `-watchDemoLater` instead
+delivers it three seconds after launch. `HomespunWatchUITests` times Crown and swipe steps for each
+case, including a minute refresh (`zsh ci/lane.sh watch`, no paired iPhone or server needed).
 
 ### TestFlight
 

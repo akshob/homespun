@@ -39,7 +39,7 @@ final class PhoneLink: NSObject, WCSessionDelegate, Sendable {
     static let shared = PhoneLink()
 
     func activate() {
-        guard WCSession.isSupported(), WCSession.default.activationState != .activated else { return }
+        guard WCSession.isSupported(), WCSession.default.activationState == .notActivated else { return }
         WCSession.default.delegate = self
         WCSession.default.activate()
     }
