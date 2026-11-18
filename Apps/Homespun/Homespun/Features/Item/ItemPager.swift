@@ -82,7 +82,7 @@ struct ItemPager: UIViewControllerRepresentable {
     let start: String
     @Binding var current: String?
     @Binding var zoomed: Bool
-    var asset: (String) -> PHAsset?
+    var item: (String) -> (any LibraryItem)?
     /// VoiceOver's label for a page.
     var label: (String) -> String
     /// Swipe down to close: the drag so far, then where and how fast it was let go.
@@ -100,7 +100,7 @@ struct ItemPager: UIViewControllerRepresentable {
     }
 
     private func update(_ controller: ItemPagerController) {
-        controller.asset = asset
+        controller.item = item
         controller.label = label
         let current = $current, zoomed = $zoomed
         controller.shown = { current.wrappedValue = $0 }
@@ -118,7 +118,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     /// Between pages, like Photos.
     static let gap: CGFloat = 20
 
-    var asset: (String) -> PHAsset? = { _ in nil }
+    var item: (String) -> (any LibraryItem)? = { _ in nil }
     var label: (String) -> String = { _ in "" }
     /// The page shown changed (its identifier).
     var shown: (String) -> Void = { _ in }
@@ -250,19 +250,19 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int { ids.count }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        let asset = ids.indices.contains(indexPath.item) ? asset(ids[indexPath.item]) : nil
-        let kind = asset?.mediaType == .video ? VideoPageCell.reuse : PhotoPageCell.reuse
+        let item = ids.indices.contains(indexPath.item) ? self.item(ids[indexPath.item]) : nil
+        let kind = item?.itemKind == .video ? VideoPageCell.reuse : PhotoPageCell.reuse
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: kind, for: indexPath)
-        configure(cell, at: indexPath.item, asset: asset)
+        configure(cell, at: indexPath.item, item: item)
         return cell
     }
 
     /// A photo's page is UIKit; a video's is SwiftUI in a hosting controller, which its player needs.
-    private func configure(_ cell: UICollectionViewCell, at item: Int, asset known: PHAsset? = nil) {
+    private func configure(_ cell: UICollectionViewCell, at item: Int, item known: (any LibraryItem)? = nil) {
         guard ids.indices.contains(item) else { return }
         let id = ids[item], current = item == index, placeholder = images.image(id)
         if let cell = cell as? PhotoPageCell {
-            cell.show(id: id, asset: { known ?? self.asset(id) }, current: current, label: label(id), placeholder: placeholder,
+            cell.show(id: id, item: { known ?? self.item(id) }, current: current, label: label(id), placeholder: placeholder,
                       images: images) { [weak self] zoomed in self?.zoomed(id, zoomed) }
             return
         }
@@ -270,7 +270,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         let key = VideoPageCell.Key(id: id, current: current, label: label(id), placeholder: placeholder != nil)
         guard cell.key != key else { return }
         cell.key = key
-        let page = ItemVideoPage(asset: known ?? asset(id), isCurrent: current, label: key.label, placeholder: placeholder,
+        let page = ItemVideoPage(item: known ?? self.item(id), isCurrent: current, label: key.label, placeholder: placeholder,
                                  images: images)
         if let host = cell.host {
             host.rootView = page
@@ -301,7 +301,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
 
     /// Screen-size images of the neighbours, so a swipe never shows an empty page.
     private func preload() {
-        images.keep(ids: ids, around: index, asset: asset)
+        images.keep(ids: ids, around: index, item: item)
     }
 
     // MARK: Scrolling
@@ -312,7 +312,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         // Past half a page, its neighbours start loading.
         if page != middle, ids.indices.contains(page) {
             middle = page
-            images.keep(ids: ids, around: page, asset: asset)
+            images.keep(ids: ids, around: page, item: item)
         }
         // Moved by VoiceOver or code rather than a finger: shown at once.
         if !scrollView.isTracking, !scrollView.isDecelerating { show(page) }
@@ -385,7 +385,10 @@ final class ItemImages {
     private var pixels = CGSize.zero
     private var decoded: [String: UIImage] = [:]
     private var loading: [String: Task<Void, Never>] = [:]
+    /// What PhotoKit caches (a library with its own items, the demo's, caches nothing there).
     private var cached: [String: PHAsset] = [:]
+    /// The items within reach of the page shown (`cached` has those from Photos).
+    private var held: [String: any LibraryItem] = [:]
 
     private static let options: PHImageRequestOptions = {
         let options = PHImageRequestOptions()
@@ -408,7 +411,7 @@ final class ItemImages {
     }
 
     /// Keeps the images around `index`, and lets go of the rest.
-    func keep(ids: [String], around index: Int, asset: (String) -> PHAsset?) {
+    func keep(ids: [String], around index: Int, item lookup: (String) -> (any LibraryItem)?) {
         guard pixels.width > 0, pixels.height > 0, !ids.isEmpty, ids.indices.contains(index) else { return }
         func around(_ reach: Int) -> ArraySlice<String> {
             ids[max(0, index - reach)...min(ids.count - 1, index + reach)]
@@ -419,9 +422,12 @@ final class ItemImages {
             manager.stopCachingImages(for: Array(gone.values), targetSize: pixels, contentMode: .aspectFit, options: Self.options)
             for id in gone.keys { cached[id] = nil }
         }
+        for id in held.keys where !far.contains(id) { held[id] = nil }
         var start: [PHAsset] = []
-        for id in far where cached[id] == nil {
-            guard let asset = asset(id) else { continue }
+        for id in far where held[id] == nil {
+            guard let item = lookup(id) else { continue }
+            held[id] = item
+            guard let asset = item as? PHAsset else { continue }
             cached[id] = asset
             start.append(asset)
         }
@@ -434,9 +440,9 @@ final class ItemImages {
             loading[id] = nil
         }
         for id in near where decoded[id] == nil && loading[id] == nil {
-            guard let asset = cached[id] else { continue }
+            guard let item = held[id] else { continue }
             loading[id] = Task { [weak self] in
-                let image = await self?.load(asset)
+                let image = await self?.load(item)
                 guard let self, !Task.isCancelled else { return }
                 self.loading[id] = nil
                 guard let image else { return }
@@ -448,15 +454,20 @@ final class ItemImages {
 
     /// Lets PhotoKit forget what this viewer cached (when it closes, or the size changes).
     func stopCaching() {
+        held = [:]
         guard !cached.isEmpty else { return }
         manager.stopCachingImages(for: Array(cached.values), targetSize: pixels, contentMode: .aspectFit, options: Self.options)
         cached = [:]
     }
 
     /// The screen-size image, decoded: one loaded ahead, or from PhotoKit (its cache, usually).
-    func load(_ asset: PHAsset) async -> UIImage? {
-        if let image = decoded[asset.localIdentifier] { return image }
+    func load(_ item: any LibraryItem) async -> UIImage? {
+        if let image = decoded[item.localIdentifier] { return image }
         guard pixels.width > 0 else { return nil }
+        guard let asset = item as? PHAsset else {
+            let image = await item.image(size: pixels, fast: false)
+            return await image?.byPreparingForDisplay() ?? image
+        }
         let manager = manager, pixels = pixels, options = Self.options
         let image: UIImage? = await withCheckedContinuation { continuation in
             manager.requestImage(for: asset, targetSize: pixels, contentMode: .aspectFit, options: options) { image, _ in

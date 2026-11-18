@@ -12,7 +12,15 @@ final class AppSettings {
         case unreachable(String)
     }
 
-    private let defaults: UserDefaults
+    /// Where these settings are kept (the demo has its own).
+    let defaults: UserDefaults
+    /// The photo library this app works on: Photos, or the demo's sample photos.
+    let photos: any PhotoSource
+    /// The demo (Try the Demo): sample photos and a pretend server, kept apart from everything else.
+    let isDemo: Bool
+    private let tokens: any TokenStore
+    /// How the server is reached (the demo's answers in the app itself).
+    private let session: URLSession
     private(set) var serverURL: URL?
     private(set) var server: ServerAPI.ServerInfo?
     private(set) var serverStatus: ServerStatus = .unknown {
@@ -38,8 +46,13 @@ final class AppSettings {
     }
     var freedSince: Date? { didSet { defaults.set(freedSince, forKey: "freedSince") } }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, photos: any PhotoSource = PhotoKitSource(), tokens: any TokenStore = KeychainTokens(),
+         session: URLSession = .shared, isDemo: Bool = false) {
         self.defaults = defaults
+        self.photos = photos
+        self.tokens = tokens
+        self.session = session
+        self.isDemo = isDemo
         serverURL = defaults.url(forKey: "serverURL")
         server = defaults.data(forKey: "serverInfo").flatMap { try? ServerAPI.decoder.decode(ServerAPI.ServerInfo.self, from: $0) }
         // Homespun always works through the paired server; the old mode choice (server or
@@ -54,8 +67,8 @@ final class AppSettings {
     }
 
     var client: ServerClient? {
-        guard let serverURL, let token = Keychain.token(for: serverURL.absoluteString) else { return nil }
-        return ServerClient(baseURL: serverURL, token: token)
+        guard let serverURL, let token = tokens.token(for: serverURL.absoluteString) else { return nil }
+        return ServerClient(baseURL: serverURL, token: token, session: session)
     }
 
     var isPaired: Bool { client != nil && server != nil }
@@ -67,25 +80,38 @@ final class AppSettings {
     /// keeps it paired with the photo).
     func compactor(ledger: CompactLedger) -> (any Compacting)? {
         guard usesServer, let client, let server else { return nil }
-        return ServerCompactor(client: client, mode: server.mode, profile: server.profile, ledger: ledger)
+        return photos.compactor(client: client, mode: server.mode, profile: server.profile, ledger: ledger)
     }
 
-    func remover(ledger: CompactLedger) -> OriginalRemover? {
+    func remover(ledger: CompactLedger) -> (any RemovingOriginals)? {
         guard let client, let server else { return nil }
-        return OriginalRemover(client: client, mode: server.mode, ledger: ledger)
+        return photos.remover(client: client, mode: server.mode, ledger: ledger)
+    }
+
+    func restorer(ledger: CompactLedger) -> (any RestoringOriginals)? {
+        guard let client else { return nil }
+        return photos.restorer(client: client, ledger: ledger)
     }
 
     // MARK: Pairing
 
+    struct DemoOnly: LocalizedError {
+        var errorDescription: String? { "In the demo, Homespun pairs only with Homespun Demo. Leave the demo to pair your own server." }
+    }
+
     func pair(_ link: PairingLink) async throws {
-        let response = try await ServerClient(baseURL: link.serverURL).pair(code: link.code, deviceName: UIDevice.current.name)
+        guard !isDemo || link.serverURL.host == DemoServer.host else { throw DemoOnly() }
+        let response = try await ServerClient(baseURL: link.serverURL, session: session).pair(code: link.code,
+                                                                                           deviceName: UIDevice.current.name)
         try finishPairing(serverURL: link.serverURL, response: response)
     }
 
     /// Keeps a pairing made with a code or allowed on the server.
     func finishPairing(serverURL newURL: URL, response: ServerAPI.PairResponse) throws {
-        try Keychain.setToken(response.token, for: newURL.absoluteString)
-        if let serverURL, serverURL != newURL { Keychain.removeToken(for: serverURL.absoluteString) }
+        // The demo's sample photos never go to a real server.
+        guard !isDemo || newURL.host == DemoServer.host else { throw DemoOnly() }
+        try tokens.setToken(response.token, for: newURL.absoluteString)
+        if let serverURL, serverURL != newURL { tokens.removeToken(for: serverURL.absoluteString) }
         serverURL = newURL
         defaults.set(newURL, forKey: "serverURL")
         store(response.server)
@@ -93,7 +119,7 @@ final class AppSettings {
     }
 
     func unpair() {
-        if let serverURL { Keychain.removeToken(for: serverURL.absoluteString) }
+        if let serverURL { tokens.removeToken(for: serverURL.absoluteString) }
         serverURL = nil
         server = nil
         serverStatus = .unknown

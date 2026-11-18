@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import Photos
 import SwiftUI
 
 /// Restore Original: for compact copies whose originals were freed up, brings each original back
@@ -48,7 +47,7 @@ struct RestoreOriginalSheet: View {
         .interactiveDismissDisabled(controller.isRestoring)
         .task {
             let found = await controller.restorable(compacts)
-            edited = found.filter { item in PhotoLibrary.asset(item.compact).map(PhotoLibrary.isEdited) ?? false }.count
+            edited = found.filter { item in controller.settings.photos.item(item.compact)?.isEdited ?? false }.count
             items = found
         }
     }
@@ -72,7 +71,9 @@ struct RestoreOriginalSheet: View {
                     .foregroundStyle(Theme.secondaryLabel)
                 promise("checkmark.shield", "Each one is checked against \(server)'s copy as it arrives, and again in Photos.")
                 promise("heart", "Favorites, hidden photos and albums stay as they are.")
-                promise("trash", "Then iOS asks to delete the compact copies. They stay in Recently Deleted for 30 days.")
+                promise("trash", controller.settings.isDemo
+                        ? "Then Homespun asks to delete the compact copies, as iOS would. In the demo, nothing is deleted."
+                        : "Then iOS asks to delete the compact copies. They stay in Recently Deleted for 30 days.")
                 promise("lock", "It stays full size: Free Up Space and automatic mode leave it alone until you make a compact copy again.")
                 if edited > 0 {
                     InlineNotice(tone: .warning, title: edited == 1 && items.count == 1 ? "You edited this compact copy"
@@ -99,7 +100,9 @@ struct RestoreOriginalSheet: View {
         ProgressView(value: Double(progress.done), total: Double(max(progress.total, 1)))
             .accessibilityValue("\(progress.done) of \(progress.total)")
             .accessibilityIdentifier("restore.progress")
-        Text("Keep Homespun open. Nothing is deleted until every original is safely in Photos and iOS asks you.")
+        Text(controller.settings.isDemo
+             ? "Keep Homespun open. Nothing is removed until every original is safely back and you say so; in the demo, nothing is deleted."
+             : "Keep Homespun open. Nothing is deleted until every original is safely in Photos and iOS asks you.")
             .font(.footnote).foregroundStyle(Theme.secondaryLabel)
     }
 
@@ -118,6 +121,9 @@ struct RestoreOriginalSheet: View {
             .accessibilityIdentifier("restore.summary")
             Text(report.copiesKept
                  ? "You kept the compact copies, so both are in Photos. Free Up Space can remove the originals again."
+                 : controller.settings.isDemo
+                 ? "\(LibraryController.bytes(report.bytes)) back, full size. In the demo, the compact copies only left its library; "
+                    + "with your own photos, they'd stay in Recently Deleted for 30 days."
                  : "\(LibraryController.bytes(report.bytes)) back on this iPhone, full size. The compact copies are in Recently "
                     + "Deleted until \(Date.now.addingTimeInterval(30 * 86_400).formatted(.dateTime.month(.wide).day())).")
                 .foregroundStyle(Theme.secondaryLabel)

@@ -20,7 +20,7 @@ final class PhotoPageCell: ItemPageCell {
     private let content = PhotoContent()
     private lazy var zoom = ZoomScrollView(content: content)
     private var id: String?
-    private var asset: PHAsset?
+    private var item: (any LibraryItem)?
     private var current = false
     /// The full-size image or the Live Photo is in.
     private var sharp = false
@@ -41,19 +41,19 @@ final class PhotoPageCell: ItemPageCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Shows an item (or the same one again, current or not, with new words).
-    func show(id: String, asset: () -> PHAsset?, current: Bool, label: String, placeholder: UIImage?,
+    func show(id: String, item: () -> (any LibraryItem)?, current: Bool, label: String, placeholder: UIImage?,
               images: ItemImages, onZoom: @escaping (Bool) -> Void) {
         if id != self.id {
             loading?.cancel()
             loading = nil
             loaded = nil
             self.id = id
-            self.asset = asset()
+            self.item = item()
             sharp = false
             content.image = nil
             content.livePhoto = nil
             zoom.reset()
-            zoom.aspect = CGSize(width: self.asset?.pixelWidth ?? 0, height: self.asset?.pixelHeight ?? 0)
+            zoom.aspect = CGSize(width: self.item?.pixelWidth ?? 0, height: self.item?.pixelHeight ?? 0)
         }
         self.images = images
         self.onZoom = onZoom
@@ -74,26 +74,26 @@ final class PhotoPageCell: ItemPageCell {
 
     /// The screen-size image if it isn't in yet; the full-size one (or the Live Photo) on the page shown.
     private func load() {
-        guard let id, let asset, let images, loaded.map({ $0.id != id || $0.current != current }) ?? true else { return }
+        guard let id, let item, let images, loaded.map({ $0.id != id || $0.current != current }) ?? true else { return }
         loading?.cancel()
         loaded = (id, current)
         let current = current
         loading = Task { [weak self] in
             if self?.content.image == nil {
-                let image = await images.load(asset)
+                let image = await images.load(item)
                 guard let self, self.id == id, !Task.isCancelled else { return }
                 if let image, self.content.image == nil { self.show(image) }
             }
             guard current, let self, !self.sharp, !Task.isCancelled else { return }
-            let width = Double(asset.pixelWidth), height = Double(asset.pixelHeight)
+            let width = Double(item.pixelWidth), height = Double(item.pixelHeight)
             let scale = min(1, 4096 / max(width, height, 1))
             let full = CGSize(width: width * scale, height: height * scale)
-            if asset.mediaSubtypes.contains(.photoLive) {
-                let live = await ItemMedia.livePhoto(asset, size: full)
+            if item.itemKind == .livePhoto {
+                let live = await item.livePhoto(size: full)
                 guard self.id == id, !Task.isCancelled, let live else { return }
                 self.content.livePhoto = live
                 self.sharp = true
-            } else if let sharper = await ItemMedia.image(asset, size: full), self.id == id, !Task.isCancelled {
+            } else if let sharper = await item.image(size: full, fast: false), self.id == id, !Task.isCancelled {
                 self.show(sharper)
                 self.sharp = true
             }
@@ -170,7 +170,7 @@ final class VideoPageCell: ItemPageCell {
 /// A video: its poster (the screen-size image) until it's the page shown, then the player, which
 /// pauses when the page isn't shown any more.
 struct ItemVideoPage: View {
-    let asset: PHAsset?
+    let item: (any LibraryItem)?
     let isCurrent: Bool
     let label: String
     /// The screen-size image, when the pager has it already.
@@ -190,7 +190,7 @@ struct ItemVideoPage: View {
     }
 
     /// What's loaded, if it's for this item (the page may have just been given another).
-    private var media: Media { loaded.id == asset?.localIdentifier ? loaded : Media(id: asset?.localIdentifier) }
+    private var media: Media { loaded.id == item?.localIdentifier ? loaded : Media(id: item?.localIdentifier) }
     private var image: UIImage? { media.image ?? placeholder }
 
     var body: some View {
@@ -211,26 +211,26 @@ struct ItemVideoPage: View {
             }
         }
         .ignoresSafeArea()
-        .task(id: Load(id: asset?.localIdentifier, current: isCurrent)) { await load() }
+        .task(id: Load(id: item?.localIdentifier, current: isCurrent)) { await load() }
         .onChange(of: isCurrent) { _, current in if !current { loaded.player?.pause() } }
         .onDisappear { loaded.player?.pause() }
     }
 
     private func load() async {
-        guard let asset else { return }
-        let id = asset.localIdentifier
+        guard let item else { return }
+        let id = item.localIdentifier
         if loaded.id != id {
             loaded.player?.pause()
             loaded = Media(id: id)
         }
         if loaded.image == nil {
             var image = placeholder
-            if image == nil { image = await images?.load(asset) }
+            if image == nil { image = await images?.load(item) }
             guard loaded.id == id else { return }
             loaded.image = image
         }
         guard isCurrent, !Task.isCancelled, loaded.player == nil else { return }
-        let player = await ItemMedia.player(asset)
+        let player = await item.player()
         if loaded.id == id, !Task.isCancelled { loaded.player = player }
     }
 }

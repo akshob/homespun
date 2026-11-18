@@ -23,6 +23,7 @@ struct ItemViewer: View {
     /// Swipe down to close: how far the item has been dragged.
     @State private var drag: CGSize = .zero
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.showsTips) private var showsTips
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
     init(model: AppModel, ids: [String], start: String, details: Binding<String?>,
@@ -41,7 +42,7 @@ struct ItemViewer: View {
     private var immich: Bool { model.settings.server?.mode == .immich }
 
     var body: some View {
-        let cell = cell(shown), asset = model.library.library.asset(shown)
+        let cell = cell(shown), asset = model.library.library.item(shown)
         let pulled = min(max(drag.height, 0) / 400, 1)
         ZStack {
             Color.black.opacity(1 - pulled * 0.8).ignoresSafeArea()
@@ -52,7 +53,7 @@ struct ItemViewer: View {
         }
 
         .navigationTitle(ItemText.title(asset?.creationDate))
-        .navigationSubtitle(ItemText.subtitle(asset?.creationDate, kind: asset.flatMap(PhotoLibrary.kind),
+        .navigationSubtitle(ItemText.subtitle(asset?.creationDate, kind: asset?.itemKind,
                                               duration: asset?.duration ?? 0))
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
@@ -87,7 +88,7 @@ struct ItemViewer: View {
     private var pager: some View {
         // From the item shown, should SwiftUI make the pager again while the viewer stays.
         ItemPager(ids: ids, start: shown, current: $current, zoomed: $zoomed,
-                  asset: { model.library.library.asset($0) }, label: spokenLabel) { drag = $0 } released: { translation, velocity in
+                  item: { model.library.library.item($0) }, label: spokenLabel) { drag = $0 } released: { translation, velocity in
             if translation.height > 120 || velocity.height > 900 {
                 dismiss()
             } else {
@@ -125,7 +126,7 @@ struct ItemViewer: View {
 
     /// The badge and its sentence, just under the photo; over it, on a scrim, when the photo
     /// fills the height.
-    private func stateLine(_ cell: LibraryState.Cell, asset: PHAsset?) -> some View {
+    private func stateLine(_ cell: LibraryState.Cell, asset: (any LibraryItem)?) -> some View {
         GeometryReader { geo in
             let insets = geo.safeAreaInsets
             let screen = CGSize(width: geo.size.width + insets.leading + insets.trailing,
@@ -167,7 +168,7 @@ struct ItemViewer: View {
                 }
                 .tint(.white)
                 .accessibilityIdentifier("item.compare")
-                .popoverTip(CompareTip())
+                .popoverTip(showsTips ? CompareTip() : nil)
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
@@ -184,7 +185,9 @@ struct ItemViewer: View {
                 TitleAndIcon(title: "Free Up Space", systemImage: "iphone")
             }
             .buttonStyle(.glassProminent).tint(Theme.accent)
-            .accessibilityHint("Removes this original from this iPhone. Its compact copy stays. Recently Deleted keeps it for 30 days.")
+            .accessibilityHint(model.settings.isDemo
+                               ? "Removes this original from the demo. Its compact copy stays. Nothing is deleted."
+                               : "Removes this original from this iPhone. Its compact copy stays. Recently Deleted keeps it for 30 days.")
             .accessibilityIdentifier("item.action")
         case .backUp, .tryAgain:
             let again = ItemAction.for(cell) == .tryAgain
@@ -209,7 +212,9 @@ struct ItemViewer: View {
                     TitleAndIcon(title: "Restore Original", systemImage: "arrow.uturn.backward.circle")
                 }
                 .buttonStyle(.glassProminent).tint(Theme.accent)
-                .accessibilityHint("Brings the full-size original back from \(server) and deletes this compact copy. iOS asks first.")
+                .accessibilityHint(model.settings.isDemo
+                                   ? "Brings the full-size original back from \(server) and deletes this compact copy from the demo. You're asked first."
+                                   : "Brings the full-size original back from \(server) and deletes this compact copy. iOS asks first.")
                 .accessibilityIdentifier("item.action")
             }
         }

@@ -43,6 +43,8 @@ struct AnalyticsPage: View {
 
 /// Server › This iPhone › Share Analytics.
 struct AnalyticsSettingsView: View {
+    /// The demo shows the choice but leaves it as the person made it (the demo records nothing).
+    var demo = false
     @State private var telemetry = Telemetry.shared
     @State private var confirmingDelete = false
     @State private var deleting = false
@@ -51,10 +53,19 @@ struct AnalyticsSettingsView: View {
 
     var body: some View {
         List {
+            if demo {
+                Section {
+                    InlineNotice(tone: .info, title: "The demo records nothing",
+                                 message: "This choice is your own Homespun's, so it can't be changed in the demo.")
+                }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+            }
             Section {
                 Toggle("Share Analytics", isOn: Binding(get: { telemetry.isSharing },
                                                         set: { telemetry.setSharing($0); deleted = false }))
                     .tint(Theme.accent)
+                    .disabled(demo)
                     .accessibilityIdentifier("analytics.toggle")
             } footer: {
                 Text("Anonymous analytics help the developer see what works and fix what doesn't.")
@@ -73,7 +84,7 @@ struct AnalyticsSettingsView: View {
                         if deleting { Spacer(); ProgressView() }
                     }
                 }
-                .disabled(deleting || !(telemetry.hasSharedData || telemetry.isSharing))
+                .disabled(demo || deleting || !(telemetry.hasSharedData || telemetry.isSharing))
                 .accessibilityIdentifier("analytics.delete")
                 if deleted {
                     Label("Deleted", systemImage: "checkmark.circle.fill").foregroundStyle(Theme.teal)

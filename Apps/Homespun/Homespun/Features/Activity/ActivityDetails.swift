@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import Photos
 import SwiftUI
 
 /// One run's receipt and its items (DESIGN 03·2.3, 07·BK-2): how long it took, what happened,
@@ -53,7 +52,7 @@ struct RunDetailView: View {
                     ForEach(items) { item in
                         RunItemRow(item: item, job: live ? model.job : nil,
                                    present: present?.contains(item.assetID) ?? true, server: server,
-                                   thumbnails: model.library.library.thumbnails)
+                                   library: model.library.library)
                     }
                 }
                 .listRowBackground(Theme.card)
@@ -66,7 +65,8 @@ struct RunDetailView: View {
         }
         .task(id: PresenceKey(run: runID, count: items.count)) {
             let ids = items.map(\.assetID).filter { !$0.isEmpty }
-            present = await Task.detached(priority: .userInitiated) { PhotoLibrary.existing(ids) }.value
+            let photos = model.settings.photos
+            present = await Task.detached(priority: .userInitiated) { photos.existing(ids, includeHidden: false) }.value
         }
         .overlay {
             if !live, run == nil {
@@ -157,7 +157,7 @@ struct RunItemRow: View {
     /// The original is still on this iPhone.
     var present: Bool
     var server: String
-    let thumbnails: PHCachingImageManager
+    let library: LibraryModel
 
     /// What it's doing now, while the run is in progress.
     private var working: String? {
@@ -173,7 +173,7 @@ struct RunItemRow: View {
                         .overlay { Image(systemName: "trash").foregroundStyle(Theme.secondaryLabel) }
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 } else {
-                    Thumbnail(identifier: thumbnail, manager: thumbnails, side: 44)
+                    Thumbnail(identifier: thumbnail, library: library, side: 44)
                 }
                 badge.offset(x: 6, y: -6)
             }
@@ -273,7 +273,7 @@ struct NeedsAttentionView: View {
                             .accessibilityHint(blocked ?? "Backs up these \(group.items.count) again.")
                             .accessibilityIdentifier("attention.retry")
                         }
-                        ThumbnailStrip(identifiers: group.items.map(\.assetID), manager: model.library.library.thumbnails)
+                        ThumbnailStrip(identifiers: group.items.map(\.assetID), library: model.library.library)
                     }
                 }
                 .listRowBackground(Theme.card)

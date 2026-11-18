@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import HomespunCore
-import Photos
 import SwiftUI
 
 /// What Details shows about an item, from PhotoKit, the ledger and the server.
@@ -20,18 +19,19 @@ struct ItemDetails: Equatable {
 
     @MainActor static func load(model: AppModel, cell: LibraryState.Cell) async -> ItemDetails {
         var details = ItemDetails()
-        if let asset = PhotoLibrary.asset(cell.id) {
-            let facts = ItemMedia.facts(asset)
+        let photos = model.settings.photos
+        if let asset = photos.item(cell.id) {
+            let facts = asset.mediaFacts()
             details.shown = facts.main
             details.shownMotion = facts.motion
-            details.isLive = asset.mediaSubtypes.contains(.photoLive)
+            details.isLive = asset.itemKind == .livePhoto
         }
         guard let original = cell.original else { return details }
         let entry = await model.job.ledger.entry(for: original)
         details.entry = entry
         details.backedUpAt = entry?.savedAt
-        if let asset = PhotoLibrary.asset(original) {
-            let facts = ItemMedia.facts(asset)
+        if let asset = photos.item(original) {
+            let facts = asset.mediaFacts()
             details.originalOnPhone = true
             details.original = facts.main
             details.originalMotion = facts.motion

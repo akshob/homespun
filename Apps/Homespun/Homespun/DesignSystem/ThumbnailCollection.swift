@@ -14,7 +14,7 @@ final class ThumbnailCell: UICollectionViewCell {
     private let ring = UIView()
     /// The element VoiceOver and the UI tests see: a button over the whole cell.
     private let element = Element()
-    private var request: PHImageRequestID?
+    private var request: ThumbnailLoader.Request?
     private weak var loader: ThumbnailLoader?
     private(set) var identifier: String?
 
@@ -121,7 +121,7 @@ struct ThumbnailRow: UIViewRepresentable {
     }
 
     let items: [Item]
-    let manager: PHCachingImageManager
+    let library: LibraryModel
     var side: CGFloat = 56
     var spacing: CGFloat = 6
     /// Each item's VoiceOver label and identifier when it can be tapped; nil hides the row from VoiceOver.
@@ -143,7 +143,7 @@ struct ThumbnailRow: UIViewRepresentable {
         view.alwaysBounceVertical = false
         view.contentInsetAdjustmentBehavior = .never
         view.accessibilityElementsHidden = accessibility == nil
-        context.coordinator.attach(to: view, manager: manager, side: side, scale: context.environment.displayScale)
+        context.coordinator.attach(to: view, library: library, side: side, scale: context.environment.displayScale)
         context.coordinator.update(items: items, accessibility: accessibility, tap: tap)
         return view
     }
@@ -182,9 +182,9 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
     var section = 0
 
     /// `own`: this is the view's data source (a row); otherwise the view's own forwards the section.
-    func attach(to view: UICollectionView, manager: PHCachingImageManager, side: CGFloat, scale: CGFloat, own: Bool = true) {
+    func attach(to view: UICollectionView, library: LibraryModel, side: CGFloat, scale: CGFloat, own: Bool = true) {
         self.view = view
-        loader = ThumbnailLoader(manager: manager, side: side, scale: scale)
+        loader = ThumbnailLoader(library: library, side: side, scale: scale)
         view.register(ThumbnailCell.self, forCellWithReuseIdentifier: ThumbnailCell.reuse)
         guard own else { return }
         view.dataSource = self
@@ -196,7 +196,7 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
     func resize(side: CGFloat, scale: CGFloat) {
         guard let old = loader, old.pixels != ThumbnailLoader.pixels(side: side, scale: scale) else { return }
         old.stopPreheatingAll()
-        loader = ThumbnailLoader(manager: old.manager, side: side, scale: scale)
+        loader = ThumbnailLoader(library: old.library, side: side, scale: scale)
         view?.reloadData()
     }
 
@@ -266,10 +266,10 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
 /// VoiceOver, which reads the words beside it.
 struct ThumbnailStrip: View {
     let identifiers: [String]
-    let manager: PHCachingImageManager
+    let library: LibraryModel
 
     var body: some View {
-        ThumbnailRow(items: identifiers.map { ThumbnailRow.Item(id: $0, photo: $0) }, manager: manager)
+        ThumbnailRow(items: identifiers.map { ThumbnailRow.Item(id: $0, photo: $0) }, library: library)
             .accessibilityHidden(true)
     }
 }

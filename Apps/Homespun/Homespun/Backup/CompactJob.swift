@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Observation
-import Photos
 import UIKit
 
 /// The queue of items the user picked, processed one at a time.
@@ -176,8 +175,9 @@ final class CompactJob {
         let wanted = assetIdentifiers.filter { states[$0]?.isOpen != true }
         guard !wanted.isEmpty else { return }
         preparing += 1
+        let photos = settings.photos
         let prepared = await Task.detached(priority: .userInitiated) {
-            Self.prepare(wanted, trigger: trigger, backUpOnly: backUpOnly)
+            Self.prepare(wanted, trigger: trigger, backUpOnly: backUpOnly, photos: photos)
         }.value
         preparing -= 1
         let stopped = stoppedWhilePreparing, dropped = droppedWhilePreparing
@@ -212,20 +212,17 @@ final class CompactJob {
 
     /// The items to queue, oldest first; items no longer in the library fail at once.
     private nonisolated static func prepare(_ identifiers: [String], trigger: RunHistory.Trigger,
-                                            backUpOnly: Set<String>) -> [Item] {
-        var assets: [String: PHAsset] = [:]
-        PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil).enumerateObjects { asset, _, _ in
-            assets[asset.localIdentifier] = asset
-        }
+                                            backUpOnly: Set<String>, photos: any PhotoSource) -> [Item] {
+        let assets = photos.summaries(identifiers)
         var added: [Item] = []
         added.reserveCapacity(identifiers.count)
-        for identifier in PhotoLibrary.chronological(identifiers, dates: assets.compactMapValues(\.creationDate)) {
-            guard let asset = assets[identifier], let kind = PhotoLibrary.kind(of: asset) else {
+        for identifier in PhotoLibrary.chronological(identifiers, dates: assets.compactMapValues(\.created)) {
+            guard let asset = assets[identifier], let kind = asset.kind else {
                 added.append(Item(assetIdentifier: identifier, name: "Item", symbol: "questionmark.square",
                                   state: .failed(PhotoLibrary.Failure.notFound.localizedDescription), trigger: trigger))
                 continue
             }
-            let date = asset.creationDate?.formatted(date: .abbreviated, time: .shortened)
+            let date = asset.created?.formatted(date: .abbreviated, time: .shortened)
             added.append(Item(assetIdentifier: identifier, name: date.map { "\(kind.name), \($0)" } ?? kind.name,
                               symbol: kind.symbol, state: .waiting, trigger: trigger,
                               backUpOnly: backUpOnly.contains(identifier)))
@@ -302,7 +299,7 @@ final class CompactJob {
             let id = items[index].id
             setState(index, .working("Starting"))
             current = (id, index)
-            if let name = PhotoLibrary.describe(items[index].assetIdentifier)?.name { items[index].name = name }
+            if let name = settings.photos.describe(items[index].assetIdentifier)?.name { items[index].name = name }
             runProgress.current = .init(asset: items[index].assetIdentifier, name: items[index].name, message: "Starting")
             let state: State
             do {

@@ -1,0 +1,354 @@
+[
+  {
+    "date" : "2024-05-11T06:52:10-07:00",
+    "files" : {
+      "photo" : "IMG_0102.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0102",
+    "thumbnail" : "thumbs\/IMG_0102.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-05-11T13:05:44-07:00",
+    "files" : {
+      "photo" : "IMG_0105.JPG"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0105",
+    "thumbnail" : "thumbs\/IMG_0105.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-05-12T06:31:09-07:00",
+    "files" : {
+      "photo" : "IMG_0109.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0109",
+    "thumbnail" : "thumbs\/IMG_0109.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-07-03T20:31:02-07:00",
+    "favorite" : true,
+    "files" : {
+      "photo" : "IMG_0215.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0215",
+    "thumbnail" : "thumbs\/IMG_0215.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-07-04T11:16:37-07:00",
+    "files" : {
+      "photo" : "IMG_0219.HEIC"
+    },
+    "height" : 4032,
+    "kind" : "photo",
+    "name" : "IMG_0219",
+    "thumbnail" : "thumbs\/IMG_0219.JPG",
+    "width" : 3024
+  },
+  {
+    "compact" : {
+      "video" : "compact\/IMG_0224.MOV"
+    },
+    "date" : "2024-07-04T15:02:40-07:00",
+    "files" : {
+      "video" : "IMG_0224.MOV"
+    },
+    "height" : 1080,
+    "kind" : "video",
+    "name" : "IMG_0224",
+    "seconds" : 6,
+    "thumbnail" : "thumbs\/IMG_0224.JPG",
+    "width" : 1920
+  },
+  {
+    "date" : "2024-07-05T13:13:13-07:00",
+    "files" : {
+      "photo" : "IMG_0231.JPG"
+    },
+    "height" : 4032,
+    "kind" : "photo",
+    "name" : "IMG_0231",
+    "thumbnail" : "thumbs\/IMG_0231.JPG",
+    "width" : 3024
+  },
+  {
+    "date" : "2024-07-06T21:05:11-07:00",
+    "files" : {
+      "photo" : "IMG_0238.JPG"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0238",
+    "thumbnail" : "thumbs\/IMG_0238.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-10-19T17:22:08-07:00",
+    "favorite" : true,
+    "files" : {
+      "photo" : "IMG_0301.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0301",
+    "thumbnail" : "thumbs\/IMG_0301.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-10-20T09:09:09-07:00",
+    "files" : {
+      "photo" : "IMG_0305.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0305",
+    "thumbnail" : "thumbs\/IMG_0305.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-10-20T15:37:29-07:00",
+    "files" : {
+      "photo" : "IMG_0309.JPG"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0309",
+    "thumbnail" : "thumbs\/IMG_0309.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-12-24T18:02:55-08:00",
+    "favorite" : true,
+    "files" : {
+      "photo" : "IMG_0352.HEIC"
+    },
+    "height" : 4032,
+    "kind" : "photo",
+    "name" : "IMG_0352",
+    "thumbnail" : "thumbs\/IMG_0352.JPG",
+    "width" : 3024
+  },
+  {
+    "date" : "2024-12-30T17:05:03-08:00",
+    "files" : {
+      "photo" : "IMG_0358.JPG"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0358",
+    "thumbnail" : "thumbs\/IMG_0358.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2024-12-31T23:41:16-08:00",
+    "files" : {
+      "photo" : "IMG_0361.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0361",
+    "thumbnail" : "thumbs\/IMG_0361.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2025-02-08T10:30:12-08:00",
+    "files" : {
+      "photo" : "IMG_0420.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0420",
+    "thumbnail" : "thumbs\/IMG_0420.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2025-02-09T22:14:47-08:00",
+    "files" : {
+      "photo" : "IMG_0428.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0428",
+    "thumbnail" : "thumbs\/IMG_0428.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2025-04-19T08:20:31-07:00",
+    "files" : {
+      "photo" : "IMG_0510.HEIC"
+    },
+    "height" : 4032,
+    "kind" : "photo",
+    "name" : "IMG_0510",
+    "thumbnail" : "thumbs\/IMG_0510.JPG",
+    "width" : 3024
+  },
+  {
+    "compact" : {
+      "video" : "compact\/IMG_0514.MOV"
+    },
+    "date" : "2025-04-19T19:30:05-07:00",
+    "files" : {
+      "video" : "IMG_0514.MOV"
+    },
+    "height" : 1080,
+    "kind" : "video",
+    "name" : "IMG_0514",
+    "seconds" : 5,
+    "thumbnail" : "thumbs\/IMG_0514.JPG",
+    "width" : 1920
+  },
+  {
+    "date" : "2025-04-20T11:48:33-07:00",
+    "files" : {
+      "photo" : "IMG_0517.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0517",
+    "thumbnail" : "thumbs\/IMG_0517.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2025-04-20T16:48:20-07:00",
+    "files" : {
+      "photo" : "IMG_0519.JPG"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0519",
+    "thumbnail" : "thumbs\/IMG_0519.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2025-08-09T20:12:42-07:00",
+    "files" : {
+      "photo" : "IMG_0640.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0640",
+    "thumbnail" : "thumbs\/IMG_0640.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2025-08-10T10:44:20-07:00",
+    "files" : {
+      "photo" : "IMG_0644.JPG"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0644",
+    "thumbnail" : "thumbs\/IMG_0644.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2025-08-12T16:26:58-07:00",
+    "files" : {
+      "photo" : "IMG_0651.HEIC"
+    },
+    "height" : 4032,
+    "kind" : "photo",
+    "name" : "IMG_0651",
+    "thumbnail" : "thumbs\/IMG_0651.JPG",
+    "width" : 3024
+  },
+  {
+    "date" : "2025-08-13T08:05:51-07:00",
+    "files" : {
+      "photo" : "IMG_0655.JPG"
+    },
+    "height" : 4032,
+    "kind" : "photo",
+    "name" : "IMG_0655",
+    "thumbnail" : "thumbs\/IMG_0655.JPG",
+    "width" : 3024
+  },
+  {
+    "date" : "2026-09-05T07:20:36-07:00",
+    "files" : {
+      "photo" : "IMG_0941.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0941",
+    "thumbnail" : "thumbs\/IMG_0941.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2026-09-05T14:02:19-07:00",
+    "files" : {
+      "photo" : "IMG_0944.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "photo",
+    "name" : "IMG_0944",
+    "thumbnail" : "thumbs\/IMG_0944.JPG",
+    "width" : 4032
+  },
+  {
+    "compact" : {
+      "paired_video" : "compact\/IMG_0950.MOV",
+      "photo" : "compact\/IMG_0950.HEIC"
+    },
+    "date" : "2026-09-06T12:31:45-07:00",
+    "files" : {
+      "paired_video" : "IMG_0950.MOV",
+      "photo" : "IMG_0950.HEIC"
+    },
+    "height" : 3024,
+    "kind" : "live_photo",
+    "name" : "IMG_0950",
+    "seconds" : 2,
+    "thumbnail" : "thumbs\/IMG_0950.JPG",
+    "width" : 4032
+  },
+  {
+    "date" : "2026-09-12T08:15:00-07:00",
+    "files" : {
+      "photo" : "IMG_0958.PNG"
+    },
+    "height" : 2622,
+    "kind" : "photo",
+    "name" : "IMG_0958",
+    "screenshot" : true,
+    "thumbnail" : "thumbs\/IMG_0958.JPG",
+    "width" : 1206
+  },
+  {
+    "compact" : {
+      "video" : "compact\/IMG_0973.MOV"
+    },
+    "date" : "2026-10-04T11:03:27-07:00",
+    "files" : {
+      "video" : "IMG_0973.MOV"
+    },
+    "height" : 1080,
+    "kind" : "video",
+    "name" : "IMG_0973",
+    "seconds" : 5,
+    "thumbnail" : "thumbs\/IMG_0973.JPG",
+    "width" : 1920
+  },
+  {
+    "date" : "2026-10-04T15:40:02-07:00",
+    "files" : {
+      "photo" : "IMG_0978.HEIC"
+    },
+    "height" : 4032,
+    "kind" : "photo",
+    "name" : "IMG_0978",
+    "thumbnail" : "thumbs\/IMG_0978.JPG",
+    "width" : 3024
+  }
+]

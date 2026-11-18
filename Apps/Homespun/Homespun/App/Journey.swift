@@ -9,6 +9,8 @@ import TipKit
 @MainActor @Observable
 final class JourneyLog {
     private let defaults: UserDefaults
+    /// Feeds TipKit (the demo's journey doesn't: its tips are the app's own).
+    private let tips: Bool
 
     /// App launches into the foreground (sessions).
     private(set) var sessions: Int
@@ -25,8 +27,9 @@ final class JourneyLog {
     /// Get Started was closed (it stays findable in the Server tab's Help and About).
     var getStartedClosed: Bool { didSet { defaults.set(getStartedClosed, forKey: "journey.getStartedClosed") } }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, tips: Bool = true) {
         self.defaults = defaults
+        self.tips = tips
         sessions = defaults.integer(forKey: "journey.sessions")
         lastBackup = defaults.object(forKey: "journey.lastBackup") as? Date
         manualBackupDays = (defaults.array(forKey: "journey.manualDays") as? [Date]) ?? []
@@ -48,7 +51,7 @@ final class JourneyLog {
     func sessionStarted() {
         sessions += 1
         defaults.set(sessions, forKey: "journey.sessions")
-        Journey.updateTipParameters(self)
+        if tips { Journey.updateTipParameters(self) }
     }
 
     func setupFinished() {
@@ -76,21 +79,21 @@ final class JourneyLog {
         case .select:
             selectUsed = true
             defaults.set(true, forKey: "journey.select")
-            SelectTip().invalidate(reason: .actionPerformed)
+            if tips { SelectTip().invalidate(reason: .actionPerformed) }
         case .freeUp:
             freeUpUsed = true
             defaults.set(true, forKey: "journey.freeUp")
-            FreeUpTip(server: "").invalidate(reason: .actionPerformed)
+            if tips { FreeUpTip(server: "").invalidate(reason: .actionPerformed) }
         case .compare:
             compareUsed = true
             defaults.set(true, forKey: "journey.compare")
-            CompareTip().invalidate(reason: .actionPerformed)
+            if tips { CompareTip().invalidate(reason: .actionPerformed) }
         case .badgeGuide:
             badgeGuideOpened = true
             defaults.set(true, forKey: "journey.badgeGuide")
-            BadgeTip().invalidate(reason: .actionPerformed)
+            if tips { BadgeTip().invalidate(reason: .actionPerformed) }
         }
-        Journey.updateTipParameters(self)
+        if tips { Journey.updateTipParameters(self) }
     }
 }
 
@@ -121,6 +124,11 @@ enum Journey {
             .map { Calendar.current.startOfDay(for: $0) })
         return recent.count >= 2
     }
+}
+
+extension EnvironmentValues {
+    /// Tips show (not in the demo, whose taps would change the app's own tips).
+    @Entry var showsTips = true
 }
 
 /// What tips are allowed to know, as TipKit parameters.

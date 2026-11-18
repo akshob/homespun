@@ -40,6 +40,13 @@ final class ServerDiscovery {
     private(set) var blocked = false
     private var browser: NWBrowser?
     private var patience: Task<Void, Never>?
+    /// Servers that answer without looking on the network (the demo's pretend server); nil: Bonjour.
+    private let pretend: [(name: String, url: URL)]?
+    private var pretending: Task<Void, Never>?
+
+    init(pretend: [(name: String, url: URL)]? = nil) {
+        self.pretend = pretend
+    }
 
     /// Servers that can be recommended, as the advisor sees them.
     var ready: [Found] { servers.filter(\.isReady) }
@@ -47,6 +54,21 @@ final class ServerDiscovery {
     func found(_ id: String) -> Found? { servers.first { $0.name == id } }
 
     func start() {
+        if let pretend {
+            guard pretending == nil else { return }
+            isSearching = true
+            // Found after a moment, as a real one would be.
+            pretending = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard !Task.isCancelled, let self else { return }
+                for (name, url) in pretend where !self.servers.contains(where: { $0.name == name }) {
+                    self.servers.append(Found(name: name, url: url))
+                    self.lastChange = Date()
+                    await self.ask(name, url)
+                }
+            }
+            return
+        }
         guard browser == nil else { return }
         let browser = NWBrowser(for: .bonjour(type: "_homespun._tcp", domain: nil), using: .tcp)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
@@ -80,6 +102,8 @@ final class ServerDiscovery {
     }
 
     func stop() {
+        pretending?.cancel()
+        pretending = nil
         browser?.cancel()
         browser = nil
         patience?.cancel()
@@ -131,6 +155,11 @@ final class ServerDiscovery {
             $0.url = url
             $0.pairedBefore = Keychain.token(for: url.absoluteString) != nil
         }
+        await ask(name, url)
+    }
+
+    /// Asks a server found at `url` what it runs on.
+    private func ask(_ name: String, _ url: URL) async {
         var client = ServerClient(baseURL: url)
         client.timeout = 6
         do {

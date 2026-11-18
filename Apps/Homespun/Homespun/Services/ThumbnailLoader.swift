@@ -3,18 +3,29 @@ import Photos
 import UIKit
 
 /// Small square thumbnails from Photos for UIKit collections of items (Free Up Space's compact
-/// copies, a row of items in Needs Attention): through a caching manager, cached ahead for the
-/// cells about to show (the collection view's prefetching), cancelled when a cell takes another item.
+/// copies, a row of items in Needs Attention): through the library's caching manager, cached ahead
+/// for the cells about to show (the collection view's prefetching), cancelled when a cell takes
+/// another item. A library with its own items (the demo's) makes its own thumbnails instead.
 @MainActor
 final class ThumbnailLoader {
-    let manager: PHCachingImageManager
+    let library: LibraryModel
+    private let manager: PHCachingImageManager
+    private let catalog: (any ItemCatalog)?
     /// The requested size, in pixels.
     let pixels: CGSize
     private var assets: [String: PHAsset] = [:]
     private var cached: [String: PHAsset] = [:]
 
-    init(manager: PHCachingImageManager, side: CGFloat, scale: CGFloat) {
-        self.manager = manager
+    /// A thumbnail on its way, to cancel when the cell takes another item.
+    enum Request {
+        case photos(PHImageRequestID)
+        case catalog(Task<Void, Never>)
+    }
+
+    init(library: LibraryModel, side: CGFloat, scale: CGFloat) {
+        self.library = library
+        manager = library.thumbnails
+        catalog = library.catalog
         pixels = Self.pixels(side: side, scale: scale)
     }
 
@@ -33,24 +44,32 @@ final class ThumbnailLoader {
     }
 
     /// Starts loading an item's thumbnail: `deliver` gets a quick one, then the sharp one.
-    func request(_ id: String, deliver: @escaping @MainActor @Sendable (UIImage) -> Void) -> PHImageRequestID? {
+    func request(_ id: String, deliver: @escaping @MainActor @Sendable (UIImage) -> Void) -> Request? {
+        if let catalog {
+            let side = pixels.width
+            return .catalog(Task { if let image = await catalog.thumbnail(id, side: side), !Task.isCancelled { deliver(image) } })
+        }
         guard let asset = asset(id) else { return nil }
-        return manager.requestImage(for: asset, targetSize: pixels, contentMode: .aspectFill, options: Self.options()) { image, _ in
+        return .photos(manager.requestImage(for: asset, targetSize: pixels, contentMode: .aspectFill, options: Self.options()) { image, _ in
             guard let image else { return }
             if Thread.isMainThread {
                 MainActor.assumeIsolated { deliver(image) }
             } else {
                 Task { @MainActor in deliver(image) }
             }
-        }
+        })
     }
 
-    func cancel(_ request: PHImageRequestID) {
-        manager.cancelImageRequest(request)
+    func cancel(_ request: Request) {
+        switch request {
+        case .photos(let id): manager.cancelImageRequest(id)
+        case .catalog(let task): task.cancel()
+        }
     }
 
     /// Caches the thumbnails of items about to show.
     func preheat(_ ids: [String]) {
+        guard catalog == nil else { return }
         fetch(ids)
         let new = ids.compactMap { id in cached[id] == nil ? assets[id] : nil }
         guard !new.isEmpty else { return }

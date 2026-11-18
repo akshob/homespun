@@ -22,7 +22,14 @@ targets:
     type: application
     platform: iOS
     # Shared: the widgets' status (StatusSnapshot), written by the app and read by the widgets.
-    sources: [Homespun, Shared]
+    sources:
+      - path: Homespun
+        excludes: ["Resources/Demo", "Resources/Demo/**"]
+      - Shared
+      # Try the Demo's sample photos and videos (drawn by scripts/demo-media.swift), as one folder.
+      - path: Homespun/Resources/Demo
+        type: folder
+        buildPhase: resources
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig

@@ -29,9 +29,9 @@ final class LibraryController {
     let premium: Premium
     let automatic: AutomaticMode
     let copyFinder: CopyFinder
-    let library = LibraryModel()
-    let journey = JourneyLog()
-    private(set) var access = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    let library: LibraryModel
+    let journey: JourneyLog
+    private(set) var access: PHAuthorizationStatus
     /// The grid has its first contents, so it can open scrolled to the newest items.
     private(set) var loaded = false
     /// Everything ready to free up now.
@@ -63,6 +63,10 @@ final class LibraryController {
         self.premium = premium
         self.automatic = automatic
         self.copyFinder = copyFinder
+        // A library that lists its own items (the demo's) is read through it; Photos by the model itself.
+        library = LibraryModel(catalog: settings.photos as? any ItemCatalog)
+        journey = JourneyLog(defaults: settings.defaults, tips: !settings.isDemo)
+        access = settings.photos.authorization()
     }
 
     var isRemoving: Bool { if case .checking = removal { true } else { false } }
@@ -106,7 +110,7 @@ final class LibraryController {
     }
 
     func refresh() async {
-        let now = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        let now = settings.photos.authorization()
         // The whole library is read at launch and when access changes; after that Photos' change
         // observer keeps it current (re-reading 35,000 items on every return to the app is slow).
         if !library.loaded || now != access {
@@ -125,7 +129,7 @@ final class LibraryController {
 
     func requestAccess() async {
         // `refresh` sees the new status (against `access`) and reads the library.
-        _ = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        _ = await settings.photos.requestAuthorization()
         await refresh()
     }
 
@@ -134,10 +138,12 @@ final class LibraryController {
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
-        TipState.notBackedUp = state.count(.notBackedUp)
-        TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
-        TipState.automaticOn = automatic.enabled
-        TipState.trialDone = settings.trialConfirmed
+        if !settings.isDemo {
+            TipState.notBackedUp = state.count(.notBackedUp)
+            TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
+            TipState.automaticOn = automatic.enabled
+            TipState.trialDone = settings.trialConfirmed
+        }
         await refreshNewSinceBackup()
     }
 
@@ -145,16 +151,11 @@ final class LibraryController {
     private func backedUpDue() async -> [String: Date?] {
         let backedUp = await job.ledger.backedUpSnapshot()
         guard !backedUp.isEmpty else { return [:] }
-        let ids = Array(backedUp.keys)
-        let assets = await Task.detached(priority: .userInitiated) { () -> [(String, Date?, Bool)] in
-            var found: [(String, Date?, Bool)] = []
-            PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
-                found.append((asset.localIdentifier, asset.creationDate, asset.isFavorite))
-            }
-            return found
-        }.value
+        let ids = Array(backedUp.keys), photos = settings.photos
+        let assets = await Task.detached(priority: .userInitiated) { photos.summaries(ids) }.value
         var due: [String: Date?] = [:]
-        for (id, created, favorite) in assets {
+        for (id, summary) in assets {
+            let created = summary.created, favorite = summary.favorite
             // Kept full size: never (shown as such, unlike a favorite's).
             due[id] = backedUp[id]?.kept == true ? Date.distantFuture : automatic.due(created: created, id: id, favorite: favorite)
         }
@@ -231,8 +232,9 @@ final class LibraryController {
         let trigger: RunHistory.Trigger = settings.onboardingComplete ? .manual : .firstTask
         Task {
             await job.enqueue(identifiers, trigger: trigger)
-            // Once the items are queued, so the system's progress follows them from the start.
-            LongRun.shared.begin(items: identifiers.count, server: serverName)
+            // Once the items are queued, so the system's progress follows them from the start. (The demo's
+            // runs are short and stay on screen.)
+            if !settings.isDemo { LongRun.shared.begin(items: identifiers.count, server: serverName) }
         }
     }
 
@@ -342,7 +344,8 @@ final class LibraryController {
         let wanted = Set(compacts)
         let entries = await job.ledger.snapshot().filter { wanted.contains($0.value.compactIdentifier) && $0.value.serverAssetID != nil }
         let originals = entries.keys.filter { !$0.hasPrefix(CompactLedger.elsewhere("")) }
-        let present = await Task.detached { PhotoLibrary.existing(Array(originals), includeHidden: true) }.value
+        let photos = settings.photos
+        let present = await Task.detached { photos.existing(Array(originals), includeHidden: true) }.value
         return entries.filter { !present.contains($0.key) }
             .map { OriginalRestorer.Item(key: $0.key, compact: $0.value.compactIdentifier, serverAssetID: $0.value.serverAssetID!,
                                          originalBytes: $0.value.originalBytes) }
@@ -351,8 +354,7 @@ final class LibraryController {
 
     /// Restores these originals (see `OriginalRestorer`); `restoring` follows it.
     func restore(_ items: [OriginalRestorer.Item]) {
-        guard !isRestoring, !items.isEmpty, let client = settings.client else { return }
-        let restorer = OriginalRestorer(client: client, ledger: job.ledger)
+        guard !isRestoring, !items.isEmpty, let restorer = settings.restorer(ledger: job.ledger) else { return }
         restoring = .running(.init(done: 0, total: items.count, message: "Getting ready"))
         Announce.say(items.count == 1 ? "Restoring the original." : "Restoring \(items.count) originals.")
         restoreTask = Task {
@@ -389,7 +391,7 @@ final class LibraryController {
         }
         guard !items.isEmpty else { return false }
         do {
-            try await Self.deleteAssets(compacts)
+            try await settings.photos.delete(compacts)
         } catch {
             return false
         }
@@ -403,13 +405,6 @@ final class LibraryController {
         await refreshReady()
         await refreshGrid()
         return true
-    }
-
-    /// Deletes these items (iOS asks first; a cancel throws). Nothing to delete is fine.
-    private nonisolated static func deleteAssets(_ ids: [String]) async throws {
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-        guard assets.count > 0 else { return }
-        try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
     }
 
     func dismissRemoval() {
