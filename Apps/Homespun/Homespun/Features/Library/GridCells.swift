@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import Photos
 import SwiftUI
 import UIKit
 
@@ -18,7 +17,7 @@ final class GridCell: UICollectionViewCell {
 
     /// The item shown, and its thumbnail request (cancelled when the cell shows another item).
     private(set) var item: String?
-    private var request: PHImageRequestID?
+    private var request: GridThumbnails.Request?
     /// The picture shown is the sharp one (not Photos' quick first one).
     private var sharp = false
     private weak var loader: GridThumbnails?
@@ -55,7 +54,7 @@ final class GridCell: UICollectionViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Shows an item: its picture (asked for if it's another item or another size), then its state.
-    func show(_ item: String, asset: () -> PHAsset?, info: MediaInfo?, loader: GridThumbnails, pixels: CGFloat) {
+    func show(_ item: String, info: MediaInfo?, loader: GridThumbnails, pixels: CGFloat) {
         self.info = info
         if item != self.item || pixels != self.pixels || request == nil && !sharp {
             if item != self.item {
@@ -68,14 +67,12 @@ final class GridCell: UICollectionViewCell {
             self.pixels = pixels
             self.loader = loader
             sharp = false
-            if let asset = asset() {
-                request = loader.request(asset, pixels: pixels) { [weak self] image, final in
-                    guard let self, self.item == item else { return }
-                    self.imageView.image = image
-                    if final {
-                        self.request = nil
-                        self.sharp = true
-                    }
+            request = loader.request(item, pixels: pixels) { [weak self] image, final in
+                guard let self, self.item == item else { return }
+                self.imageView.image = image
+                if final {
+                    self.request = nil
+                    self.sharp = true
                 }
             }
         }

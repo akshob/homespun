@@ -146,7 +146,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         self.zoom = zoom
         self.input = input
         self.actions = actions
-        thumbnails = GridThumbnails(manager: library.thumbnails, source: { [unowned library] in library.source })
+        thumbnails = GridThumbnails(manager: library.thumbnails, source: { [unowned library] in library.source },
+                                    catalog: library.catalog)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -490,7 +491,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private func configure(_ cell: GridCell?, at indexPath: IndexPath?) {
         guard let cell, let indexPath, let position = position(indexPath) else { return }
         let id = data.cells[position].id
-        cell.show(id, asset: { [library] in library.asset(id) }, info: library.info(id), loader: thumbnails, pixels: pixels)
+        cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
         update(cell, position: position)
     }
 
@@ -621,8 +622,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         let frame = layout.geometry.frame(ofItem: position).offsetBy(dx: -collectionView.bounds.minX, dy: -collectionView.bounds.minY)
         let shown = (collectionView.cellForItem(at: indexPath(of: position)) as? GridCell).flatMap { $0.item == id ? $0.image : nil }
         zoom.source = GridZoom.Source(id: id, frame: frame, image: shown ?? (zoom.source?.id == id ? zoom.source?.image : nil))
-        guard shown == nil, let asset = library.asset(id) else { return }
-        _ = thumbnails.request(asset, pixels: pixels) { [weak self] image, _ in
+        guard shown == nil else { return }
+        _ = thumbnails.request(id, pixels: pixels) { [weak self] image, _ in
             guard let self, self.zoom.source?.id == id else { return }
             self.zoom.source?.image = image
         }

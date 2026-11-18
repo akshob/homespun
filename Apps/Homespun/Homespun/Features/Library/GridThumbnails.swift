@@ -7,11 +7,13 @@ import UIKit
 /// first when there is one, then the sharp one), and the manager keeps the next screens ready: a
 /// window of items around what's on screen, reaching further in the direction of scrolling, whose
 /// changes start and stop caching as it moves. High-quality caching stays off so fast scrolling
-/// stays quick; thumbnails are never downloaded.
+/// stays quick; thumbnails are never downloaded. A catalog (the demo's sample photos) makes its own
+/// thumbnails: nothing is cached in Photos then.
 @MainActor
 final class GridThumbnails {
     let manager: PHCachingImageManager
     private let source: () -> AssetSource
+    private let catalog: (any ItemCatalog)?
     /// The thumbnails' side in pixels (a cell's side on screen).
     private(set) var pixels: CGFloat = 0
     /// The items being kept ready (positions in `order`).
@@ -20,9 +22,10 @@ final class GridThumbnails {
     private(set) var prefetched = Set<String>()
     private var order: [String] = []
 
-    init(manager: PHCachingImageManager, source: @escaping () -> AssetSource) {
+    init(manager: PHCachingImageManager, source: @escaping () -> AssetSource, catalog: (any ItemCatalog)? = nil) {
         self.manager = manager
         self.source = source
+        self.catalog = catalog
         manager.allowsCachingHighQualityImages = false
     }
 
@@ -36,20 +39,40 @@ final class GridThumbnails {
         return options
     }
 
+    /// A thumbnail on its way (cancelled when its cell shows another item).
+    enum Request {
+        case photos(PHImageRequestID)
+        case catalog(Task<Void, Never>)
+    }
+
     /// Asks for an item's thumbnail; `handler` gets each picture on the main thread (the quick one
-    /// may come before this returns), and whether it's the last.
-    func request(_ asset: PHAsset, pixels: CGFloat,
-                 handler: @escaping @MainActor (UIImage, _ final: Bool) -> Void) -> PHImageRequestID {
+    /// may come before this returns), and whether it's the last. Nil: the item is gone.
+    func request(_ id: String, pixels: CGFloat,
+                 handler: @escaping @MainActor (UIImage, _ final: Bool) -> Void) -> Request? {
+        if let catalog {
+            return .catalog(Task {
+                guard let image = await catalog.thumbnail(id, side: pixels), !Task.isCancelled else { return }
+                let prepared = await image.byPreparingForDisplay() ?? image
+                guard !Task.isCancelled else { return }
+                handler(prepared, true)
+            })
+        }
+        guard let asset = source().asset(id) else { return nil }
         let deliver = Delivery(handler: handler)
-        return manager.requestImage(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: .aspectFill,
-                                    options: Self.options()) { image, info in
+        return .photos(manager.requestImage(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: .aspectFill,
+                                            options: Self.options()) { image, info in
             let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
             guard let image else { return }
             deliver.send(image, final: !degraded)
-        }
+        })
     }
 
-    func cancel(_ request: PHImageRequestID) { manager.cancelImageRequest(request) }
+    func cancel(_ request: Request) {
+        switch request {
+        case .photos(let id): manager.cancelImageRequest(id)
+        case .catalog(let task): task.cancel()
+        }
+    }
 
     /// Hands a picture to the main thread (Photos calls back on the main thread or its own).
     private struct Delivery: @unchecked Sendable {
@@ -80,7 +103,7 @@ final class GridThumbnails {
     /// Keeps the thumbnails of `wanted` (positions in the order) ready, and lets go of the rest.
     func keep(_ wanted: Range<Int>) {
         let wanted = wanted.clamped(to: 0..<order.count)
-        guard wanted != window, pixels > 0 else { return }
+        guard wanted != window, pixels > 0, catalog == nil else { return }
         let (start, stop) = PreheatWindow.changes(from: window, to: wanted)
         window = wanted
         // Prefetched ahead of the window, they're cached already: the window takes them over (and
@@ -93,7 +116,7 @@ final class GridThumbnails {
     func prefetch(_ positions: [Int]) {
         let new = positions.filter { order.indices.contains($0) && !window.contains($0) }.map { order[$0] }
             .filter { !prefetched.contains($0) }
-        guard !new.isEmpty, pixels > 0 else { return }
+        guard !new.isEmpty, pixels > 0, catalog == nil else { return }
         prefetched.formUnion(new)
         cache(start: new, stop: [])
     }
