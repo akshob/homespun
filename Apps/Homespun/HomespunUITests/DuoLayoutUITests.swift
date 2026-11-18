@@ -114,7 +114,9 @@ final class DuoLayoutUITests: XCTestCase {
         app.buttons["help.demo.confirm"].tap()
         let preparing = app.descendants(matching: .any)["demo.prepare"]
         XCTAssertTrue(preparing.waitForExistence(timeout: 5))
-        XCTAssertLessThanOrEqual(app.staticTexts["setup.title"].frame.width, 640, "the loading page isn't a centred column")
+        let title = app.staticTexts["setup.title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertLessThanOrEqual(title.frame.width, 640, "the loading page isn't a centred column")
         attach(app, "Preparing, open")
         app.buttons["demo.prepare.cancel"].tap()
         XCTAssertTrue(preparing.waitForNonExistence(timeout: 10))

@@ -104,8 +104,8 @@ a server: about 30 sample photos and videos drawn for the purpose. The photos, a
 grid's pictures are drawn on the iPhone when the demo starts ("Preparing the Demo", a few seconds,
 once per launch; `Features/Demo/DemoArt.swift`). The videos and a Live Photo come with the app
 (`Resources/Demo`, about 3.4 MB, made by `scripts/demo-media.sh` from the same drawing code).
-A pretend server, "Homespun Demo",
-that is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
+The pretend server, "Homespun Demo",
+is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
 Backing up, compact copies, Compare, Free Up Space (with a question that says nothing is deleted),
 Keep Original, Restore Original, Activity and the Server tab all work on them. The demo never reads or
 changes Photos, asks iOS for nothing, records no analytics and sends no reports (the widgets and the

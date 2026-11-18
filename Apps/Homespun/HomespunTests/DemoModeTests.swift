@@ -61,7 +61,7 @@ import Testing
         try #require(library.samples.first { $0.kind == kind })
     }
 
-    /// The samples come with the app: about 30 photos and videos over several years, a Live Photo with
+    /// The samples are drawn or cloned for this launch: 30 photos and videos over several years, a Live Photo with
     /// its motion, videos, a screenshot; oldest first, with months for the grid's headers.
     @Test func samplesAreListedOldestFirst() async throws {
         let fixture = try await Fixture.make()
@@ -132,7 +132,7 @@ import Testing
         #expect(report.removed.count == 2 && report.blocked.isEmpty && report.freedBytes > 0)
         #expect(fixture.asked.all.last?.message.contains("nothing is deleted") == true)
         #expect(library.existing(photos.map(\.id), includeHidden: true).count == 1)
-        // The bundled originals are still there: only the demo's record changed.
+        // The drawn originals are still there: only the demo's record changed.
         #expect(photos.allSatisfy { FileManager.default.fileExists(atPath: fixture.media.appendingPathComponent($0.files["photo"]!).path) })
 
         let freed = try #require(photos.first { !library.existing([$0.id], includeHidden: true).contains($0.id) })

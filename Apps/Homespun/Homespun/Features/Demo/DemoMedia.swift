@@ -52,7 +52,7 @@ actor DemoMediaStore {
 
     init(root: URL, bundled: URL = bundledFolder,
          freeSpace: @escaping @Sendable () -> Int64? = DemoMediaStore.systemFreeSpace,
-         availableMemory: @escaping @Sendable () -> Int = { Int(os_proc_available_memory()) },
+         availableMemory: @escaping @Sendable () -> Int = DemoMediaStore.systemAvailableMemory,
          cores: Int = ProcessInfo.processInfo.activeProcessorCount) {
         folder = root.appendingPathComponent(Self.folderName, isDirectory: true)
         self.bundled = bundled
@@ -64,6 +64,15 @@ actor DemoMediaStore {
     nonisolated static func systemFreeSpace() -> Int64? {
         (try? URL.applicationSupportDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
             .volumeAvailableCapacityForImportantUsage
+    }
+
+    nonisolated static func systemAvailableMemory() -> Int {
+        #if targetEnvironment(simulator)
+        // The simulator doesn't report a usable per-app jetsam memory budget.
+        Int(clamping: ProcessInfo.processInfo.physicalMemory)
+        #else
+        Int(clamping: os_proc_available_memory())
+        #endif
     }
 
     nonisolated static func limit(cores: Int, available: Int) -> Int {
@@ -130,6 +139,7 @@ actor DemoMediaStore {
                 } catch is CancellationError {
                     throw CancellationError()
                 } catch {
+                    try Task.checkCancellation()
                     if let free = freeSpace(), free < Self.neededBytes { throw Failure.diskFull(neededBytes: Self.neededBytes) }
                     Logger(subsystem: "photos.homespun.app", category: "Demo")
                         .error("Couldn't draw demo media: \(String(describing: error), privacy: .private)")

@@ -35,28 +35,19 @@ enum DemoTestMedia {
 }
 
 @Suite(.serialized) struct DemoMediaTests {
-    // Checked against the old bundled pictures before removing them from the bundle.
+    // Captured with ImageIO/CoreGraphics from the old bundled pictures before removing them.
     static let golden: [String: UInt64] = [
-        "IMG_0102": 0x107170B53572B8B0, "IMG_0105": 0xBB3B30272F000000, "IMG_0109": 0xC3C3E28912000081,
-        "IMG_0215": 0x0838383858B88C00, "IMG_0219": 0xCEB83001091CBC00, "IMG_0224": 0xE3C5E4606068E600,
-        "IMG_0231": 0xE3F5E110B2F0F200, "IMG_0238": 0xE6E6E6E666E2E500, "IMG_0301": 0x18383842F5000000,
-        "IMG_0305": 0xD8583A5CD9B00000, "IMG_0309": 0x7AFA785830000000, "IMG_0352": 0x6CEB8DE8E0F00000,
-        "IMG_0358": 0x70F0949541818191, "IMG_0361": 0x6061A37102959495, "IMG_0420": 0xC0C0C0CBCA000000,
-        "IMG_0428": 0xE863660000000000, "IMG_0510": 0xB02DE4070F000000, "IMG_0514": 0x40C0C0E0C9820000,
-        "IMG_0517": 0x4080C0CF0CD5B39C, "IMG_0519": 0xE4CD1C0E0DA6C9A4, "IMG_0640": 0x307070B38D71B2B9,
-        "IMG_0644": 0x9933314C50B8B1F0, "IMG_0651": 0x7878380F1CB6266A, "IMG_0655": 0x000070D4CC700000,
-        "IMG_0941": 0x0C1C1C1C00F1E000, "IMG_0944": 0x707070303802F000, "IMG_0950": 0x1C981C086CBC9C00,
-        "IMG_0958": 0x507A861C3C1C0C00, "IMG_0973": 0x46C6C0F302B2C9AD, "IMG_0978": 0xF0C1C33634001000,
+        "IMG_0102": 0xD171F1B53572B8F9, "IMG_0105": 0xBB3B75272FDB9565, "IMG_0109": 0xC3C3E3A912526993,
+        "IMG_0215": 0xD878B8B858B99C13, "IMG_0219": 0xCEB871B9F95CBC9A, "IMG_0224": 0xE3C5E5E7E668E645,
+        "IMG_0231": 0xE3F5F176F6F0F276, "IMG_0238": 0xE6E6E6E666E2E54C, "IMG_0301": 0x78B8B8C2F455D922,
+        "IMG_0305": 0xD8587A5CD9B89A27, "IMG_0309": 0xFAFA787830DA7926, "IMG_0352": 0x6CEB8DE8F0F0955D,
+        "IMG_0358": 0x70F0949545919191, "IMG_0361": 0xE0E1A373B2959595, "IMG_0420": 0xC2C2C2CACACDA915,
+        "IMG_0428": 0xC86766041348AA6A, "IMG_0510": 0xB02DE40F0FD13664, "IMG_0514": 0xE6C6C1E3D9C6BCF2,
+        "IMG_0517": 0x4181C2CF0CD5B39C, "IMG_0519": 0xE4CDDC0E0FA6C9B4, "IMG_0640": 0x32F0F1B38D73B2B9,
+        "IMG_0644": 0x9933714C52B8B1F0, "IMG_0651": 0x7878788F1CB6276A, "IMG_0655": 0xAA55F0D4CCF09A56,
+        "IMG_0941": 0x6C9CDC1CA0F1F000, "IMG_0944": 0x7170F173B822F085, "IMG_0950": 0x3C98FC3C6DBC9C4B,
+        "IMG_0958": 0x507E961C3C3C2C00, "IMG_0973": 0x46C6C1F306B2C9AD, "IMG_0978": 0xF0C1C3363499928A,
     ]
-
-    @Test func bundledThumbnailsMatchTheGoldenTable() throws {
-        let bundle = Bundle.main.bundleURL.appendingPathComponent("Demo")
-        for (name, golden) in Self.golden {
-            let actual = try Self.dHash(bundle.appendingPathComponent("thumbs/\(name).JPG"))
-            print("\(name): \(String(actual, radix: 16)), \((actual ^ golden).nonzeroBitCount) bits from golden")
-            #expect((actual ^ golden).nonzeroBitCount <= 4, "\(name): \(String(actual, radix: 16))")
-        }
-    }
 
     @Test func drawingIsDeterministic() throws {
         let folder = try DemoTestMedia.makeRoot()
@@ -71,7 +62,9 @@ enum DemoTestMedia {
                 }
             }
             let first = picture(), second = picture()
-            #expect(first.dataProvider?.data as Data? == second.dataProvider?.data as Data?, "\(name): pixels differ")
+            let firstPixels = try #require(first.dataProvider?.data) as Data
+            let secondPixels = try #require(second.dataProvider?.data) as Data
+            #expect(firstPixels == secondPixels, "\(name): pixels differ")
             let a = folder.appendingPathComponent("a"), b = folder.appendingPathComponent("b")
             let type: UTType = DemoServer.writesHEIC ? .heic : .jpeg
             try DemoArt.writeImage(first, to: a, type: type, quality: 0.6, date: recipe.date)
@@ -292,6 +285,21 @@ enum DemoTestMedia {
         "IMG_0224.MOV", "IMG_0514.MOV", "IMG_0973.MOV", "IMG_0950.HEIC", "IMG_0950.MOV",
         "compact/IMG_0224.MOV", "compact/IMG_0514.MOV", "compact/IMG_0973.MOV", "compact/IMG_0950.HEIC", "compact/IMG_0950.MOV",
     ]
+
+    @Test func bundledMediaFitsTheBudget() throws {
+        let bundle = DemoMediaStore.bundledFolder
+        let enumerator = try #require(FileManager.default.enumerator(
+            at: bundle, includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey]))
+        var files: Set<String> = [], bytes = 0
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values.isRegularFile == true else { continue }
+            files.insert(String(url.path.dropFirst(bundle.path.count + 1)))
+            bytes += values.fileSize ?? 0
+        }
+        #expect(files == Self.bundledFiles.union(["README.md"]), "only the unchanged videos, Live Photo and compacts belong in the bundle")
+        #expect(bytes <= 5_000_000, "bundled demo media is \(bytes) bytes")
+    }
 
     static func dHash(_ url: URL) throws -> UInt64 {
         let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))

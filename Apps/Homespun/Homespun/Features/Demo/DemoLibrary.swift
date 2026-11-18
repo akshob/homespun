@@ -194,7 +194,7 @@ enum DemoPictures {
     }
 }
 
-/// The demo's photo library: the sample photos and videos that come with the app, and the compact
+/// The demo's photo library: the generated photos and cloned videos and Live Photo, and the compact
 /// copies the demo makes of them, kept in the demo's folder. It stands in for Photos everywhere
 /// (`PhotoSource`, `ItemCatalog`) and never reads or changes the person's own library. Deleting
 /// asks with an in-app question that says it's pretend, and removes only from the demo.
