@@ -25,7 +25,10 @@ let package = Package(
         .package(url: "https://github.com/fwcd/swift-qrcode-generator.git", from: "2.0.0"),
     ],
     targets: [
-        .target(name: "HomespunCore", dependencies: [.product(name: "Crypto", package: "swift-crypto")]),
+        .target(name: "HomespunCore", dependencies: [
+            .product(name: "Crypto", package: "swift-crypto"),
+            .product(name: "_CryptoExtras", package: "swift-crypto", condition: .when(platforms: [.linux])),
+        ]),
         .target(name: "HomespunMedia", dependencies: [
             "HomespunCore",
             .target(name: "CHomespunVips", condition: .when(platforms: [.linux])),
