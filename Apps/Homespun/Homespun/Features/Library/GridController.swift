@@ -213,13 +213,31 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         isFront = false
+        barsTimeout?.cancel()
+        awaitingBars = false
     }
+
+    /// Back from an item, the tab bar the viewer hid returns a few frames after the grid appears (the
+    /// open Duo's strip reports other insets until then): the insets from before the item opened stay
+    /// until the bars are back, so the grid doesn't go there and back.
+    private var awaitingBars = false
+    private var barsTimeout: DispatchWorkItem?
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        isFront = true
-        lastInsets = collectionView.adjustedContentInset
-        view.setNeedsLayout()
+        if !isFront, collectionView.adjustedContentInset != lastInsets {
+            awaitingBars = true
+            barsTimeout?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.barsSettled() }
+            barsTimeout = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        } else {
+            isFront = true
+            lastInsets = collectionView.adjustedContentInset
+            view.setNeedsLayout()
+            // The bars may differ from when it last showed (the newest end stays in view).
+            if placed, pinned { setOffset(offsetRange.upperBound) }
+        }
         // Back from an item: the zoom has landed, its stand-in goes.
         following?.cancel()
         let paged = viewerItem != nil
@@ -228,8 +246,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             zoom.source = nil
             zoom.shown = nil
         }
-        // Back from an item: the bars may differ from when it opened (the newest end stays in view).
-        if placed, pinned { setOffset(offsetRange.upperBound) }
         // The bars learn where the grid is when it scrolls: opened at the newest, the large title
         // has to collapse at once.
         let offset = collectionView.contentOffset
@@ -440,6 +456,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private func setOffset(_ y: CGFloat, animated: Bool = false) {
         let point = CGPoint(x: -insets.left, y: y)
         placedAt = animated ? nil : (y, CACurrentMediaTime() + 0.5)
+        animatingScroll = animated
         if animated { collectionView.setContentOffset(point, animated: true) } else { collectionView.contentOffset = point }
         // Mid-turn, the place from before it says whether it's at the newest end.
         if turning == nil, whole { pinned = y >= offsetRange.upperBound - 1 }
@@ -681,6 +698,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool { false }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        if awaitingBars { barsSettled() }
         held = nil
         placedAt = nil
         if !tracking {
@@ -697,6 +715,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { scrollEnded() }
 
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+        animatingScroll = false
         pinned = collectionView.contentOffset.y >= offsetRange.upperBound - 1
         publishProbe()
     }
@@ -711,12 +730,16 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        let y = scrollView.contentOffset.y
         if scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating {
-            pinned = scrollView.contentOffset.y >= offsetRange.upperBound - 1
-        } else if let placedAt, CACurrentMediaTime() < placedAt.until, abs(scrollView.contentOffset.y - placedAt.y) > 0.5 {
-            // UIKit moved it, not the person: back to the newest end, or where it was put.
-            let range = offsetRange
-            setOffset(pinned ? range.upperBound : min(max(placedAt.y, range.lowerBound), range.upperBound))
+            pinned = y >= offsetRange.upperBound - 1
+        } else {
+            if PerfMonitor.shared.enabled, !animatingScroll { checkBounce(y) }
+            if let placedAt, CACurrentMediaTime() < placedAt.until, abs(y - placedAt.y) > 0.5 {
+                // UIKit moved it, not the person: back to the newest end, or where it was put.
+                let range = offsetRange
+                setOffset(pinned ? range.upperBound : min(max(placedAt.y, range.lowerBound), range.upperBound))
+            }
         }
         updatePreheat()
         checkJump()
@@ -724,6 +747,11 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) {
+        if awaitingBars {
+            // The bars are back as they were before the item opened: nothing moves.
+            if scrollView.adjustedContentInset == lastInsets { barsSettled() }
+            return
+        }
         guard scrollView.window != nil, isFront else { return }
         // The bars changed (the tab bar minimised, the accessory came, the screen turned): the newest
         // end, or the item in view, stays in view.
@@ -731,6 +759,25 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             if let place = heldPlace() { restore(place) } else if pinned { setOffset(offsetRange.upperBound) }
         }
         view.setNeedsLayout()
+        publishProbe()
+    }
+
+    /// The bars are back (or half a second has passed): the grid takes their insets, and moves only if
+    /// they differ from before the item opened.
+    private func barsSettled() {
+        barsTimeout?.cancel()
+        barsTimeout = nil
+        guard awaitingBars else { return }
+        awaitingBars = false
+        isFront = true
+        let old = lastInsets
+        lastInsets = collectionView.adjustedContentInset
+        if old != lastInsets {
+            view.setNeedsLayout()
+            if placed, !collectionView.isTracking, !collectionView.isDecelerating {
+                if let place = heldPlace() { restore(place) } else if pinned { setOffset(offsetRange.upperBound) }
+            }
+        }
         publishProbe()
     }
 
@@ -886,6 +933,23 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         jumpProbe = (probe.id, y, finger)
     }
 
+    /// Moves the grid made by itself and took back within 0.3 s, frames later: it showed another
+    /// place for a moment (UI tests; a move undone before the next frame isn't seen).
+    private var bounces = 0
+    private var unasked: (from: CGFloat, at: CFTimeInterval)?
+    private var animatingScroll = false
+
+    private func checkBounce(_ y: CGFloat) {
+        guard abs(y - lastOffset) > 2 else { return }
+        let now = CACurrentMediaTime()
+        if let move = unasked, now - move.at > 0.005, now - move.at < 0.3, abs(y - move.from) < 2 {
+            bounces += 1
+            unasked = nil
+        } else {
+            unasked = (lastOffset, now)
+        }
+    }
+
     /// Where the grid is, for the UI tests: its offset and its ends', the items in view, jumps, cells
     /// still without a picture a moment later, and the items the viewer shows and zooms back into.
     private func publishProbe() {
@@ -897,7 +961,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                 let items = geometry.items(inBand: visible.minY...visible.maxY)
                 PerfMonitor.shared.note([
                     "grid.offset": self.collectionView.contentOffset.y, "grid.top": range.lowerBound, "grid.bottom": range.upperBound,
-                    "grid.jumps": Double(self.jumps), "grid.count": Double(geometry.count), "grid.columns": Double(geometry.columns),
+                    "grid.jumps": Double(self.jumps), "grid.bounces": Double(self.bounces), "grid.count": Double(geometry.count), "grid.columns": Double(geometry.columns),
                     "grid.width": geometry.metrics.width,
                     "grid.span": self.collectionView.bounds.width - self.insets.left - self.insets.right,
                     "grid.first": Double(items.lowerBound), "grid.last": Double(items.upperBound - 1),

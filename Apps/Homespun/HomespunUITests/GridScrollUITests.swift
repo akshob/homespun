@@ -148,6 +148,44 @@ final class GridScrollUITests: XCTestCase {
         }
     }
 
+    /// Closing an item at the newest end leaves the grid where it was, not even a few frames elsewhere
+    /// (on the open Duo the tab bar the viewer hid comes back a moment after the grid, and its insets
+    /// differ until then). In every pose on iPhone Duo: taps reach the open Duo, swipes don't.
+    @MainActor func testClosingTheViewerAtTheNewestStaysPut() throws {
+        try launch()
+        _ = try settled()
+        for name in poses == nil ? ["iPhone"] : ["landscape", "portrait", "folded"] {
+            if poses != nil {
+                pose(name)
+                XCTAssertTrue(waitForWindow { name == "folded" ? $0.width < 500 : $0.width > 500 && ($0.width > $0.height) == (name == "landscape") },
+                              "the screen didn't turn \(name)")
+                sleep(3)
+            }
+            let before = report()
+            XCTAssertEqual(before.value("grid.offset"), before.value("grid.bottom"), accuracy: 1, "\(name): not at the newest")
+            // A cell in the last row clear of the bars at the bottom.
+            let screen = app.windows.firstMatch.frame
+            let cells = app.gridItems().allElementsBoundByIndex.filter {
+                $0.frame.minY > screen.minY + 100 && $0.frame.maxY < screen.maxY - 140 && app.isOnScreen($0)
+            }
+            guard let cell = cells.max(by: { ($0.frame.minY, -$0.frame.minX) < ($1.frame.minY, -$1.frame.minX) }) else {
+                return XCTFail("\(name): no cell to open")
+            }
+            cell.tap()
+            let viewer = app.descendants(matching: .any)["item.viewer"].firstMatch
+            XCTAssertTrue(viewer.waitForExistence(timeout: 8), "\(name): the item didn't open")
+            sleep(1)
+            app.goBack()
+            XCTAssertTrue(viewer.waitForNonExistence(timeout: 8), "\(name): the item didn't close")
+            sleep(2)
+            let after = report()
+            XCTAssertEqual(after.value("grid.bounces"), before.value("grid.bounces"),
+                           "\(name): closing the item moved the grid and back")
+            XCTAssertEqual(after.value("grid.offset"), after.value("grid.bottom"), accuracy: 1, "\(name): not at the newest after closing")
+            XCTAssertEqual(after.value("grid.jumps"), before.value("grid.jumps"))
+        }
+    }
+
     /// Paging the viewer to items that weren't in view: the grid behind it follows (like Photos), so
     /// closing zooms into the item shown, in view, not into the one tapped.
     @MainActor func testClosingTheViewerShowsTheItemItCameTo() throws {
