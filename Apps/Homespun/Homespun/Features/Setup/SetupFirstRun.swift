@@ -215,14 +215,12 @@ struct FirstTaskPage: View {
 
     var body: some View {
         SetupScaffold(title: title, subtitle: "Their originals go to \(name). Compact copies come back to Photos.") {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 5), spacing: 6) {
-                ForEach(ids, id: \.self) { id in
-                    Thumbnail(identifier: id, library: library.library, side: 64)
-                        .frame(maxWidth: .infinity)
-                        .aspectRatio(1, contentMode: .fit)
-                        .overlay(alignment: .topTrailing) {
-                            JobBadge(job: job, id: id, badge: badge).padding(4)
-                        }
+            // At most ten: every tile laid out, five to a row.
+            Grid(horizontalSpacing: 6, verticalSpacing: 6) {
+                ForEach(Array(stride(from: 0, to: ids.count, by: 5)), id: \.self) { start in
+                    GridRow {
+                        ForEach(ids[start..<min(start + 5, ids.count)], id: \.self) { tile($0) }
+                    }
                 }
             }
             .accessibilityElement(children: .ignore)
@@ -277,6 +275,15 @@ struct FirstTaskPage: View {
         .onChange(of: finished) { _, finished in
             if finished, !saved.isEmpty { complete() }
         }
+    }
+
+    private func tile(_ id: String) -> some View {
+        Thumbnail(identifier: id, library: library.library, side: 64)
+            .frame(maxWidth: .infinity)
+            .aspectRatio(1, contentMode: .fit)
+            .overlay(alignment: .topTrailing) {
+                JobBadge(job: job, id: id, badge: badge).padding(4)
+            }
     }
 
     private var status: String {

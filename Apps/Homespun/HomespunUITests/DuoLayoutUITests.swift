@@ -126,7 +126,7 @@ final class DuoLayoutUITests: XCTestCase {
     @MainActor private func checkItem(_ app: XCUIApplication, pose: String) {
         app.openTab("Library")
         XCTAssertTrue(app.openItem(), "\(pose): no item viewer")
-        let viewer = app.scrollViews["item.viewer"], screen = app.windows.firstMatch.frame
+        let viewer = app.descendants(matching: .any)["item.viewer"], screen = app.windows.firstMatch.frame
         XCTAssertGreaterThan(viewer.frame.width, screen.width * 0.85, "\(pose): the viewer isn't full width")
         XCTAssertFalse(app.isOnScreen(app.tab("Activity")), "\(pose): the tabs show over the viewer")
         attach(app, "\(pose), item")
@@ -277,14 +277,14 @@ private extension XCUIApplication {
             let row = gridRow()
             guard !row.isEmpty else { return false }
             row[row.count / 2].tap()
-            if scrollViews["item.viewer"].waitForExistence(timeout: 8) { return true }
+            if descendants(matching: .any)["item.viewer"].waitForExistence(timeout: 8) { return true }
         }
         return false
     }
 
     /// Back to the grid: Back, or swiping the viewer down.
     @MainActor func closeItem() {
-        let viewer = scrollViews["item.viewer"]
+        let viewer = descendants(matching: .any)["item.viewer"]
         guard viewer.exists else { return }
         goBack()
         if !viewer.waitForNonExistence(timeout: 3) { viewer.swipeDown(velocity: .fast) }

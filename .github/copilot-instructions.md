@@ -78,8 +78,10 @@ and may not exist in other checkouts.
 ## The demo (Try the Demo)
 
 - Photos are read and changed only through `PhotoSource` (`PhotoKitSource` for Photos, `DemoLibrary` for
-  the demo); the Library grid reads Photos itself (`LibraryModel`) unless it has an `ItemCatalog`. New
-  PhotoKit calls go behind `PhotoSource`, so the demo never touches the person's library.
+  the demo); the Library grid reads Photos itself (`LibraryModel`) unless it has an `ItemCatalog`. Views
+  take the `LibraryModel` rather than its image manager (`Thumbnail`, `ThumbnailRow`/`ThumbnailLoader`), and
+  the viewer's pages show `LibraryModel.item` (`any LibraryItem`). New PhotoKit calls go behind
+  `PhotoSource`, so the demo never touches the person's library.
 - The demo's model keeps its own settings (`photos.homespun.demo`), folder (`Homespun Demo`), token and
   records; it never writes the person's settings, Keychain, TipKit tips or analytics (`Telemetry.paused`),
   never asks iOS for a permission, and pairs only with its pretend server. Leave the Demo deletes it all.

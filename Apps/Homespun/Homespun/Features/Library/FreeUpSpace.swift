@@ -201,17 +201,28 @@ struct FreeUpSpacePanel: View {
         return originals.prefix(count).reduce(0) { $0 + (sizes[$1] ?? 0) }
     }
 
+    private var reviewing: Bool {
+        if case .idle = controller.removal { return true }
+        return false
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: brief ? 10 : 20) {
-                switch controller.removal {
-                case .idle: review
-                case .checking(let message): checking(message)
-                case .done(let report): result(report)
+        Group {
+            if grid, reviewing, !originals.isEmpty, !pairs.isEmpty {
+                column
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: brief ? 10 : 20) {
+                        switch controller.removal {
+                        case .idle: review
+                        case .checking(let message): checking(message)
+                        case .done(let report): result(report)
+                        }
+                    }
+                    .padding(brief ? 16 : 24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .padding(brief ? 16 : 24)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Theme.background)
         .safeAreaBar(edge: .bottom) { actions.padding(.horizontal, 24).padding(.bottom, 12) }
@@ -235,38 +246,63 @@ struct FreeUpSpacePanel: View {
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel)
             if !pairs.isEmpty { strip }
         } else {
-            demoNotice
-            Text(LibraryController.bytes(bytes)).font(.system(size: 44, weight: .semibold, design: .rounded))
-                .monospacedDigit().foregroundStyle(Theme.label)
-                .accessibilityIdentifier("remove.bytes")
-            Text("\(count) original\(count == 1 ? " is" : "s are") safe on \(controller.serverName). "
-                 + (trial ? "Their compact copies stay in Photos."
-                    : demo ? "Homespun checks each one again, then asks you, as iOS would."
-                    : "Homespun checks each one again, then iOS asks you."))
-                .foregroundStyle(Theme.secondaryLabel)
-            if trial {
-                compareCard
-                promise("checkmark.shield", "First, Homespun checks each original with \(controller.serverName) again, byte for byte.")
-                promise("trash", demo ? "Then Homespun asks you, as iOS would. In the demo, nothing is deleted."
-                        : "Then iOS asks you. Removed originals stay in Recently Deleted for 30 days.")
-                promise("icloud", "With iCloud Photos, they're also removed from iCloud and your other devices. Compact copies stay.")
-                if somethingWrong {
-                    InlineNotice(tone: .info, title: "Nothing has been removed",
-                                 message: "Keep the originals on this iPhone for now. Server › Report a Problem tells us "
-                                    + "what looked wrong.")
-                }
-            } else {
-                if !pairs.isEmpty { compareCard }
-                DisclosureGroup("How it works") {
-                    VStack(alignment: .leading, spacing: 12) {
-                        promise("checkmark.shield", "Each original on this iPhone must match \(controller.serverName)'s copy exactly.")
-                        promise("trash", "Removed originals stay in Recently Deleted for 30 days.")
-                        promise("icloud", "With iCloud Photos, they're also removed from iCloud. Compact copies stay.")
-                    }
-                    .padding(.top, 8)
-                }
-                .tint(Theme.accent)
+            summary
+            if trial || !pairs.isEmpty { compareCard }
+            promises
+        }
+    }
+
+    /// The review as one column with the compact copies as a grid in it (beside the comparison).
+    private var column: some View {
+        FreeUpColumn(pairs: pairs, selected: selected, library: controller.library, compare: compare) {
+            VStack(alignment: .leading, spacing: 20) { summary }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } title: {
+            VStack(alignment: .leading, spacing: 10) { cardWords }
+                .padding([.top, .horizontal], FreeUpColumnLayout.padding)
+                .padding(.bottom, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } tail: {
+            VStack(alignment: .leading, spacing: 20) { promises }
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// How much, and from how many originals.
+    @ViewBuilder private var summary: some View {
+        demoNotice
+        Text(LibraryController.bytes(bytes)).font(.system(size: 44, weight: .semibold, design: .rounded))
+            .monospacedDigit().foregroundStyle(Theme.label)
+            .accessibilityIdentifier("remove.bytes")
+        Text("\(count) original\(count == 1 ? " is" : "s are") safe on \(controller.serverName). "
+             + (trial ? "Their compact copies stay in Photos."
+                : demo ? "Homespun checks each one again, then asks you, as iOS would."
+                : "Homespun checks each one again, then iOS asks you."))
+            .foregroundStyle(Theme.secondaryLabel)
+    }
+
+    /// What happens next: spelled out the first time, then behind How it works.
+    @ViewBuilder private var promises: some View {
+        if trial {
+            promise("checkmark.shield", "First, Homespun checks each original with \(controller.serverName) again, byte for byte.")
+            promise("trash", demo ? "Then Homespun asks you, as iOS would. In the demo, nothing is deleted."
+                    : "Then iOS asks you. Removed originals stay in Recently Deleted for 30 days.")
+            promise("icloud", "With iCloud Photos, they're also removed from iCloud and your other devices. Compact copies stay.")
+            if somethingWrong {
+                InlineNotice(tone: .info, title: "Nothing has been removed",
+                             message: "Keep the originals on this iPhone for now. Server › Report a Problem tells us "
+                                + "what looked wrong.")
             }
+        } else {
+            DisclosureGroup("How it works") {
+                VStack(alignment: .leading, spacing: 12) {
+                    promise("checkmark.shield", "Each original on this iPhone must match \(controller.serverName)'s copy exactly.")
+                    promise("trash", "Removed originals stay in Recently Deleted for 30 days.")
+                    promise("icloud", "With iCloud Photos, they're also removed from iCloud. Compact copies stay.")
+                }
+                .padding(.top, 8)
+            }
+            .tint(Theme.accent)
         }
     }
 
@@ -284,47 +320,27 @@ struct FreeUpSpacePanel: View {
     /// original instead). The first time, checking them is the point.
     private var compareCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(trial ? "Check the compact copies first" : "Compare before freeing up").font(.headline).foregroundStyle(Theme.label)
-            Text(trial ? "They take the originals' place in Photos. Tap one to compare it with its original on \(controller.serverName)."
-                 : "Tap one to compare it with its original, or to keep that original instead.")
-                .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
-            if grid {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 72), spacing: 6)], spacing: 6) {
-                    ForEach(pairs) { thumbnail($0) }
-                }
-            } else {
-                strip
-            }
+            cardWords
+            if !pairs.isEmpty { strip }
         }
         .card()
     }
 
-    private var strip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: 8) {
-                ForEach(pairs) { thumbnail($0) }
-            }
-        }
-        .frame(height: 76)
+    @ViewBuilder private var cardWords: some View {
+        Text(trial ? "Check the compact copies first" : "Compare before freeing up").font(.headline).foregroundStyle(Theme.label)
+        Text(trial ? "They take the originals' place in Photos. Tap one to compare it with its original on \(controller.serverName)."
+             : "Tap one to compare it with its original, or to keep that original instead.")
+            .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
     }
 
-    private func thumbnail(_ pair: FreeUpPair) -> some View {
-        Button { compare(pair) } label: {
-            Thumbnail(identifier: pair.compact, library: controller.library, side: 72)
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: "rectangle.split.2x1.fill").font(.caption)
-                        .foregroundStyle(.white).padding(5).shadow(radius: 2)
-                }
-                .overlay {
-                    if pair == selected {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.accent, lineWidth: 3)
-                    }
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Compare with the original")
-        .accessibilityAddTraits(pair == selected ? .isSelected : [])
-        .accessibilityIdentifier("remove.compare")
+    /// The compact copies in a row that scrolls sideways (UIKit: a reused cell per copy on screen).
+    private var strip: some View {
+        ThumbnailRow(items: thumbnails, library: controller.library, side: 72, spacing: 8,
+                     accessibility: (FreeUpThumbnails.label, FreeUpThumbnails.identifier)) { compare(pairs[$0]) }
+    }
+
+    private var thumbnails: [ThumbnailRow.Item] {
+        pairs.map { ThumbnailRow.Item(id: $0.original, photo: $0.compact, marked: true, selected: $0 == selected) }
     }
 
     // MARK: Checking
@@ -413,21 +429,6 @@ struct FreeUpSpacePanel: View {
             Image(systemName: icon).font(.title3).foregroundStyle(Theme.accent).frame(width: 28).accessibilityHidden(true)
             Text(text).font(.subheadline).foregroundStyle(Theme.label)
         }
-    }
-}
-
-/// A row of small thumbnails, for what a sheet is about to act on.
-struct ThumbnailStrip: View {
-    let identifiers: [String]
-    let library: LibraryModel
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(identifiers, id: \.self) { Thumbnail(identifier: $0, library: library, side: 56) }
-            }
-        }
-        .accessibilityHidden(true)
     }
 }
 

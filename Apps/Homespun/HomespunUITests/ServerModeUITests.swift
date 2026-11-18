@@ -68,11 +68,7 @@ final class ServerModeUITests: XCTestCase {
         let before = proceed.label
         let compare = app.buttons["remove.compare"].firstMatch
         XCTAssertTrue(compare.waitForExistence(timeout: 5), "no compact copies to compare")
-        // On a small screen (iPhone Duo's cover) the sheet opens at half height, the photos under its
-        // buttons: bring them up first.
-        var lifts = 4
-        while compare.frame.maxY > app.frame.maxY - 200, lifts > 0 { app.swipeUpInContent(); lifts -= 1 }
-        compare.tap()
+        app.tapCompactCopy(compare)
         XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
         attach(app, "Compare before freeing up")
         let keep = app.buttons["remove.keepOriginal"]
