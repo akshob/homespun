@@ -5,9 +5,9 @@
 #   runs:   quick quick-duo (a pull request's) · iphone library later copies onboarding telemetry
 #           duo-cover duo-open (after a merge) · large (nightly)
 #   groups: pr (both quick runs), iphone-all, duo-all, full (every run after a merge)
-# Ports differ, so runs of different jobs can share a Mac. RETRY_UI=1: a failed run gets one more
-# try on a new simulator; the first try's results move to $RESULTS/attempt1 (the summary marks a
-# run that passed then as flaky).
+# Ports differ, so runs of different jobs can share a Mac. RETRY_UI=1: a failing test runs once
+# more in place (Xcode's retry; the summary names tests that passed then as flaky). Tests in
+# quarantine.txt (known failures with an issue) are skipped and reported.
 set -u
 D=${0:A:h}
 failed=()
@@ -15,16 +15,7 @@ source $D/env.sh
 run() {
     local name=$1; shift
     echo "::group::$name"
-    if ! "$@"; then
-        if [[ -n ${RETRY_UI:-} ]]; then
-            echo "$name failed; one more try"
-            mkdir -p $RESULTS/attempt1
-            for f in $RESULTS/$name{.xcresult,.log,-server.log,-poses.log,-shots}(N); do mv $f $RESULTS/attempt1/; done
-            "$@" || failed+=$name
-        else
-            failed+=$name
-        fi
-    fi
+    "$@" || failed+=$name
     echo "::endgroup::"
 }
 runs=()

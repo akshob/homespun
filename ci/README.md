@@ -13,8 +13,18 @@ pull request; the extended suite runs after the merge; everything runs every nig
 | `docker.yml` | `main` and version tags, when the server changes | the server's Docker image |
 
 Pushing a branch runs nothing: open a draft pull request for the build and unit tests, mark it ready
-for the quick checks, or use Run workflow. A failed UI run gets one more try on a new simulator; one
-that passes then is marked flaky in the summary. `suite.yml` holds the jobs all of them share;
+for the quick checks, or use Run workflow.
+
+Keeping UI runs reliable on shared cloud machines:
+- A failing test runs once more in place (Xcode's `-retry-tests-on-failure`); one that passes then
+  is named as flaky in the summary, and a test that fails twice still fails the run.
+- When the simulator can't start or reach the test runner (no test ran), it's rebooted and the run
+  tried once more.
+- Each run's test server must be its own: the port must be free first, and the server stopped and
+  waited for at the end.
+- A known failure is listed in `quarantine.txt` with its issue: it's skipped and the summary says
+  so, so the suite stays meaningful while the fix is made. The pull request that fixes it removes
+  the line. `suite.yml` holds the jobs all of them share;
 `ci/plan.py` decides what a run needs from the files it changes (design files and Markdown alone run
 nothing; the website alone runs only its checks), because GitHub gives this account five macOS
 machines at once.
@@ -47,7 +57,8 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `plan.py` | what a run needs (see above) |
 | `release-guard.py <commit>` | whether a commit may go to TestFlight |
 | `site-check.py`, `htmlvalidate.json` | the website's checks |
-| `summary.py <results>` | the Markdown report each job adds to its summary |
+| `summary.py <results>` | the Markdown report each job adds to its summary (failures, flaky tests, known failures skipped) |
+| `quarantine.txt` | known UI test failures, each with its issue, skipped until fixed |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
 
