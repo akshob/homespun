@@ -180,7 +180,8 @@ struct GridGeometry: Equatable, Sendable {
     func anchor(in visible: CGRect, at point: CGPoint? = nil) -> Anchor? {
         let point = point ?? CGPoint(x: visible.midX, y: visible.midY)
         guard visible.height > 0, let item = item(near: point) else { return nil }
-        return Anchor(item: item, fraction: (frame(ofItem: item).midY - visible.minY) / visible.height)
+        // On screen (the nearest item to a point in a sliver of a screen can be far outside it).
+        return Anchor(item: item, fraction: min(max((frame(ofItem: item).midY - visible.minY) / visible.height, 0), 1))
     }
 
     /// The visible area's top that puts an anchored item back where it was on screen.

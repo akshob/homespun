@@ -138,6 +138,9 @@ private func geometry(width: CGFloat = 402, columns: Int = 4, top: CGFloat = 0, 
     // A pinch keeps the item under the fingers.
     let pinched = try #require(phone.anchor(in: visible, at: CGPoint(x: 300, y: 400_100)))
     #expect(phone.frame(ofItem: pinched.item).insetBy(dx: -2, dy: -2).contains(CGPoint(x: 300, y: 400_100)))
+    // Mid-turn the bars can leave a sliver of a screen: the item stays on screen, not far above it.
+    let sliver = try #require(phone.anchor(in: CGRect(x: 0, y: 400_000, width: 402, height: 1)))
+    #expect((0...1).contains(sliver.fraction))
 }
 
 /// The thumbnail window reaches further in the direction of scrolling, follows only once the screen

@@ -125,6 +125,12 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// The place kept through a change of size: turning or unfolding brings a new width, then new
     /// insets, in steps; each step puts back the place from before the first, not from the step before.
     private var held: (place: Place, until: CFTimeInterval)?
+    /// The place from before a turn, fold or unfold, kept until it has finished (its steps can take
+    /// seconds on a busy device, and some leave a sliver of a screen between the bars).
+    private var turning: Place?
+    private var turns = 0
+    /// The last place seen on a whole screen.
+    private var lastPlace = Place.newest
     /// Where the grid was just put: for a moment, the scroll view moving by itself (a large title
     /// collapsing keeps a scroll view that was at the top there) is undone.
     private var placedAt: (y: CGFloat, until: CFTimeInterval)?
@@ -274,7 +280,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// New items (a filter, the library changed): the item in view stays where it is on screen, or
     /// the newest end stays in view.
     private func apply(data new: GridData, version: Int) {
-        let place = currentPlace()
+        let place = turning ?? currentPlace()
         held = nil
         let old = data
         data = new
@@ -292,6 +298,21 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     // MARK: Geometry
+
+    override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        let place = heldPlace() ?? currentPlace()
+        turning = place
+        turns += 1
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.turns -= 1
+            guard self.turns == 0 else { return }
+            self.turning = nil
+            self.held = (place, CACurrentMediaTime() + 1)
+            self.view.setNeedsLayout()
+        }
+    }
 
     override func viewWillLayoutSubviews() {
         super.viewWillLayoutSubviews()
@@ -388,14 +409,20 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     private func heldPlace() -> Place? {
+        if let turning { return turning }
         guard let held, CACurrentMediaTime() < held.until else { return nil }
         return held.place
     }
 
+    /// Whether the bars leave a screen to see (mid-turn they can leave a sliver, or nothing).
+    private var whole: Bool { collectionView.bounds.height > 0 && visibleRect.height >= 44 }
+
     private func currentPlace(at point: CGPoint? = nil) -> Place {
-        guard placed, !pinned, layout.geometry.count > 0, collectionView.bounds.height > 0,
-              let anchor = layout.geometry.anchor(in: visibleRect, at: point), anchor.item < data.ids.count else { return .newest }
-        return .item(data.ids[anchor.item], position: anchor.item, fraction: anchor.fraction)
+        guard placed, !pinned, layout.geometry.count > 0 else { return .newest }
+        guard whole else { return lastPlace }
+        guard let anchor = layout.geometry.anchor(in: visibleRect, at: point), anchor.item < data.ids.count else { return .newest }
+        lastPlace = .item(data.ids[anchor.item], position: anchor.item, fraction: anchor.fraction)
+        return lastPlace
     }
 
     private func restore(_ place: Place, old: GridData? = nil) {
@@ -413,7 +440,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         let point = CGPoint(x: -insets.left, y: y)
         placedAt = animated ? nil : (y, CACurrentMediaTime() + 0.5)
         if animated { collectionView.setContentOffset(point, animated: true) } else { collectionView.contentOffset = point }
-        pinned = y >= offsetRange.upperBound - 1
+        // Mid-turn, the place from before it says whether it's at the newest end.
+        if turning == nil, whole { pinned = y >= offsetRange.upperBound - 1 }
         updatePreheat()
     }
 
@@ -677,6 +705,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             tracking = false
             PerfMonitor.shared.scrollEnded()
         }
+        _ = currentPlace()
         publishProbe()
     }
 
@@ -869,6 +898,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                     "grid.offset": self.collectionView.contentOffset.y, "grid.top": range.lowerBound, "grid.bottom": range.upperBound,
                     "grid.jumps": Double(self.jumps), "grid.count": Double(geometry.count), "grid.columns": Double(geometry.columns),
                     "grid.width": geometry.metrics.width,
+                    "grid.span": self.collectionView.bounds.width - self.insets.left - self.insets.right,
                     "grid.first": Double(items.lowerBound), "grid.last": Double(items.upperBound - 1),
                     "grid.anchor": Double(geometry.anchor(in: visible)?.item ?? -1), "grid.blank": Double(self.blankCells().blank),
                     "grid.shown": Double(self.viewerItem.flatMap { self.data.positions[$0] } ?? -1),
