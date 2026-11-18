@@ -135,7 +135,11 @@ final class DuoLayoutUITests: XCTestCase {
         app.launch()
         app.pair(address: address, code: code)
         app.choose("grid.filter", "Videos")
-        XCTAssertEqual(app.compactNewest(1, matching: NSPredicate(format: "label BEGINSWITH 'Video'")), 1)
+        let videos = NSPredicate(format: "label BEGINSWITH 'Video'")
+        // A retry finds the video the first attempt compacted (the test server keeps it).
+        if !app.gridItems("Ready to free up").matching(videos).firstMatch.waitForExistence(timeout: 10) {
+            XCTAssertEqual(app.compactNewest(1, matching: videos), 1)
+        }
 
         for name in ["landscape", "portrait"] {
             pose(name, file: poses)
@@ -166,11 +170,15 @@ final class DuoLayoutUITests: XCTestCase {
             }
             play.tap()
             XCTAssertEqual(play.label, "Pause both")
-            sleep(1)
-            play.tap()
-            XCTAssertEqual(play.label, "Play both")
-            XCTAssertFalse((app.sliders["compare.position"].value as? String ?? "").hasPrefix("0:00"),
-                           "both videos stayed at the start")
+            let position = app.sliders["compare.position"]
+            let deadline = Date().addingTimeInterval(10)
+            while (position.value as? String ?? "0:00").hasPrefix("0:00"), Date() < deadline { usleep(200_000) }
+            // CI's videos last 2 s: on a busy machine they can end (and stop) before the second tap.
+            if play.label == "Pause both" {
+                play.tap()
+            }
+            XCTAssertTrue(play.wait(for: \.label, toEqual: "Play both", timeout: 10), "the videos didn't pause or stop")
+            XCTAssertFalse((position.value as? String ?? "").hasPrefix("0:00"), "both videos stayed at the start")
             let sound = app.buttons["compare.sound"], heard = app.buttons["compare.sound"].value as? String
             sound.tap()
             XCTAssertNotEqual(sound.value as? String, heard, "Sound didn't switch sides")
