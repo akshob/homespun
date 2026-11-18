@@ -25,6 +25,15 @@ struct RootView: View {
         .tint(Theme.accent)
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
         .modifier(QuitUnexpectedly(model: model))
+        .task {
+            #if DEBUG
+            guard ProcessInfo.processInfo.arguments.contains("-probeServerStatus") else { return }
+            while !Task.isCancelled {
+                await model.settings.refreshServerInfo()
+                try? await Task.sleep(for: .seconds(1))
+            }
+            #endif
+        }
         .onChange(of: scenePhase, initial: true) { _, phase in
             // From the first moment on screen (onChange alone misses the launch).
             if phase == .active { SessionMarker.shared.active() }

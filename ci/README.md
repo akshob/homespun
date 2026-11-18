@@ -65,6 +65,8 @@ Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded whe
 `ui.sh` also exposes its isolated server's control file to UI tests. Writing `offline` or `online`
 stops or restarts that test server; the matching `.ack` file confirms completion. The Library's
 status-layout regression uses it at the newest end and mid-scroll, on iPhone and in the Duo poses.
+Its Debug-only `-probeServerStatus` launch argument checks the real server once a second without
+leaving the Library, so foregrounding or changing tabs cannot hide an inset jump.
 
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).

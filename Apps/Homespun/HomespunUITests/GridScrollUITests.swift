@@ -15,11 +15,12 @@ final class GridScrollUITests: XCTestCase {
     /// On iPhone Duo with poses (`ci/ui.sh` with `DUO_POSES=1`): the file `ui.sh` watches to fold and turn it.
     private let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"]
 
-    @MainActor private func launch() throws {
+    @MainActor private func launch(checkServer: Bool = false) throws {
         // Folded, where XCTest's gestures reach the app.
         pose("folded")
         app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "YES", "-perfMonitor", "YES"]
+        if checkServer { app.launchArguments.append("-probeServerStatus") }
         app.launch()
         XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 30), "no photos in the Library")
         XCTAssertTrue(app.descendants(matching: .any)["perf.monitor"].waitForExistence(timeout: 10), "no grid report")
@@ -213,6 +214,7 @@ final class GridScrollUITests: XCTestCase {
                 print("BEHIND \(name) \(close): changes=\(after.value("behind.changes")) samples=\(after.value("behind.samples"))")
                 XCTAssertEqual(after.value("behind.changes"), 0, "\(name), \(close): the app behind the viewer changed")
                 XCTAssertGreaterThan(after.value("behind.samples"), 10)
+                XCTAssertGreaterThanOrEqual(after.value("grid.source"), 0, "the zoom didn't have a real cell to land in")
                 XCTAssertEqual(after.value("grid.bounces"), before.value("grid.bounces"))
                 XCTAssertEqual(after.value("grid.jumps"), before.value("grid.jumps"))
                 if close != "Paged" {
@@ -228,7 +230,7 @@ final class GridScrollUITests: XCTestCase {
               let code = environment["HOMESPUN_PAIRING_CODE"] else {
             throw XCTSkip("Needs ci/ui.sh's stoppable test server.")
         }
-        try launch()
+        try launch(checkServer: true)
         app.pair(address: address, code: code)
         app.openTab("Library")
         _ = try settled()
@@ -251,6 +253,12 @@ final class GridScrollUITests: XCTestCase {
                 }
                 _ = try settled()
                 let before = report(), tabs = app.tabFrames()
+                if middle {
+                    XCTAssertGreaterThan(before.value("grid.offset"), before.value("grid.top") + 100)
+                    XCTAssertLessThan(before.value("grid.offset"), before.value("grid.bottom") - 100)
+                } else {
+                    XCTAssertEqual(before.value("grid.offset"), before.value("grid.bottom"), accuracy: 1)
+                }
                 let title = app.screenTitle("Library").frame
                 let cells = app.gridItems().allElementsBoundByIndex.filter { app.isOnScreen($0) }
                 let frames = cells.map(\.frame)
@@ -261,8 +269,6 @@ final class GridScrollUITests: XCTestCase {
                     while (try? String(contentsOfFile: control + ".ack", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) != wanted,
                           Date() < deadline { usleep(100_000) }
                     XCTAssertEqual((try? String(contentsOfFile: control + ".ack", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines), wanted)
-                    XCUIDevice.shared.press(.home)
-                    app.activate()
                     let unreachable = app.descendants(matching: .any)["accessory.unreachable"].firstMatch
                     if online {
                         XCTAssertTrue(unreachable.waitForNonExistence(timeout: 20))
@@ -351,6 +357,7 @@ final class GridScrollUITests: XCTestCase {
         XCTAssertTrue(viewer.waitForNonExistence(timeout: 8), "the viewer didn't close")
         sleep(2)
         let back = report()
+        XCTAssertEqual(back.value("grid.source"), shown, "the zoom didn't return to the real cell of the item shown")
         XCTAssertTrue(back.value("grid.first") <= shown && shown <= back.value("grid.last"),
                       "closed: item \(shown) isn't in view (\(back.value("grid.first"))–\(back.value("grid.last")))")
         XCTAssertEqual(back.value("grid.jumps"), start.value("grid.jumps"))

@@ -99,6 +99,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var behindProbe: BehindProbe?
     private weak var presentedViewer: ItemViewerController?
     private var openedPosition: Int?
+    private var lastZoomSource: Int?
     private var pendingOpen: (id: String, details: Bool)?
 
     init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, input: GridInput,
@@ -582,6 +583,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
               view.window != nil else { return }
         let id = data.cells[position].id
         let viewer = actions.viewer(id, data.ids, details)
+        lastZoomSource = nil
         viewer.state.onShow = { [weak self] in self?.viewerChanged($0) }
         viewer.resumed = { [weak self] in self?.behindProbe?.cancelClosing() }
         viewer.closing = { [weak self] in
@@ -599,7 +601,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             self.following?.cancel()
             self.publishProbe()
             let cell = id.flatMap { self.data.positions[$0] }.flatMap { self.collectionView.cellForItem(at: self.indexPath(of: $0)) }
-            UIAccessibility.post(notification: .layoutChanged, argument: cell)
+            if self.view.window != nil { UIAccessibility.post(notification: .layoutChanged, argument: cell) }
         }
         let options = UIViewController.Transition.ZoomOptions()
         options.interactiveDismissShouldBegin = { [weak viewer] context in
@@ -625,7 +627,15 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         let frame = layout.geometry.frame(ofItem: position)
         if !visibleRect.contains(frame), collectionView.bounds.height > 0 { follow(id) }
         collectionView.layoutIfNeeded()
-        return collectionView.cellForItem(at: indexPath(of: position))
+        let cell = collectionView.cellForItem(at: indexPath(of: position))
+        if PerfMonitor.shared.enabled {
+            let source = cell == nil ? -1 : position
+            if source != lastZoomSource {
+                lastZoomSource = source
+                PerfMonitor.shared.note(["grid.source": Double(source)])
+            }
+        }
+        return cell
     }
 
     private func indexPath(of position: Int) -> IndexPath {
@@ -703,9 +713,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         } else {
             if PerfMonitor.shared.enabled, !animatingScroll { checkBounce(y) }
             if let placedAt, CACurrentMediaTime() < placedAt.until, abs(y - placedAt.y) > 0.5 {
-                // UIKit moved it, not the person: back to the newest end, or where it was put.
-                let range = offsetRange
-                setOffset(pinned ? range.upperBound : min(max(placedAt.y, range.lowerBound), range.upperBound))
+                // UIKit moved it, not the person. A changing bar must not repin it to a new end.
+                setOffset(placedAt.y)
             }
         }
         updatePreheat()

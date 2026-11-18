@@ -102,6 +102,10 @@ final class ItemViewerUITests: XCTestCase {
         app.buttons["details.done"].tap()
         app.goBack()
         XCTAssertTrue(library.waitForExistence(timeout: 0.2), "the tabs disappeared after Show Details")
+        XCTAssertTrue(open(item, app))
+        app.open(URL(string: "homespun://activity")!)
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "an app link left the viewer over the app")
+        XCTAssertTrue(app.hasScreen("Activity"))
     }
 
     /// Frees one original from the viewer, then Compare downloads it from the server.

@@ -18,7 +18,12 @@ final class ItemViewerState {
         self.details = details ? start : nil
     }
 
-    func close() { host?.presentingViewController?.dismiss(animated: true) }
+    func close() {
+        guard let host else { return }
+        host.presentingViewController?.dismiss(animated: true) {
+            (host as? ItemViewerController)?.finishedDismissal()
+        }
+    }
 }
 
 @MainActor

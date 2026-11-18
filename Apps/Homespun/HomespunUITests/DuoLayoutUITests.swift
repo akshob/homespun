@@ -222,6 +222,10 @@ final class DuoLayoutUITests: XCTestCase {
             XCTAssertEqual(app.behind().changes, 0, "\(pose): the app behind the viewer changed")
         }
         XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10), "\(pose): no grid after closing")
+        XCTAssertTrue(app.openItem(), "\(pose): no viewer before an app link")
+        app.open(URL(string: "homespun://activity")!)
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "\(pose): an app link left the viewer over the app")
+        app.openTab("Library")
     }
 
     /// Free Up Space takes the whole screen: the chosen item compared side by side (beside or
