@@ -15,6 +15,9 @@ final class DemoMode {
 
     /// The demo's model while it's on.
     private(set) var model: AppModel?
+    /// Just left: what the demo was in the middle of may still be finishing. Try the Demo waits until
+    /// it has and the folder is deleted again, so a new demo never gets the last one's leftovers.
+    private(set) var settling = false
 
     nonisolated static let settingsName = "photos.homespun.demo"
     nonisolated static var folder: URL {
@@ -44,7 +47,7 @@ final class DemoMode {
 
     /// Starts afresh.
     func start() {
-        guard model == nil else { return }
+        guard model == nil, !settling else { return }
         Self.wipe()
         begin()
         Announce.say("The demo is on. Nothing on this iPhone is changed.")
@@ -74,9 +77,11 @@ final class DemoMode {
         DemoPictures.forget()
         Self.wipe()
         // Again once anything it was in the middle of has stopped writing.
+        settling = true
         Task {
             try? await Task.sleep(for: .seconds(3))
-            if !DemoMode.shared.isOn { Self.wipe() }
+            Self.wipe()
+            DemoMode.shared.settling = false
         }
         Announce.say("Left the demo.")
     }

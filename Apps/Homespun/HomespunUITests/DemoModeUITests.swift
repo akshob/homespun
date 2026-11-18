@@ -4,7 +4,8 @@ import XCTest
 /// Try the Demo, from a fresh install and with no server: Welcome's Try the Demo,
 /// the pretend server found and paired, a few samples backed up and their compact copies, one opened and
 /// compared, Free Up Space (compare, keep one original, free the rest, with the demo's own question),
-/// Restore Original, Activity's runs, then Leave the Demo back to Welcome, and the demo starting afresh.
+/// Restore Original, Activity's runs, Automatic Mode turned on, then Leave the Demo back to Welcome, and
+/// the demo starting afresh.
 /// iOS never asks for anything (no Photos access, no Local Network). And without the purchase, turning on
 /// Automatic Mode or Cloud Copies in the demo asks for the real one. Screenshots are attached.
 final class DemoModeUITests: XCTestCase {
@@ -144,15 +145,32 @@ final class DemoModeUITests: XCTestCase {
         let card = app.descendants(matching: .any)["demo.card"]
         XCTAssertTrue(card.waitForExistence(timeout: 15), "the Server tab doesn't say it's the demo")
         attach("Server")
-        nothingAsked("tabs")
 
-        // Leave the Demo: back to Welcome.
-        leave(app.buttons["demo.leave"].firstMatch)
+        // Automatic Mode (unlocked in a build from Xcode): on for everything not backed up, and it starts
+        // at once, asking iOS nothing (no notifications, no background tasks in the demo).
+        app.openAutomaticMode()
+        app.tapSwitch(app.automaticToggle)
+        let everything = app.buttons["Everything not backed up yet"].firstMatch
+        XCTAssertTrue(everything.waitForExistence(timeout: 10), "turning on Automatic Mode didn't ask what to back up")
+        everything.tap()
+        let on = Date().addingTimeInterval(10)
+        while app.automaticToggle.value as? String != "1", Date() < on { usleep(250_000) }
+        XCTAssertEqual(app.automaticToggle.value as? String, "1", "Automatic Mode didn't turn on")
+        attach("Automatic Mode")
+        nothingAsked("tabs")
+        app.goBack(from: "Automatic Mode")
+
+        // Leave the Demo, perhaps while Automatic Mode is backing up: back to Welcome.
+        let leaveButton = app.buttons["demo.leave"].firstMatch
+        XCTAssertTrue(app.reveal(leaveButton), "no Leave the Demo in the Server tab")
+        leave(leaveButton)
         XCTAssertTrue(app.buttons["setup.demo"].waitForExistence(timeout: 20), "Leave the Demo didn't return to Welcome")
         attach("Left")
 
         // Nothing was left: the demo starts afresh (its pretend server isn't paired), and leaving from setup works.
-        app.buttons["setup.demo"].tap()
+        let again = app.buttons["setup.demo"]
+        XCTAssertTrue(again.wait(for: \.isEnabled, toEqual: true, timeout: 15), "Try the Demo stays off after leaving")
+        again.tap()
         XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30), "the demo didn't start afresh")
         let menu = app.buttons["demo.menu"].firstMatch
         XCTAssertTrue(menu.waitForExistence(timeout: 5), "no Demo mark in setup")
