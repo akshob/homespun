@@ -137,6 +137,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var lastPreheat: ClosedRange<CGFloat>?
     private var lastOffset: CGFloat = 0
     private var tracking = false
+    private var behindProbe: BehindProbe?
 
     init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, zoom: GridZoom, input: GridInput,
          actions: GridActions) {
@@ -208,6 +209,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         adoptAsContentScrollView()
+        behindProbe?.closing()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -225,6 +227,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        behindProbe?.closed()
         if !isFront, collectionView.adjustedContentInset != lastInsets {
             awaitingBars = true
             barsTimeout?.cancel()
@@ -618,6 +621,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         }
         // The zoom's stand-in is drawn first, so the item zooms out of its cell when it opens.
         PerfMonitor.shared.begin("open")
+        startBehindProbe()
         prepareZoom(position)
         DispatchQueue.main.async { [weak self] in self?.actions.tapped(cell) }
         return false
@@ -971,6 +975,87 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                 ])
             }
         }
+    }
+
+    private func startBehindProbe() {
+        guard PerfMonitor.shared.enabled else { return }
+        behindProbe?.stop()
+        behindProbe = BehindProbe { [weak self] in
+            guard let self, let window = self.view.window else { return nil }
+            let tab = self.tabBarController?.tabBar
+            let nav = self.navigationController?.navigationBar
+            return BehindProbe.Sample(
+                insets: self.collectionView.adjustedContentInset,
+                offset: self.collectionView.contentOffset.y,
+                tabHidden: tab?.isHidden, tabAlpha: tab?.alpha,
+                tabFrame: tab.map { $0.convert($0.bounds, to: window) },
+                safeArea: self.tabBarController?.view.safeAreaInsets,
+                navFrame: nav.map { $0.convert($0.bounds, to: window) })
+        }
+    }
+}
+
+/// Samples every in-window frame, including the frames XCTest misses during dismissal.
+@MainActor private final class BehindProbe: NSObject {
+    struct Sample: Equatable {
+        var insets: UIEdgeInsets
+        var offset: CGFloat
+        var tabHidden: Bool?
+        var tabAlpha: CGFloat?
+        var tabFrame: CGRect?
+        var safeArea: UIEdgeInsets?
+        var navFrame: CGRect?
+    }
+
+    private let sample: () -> Sample?
+    private var baseline: Sample?
+    private var closingOffset: CGFloat?
+    private var link: CADisplayLink?
+    private var end: CFTimeInterval?
+    private var changes = 0
+    private var samples = 0
+    private var isClosing = false
+    private var publishedAt: CFTimeInterval = 0
+
+    init(sample: @escaping () -> Sample?) {
+        self.sample = sample
+        super.init()
+        baseline = sample()
+        PerfMonitor.shared.note(["behind.changes": 0, "behind.samples": 0])
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func closing() {
+        isClosing = true
+        closingOffset = sample()?.offset
+    }
+
+    func closed() { end = CACurrentMediaTime() + 1 }
+    func stop() {
+        link?.invalidate()
+        link = nil
+        publish()
+    }
+
+    private func publish() {
+        publishedAt = CACurrentMediaTime()
+        PerfMonitor.shared.note(["behind.changes": Double(changes), "behind.samples": Double(samples)])
+    }
+
+    @objc private func tick() {
+        if let end, CACurrentMediaTime() > end {
+            stop()
+            return
+        }
+        guard var now = sample(), var baseline else { return }
+        if isClosing { samples += 1 }
+        // Paging may deliberately move the grid before closing; the bars must never change.
+        baseline.offset = closingOffset ?? now.offset
+        if !isClosing { now.offset = baseline.offset }
+        if now != baseline { changes += 1 }
+        if isClosing, CACurrentMediaTime() - publishedAt > 0.1 { publish() }
     }
 }
 

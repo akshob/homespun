@@ -69,6 +69,22 @@ extension XCUIApplication {
         return tabBars.buttons[title]
     }
 
+    @MainActor func tabFrames() -> [String: CGRect] {
+        Dictionary(uniqueKeysWithValues: ["Library", "Activity", "Server"].compactMap {
+            let element = tab($0)
+            return element.exists ? ($0, element.frame) : nil
+        })
+    }
+
+    @MainActor func behind() -> (changes: Double, samples: Double) {
+        var values: [String: Double] = [:]
+        for part in descendants(matching: .any)["perf.monitor"].firstMatch.label.split(separator: ";") {
+            let pair = part.split(separator: "=", maxSplits: 1)
+            if pair.count == 2, let value = Double(pair[1]) { values[String(pair[0])] = value }
+        }
+        return (values["behind.changes"] ?? .nan, values["behind.samples"] ?? .nan)
+    }
+
     /// Whether an element is on screen, from its frame (asking whether far-off cells are hittable
     /// fails the test instead of answering).
     @MainActor func isOnScreen(_ element: XCUIElement) -> Bool {
@@ -112,6 +128,10 @@ extension XCUIApplication {
     /// beside it, so without a Back button this does nothing (a bar's first button there is
     /// something else, such as More).
     @MainActor func goBack(from title: String? = nil) {
+        let close = descendants(matching: .any)["item.close"].firstMatch
+        if close.exists {
+            return close.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
         // The strip's buttons on the open Duo say they can't be hit, though they can.
         let strip = descendants(matching: .any)["BackButton"]
         // Relative to the element: screen coordinates are rotated on the open Duo.

@@ -47,8 +47,27 @@ if [[ -z ${SERVERLESS:-} ]]; then
     export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
            HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
     wait_port_free $PORT || exit 1
-    $SERVER_BIN serve > $DATA.log 2>&1 &
+    CONTROL=$DATA/server-control
+    print online > $CONTROL
+    (
+        child=""
+        trap '[[ -z $child ]] || { kill $child 2>/dev/null; wait $child 2>/dev/null; }' EXIT
+        trap 'exit 0' TERM INT
+        while true; do
+            wanted=$(cat $CONTROL)
+            if [[ $wanted == offline && -n $child ]]; then
+                kill $child 2>/dev/null; wait $child 2>/dev/null; child=""
+                print offline > $CONTROL.ack
+            elif [[ $wanted == online && -z $child ]]; then
+                $SERVER_BIN serve >> $DATA.log 2>&1 & child=$!
+                wait_for_server $PORT || exit 1
+                print online > $CONTROL.ack
+            fi
+            sleep 0.2
+        done
+    ) &
     SERVER=$!
+    export TEST_RUNNER_SERVER_CONTROL_FILE=$CONTROL
     wait_for_server $PORT || exit 1
     # The server answering is this one (not one still stopping from an earlier try).
     kill -0 $SERVER 2>/dev/null || { echo "the test server didn't start"; cat $DATA.log; exit 1; }
@@ -71,6 +90,7 @@ if [[ -n ${DUO_POSES:-} ]]; then
             portrait) $DUOCTL -d $SIM hinge 180; turn portrait;;
             laptop) $DUOCTL -d $SIM hinge 180; turn portrait; $DUOCTL -d $SIM hinge 100;;
             folded) $DUOCTL -d $SIM hinge 0; sleep 2; turn portrait;;
+            swipe\ *) read -r command x1 y1 x2 y2 < $POSEFILE; $DUOCTL -d $SIM swipe $x1 $y1 $x2 $y2;;
           esac >> $RESULTS/$NAME-poses.log 2>&1
           rm -f $POSEFILE
         fi
