@@ -136,22 +136,13 @@ struct NASBrandsPage: View {
     var body: some View {
         SetupScaffold(title: "Which NAS do you have?",
                       subtitle: "Homespun Server runs on it in Docker. Choose the brand for its exact steps.") {
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: typeSize.isAccessibilitySize ? 1 : 2),
-                      spacing: 10) {
-                ForEach(NASBrand.allCases) { brand in
-                    Button { flow.go(.nasGuide(brand)) } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: SetupAdvisor.Machine.nas.symbol).foregroundStyle(Theme.accent)
-                                .accessibilityHidden(true)
-                            Text(brand.name).foregroundStyle(Theme.label)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 14)
-                        .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
-                        .background(Theme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            // A few brands: all laid out at once (no lazy grid guessing sizes).
+            let brands = Array(NASBrand.allCases), columns = typeSize.isAccessibilitySize ? 1 : 2
+            Grid(horizontalSpacing: 10, verticalSpacing: 10) {
+                ForEach(Array(stride(from: 0, to: brands.count, by: columns)), id: \.self) { start in
+                    GridRow {
+                        ForEach(brands[start..<min(start + columns, brands.count)]) { brand($0) }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("nas.\(brand.rawValue)")
                 }
             }
             Text("Not sure? The brand is printed on the front of the NAS.")
@@ -159,6 +150,22 @@ struct NASBrandsPage: View {
                 .multilineTextAlignment(.center)
         }
         .navigationTitle("Your NAS")
+    }
+
+    private func brand(_ brand: NASBrand) -> some View {
+        Button { flow.go(.nasGuide(brand)) } label: {
+            HStack(spacing: 10) {
+                Image(systemName: SetupAdvisor.Machine.nas.symbol).foregroundStyle(Theme.accent)
+                    .accessibilityHidden(true)
+                Text(brand.name).foregroundStyle(Theme.label)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+            .background(Theme.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("nas.\(brand.rawValue)")
     }
 }
 

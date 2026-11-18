@@ -4,7 +4,7 @@ import SwiftUI
 import UserNotifications
 
 /// The Server tab (DESIGN 04·1.1–1.5, 05): the paired server at a glance, where originals are,
-/// Premium features, devices, and this iPhone's settings. Not paired: a way to set one up.
+/// automatic mode and cloud copies, devices, and this iPhone's settings. Not paired: a way to set one up.
 struct ServerTab: View {
     let model: AppModel
 
@@ -24,8 +24,6 @@ struct ServerTab: View {
     @State private var settingUp = false
     @State private var confirmingUnpair = false
     @State private var confirmingSwitch = false
-    @State private var askingScope = false
-    @State private var locked: PremiumFeature?
     /// When the server last answered, for "Last seen" while it can't be reached.
     @AppStorage("serverLastSeen") private var lastSeen: Double = 0
 
@@ -47,18 +45,7 @@ struct ServerTab: View {
             EmptyView()
         }
         .sheet(isPresented: $settingUp) { OnboardingView(settings: settings, library: model.library) }
-        .sheet(item: $locked) { feature in
-            PremiumFeatureSheet(feature: feature, premium: model.premium) {
-                locked = nil
-                path.append(.premium)
-            }
-        }
-        .alert("Back up what's already here too?", isPresented: $askingScope) {
-            AutomaticModeView.scopeButtons(model.automatic)
-        } message: {
-            Text(AutomaticModeView.scopeMessage(count: model.library.library.state.count(.notBackedUp)))
-        }
-        // A widget's link to one of these pages (Automatic Mode's own page says if it's locked).
+        // A widget's link to one of these pages.
         .onChange(of: model.router.serverRoute, initial: true) { _, route in
             guard let route else { return }
             model.router.serverRoute = nil
@@ -120,7 +107,7 @@ struct ServerTab: View {
                 .sidebarRow(Route.immich)
             }
             .listRowBackground(Theme.card)
-            premiumSection(selection)
+            backupsSection
             Section {
                 NavigationLink(value: Route.compactCopies) {
                     ServerRow(title: "Compact Copies", symbol: "slider.horizontal.3",
@@ -216,7 +203,7 @@ struct ServerTab: View {
                 .padding(.vertical, 10)
             }
             .listRowBackground(Theme.card)
-            premiumSection(selection)
+            backupsSection
             thisIPhoneSection
         }
         .homespunList()
@@ -227,53 +214,21 @@ struct ServerTab: View {
 
     // MARK: Sections
 
-    /// `selection`: the sidebar's, on the open iPhone Duo (a row there replaces what's open beside it).
-    private func premiumSection(_ selection: Binding<Route?>?) -> some View {
-        let premium = model.premium, automatic = model.automatic, settings = model.settings
-        return Section("Premium") {
-            if premium.isUnlocked {
-                HStack(spacing: 12) {
-                    Button {
-                        if let selection { selection.wrappedValue = .automatic } else { path.append(.automatic) }
-                    } label: {
-                        HStack {
-                            ActivityRow(symbol: "bolt.fill", title: "Automatic Mode", detail: automaticDetail)
-                            Spacer(minLength: 0)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Opens what automatic mode backs up, and its last run.")
-                    .accessibilityIdentifier("settings.automatic")
-                    Toggle("Automatic Mode", isOn: Binding(get: { automatic.enabled }, set: { on in
-                        if on { askingScope = true } else { automatic.disable() }
-                    }))
-                    .labelsHidden()
-                    .tint(Theme.accent)
-                    .disabled(!settings.canCompact)
-                    .accessibilityIdentifier("automatic.toggle")
-                }
-                .sidebarRow(Route.automatic)
-                NavigationLink(value: Route.connectors) {
-                    ServerRow(title: "Cloud Copies", symbol: "icloud.and.arrow.up", value: cloudValue)
-                }
-                .disabled(!settings.isPaired)
-                .accessibilityIdentifier("settings.connectors")
-                .sidebarRow(Route.connectors)
-            } else {
-                Button { locked = .automatic } label: {
-                    ServerRow(title: "Automatic Mode", symbol: "bolt.fill", value: "Premium", valueTint: Theme.accent,
-                              chevron: true)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("automatic.premium")
-                Button { locked = .cloudCopies } label: {
-                    ServerRow(title: "Cloud Copies", symbol: "icloud.and.arrow.up", value: "Premium",
-                              valueTint: Theme.accent, chevron: true)
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("settings.connectors")
+    /// Automatic mode and cloud copies: the same rows with or without the purchase, which each page
+    /// asks for when the feature is turned on.
+    private var backupsSection: some View {
+        Section("Backups") {
+            NavigationLink(value: Route.automatic) {
+                ServerRow(title: "Automatic Mode", symbol: "bolt.fill", value: automaticValue)
             }
+            .accessibilityIdentifier("settings.automatic")
+            .sidebarRow(Route.automatic)
+            NavigationLink(value: Route.connectors) {
+                ServerRow(title: "Cloud Copies", symbol: "icloud.and.arrow.up", value: cloudValue)
+            }
+            .disabled(!model.settings.isPaired)
+            .accessibilityIdentifier("settings.connectors")
+            .sidebarRow(Route.connectors)
         }
         .listRowBackground(Theme.card)
     }
@@ -322,7 +277,7 @@ struct ServerTab: View {
         case .existingLibrary: ExistingLibraryView(model: model)
         case .immich: ImmichConnectView(settings: settings).homespunList()
         case .automatic: AutomaticModeView(model: model)
-        case .connectors: ConnectorsView(settings: settings)
+        case .connectors: ConnectorsView(settings: settings, premium: model.premium) { cloud = $0 }
         case .compactCopies: CompactCopiesView(server: settings.server)
         case .devices: DevicesView(settings: settings, rename: { path.append(.deviceName) }) { path.append(.addDevice) }
         case .deviceName: DeviceNameView(settings: settings) { updated in
@@ -355,17 +310,13 @@ struct ServerTab: View {
         return "Not set up"
     }
 
-    private var automaticDetail: String {
-        guard model.settings.isPaired else { return "Pair a server first." }
-        guard model.automatic.enabled else { return "Off" }
-        if let run = model.history.runs.first(where: { $0.kind == .backUp && $0.trigger == .automatic }) {
-            let when = run.title().replacingOccurrences(of: " · automatic", with: "")
-            return "\(when): \(run.count(.saved)) backed up"
-        }
-        return "Next run tonight while charging"
+    private var automaticValue: String {
+        let automatic = model.automatic
+        return AutomaticMode.status(on: automatic.enabled && model.premium.isUnlocked, lastRun: automatic.state.lastRun)
     }
 
     private var cloudValue: String? {
+        guard model.settings.isPaired else { return "Off" }
         guard let cloud else { return nil }
         let on = cloud.filter(\.enabled).map(\.name)
         return on.isEmpty ? "Off" : on.joined(separator: ", ")
@@ -389,11 +340,10 @@ struct ServerTab: View {
             if model.settings.serverStatus == .unknown { await model.settings.refreshServerInfo() }
             return
         }
-        let wantsCloud = model.premium.isUnlocked
         async let storage = try? client.storage()
         async let report = try? client.setup()
         async let devices = try? client.devices()
-        async let cloud = wantsCloud ? try? client.connectors() : nil
+        async let cloud = try? client.connectors()
         let (newStorage, newReport, newDevices, newCloud) = await (storage, report, devices, cloud)
         self.storage = newStorage ?? self.storage
         checks = newReport?.checks ?? checks

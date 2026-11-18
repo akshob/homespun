@@ -117,6 +117,10 @@ and the Get Started card open the Library to pick a few items to try.
   or the server can't be reached). Tapping one opens that place in the app. Locked, they say
   "Unlock widgets in the Homespun app" and open the unlock sheet (`homespun://unlock?feature=widgets`).
 
+Their pages (Server › Backups) open with or without the purchase. Turning either one on (automatic
+mode's switch, or signing in to or turning on a cloud service) asks for the purchase first, with
+Restore Purchase, then carries on; one purchase unlocks both, and the widgets too.
+
 Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
 TestFlight builds are unlocked too while the App Store has no Premium product; once it exists,
 TestFlight shows the real purchase (free in the sandbox).

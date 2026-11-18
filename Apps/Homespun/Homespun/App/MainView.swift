@@ -105,7 +105,7 @@ struct MainTabView: View {
         case freeUp(only: Set<String>?)
         case backUp([String])
         case pair(PairingLink)
-        /// A Premium feature asked for while locked (a widget's Unlock).
+        /// The purchase, from a locked widget's tap (`homespun://unlock?feature=widgets`).
         case unlock(PremiumFeature)
         var id: String {
             switch self {
@@ -160,11 +160,8 @@ struct MainTabView: View {
             case .pair(let link):
                 PairConfirmView(settings: model.settings, link: link) {}
             case .unlock(let feature):
-                PremiumFeatureSheet(feature: feature, premium: model.premium) {
-                    self.sheet = nil
-                    tab = .server
-                    model.router.serverRoute = .premium
-                }
+                // Once unlocked the widgets fill in on their own (StatusPublisher): nothing to carry on with.
+                UnlockSheet(feature: feature, premium: model.premium, server: model.library.serverName) {}
             }
         }
         .onChange(of: settings.pendingLink, initial: true) { _, link in

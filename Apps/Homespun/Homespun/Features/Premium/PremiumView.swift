@@ -89,7 +89,7 @@ struct PremiumView: View {
                         ServerRow(title: "Turn On Automatic Mode", symbol: "bolt.fill", value: nil, chevron: true)
                     }
                     Divider().overlay(Theme.separator).padding(.leading, 42)
-                    NavigationLink { ConnectorsView(settings: model.settings) } label: {
+                    NavigationLink { ConnectorsView(settings: model.settings, premium: premium) } label: {
                         ServerRow(title: "Set Up Cloud Copies", symbol: "icloud.and.arrow.up", value: nil, chevron: true)
                     }
                 }
@@ -172,10 +172,19 @@ struct PremiumView: View {
     }
 }
 
-/// A Premium feature tapped while locked (`widgets`: from a widget's `homespun://unlock?feature=widgets`).
+/// A feature the one-time purchase unlocks (all of them, whichever comes first). Widgets ask from
+/// their own link (`homespun://unlock?feature=widgets`).
 enum PremiumFeature: String, Identifiable {
     case automatic, cloudCopies, widgets
     var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .automatic: "Automatic Mode"
+        case .cloudCopies: "Cloud Copies"
+        case .widgets: "Widgets"
+        }
+    }
 
     var symbol: String {
         switch self {
@@ -184,77 +193,98 @@ enum PremiumFeature: String, Identifiable {
         case .widgets: "square.grid.2x2"
         }
     }
-
-    var title: String {
-        switch self {
-        case .automatic: "Automatic mode is part of Premium"
-        case .cloudCopies: "Cloud copies are part of Premium"
-        case .widgets: "Unlock widgets"
-        }
-    }
-
-    var explanation: String {
-        switch self {
-        case .automatic:
-            "New photos back up on their own, usually overnight while charging. Homespun tells you when there's space "
-                + "to free up."
-        case .cloudCopies:
-            "Your server also copies each original to OneDrive, as an extra backup. Freeing up space still depends only "
-                + "on your server's own copy."
-        case .widgets:
-            "See what's ready to free up, your last backup and your server at a glance, on your Home Screen, Lock "
-                + "Screen and Apple Watch. Unlocked with the same one-time purchase as automatic mode and cloud copies."
-        }
-    }
 }
 
-/// Explains the one feature tapped, in a medium sheet (05·1.2).
-struct PremiumFeatureSheet: View {
+/// Turning on automatic mode or cloud copies before the purchase, or a locked widget's tap (DESIGN
+/// 05·1.2): what it does, the price, and Restore Purchase. One purchase unlocks them all. `unlocked`
+/// runs once it's unlocked, so the presenter carries on with what the person started after the sheet
+/// has closed.
+struct UnlockSheet: View {
     let feature: PremiumFeature
     let premium: Premium
-    var seeAll: () -> Void
+    var server = "Your server"
+    var unlocked: () -> Void
     @State private var working = false
     @State private var message: String?
+    @State private var finished = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {
-                    Image(systemName: feature.symbol)
-                        .font(.system(size: 36)).foregroundStyle(Theme.accent).accessibilityHidden(true)
-                    Text(feature.title)
+                    Image(systemName: feature.symbol).font(.system(size: 32)).foregroundStyle(Theme.accent)
+                        .accessibilityHidden(true)
+                    Text(feature == .widgets ? "Unlock Widgets" : "Turn On \(feature.name)")
                         .font(.title2.weight(.semibold)).foregroundStyle(Theme.label).multilineTextAlignment(.center)
                         .accessibilityAddTraits(.isHeader)
-                        .accessibilityIdentifier("premium.feature.title")
-                    Text(feature.explanation)
+                    Text(explanation)
                         .font(.subheadline).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
+                    Text("A one-time purchase unlocks Automatic Mode, Cloud Copies and widgets, on all your devices "
+                         + "with this Apple Account.")
+                        .font(.subheadline).foregroundStyle(Theme.label).multilineTextAlignment(.center)
+                        .accessibilityIdentifier("unlock.both")
+                    if !premium.loading && premium.product == nil {
+                        Text("The App Store isn't available right now.").font(.footnote)
+                            .foregroundStyle(Theme.secondaryLabel)
+                    }
                     Button { Task { await buy() } } label: {
-                        BusyLabel(title: premium.product.map { "Unlock · \($0.displayPrice)" } ?? "Unlock", busy: working)
+                        BusyLabel(title: premium.product.map { "Unlock for \($0.displayPrice)" } ?? "Unlock", busy: working)
                             .frame(maxWidth: .infinity)
                     }
                     .primaryAction()
                     .disabled(working || premium.product == nil)
                     .padding(.top, 6)
-                    .accessibilityIdentifier("premium.feature.buy")
-                    Button("See Everything in Premium", action: seeAll)
+                    .accessibilityIdentifier("unlock.buy")
+                    Button("Restore Purchase") { Task { await restore() } }
                         .tint(Theme.accent)
-                        .accessibilityIdentifier("premium.seeAll")
-                    if let message { Text(message).font(.footnote).foregroundStyle(Theme.secondaryLabel) }
+                        .disabled(working)
+                        .accessibilityIdentifier("unlock.restore")
+                    if let message {
+                        Text(message).font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
+                            .accessibilityIdentifier("unlock.message")
+                    }
                 }
                 .padding(.horizontal, 24)
+                .padding(.bottom, 20)
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button { dismiss() } label: { Label("Close", systemImage: "xmark") }
+                        .accessibilityIdentifier("unlock.close")
                 }
             }
         }
         .presentationDetents([.medium, .large])
         .task {
-            Telemetry.shared.record(.premium("shown"))
+            Telemetry.shared.record(.premium("shown.\(feature.rawValue)"))
             await premium.load()
         }
+        // Bought, restored, approved (Ask to Buy) or found owned while open: carry on.
+        .onChange(of: premium.isUnlocked) { _, isUnlocked in
+            if isUnlocked { finish() }
+        }
+    }
+
+    private var explanation: String {
+        switch feature {
+        case .automatic:
+            "New photos and videos back up on their own, usually overnight while this iPhone charges. Homespun "
+                + "tells you when there's space to free up; you still choose when."
+        case .cloudCopies:
+            "\(server) also copies each original to OneDrive, as an extra backup. Freeing up space still depends "
+                + "only on \(server)'s own copy."
+        case .widgets:
+            "What's ready to free up, your last backup and your server at a glance, on your Home Screen, Lock "
+                + "Screen and Apple Watch."
+        }
+    }
+
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        unlocked()
+        dismiss()
     }
 
     private func buy() async {
@@ -264,10 +294,23 @@ struct PremiumFeatureSheet: View {
             let outcome = try await premium.purchase()
             Telemetry.shared.record(.premium("purchase", outcome: String(describing: outcome)))
             switch outcome {
-            case .purchased: dismiss()
-            case .pending: message = "Waiting for approval. Premium unlocks when it's approved."
+            case .purchased:
+                Announce.say("Unlocked.")
+                finish()
+            case .pending: message = "Waiting for approval. Once it's approved, turn it on again."
             case .cancelled: break
             }
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
+    private func restore() async {
+        working = true
+        defer { working = false }
+        do {
+            try await premium.restore()
+            if premium.isUnlocked { finish() } else { message = "This Apple Account hasn't bought it yet." }
         } catch {
             message = error.localizedDescription
         }

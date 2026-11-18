@@ -257,7 +257,7 @@ final class OnboardingUITests: XCTestCase {
         let compare = app.buttons["remove.compare"].firstMatch
         XCTAssertTrue(compare.waitForExistence(timeout: 10), "no compact copies to compare")
         attach("3.1 Check the copies first")
-        compare.tap()
+        app.tapCompactCopy(compare)
         XCTAssertTrue(app.staticTexts["compare.compact"].waitForExistence(timeout: 30), "no Compare")
         attach("1.13 Compare")
         // Compare opened inside the sheet: Back returns to the review.

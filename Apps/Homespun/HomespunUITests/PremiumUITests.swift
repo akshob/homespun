@@ -1,56 +1,72 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 
-/// Without Premium, automatic mode and cloud copies explain themselves, then lead to the Premium screen; widgets'
-/// links lead to their places, or to unlocking widgets.
+/// Without the purchase (`-premiumLocked YES`), automatic mode and cloud copies look the same: their
+/// rows say whether they're on and their pages open. Turning one on asks for the purchase (with the
+/// price and Restore Purchase); closing that leaves it off. Pairs with a running server: pass
+/// `HOMESPUN_SERVER` and `HOMESPUN_PAIRING_CODE` to `xcodebuild test` with a `TEST_RUNNER_` prefix.
+/// Widgets' links need no server: a locked widget asks for the purchase, an unlocked one opens its place.
 final class PremiumUITests: XCTestCase {
-    @MainActor func testLockedFeaturesOfferPremium() throws {
+    @MainActor func testTurningOnAsksForThePurchase() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
+        }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES", "-hideTips"]
         app.launch()
+        app.pair(address: address, code: code)
+
+        // The rows: what's on, never "Premium".
         app.openTab("Server")
-        XCTAssertFalse(app.automaticToggle.waitForExistence(timeout: 3))
-        let server = XCTAttachment(screenshot: app.screenshot())
-        server.name = "Server"
-        server.lifetime = .keepAlways
-        add(server)
-        let link = app.buttons["automatic.premium"]
-        _ = link.waitForExistence(timeout: 5)
-        XCTAssertTrue(app.reveal(link), "automatic mode isn't offered")
-        link.tap()
-        let seeAll = app.buttons["premium.seeAll"]
-        // A busy simulator can drop the first tap.
-        if !seeAll.waitForExistence(timeout: 10), link.exists { link.tap() }
-        XCTAssertTrue(seeAll.waitForExistence(timeout: 20), "no sheet about the locked feature")
-        XCTAssertTrue(app.buttons["premium.feature.buy"].exists)
-        let sheet = XCTAttachment(screenshot: app.screenshot())
-        sheet.name = "Locked feature"
-        sheet.lifetime = .keepAlways
-        add(sheet)
-        seeAll.tap()
-        XCTAssertTrue(app.buttons["premium.restore"].waitForExistence(timeout: 10), "no Premium screen")
-        XCTAssertTrue(app.buttons["premium.buy"].exists)
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Premium"
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
+        let automatic = app.buttons["settings.automatic"], cloud = app.buttons["settings.connectors"]
+        XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
+        XCTAssertTrue(app.reveal(automatic), "no Automatic Mode row")
+        for (row, title) in [(automatic, "Automatic Mode"), (cloud, "Cloud Copies")] {
+            // Cloud copies' status comes from the server.
+            let off = NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH 'Off'", title)
+            let deadline = Date().addingTimeInterval(15)
+            while !off.evaluate(with: row), Date() < deadline { usleep(250_000) }
+            XCTAssertTrue(off.evaluate(with: row), row.label)
+            XCTAssertFalse(row.label.contains("Premium"), row.label)
+        }
+        attach(app, "Server")
+
+        // Automatic Mode: its switch asks for the purchase before anything else; Close leaves it off.
+        app.openAutomaticMode()
+        let toggle = app.automaticToggle
+        XCTAssertEqual(toggle.value as? String, "0")
+        attach(app, "Automatic Mode")
+        app.tapSwitch(toggle)
+        expectUnlockSheet(app, title: "Turn On Automatic Mode")
+        XCTAssertEqual(toggle.value as? String, "0", "on without the purchase")
+        XCTAssertFalse(app.buttons["Everything not backed up yet"].exists, "asked what to back up without the purchase")
+        app.goBack(from: "Automatic Mode")
+
+        // Cloud Copies: signing in to a service asks for the purchase; Close doesn't start signing in.
+        XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
+        cloud.tap()
+        let oneDrive = app.buttons["connector.onedrive"]
+        XCTAssertTrue(oneDrive.waitForExistence(timeout: 15), "no OneDrive on the Cloud Copies page")
+        attach(app, "Cloud Copies")
+        oneDrive.tap()
+        let signIn = app.buttons["connector.signIn"]
+        XCTAssertTrue(signIn.waitForExistence(timeout: 10), "no Sign In")
+        signIn.tap()
+        expectUnlockSheet(app, title: "Turn On Cloud Copies")
+        XCTAssertFalse(app.descendants(matching: .any)["signIn.code"].waitForExistence(timeout: 3),
+                       "signing in started without the purchase")
+        XCTAssertTrue(signIn.exists)
     }
 
-    /// A locked widget's tap (homespun://unlock?feature=widgets) asks to unlock widgets.
-    @MainActor func testWidgetUnlockLinkOffersPremium() throws {
+    /// A locked widget's tap (homespun://unlock?feature=widgets) asks for the purchase.
+    @MainActor func testWidgetUnlockLinkAsksForThePurchase() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES", "-hideTips"]
         app.launch()
         XCTAssertTrue(app.hasTab("Library"))
         app.open(URL(string: "homespun://unlock?feature=widgets")!)
-        let title = app.staticTexts["premium.feature.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 20), "no sheet about widgets")
-        XCTAssertEqual(title.label, "Unlock widgets")
-        XCTAssertTrue(app.buttons["premium.feature.buy"].exists)
-        let sheet = XCTAttachment(screenshot: app.screenshot())
-        sheet.name = "Unlock widgets"
-        sheet.lifetime = .keepAlways
-        add(sheet)
+        expectUnlockSheet(app, title: "Unlock Widgets")
     }
 
     /// An unlocked widget's taps open their places: Activity, and Automatic Mode in the Server tab.
@@ -65,7 +81,26 @@ final class PremiumUITests: XCTestCase {
         let selected = expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: activity)
         wait(for: [selected], timeout: 20)
         app.open(URL(string: "homespun://automatic")!)
-        XCTAssertTrue(app.descendants(matching: .any)["automatic.page.toggle"].waitForExistence(timeout: 20),
-                      "Automatic Mode didn't open")
+        XCTAssertTrue(app.automaticToggle.waitForExistence(timeout: 20), "Automatic Mode didn't open")
+    }
+
+    /// The sheet: the feature, that one purchase unlocks them all, buy and restore; then Close.
+    @MainActor private func expectUnlockSheet(_ app: XCUIApplication, title: String,
+                                              file: StaticString = #filePath, line: UInt = #line) {
+        let buy = app.buttons["unlock.buy"]
+        XCTAssertTrue(buy.waitForExistence(timeout: 10), "turning it on didn't ask for the purchase", file: file, line: line)
+        XCTAssertTrue(app.staticTexts[title].exists, "no \(title)", file: file, line: line)
+        XCTAssertTrue(app.staticTexts["unlock.both"].exists, file: file, line: line)
+        XCTAssertTrue(app.buttons["unlock.restore"].exists, "no Restore Purchase", file: file, line: line)
+        attach(app, title)
+        app.buttons["unlock.close"].tap()
+        XCTAssertTrue(buy.waitForNonExistence(timeout: 10), "the sheet didn't close", file: file, line: line)
+    }
+
+    @MainActor private func attach(_ app: XCUIApplication, _ name: String) {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = name
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 }

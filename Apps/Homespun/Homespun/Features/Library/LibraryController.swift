@@ -99,7 +99,7 @@ final class LibraryController {
         started = true
         library.onChange = { @MainActor [weak self] in Task { await self?.refreshGrid() } }
         await refresh()
-        // Only what this Apple Account owns; the product itself loads on the Premium screen.
+        // Only what this Apple Account owns; the product itself loads where the purchase is offered.
         await premium.refresh()
         loaded()
         await runAutomatic()
