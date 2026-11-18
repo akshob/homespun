@@ -613,12 +613,16 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             PerfMonitor.shared.begin("open")
             self.openViewer(at: position, details: pending.details)
         }
-        if let animator { animator.addCompletion(open) } else { DispatchQueue.main.async(execute: open) }
+        if let animator {
+            animator.addCompletion { DispatchQueue.main.async(execute: open) }
+        } else {
+            DispatchQueue.main.async(execute: open)
+        }
     }
 
     private func openViewer(at position: Int, details: Bool = false) {
         guard presentedViewer == nil, presentedViewController == nil, data.cells.indices.contains(position),
-              view.window != nil else { return }
+              let presenter = view.window?.rootViewController, presenter.presentedViewController == nil else { return }
         resizeAnchor = nil
         let id = data.cells[position].id
         let viewer = actions.viewer(id, data.ids, details)
@@ -657,7 +661,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         presentedViewer = viewer
         startBehindProbe()
         ItemViewerPresence.shared.opened(viewer)
-        present(viewer, animated: true)
+        // The entire app is the presenter, including its tabs and floating accessory.
+        presenter.present(viewer, animated: true)
     }
 
     /// UIKit asks again at dismissal, when paging may have changed the item shown.
