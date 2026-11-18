@@ -216,7 +216,7 @@ final class DuoLayoutUITests: XCTestCase {
         app.buttons["details.done"].tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5), "\(pose): Details didn't close")
         app.closeItem()
-        XCTAssertEqual(app.tabFrames(), tabs, "\(pose): closing the viewer changed the tabs")
+        app.assertTabFrames(tabs)
         let monitor = app.descendants(matching: .any)["perf.monitor"].firstMatch
         if monitor.exists {
             XCTAssertEqual(app.behind().changes, 0, "\(pose): the app behind the viewer changed")

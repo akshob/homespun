@@ -20,6 +20,7 @@ struct GridInput {
     var density: Int
     /// Bumped to bring the newest items (the Library tab tapped again, Select mode's Newest).
     var newest: Int
+    var accessoryInset: CGFloat
     /// What's above the first month (the notice, or the empty state), and what it says, so it's
     /// measured again only when that changes.
     var notice: AnyView
@@ -76,7 +77,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var noticeMeasured: (key: String, width: CGFloat, category: UIContentSizeCategory)?
     /// The grid has been put at the newest items (or the top) once.
     private var placed = false
-    /// At the newest end: stays there when the items, the width or the bars change.
+    /// At the newest end: stays there when the items or the width change, not when an overlay changes.
     private var pinned = true
     /// Where a pinch ended, to keep the item under it in place when the columns change.
     private var pinchPoint: CGPoint?
@@ -96,6 +97,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var lastOffset: CGFloat = 0
     private var tracking = false
     private var appeared = false
+    private var viewportSize = CGSize.zero
     private var behindProbe: BehindProbe?
     private weak var presentedViewer: ItemViewerController?
     private var openedPosition: Int?
@@ -133,6 +135,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                                 withReuseIdentifier: MonthHeaderView.reuse)
         collectionView.accessibilityIdentifier = "grid"
         self.collectionView = collectionView
+        collectionView.contentInset.bottom = input.accessoryInset
         view = collectionView
         installGestures()
     }
@@ -211,6 +214,15 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         let old = input
         input = new
         self.actions = actions
+        if new.accessoryInset != old.accessoryInset {
+            let offset = collectionView.contentOffset
+            collectionView.contentInset.bottom = new.accessoryInset
+            collectionView.contentOffset = offset
+            if placed {
+                pinned = isFront && abs(offset.y - offsetRange.upperBound) < 1
+                _ = currentPlace()
+            }
+        }
         if new.noticeKey != old.noticeKey {
             noticeHost.rootView = new.notice
             noticeMeasured = nil
@@ -302,8 +314,11 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     /// A new width, column count, text size or notice: a new geometry, with the place kept.
     private func relayout() {
-        guard let metrics = metrics(), metrics != layout.geometry.metrics || !placed && data.ids.count > 0 else { return }
-        let place = heldPlace() ?? currentPlace(at: pinchPoint)
+        let size = collectionView.bounds.size
+        let resized = size != viewportSize
+        guard let metrics = metrics(), metrics != layout.geometry.metrics || resized || !placed && data.ids.count > 0 else { return }
+        let place = heldPlace() ?? (resized && viewportSize != .zero ? (pinned ? .newest : lastPlace) : currentPlace(at: pinchPoint))
+        viewportSize = size
         held = (place, CACurrentMediaTime() + 1)
         pinchPoint = nil
         let before = pixels
@@ -330,14 +345,13 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             : noticeHost.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude)).height.rounded(.up)
     }
 
-    /// The bars' insets. While an item is open over the grid, the grid is out of the window and has
-    /// none; it keeps the ones it had, so following the viewer's item uses the same visible area.
+    /// Keep the last insets while UIKit detaches the grid for a cover or a fold.
     private var insets: UIEdgeInsets {
         if collectionView.window != nil, isFront { lastInsets = collectionView.adjustedContentInset }
         return lastInsets
     }
 
-    /// Whether the Library is in the window, rather than covered by a full-screen presentation.
+    /// The over-full-screen viewer leaves the Library in place; other covers can detach it.
     private var isFront = true
 
     private var lastInsets = UIEdgeInsets.zero

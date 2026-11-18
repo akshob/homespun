@@ -199,15 +199,7 @@ final class GridScrollUITests: XCTestCase {
                 }
                 let deadline = Date().addingTimeInterval(1.5)
                 repeat {
-                    let now = app.tabFrames()
-                    XCTAssertEqual(Set(now.keys), Set(frames.keys), "\(name), \(close): tabs disappeared")
-                    for (title, frame) in frames {
-                        guard let actual = now[title] else { continue }
-                        XCTAssertEqual(actual.minX, frame.minX, accuracy: 0.5)
-                        XCTAssertEqual(actual.minY, frame.minY, accuracy: 0.5)
-                        XCTAssertEqual(actual.width, frame.width, accuracy: 0.5)
-                        XCTAssertEqual(actual.height, frame.height, accuracy: 0.5)
-                    }
+                    app.assertTabFrames(frames)
                 } while Date() < deadline
                 XCTAssertTrue(viewer.waitForNonExistence(timeout: 3))
                 let after = report()
@@ -230,6 +222,15 @@ final class GridScrollUITests: XCTestCase {
               let code = environment["HOMESPUN_PAIRING_CODE"] else {
             throw XCTSkip("Needs ci/ui.sh's stoppable test server.")
         }
+        addTeardownBlock {
+            try "online".write(toFile: control, atomically: true, encoding: .utf8)
+            for _ in 0..<200 {
+                if (try? String(contentsOfFile: control + ".ack", encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == "online" { return }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            XCTFail("the test server didn't restart")
+        }
         try launch(checkServer: true)
         app.pair(address: address, code: code)
         app.openTab("Library")
@@ -246,7 +247,9 @@ final class GridScrollUITests: XCTestCase {
                 if middle {
                     // XCTest's open-Duo swipes are unreliable; scroll folded, then reopen.
                     if poses != nil { pose("folded"); sleep(3) }
-                    for _ in 0..<3 { swipe(by: 250) }
+                    let range = report()
+                    let distance = min(250, (range.value("grid.bottom") - range.value("grid.top")) / 6)
+                    for _ in 0..<3 { drag(by: CGFloat(distance)) }
                     if poses != nil { pose(name); sleep(3) }
                 } else {
                     for _ in 0..<2 { app.tab("Library").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
@@ -280,7 +283,7 @@ final class GridScrollUITests: XCTestCase {
                     print("STATUS \(name) middle=\(middle) \(wanted): offset \(before.value("grid.offset")) -> \(after.value("grid.offset"))")
                     XCTAssertEqual(after.value("grid.offset"), before.value("grid.offset"), accuracy: 0.5)
                     XCTAssertEqual(after.value("grid.bounces"), before.value("grid.bounces"))
-                    XCTAssertEqual(app.tabFrames(), tabs)
+                    app.assertTabFrames(tabs)
                     XCTAssertEqual(app.screenTitle("Library").frame, title)
                     XCTAssertEqual(cells.map(\.frame), frames, "server status moved the visible cells")
                 }

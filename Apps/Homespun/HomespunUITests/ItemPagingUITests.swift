@@ -119,8 +119,15 @@ final class ItemPagingUITests: XCTestCase {
         viewer.swipeRight()
         sleep(1)
         XCTAssertEqual(position(viewer)?.index, shown + 1, "a swipe paged while zoomed in")
+        viewer.swipeDown()
+        XCTAssertTrue(viewer.exists, "a downward pan dismissed a zoomed photo")
+        XCTAssertEqual(position(viewer)?.index, shown + 1)
         app.shownPage().doubleTap()
         XCTAssertTrue(state.waitForExistence(timeout: 5), "didn't zoom out")
+        let start = viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 35)),
+                    withVelocity: .slow, thenHoldForDuration: 0.4)
+        XCTAssertTrue(viewer.exists, "a short downward drag didn't cancel")
         viewer.swipeRight()
         check(app, viewer, at: shown, "zoomed out, 1 back")
     }

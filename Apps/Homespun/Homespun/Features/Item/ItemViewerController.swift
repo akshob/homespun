@@ -38,8 +38,11 @@ final class ItemViewerController: UIHostingController<ItemViewerScreen> {
         self.state = state
         super.init(rootView: ItemViewerScreen(model: model, state: state, showsTips: showsTips))
         state.host = self
-        modalPresentationStyle = .fullScreen
+        // Full-screen removal changes the presenter's insets before it returns to the window.
+        modalPresentationStyle = .overFullScreen
+        modalPresentationCapturesStatusBarAppearance = true
         view.backgroundColor = .black
+        view.accessibilityViewIsModal = true
     }
 
     @available(*, unavailable)

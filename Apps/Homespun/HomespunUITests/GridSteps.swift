@@ -76,6 +76,18 @@ extension XCUIApplication {
         })
     }
 
+    @MainActor func assertTabFrames(_ before: [String: CGRect], file: StaticString = #filePath, line: UInt = #line) {
+        let now = tabFrames()
+        XCTAssertEqual(Set(now.keys), Set(before.keys), "tabs disappeared", file: file, line: line)
+        for (title, frame) in before {
+            guard let actual = now[title] else { continue }
+            XCTAssertEqual(actual.minX, frame.minX, accuracy: 0.5, title, file: file, line: line)
+            XCTAssertEqual(actual.minY, frame.minY, accuracy: 0.5, title, file: file, line: line)
+            XCTAssertEqual(actual.width, frame.width, accuracy: 0.5, title, file: file, line: line)
+            XCTAssertEqual(actual.height, frame.height, accuracy: 0.5, title, file: file, line: line)
+        }
+    }
+
     @MainActor func behind() -> (changes: Double, samples: Double) {
         var values: [String: Double] = [:]
         for part in descendants(matching: .any)["perf.monitor"].firstMatch.label.split(separator: ";") {
@@ -303,7 +315,7 @@ extension XCUIApplication {
                       file: file, line: line)
         buttons["select.start"].tap()
         // In the grid's order (oldest first).
-        let all = candidates.allElementsBoundByIndex.filter { isOnScreen($0) }
+        let all = candidates.allElementsBoundByIndex.filter { isOnScreen($0) && $0.isHittable }
         let chosen = Array(newest ? all.suffix(min(count, all.count)) : all.prefix(min(count, all.count)))
         for item in chosen { item.tap() }
         XCTAssertTrue(hasScreen("\(chosen.count) Selected", timeout: 5), "selection count",

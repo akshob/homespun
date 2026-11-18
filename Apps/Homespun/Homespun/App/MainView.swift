@@ -145,11 +145,13 @@ struct MainTabView: View {
             .accessibilityIdentifier("tab.library")
             Tab("Activity", systemImage: "clock.arrow.circlepath", value: TabID.activity) {
                 ActivityTab(model: model, freeUp: { openFreeUp(nil) })
+                    .modifier(StatusAccessoryScrollInset())
                     .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.activity")
             Tab("Server", systemImage: "server.rack", value: TabID.server) {
                 ServerTab(model: model)
+                    .modifier(StatusAccessoryScrollInset())
                     .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.server")
@@ -300,27 +302,6 @@ private struct QuitUnexpectedly: ViewModifier {
     }
 }
 
-/// The bottom accessory exists only when there's something to say (26.1 and later); on 26.0 it
-/// stays, showing a quiet summary.
-private struct StatusAccessoryModifier: ViewModifier {
-    let model: AppModel
-    let open: (StatusAccessory.Action) -> Void
-
-    func body(content: Content) -> some View {
-        let status = AccessoryLadder.pick(model.library.accessoryInputs)
-        if #available(iOS 26.1, *) {
-            // The viewer covers this without changing the tabs' layout behind it.
-            content.tabViewBottomAccessory(isEnabled: status != nil && !model.library.isSelecting) {
-                StatusAccessory(status: status, serverName: model.library.serverName, open: open)
-            }
-        } else {
-            content.tabViewBottomAccessory {
-                StatusAccessory(status: status, serverName: model.library.serverName, open: open)
-            }
-        }
-    }
-}
-
 /// One line about what matters now, above the tab bar: the highest state on the ladder
 /// (DESIGN 02·1.1, §16.4).
 struct StatusAccessory: View {
@@ -329,7 +310,6 @@ struct StatusAccessory: View {
     let status: AccessoryLadder.State?
     var serverName = "your computer"
     let open: (Action) -> Void
-    @Environment(\.tabViewBottomAccessoryPlacement) private var placement
     @Environment(\.showsTips) private var showsTips
 
     var body: some View {
@@ -376,7 +356,7 @@ struct StatusAccessory: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 0) {
                 Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                if let detail, placement != .inline {
+                if let detail {
                     Text(detail).font(.caption).foregroundStyle(Theme.secondaryLabel).lineLimit(1)
                 }
             }
