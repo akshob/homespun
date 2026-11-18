@@ -3,7 +3,7 @@ import Foundation
 import Observation
 import StoreKit
 
-/// Homespun Premium: a one-time purchase that unlocks automatic mode and cloud copies.
+/// Homespun Premium: a one-time purchase that unlocks automatic mode, cloud copies and widgets.
 /// Everything else, including freeing up space, stays free. Builds made in Xcode (Debug)
 /// are unlocked, so the owner's own builds never need a purchase, and so are TestFlight builds
 /// while the App Store has no Premium product yet.

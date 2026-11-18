@@ -30,9 +30,12 @@ struct RootView: View {
             if phase == .active { SessionMarker.shared.active() }
         }
         .onOpenURL { url in
-            guard let link = PairingLink(url) else { return }
-            // The demo pairs only with its pretend server: a link is for the person's own Homespun.
-            if settings.isDemo { linkInDemo = true } else { settings.pendingLink = link }
+            if let link = PairingLink(url) {
+                // The demo pairs only with its pretend server: a link is for the person's own Homespun.
+                if settings.isDemo { linkInDemo = true } else { settings.pendingLink = link }
+            } else if let link = AppLink(url) {
+                model.router.pending = link
+            }
         }
         .alert("You're in the demo", isPresented: $linkInDemo) {
             Button("Stay in the Demo", role: .cancel) {}
@@ -83,6 +86,7 @@ struct RootView: View {
                 wasBackground = true
                 SessionMarker.shared.background()
                 model.automatic.schedule()
+                model.status?.publishInBackground()
                 Telemetry.shared.flushInBackground()
             default: break
             }
@@ -110,11 +114,14 @@ struct MainTabView: View {
         case freeUp(only: Set<String>?)
         case backUp([String])
         case pair(PairingLink)
+        /// The purchase, from a locked widget's tap (`homespun://unlock?feature=widgets`).
+        case unlock(PremiumFeature)
         var id: String {
             switch self {
             case .freeUp: "freeUp"
             case .backUp: "backUp"
             case .pair(let link): link.id
+            case .unlock(let feature): "unlock." + feature.rawValue
             }
         }
     }
@@ -161,13 +168,21 @@ struct MainTabView: View {
                 BackUpSheet(controller: model.library, identifiers: ids) {}
             case .pair(let link):
                 PairConfirmView(settings: model.settings, link: link) {}
+            case .unlock(let feature):
+                // Once unlocked the widgets fill in on their own (StatusPublisher): nothing to carry on with.
+                UnlockSheet(feature: feature, premium: model.premium, server: model.library.serverName) {}
             }
         }
         .onChange(of: settings.pendingLink, initial: true) { _, link in
             if let link { sheet = .pair(link) }
         }
+        .onChange(of: model.router.pending, initial: true) { _, link in
+            guard let link else { return }
+            model.router.pending = nil
+            open(link)
+        }
         .task {
-            await model.library.start()
+            await model.library.start { model.status?.start() }
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-deleteNewestBackedUp") {
                 await model.library.deleteNewestBackedUpForTesting()
@@ -181,6 +196,29 @@ struct MainTabView: View {
     /// layout, never its presentation (that would interrupt a removal).
     private func openFreeUp(_ scope: Set<String>?) {
         if sizeClass == .regular { cover = .freeUp(scope) } else { sheet = .freeUp(only: scope) }
+    }
+
+    /// Where a widget's link leads.
+    private func open(_ link: AppLink) {
+        switch link {
+        case .freeUp: openFreeUp(nil)
+        case .activity: tab = .activity
+        case .server: tab = .server
+        case .automatic:
+            tab = .server
+            model.router.serverRoute = .automatic
+        case .unlock(let feature):
+            // Opened from a widget at launch: Premium may not have been checked yet.
+            Task {
+                await model.premium.refresh()
+                if model.premium.isUnlocked {
+                    tab = .server
+                    model.router.serverRoute = .premium
+                } else {
+                    sheet = .unlock(PremiumFeature(rawValue: feature) ?? .widgets)
+                }
+            }
+        }
     }
 
     private func openFromAccessory(_ action: StatusAccessory.Action) {

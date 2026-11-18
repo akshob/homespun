@@ -30,7 +30,13 @@ and may not exist in other checkouts.
     history, original removal, copy finder). No views.
   - `Services/`: PhotoKit, server client and discovery, Keychain, telemetry, diagnostics, performance monitor.
   - `DesignSystem/`: theme, shared controls, adaptive layout (grid columns, `SplitNavigation`).
-  - `Support/` (Objective-C bridging) and `Resources/` (app icon, privacy manifest).
+  - `Support/` (Objective-C bridging) and `Resources/` (app icon, privacy manifest, entitlements).
+- Next to it: `Shared/` (the widgets' status, `StatusSnapshot`, and its words: compiled into the app, the
+  widgets and the watch app), `Widgets/` (the WidgetKit widget, one source for the iPhone's
+  `HomespunWidgets` and the watch's `HomespunWatchWidgets`), `HomespunWatch/` (the watch app) and
+  `HomespunWidgetTests/` (every widget size drawn). The widgets never use the network; they show what the
+  app last wrote into the App Group `group.$(HOMESPUN_BUNDLE_ID)`. Widget and watch targets get bundle IDs
+  under the app's (`.widgets`, `.watchkitapp`, `.watchkitapp.widgets`) and the same version.
 - Everything is Swift. Do not add Python, Node, or shell pipelines to the product.
 - `site/` is the homespun.photos website: static HTML and CSS only (no JavaScript, no
   third-party assets or analytics; `_headers` sets a strict CSP). The privacy policy there
@@ -83,7 +89,8 @@ and may not exist in other checkouts.
   the viewer's pages show `LibraryModel.item` (`any LibraryItem`). New PhotoKit calls go behind
   `PhotoSource`, so the demo never touches the person's library.
 - The demo's model keeps its own settings (`photos.homespun.demo`), folder (`Homespun Demo`), token and
-  records; it never writes the person's settings, Keychain, TipKit tips or analytics (`Telemetry.paused`),
+  records; it never writes the person's settings, Keychain, TipKit tips, widgets or watch status (its
+  `AppModel.status` is nil) or analytics (`Telemetry.paused`),
   never asks iOS for a permission, and pairs only with its pretend server. Leave the Demo deletes it all.
 - The demo changes nothing for real: its deletions ask in-app, say so, and remove only from the demo.
 

@@ -46,6 +46,10 @@ struct PremiumView: View {
                 feature("icloud.and.arrow.up", "Cloud copies",
                         "\(server) also copies each original to OneDrive (Google Photos and others later), as an extra "
                             + "backup.")
+                Divider().overlay(Theme.separator)
+                feature(PremiumFeature.widgets.symbol, "Widgets",
+                        "What's ready to free up, your last backup and your server at a glance, on your Home Screen, "
+                            + "Lock Screen and Apple Watch.")
             }
             .card()
             feature("checkmark.circle", "Always free",
@@ -77,7 +81,8 @@ struct PremiumView: View {
             Image(systemName: "checkmark.circle.fill").font(.system(size: 48)).foregroundStyle(Theme.teal)
                 .accessibilityHidden(true)
             Text("Premium unlocked").displayTitle().accessibilityAddTraits(.isHeader)
-            Text("Thank you. Both features are ready when you are.").foregroundStyle(Theme.secondaryLabel)
+            Text("Thank you. Automatic mode, cloud copies and widgets are ready when you are.")
+                .foregroundStyle(Theme.secondaryLabel)
             if let model {
                 VStack(spacing: 0) {
                     NavigationLink { AutomaticModeView(model: model) } label: {
@@ -167,18 +172,33 @@ struct PremiumView: View {
     }
 }
 
-/// A feature the one-time purchase unlocks (both of them, whichever is turned on first).
+/// A feature the one-time purchase unlocks (all of them, whichever comes first). Widgets ask from
+/// their own link (`homespun://unlock?feature=widgets`).
 enum PremiumFeature: String, Identifiable {
-    case automatic, cloudCopies
+    case automatic, cloudCopies, widgets
     var id: String { rawValue }
 
-    var name: String { self == .automatic ? "Automatic Mode" : "Cloud Copies" }
-    var symbol: String { self == .automatic ? "bolt.fill" : "icloud.and.arrow.up" }
+    var name: String {
+        switch self {
+        case .automatic: "Automatic Mode"
+        case .cloudCopies: "Cloud Copies"
+        case .widgets: "Widgets"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .automatic: "bolt.fill"
+        case .cloudCopies: "icloud.and.arrow.up"
+        case .widgets: "square.grid.2x2"
+        }
+    }
 }
 
-/// Turning on automatic mode or cloud copies before the purchase (DESIGN 05·1.2): what it does, the
-/// price, and Restore Purchase. One purchase unlocks both. `unlocked` runs once it's unlocked, so
-/// the presenter carries on with what the person started after the sheet has closed.
+/// Turning on automatic mode or cloud copies before the purchase, or a locked widget's tap (DESIGN
+/// 05·1.2): what it does, the price, and Restore Purchase. One purchase unlocks them all. `unlocked`
+/// runs once it's unlocked, so the presenter carries on with what the person started after the sheet
+/// has closed.
 struct UnlockSheet: View {
     let feature: PremiumFeature
     let premium: Premium
@@ -195,17 +215,13 @@ struct UnlockSheet: View {
                 VStack(spacing: 14) {
                     Image(systemName: feature.symbol).font(.system(size: 32)).foregroundStyle(Theme.accent)
                         .accessibilityHidden(true)
-                    Text("Turn On \(feature.name)")
+                    Text(feature == .widgets ? "Unlock Widgets" : "Turn On \(feature.name)")
                         .font(.title2.weight(.semibold)).foregroundStyle(Theme.label).multilineTextAlignment(.center)
                         .accessibilityAddTraits(.isHeader)
-                    Text(feature == .automatic
-                         ? "New photos and videos back up on their own, usually overnight while this iPhone charges. "
-                            + "Homespun tells you when there's space to free up; you still choose when."
-                         : "\(server) also copies each original to OneDrive, as an extra backup. Freeing up space "
-                            + "still depends only on \(server)'s own copy.")
+                    Text(explanation)
                         .font(.subheadline).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
-                    Text("A one-time purchase unlocks Automatic Mode and Cloud Copies, on all your devices with this "
-                         + "Apple Account.")
+                    Text("A one-time purchase unlocks Automatic Mode, Cloud Copies and widgets, on all your devices "
+                         + "with this Apple Account.")
                         .font(.subheadline).foregroundStyle(Theme.label).multilineTextAlignment(.center)
                         .accessibilityIdentifier("unlock.both")
                     if !premium.loading && premium.product == nil {
@@ -247,6 +263,20 @@ struct UnlockSheet: View {
         // Bought, restored, approved (Ask to Buy) or found owned while open: carry on.
         .onChange(of: premium.isUnlocked) { _, isUnlocked in
             if isUnlocked { finish() }
+        }
+    }
+
+    private var explanation: String {
+        switch feature {
+        case .automatic:
+            "New photos and videos back up on their own, usually overnight while this iPhone charges. Homespun "
+                + "tells you when there's space to free up; you still choose when."
+        case .cloudCopies:
+            "\(server) also copies each original to OneDrive, as an extra backup. Freeing up space still depends "
+                + "only on \(server)'s own copy."
+        case .widgets:
+            "What's ready to free up, your last backup and your server at a glance, on your Home Screen, Lock "
+                + "Screen and Apple Watch."
         }
     }
 

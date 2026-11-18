@@ -47,8 +47,8 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 
 | Script | Does |
 |---|---|
-| `build.sh` | release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it) |
-| `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access |
+| `build.sh` | release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it); the app embeds its widgets and the Apple Watch app, so this also builds for the watchOS simulator (Xcode's watchOS SDK; no watch simulator runs) |
+| `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access, and the widgets' (`HomespunWidgetTests`, every size drawn) |
 | `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DUO_POSES=1`, `STUB_PORT=`; `SERVERLESS=1`: no server and no Photos access, for the demo) |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
 | `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `RETRY_UI=1` retries a failed run once |

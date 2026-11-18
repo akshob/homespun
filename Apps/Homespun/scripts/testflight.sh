@@ -1,8 +1,8 @@
 #!/bin/zsh
-# Builds Homespun for the App Store and uploads it to TestFlight, signing in the cloud with an App
-# Store Connect API key (Admin). Works over SSH: the archive is unsigned (a development certificate
-# would need the login keychain), and the export is signed with Apple's cloud-managed distribution
-# certificate. Run on a Mac with Xcode and XcodeGen:
+# Builds Homespun (with its widgets and the Apple Watch app) for the App Store and uploads it to
+# TestFlight, signing in the cloud with an App Store Connect API key (Admin). Works over SSH: the
+# archive is unsigned (a development certificate would need the login keychain), and the export is
+# signed with Apple's cloud-managed distribution certificate. Run on a Mac with Xcode and XcodeGen:
 #
 #   ASC_KEY_ID=ABC123 ASC_ISSUER_ID=69a6de7e-... Apps/Homespun/scripts/testflight.sh
 #
@@ -31,6 +31,18 @@ xcodebuild archive -project Homespun.xcodeproj -scheme Homespun -configuration R
   -destination generic/platform=iOS -archivePath $WORK/Homespun.xcarchive \
   CURRENT_PROJECT_VERSION=$BUILD CODE_SIGNING_ALLOWED=NO | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" | grep -v appintents
 [[ -d $WORK/Homespun.xcarchive ]] || exit 1
+# An unsigned bundle has no entitlements, and the export keeps only the ones it finds: sign each bundle
+# ad hoc (no certificate needed) with its own, inside out, so the App Group survives.
+APP=$WORK/Homespun.xcarchive/Products/Applications/Homespun.app
+ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' $APP/Info.plist)
+for bundle entitlements in \
+    $APP/Watch/HomespunWatch.app/PlugIns/HomespunWatchWidgets.appex HomespunWatchWidgets/HomespunWatchWidgets.entitlements \
+    $APP/Watch/HomespunWatch.app HomespunWatch/HomespunWatch.entitlements \
+    $APP/PlugIns/HomespunWidgets.appex HomespunWidgets/HomespunWidgets.entitlements \
+    $APP Homespun/Resources/Homespun.entitlements; do
+  sed "s/\$(HOMESPUN_BUNDLE_ID)/$ID/g" $entitlements > $WORK/bundle.entitlements
+  codesign --force --sign - --timestamp=none --entitlements $WORK/bundle.entitlements $bundle
+done
 # Keep the symbols: crash reports (MetricKit) are symbolicated with them (scripts/symbolicate.py).
 BUILDS=${HOMESPUN_BUILDS:-$HOME/homespun-builds}
 mkdir -p $BUILDS/$BUILD && cp -R $WORK/Homespun.xcarchive/dSYMs/. $BUILDS/$BUILD/

@@ -45,6 +45,12 @@ struct ServerTab: View {
             EmptyView()
         }
         .sheet(isPresented: $settingUp) { OnboardingView(settings: settings, library: model.library) }
+        // A widget's link to one of these pages.
+        .onChange(of: model.router.serverRoute, initial: true) { _, route in
+            guard let route else { return }
+            model.router.serverRoute = nil
+            path = [route]
+        }
     }
 
     // MARK: Paired
