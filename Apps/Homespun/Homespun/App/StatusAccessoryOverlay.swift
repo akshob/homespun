@@ -100,7 +100,7 @@ private struct AccessoryBounds: UIViewRepresentable {
             if let view = controller.viewIfLoaded, view.window === window {
                 let frame = view.convert(view.bounds, to: self)
                 if abs(frame.width - whole.width) < 1, abs(frame.height - whole.height) < 1 {
-                    usable = usable.intersection(view.convert(view.safeAreaLayoutGuide.layoutFrame, to: self))
+                    usable = usable.intersection(frame.inset(by: view.safeAreaInsets))
                 }
             }
             for child in controller.children { include(child) }

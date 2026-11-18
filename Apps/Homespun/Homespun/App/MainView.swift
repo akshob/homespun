@@ -30,7 +30,7 @@ struct RootView: View {
             guard ProcessInfo.processInfo.arguments.contains("-probeServerStatus") else { return }
             while !Task.isCancelled {
                 await model.settings.refreshServerInfo()
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(5))
             }
             #endif
         }
