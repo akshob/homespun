@@ -94,6 +94,77 @@ final class DuoLayoutUITests: XCTestCase {
         attach(app, "unfolded again, Server")
     }
 
+    @MainActor func testVideosCompareSideBySide() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let poses = environment["DUO_POSE_FILE"], let address = environment["HOMESPUN_SERVER"],
+              let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Run on the open iPhone Duo with DUO_POSES=1 and a test server.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        pose("landscape", file: poses)
+        app.launch()
+        app.pair(address: address, code: code)
+        app.choose("grid.filter", "Videos")
+        let refresh = !app.gridItems().matching(NSPredicate(format: "label BEGINSWITH 'Video'")).firstMatch
+            .waitForExistence(timeout: 2)
+        if refresh { app.chooseGridSize("Large") }
+        XCTAssertEqual(app.compactNewest(1, matching: NSPredicate(format: "label BEGINSWITH 'Video'")), 1)
+
+        for name in ["landscape", "portrait"] {
+            pose(name, file: poses)
+            XCTAssertTrue(app.wait(wide: name == "landscape"), "didn't turn \(name)")
+            let offer = app.buttons["accessory.action"]
+            XCTAssertTrue(offer.waitForExistence(timeout: 10), "no Free Up offer")
+            offer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            let play = app.buttons["compare.play"]
+            if !play.waitForExistence(timeout: 5) {
+                for thumbnail in app.buttons.matching(identifier: "remove.compare").allElementsBoundByIndex {
+                    thumbnail.tap()
+                    if play.waitForExistence(timeout: 3) { break }
+                }
+            }
+            XCTAssertTrue(play.waitForExistence(timeout: 10), "no Side by Side for the video")
+            let original = app.descendants(matching: .any)["compare.image.original"]
+            let compact = app.descendants(matching: .any)["compare.image.compact"]
+            XCTAssertTrue(app.descendants(matching: .any)["compare.original"].waitForExistence(timeout: 30))
+            XCTAssertTrue(app.descendants(matching: .any)["compare.compact"].waitForExistence(timeout: 30))
+            XCTAssertTrue(original.exists && compact.exists)
+            attach(app, "\(name), videos side by side")
+            XCTAssertTrue(original.frame.maxX <= compact.frame.minX + 1 || original.frame.maxY <= compact.frame.minY + 1,
+                          "the original must come first without overlapping")
+            let screen = app.windows.firstMatch.frame
+            for pane in [original, compact] {
+                XCTAssertTrue(pane.frame.height > screen.height * 0.4 || pane.frame.width > screen.width * 0.3,
+                              "\(name): the video pane is small: \(pane.frame)")
+            }
+            play.tap()
+            XCTAssertEqual(play.label, "Pause both")
+            sleep(1)
+            play.tap()
+            XCTAssertEqual(play.label, "Play both")
+            XCTAssertFalse((app.sliders["compare.position"].value as? String ?? "").hasPrefix("0:00"),
+                           "both videos stayed at the start")
+            let sound = app.buttons["compare.sound"], heard = app.buttons["compare.sound"].value as? String
+            sound.tap()
+            XCTAssertNotEqual(sound.value as? String, heard, "Sound didn't switch sides")
+            let close = app.buttons["remove.close"]
+            close.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+            XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10))
+            let video = app.gridItems().matching(NSPredicate(format: "label BEGINSWITH 'Video'")).firstMatch
+            XCTAssertTrue(video.waitForExistence(timeout: 10))
+            video.tap()
+            XCTAssertTrue(app.buttons["item.play"].waitForExistence(timeout: 10))
+            app.buttons["item.compare"].tap()
+            XCTAssertTrue(app.buttons["compare.play"].waitForExistence(timeout: 15), "the viewer's Compare isn't side by side")
+            app.goBack()
+            app.goBack()
+            XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10))
+        }
+        app.choose("grid.filter", "Photos and Videos")
+        if refresh { app.chooseGridSize("Medium") }
+    }
+
     // MARK: - Checks
 
     /// A full row of cells runs edge to edge with only the hairline spacing between them.

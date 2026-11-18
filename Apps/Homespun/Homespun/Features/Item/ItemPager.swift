@@ -82,6 +82,7 @@ struct ItemPager: UIViewControllerRepresentable {
     let start: String
     @Binding var current: String?
     @Binding var zoomed: Bool
+    let playback: VideoPlayback
     var item: (String) -> (any LibraryItem)?
     /// VoiceOver's label for a page.
     var label: (String) -> String
@@ -101,6 +102,7 @@ struct ItemPager: UIViewControllerRepresentable {
 
     private func update(_ controller: ItemPagerController) {
         controller.item = item
+        controller.playback = playback
         controller.label = label
         let current = $current, zoomed = $zoomed
         controller.shown = { current.wrappedValue = $0 }
@@ -120,6 +122,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
 
     var item: (String) -> (any LibraryItem)? = { _ in nil }
     var label: (String) -> String = { _ in "" }
+    var playback: VideoPlayback?
     /// The page shown changed (its identifier).
     var shown: (String) -> Void = { _ in }
     /// The page shown zoomed in or back out.
@@ -144,6 +147,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     private var resizing = false
     /// Paging, for the performance monitor.
     private var moving = false
+    private var front = false
 
     init(ids: [String], start: String) {
         self.ids = ids
@@ -200,8 +204,21 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         Task { @MainActor [weak self] in self?.preload() }
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        front = true
+        refresh()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        front = false
+        playback?.pause()
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        playback?.pause()
         settled()
         images.stopCaching()
     }
@@ -257,7 +274,12 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         return cell
     }
 
-    /// A photo's page is UIKit; a video's is SwiftUI in a hosting controller, which its player needs.
+    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        (cell as? VideoPageCell)?.endDisplaying()
+    }
+
+    /// Full-size media loads only on the page shown; video playback waits until the viewer appears.
     private func configure(_ cell: UICollectionViewCell, at item: Int, item known: (any LibraryItem)? = nil) {
         guard ids.indices.contains(item) else { return }
         let id = ids[item], current = item == index, placeholder = images.image(id)
@@ -266,26 +288,9 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
                       images: images) { [weak self] zoomed in self?.zoomed(id, zoomed) }
             return
         }
-        guard let cell = cell as? VideoPageCell else { return }
-        let key = VideoPageCell.Key(id: id, current: current, label: label(id), placeholder: placeholder != nil)
-        guard cell.key != key else { return }
-        cell.key = key
-        let page = ItemVideoPage(item: known ?? self.item(id), isCurrent: current, label: key.label, placeholder: placeholder,
-                                 images: images)
-        if let host = cell.host {
-            host.rootView = page
-        } else {
-            let host = UIHostingController(rootView: page)
-            host.safeAreaRegions = []
-            host.sizingOptions = []
-            host.view.backgroundColor = .clear
-            host.view.frame = cell.contentView.bounds
-            host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            addChild(host)
-            cell.contentView.addSubview(host.view)
-            host.didMove(toParent: self)
-            cell.host = host
-        }
+        guard let cell = cell as? VideoPageCell, let playback else { return }
+        cell.show(id: id, item: { known ?? self.item(id) }, current: current && (front || playback.id == id), label: label(id),
+                  placeholder: placeholder, images: images, playback: playback)
     }
 
     private func zoomed(_ id: String, _ zoomed: Bool) {
@@ -330,6 +335,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     private func show(_ page: Int) {
         guard page != index, ids.indices.contains(page) else { return }
         let old = index
+        if ids.indices.contains(old) { playback?.unload(id: ids[old]) }
         index = page
         middle = page
         layout.anchor = page

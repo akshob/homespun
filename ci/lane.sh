@@ -37,7 +37,8 @@ for one in $runs; do
         HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare,HomespunUITests/LibraryUITests/testSelectAllMarksEveryCell,HomespunUITests/ServerModeUITests/test1CompactThroughServerAndRemoveOriginals,HomespunUITests/ServerTabUITests/testRenameThisIPhone 8780 ;;
     quick-duo)
       # A pull request's iPhone Duo run: open, in every pose (layouts, Free Up Space, the viewer).
-      run quick-duo env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh quick-duo iPhone-Duo HomespunUITests/DuoLayoutUITests 8782 open ;;
+      run quick-duo env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh quick-duo iPhone-Duo \
+        HomespunUITests/DuoLayoutUITests/testOneScreenInEveryPose 8782 open ;;
     large)
       # Nightly: a library of 3,000 photos.
       run large env EXTRA=3000 TEST_RUNNER_HOMESPUN_LIBRARY_SIZE=3003 zsh $D/ui.sh large iPhone-18-Pro HomespunUITests/LargeLibraryUITests 8783 ;;

@@ -118,6 +118,7 @@ final class DemoItem: LibraryItem, Sendable {
     }
 
     @MainActor func player() async -> AVPlayer? { AVPlayer(url: main) }
+    @MainActor func playerItem() async -> Result<AVPlayerItem, Error> { .success(AVPlayerItem(url: main)) }
 
     /// Resumes a continuation once, whatever calls it first.
     private final class Once: @unchecked Sendable {

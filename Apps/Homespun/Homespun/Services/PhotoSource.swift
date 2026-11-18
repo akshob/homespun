@@ -25,6 +25,7 @@ protocol LibraryItem: AnyObject {
     /// One image (`size` nil: full size; `fast`: whatever is quickest).
     @MainActor func image(size: CGSize?, fast: Bool) async -> UIImage?
     @MainActor func livePhoto(size: CGSize) async -> PHLivePhoto?
+    @MainActor func playerItem() async -> Result<AVPlayerItem, Error>
     @MainActor func player() async -> AVPlayer?
 }
 
@@ -34,6 +35,7 @@ extension PHAsset: LibraryItem {
     func mediaFacts() -> (main: MediaFacts, motion: Int?) { ItemMedia.facts(self) }
     @MainActor func image(size: CGSize?, fast: Bool) async -> UIImage? { await ItemMedia.image(self, size: size, fast: fast) }
     @MainActor func livePhoto(size: CGSize) async -> PHLivePhoto? { await ItemMedia.livePhoto(self, size: size) }
+    @MainActor func playerItem() async -> Result<AVPlayerItem, Error> { await ItemMedia.playerItem(self) }
     @MainActor func player() async -> AVPlayer? { await ItemMedia.player(self) }
 }
 

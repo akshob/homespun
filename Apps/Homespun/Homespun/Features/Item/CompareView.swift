@@ -49,10 +49,20 @@ final class CompareModel {
     @ObservationIgnored private var client: ServerClient?
     @ObservationIgnored private var download: Task<Void, Never>?
     @ObservationIgnored private var folder: URL?
+    @ObservationIgnored let pair = VideoPair()
+    @ObservationIgnored private var videoSwitch = 0
 
     var isVideo: Bool { kind == .video }
     var hasOriginal: Bool { original != nil || originalPlayer != nil }
     var hasCompact: Bool { compact != nil || compactPlayer != nil }
+    var videoSize: CGSize? {
+        for facts in [compactFacts, originalFacts] {
+            if let width = facts.width, let height = facts.height, width > 0, height > 0 {
+                return CGSize(width: width, height: height)
+            }
+        }
+        return nil
+    }
 
     func load(model: AppModel, compactIdentifier: String) async {
         close()
@@ -61,6 +71,8 @@ final class CompareModel {
         compact = nil
         originalPlayer = nil
         compactPlayer = nil
+        originalFacts = MediaFacts()
+        compactFacts = MediaFacts()
         server = model.library.serverName
         client = model.settings.client
         let photos = model.settings.photos
@@ -82,13 +94,19 @@ final class CompareModel {
         case .unknown: status = .noOriginal
         }
         if isVideo {
-            compactPlayer = await asset.player()
+            let player = await asset.player()
+            guard !Task.isCancelled else { return }
+            compactPlayer = player
+            pair.attach(original: originalPlayer, compact: compactPlayer)
         } else {
             compact = await asset.image(size: nil, fast: false)
         }
         if case .phone = source, let originalAsset, !Task.isCancelled {
             if isVideo {
-                originalPlayer = await originalAsset.player()
+                let player = await originalAsset.player()
+                guard !Task.isCancelled else { return }
+                originalPlayer = player
+                pair.attach(original: originalPlayer, compact: compactPlayer)
             } else {
                 original = await originalAsset.image(size: nil, fast: false)
             }
@@ -122,7 +140,9 @@ final class CompareModel {
                 try Task.checkCancellation()
                 if kind == .video {
                     originalFacts = await ItemMedia.videoFacts(at: url)
+                    try Task.checkCancellation()
                     originalPlayer = AVPlayer(url: url)
+                    pair.attach(original: originalPlayer, compact: compactPlayer)
                 } else {
                     guard let loaded = await Task.detached(operation: { ItemMedia.image(at: url) }).value else {
                         throw PhotoLibrary.Failure.unsupported("The original couldn't be opened on this iPhone.")
@@ -151,21 +171,51 @@ final class CompareModel {
 
     /// Stops any download and deletes the downloaded original.
     func close() {
+        videoSwitch += 1
         download?.cancel()
         download = nil
         originalPlayer?.pause()
         compactPlayer?.pause()
+        pair.stop()
         if let folder { try? FileManager.default.removeItem(at: folder) }
         folder = nil
     }
 
     /// Videos: the other version carries on from the same moment.
     func switchVideo(from old: CompareMode, to new: CompareMode) {
-        guard isVideo, let from = player(old), let to = player(new), from !== to else { return }
-        let playing = from.timeControlStatus == .playing
-        from.pause()
-        to.seek(to: from.currentTime(), toleranceBefore: .zero, toleranceAfter: .zero)
-        if playing { to.play() }
+        guard isVideo, old != new else { return }
+        videoSwitch += 1
+        let version = videoSwitch
+        let time: Double
+        let playing: Bool
+        if old == .sideBySide {
+            time = pair.time
+            playing = pair.isPlaying
+            pair.pause()
+            pair.active = false
+        } else {
+            let from = player(old)
+            time = from?.currentTime().seconds ?? 0
+            playing = from?.timeControlStatus != .paused && from != nil
+            from?.pause()
+        }
+        let position = time.isFinite ? time : 0
+        if new == .sideBySide {
+            pair.active = true
+            pair.seek(to: position) { [weak self] in
+                guard let self, videoSwitch == version, pair.active, playing else { return }
+                pair.play()
+            }
+        } else if let to = player(new) {
+            to.isMuted = false
+            to.seek(to: CMTime(seconds: position, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) {
+                [weak self, weak to] finished in
+                Task { @MainActor [weak self, weak to] in
+                    guard let self, videoSwitch == version, !pair.active, finished, playing else { return }
+                    to?.play()
+                }
+            }
+        }
     }
 
     private func player(_ mode: CompareMode) -> AVPlayer? {
@@ -199,7 +249,7 @@ final class CompareModel {
 /// Compare (DESIGN 01·1.13; iPhone Duo 03): an item's original next to its compact copy, with one
 /// zoom for both. Split shows the original left of a line and the compact copy right of it; drag
 /// the line, or pick Original or Compact Copy and touch and hold to see the other one. Videos
-/// switch between the two, from the same moment.
+/// play together side by side where both fit, or switch between them from the same moment.
 ///
 /// Push it on a `NavigationStack`: it sets its own title and has no Close button. Add actions
 /// below it with `.safeAreaBar(edge: .bottom)`. A downloaded original is deleted when it closes.
@@ -236,8 +286,20 @@ struct CompareView: View {
 
     /// Side by Side where there's room for both (the open iPhone Duo), first; the slider on a phone.
     private var modes: [CompareMode] {
-        if compare.isVideo { return [.original, .compact] }
-        return sizeClass == .regular ? [.sideBySide, .split, .original, .compact] : [.original, .compact, .split]
+        Self.modes(video: compare.isVideo, regular: sizeClass == .regular)
+    }
+
+    static func modes(video: Bool, regular: Bool) -> [CompareMode] {
+        if video { return regular ? [.sideBySide, .original, .compact] : [.original, .compact] }
+        return regular ? [.sideBySide, .split, .original, .compact] : [.original, .compact, .split]
+    }
+
+    static func adjusted(_ mode: CompareMode, video: Bool, regular: Bool) -> CompareMode {
+        if regular, mode == .split { return .sideBySide }
+        if !regular, mode == .sideBySide { return video ? .compact : .split }
+        if video, mode == .split { return regular ? .sideBySide : .compact }
+        let offered = modes(video: video, regular: regular)
+        return offered.contains(mode) ? mode : offered[0]
     }
 
     var body: some View {
@@ -250,19 +312,22 @@ struct CompareView: View {
             .padding(.vertical, 10)
             .accessibilityIdentifier("compare.mode")
             stage
+            if compare.isVideo, shown == .sideBySide {
+                CompareTransport(pair: compare.pair)
+            }
             facts
         }
         .background(Theme.background)
         .modifier(CompareScreen(standalone: standalone))
         .task(id: compactIdentifier) {
             await compare.load(model: model, compactIdentifier: compactIdentifier)
-            if compare.isVideo, [.split, .sideBySide].contains(mode) { mode = .compact }
+            guard !Task.isCancelled else { return }
+            mode = Self.adjusted(mode, video: compare.isVideo, regular: sizeClass == .regular)
+            if compare.isVideo, mode == .sideBySide { compare.pair.active = true }
         }
         // Side by side where both fit (opening iPhone Duo too); the slider when it folds.
         .onChange(of: sizeClass, initial: true) { _, size in
-            guard !compare.isVideo else { return }
-            if size == .regular, mode == .split { mode = .sideBySide }
-            if size != .regular, mode == .sideBySide { mode = .split }
+            mode = Self.adjusted(mode, video: compare.isVideo, regular: size == .regular)
         }
         .onChange(of: mode) { old, new in compare.switchVideo(from: old, to: new) }
         .onDisappear { compare.close() }
@@ -273,7 +338,11 @@ struct CompareView: View {
     private var stage: some View {
         GeometryReader { geo in
             ZStack {
-                if compare.isVideo {
+                if compare.isVideo, shown == .sideBySide {
+                    SideBySide(media: .videos(original: compare.originalPlayer, compact: compare.compactPlayer,
+                                              size: compare.videoSize),
+                               originalLabel: originalPill, compactLabel: "Compact copy · in Photos")
+                } else if compare.isVideo {
                     let player = shown == .original ? compare.originalPlayer : compare.compactPlayer
                     if let player {
                         VideoPlayer(player: player).id(shown)
@@ -281,7 +350,7 @@ struct CompareView: View {
                         Theme.fill
                     }
                 } else if shown == .sideBySide {
-                    SideBySide(original: compare.original, compact: compare.compact, originalLabel: originalPill,
+                    SideBySide(media: .photos(original: compare.original, compact: compare.compact), originalLabel: originalPill,
                                compactLabel: "Compact copy · in Photos")
                 } else {
                     CompareCanvas(original: compare.original, compact: compare.compact, mode: shown, split: split,
@@ -409,16 +478,17 @@ struct CompareView: View {
     // MARK: Sizes
 
     private var facts: some View {
-        VStack(spacing: 4) {
+        let tight = compare.isVideo && shown == .sideBySide && !standalone
+        return VStack(spacing: 4) {
             line("Original", compare.originalFacts, emphasised: shown != .compact)
                 .accessibilityIdentifier("compare.originalFacts")
             line("Compact copy", compare.compactFacts, emphasised: shown != .original)
                 .accessibilityIdentifier("compare.compactFacts")
             Text(hint).font(.footnote).foregroundStyle(Theme.secondaryLabel)
-                .multilineTextAlignment(.center).padding(.top, 8)
+                .multilineTextAlignment(.center).padding(.top, tight ? 0 : 8)
         }
         .padding(.horizontal, 24)
-        .padding(.vertical, 14)
+        .padding(.vertical, tight ? 0 : 14)
         .frame(maxWidth: .infinity)
     }
 
@@ -430,7 +500,8 @@ struct CompareView: View {
     }
 
     private var hint: String {
-        var text = compare.isVideo ? "Switch between them; the other carries on from the same moment."
+        var text = compare.isVideo ? (shown == .sideBySide ? "They play together. Zoom or move either one; the other follows."
+                                     : "Switch between them; the other carries on from the same moment.")
             : shown == .sideBySide ? "Zoom or move either one; the other follows."
             : shown == .split ? "Zoom in to compare the details. Drag the line to move it."
             : "Zoom in to compare the details. Touch and hold to see the other one."
@@ -460,31 +531,49 @@ private struct CompareScreen: ViewModifier {
 /// moving one moves the other. On a partly folded iPhone Duo the two meet at the crease, so neither
 /// has it across it.
 struct SideBySide: View {
-    var original: UIImage?
-    var compact: UIImage?
+    enum Media {
+        case photos(original: UIImage?, compact: UIImage?)
+        case videos(original: AVPlayer?, compact: AVPlayer?, size: CGSize?)
+
+        var size: CGSize? {
+            switch self {
+            case .photos(let original, let compact): (original ?? compact)?.size
+            case .videos(_, _, let size): size
+            }
+        }
+
+        func has(_ first: Bool) -> Bool {
+            switch self {
+            case .photos(let original, let compact): (first ? original : compact) != nil
+            case .videos(let original, let compact, _): (first ? original : compact) != nil
+            }
+        }
+    }
+
+    var media: Media
     var originalLabel: String
     var compactLabel: String
     @State private var link = ZoomLink()
 
     var body: some View {
         GeometryReader { proxy in
-            let panes = Self.panes(size: proxy.size, fold: Self.fold(proxy), photo: (original ?? compact)?.size)
+            let panes = Self.panes(size: proxy.size, fold: Self.fold(proxy), photo: media.size)
             ZStack(alignment: .topLeading) {
-                pane(original, label: originalLabel, id: "compare.original", image: "compare.image.original")
+                pane(first: true, label: originalLabel, id: "compare.original", image: "compare.image.original")
                     .frame(width: panes.first.width, height: panes.first.height)
                     .offset(x: panes.first.minX, y: panes.first.minY)
-                pane(compact, label: compactLabel, id: "compare.compact", image: "compare.image.compact")
+                pane(first: false, label: compactLabel, id: "compare.compact", image: "compare.image.compact")
                     .frame(width: panes.second.width, height: panes.second.height)
                     .offset(x: panes.second.minX, y: panes.second.minY)
             }
         }
     }
 
-    private func pane(_ image: UIImage?, label: String, id: String, image imageID: String) -> some View {
-        LinkedZoomImage(image: image, link: link, label: label, identifier: imageID)
+    private func pane(first: Bool, label: String, id: String, image imageID: String) -> some View {
+        picture(first: first, label: label, identifier: imageID)
             .background(Color.black)
             .overlay(alignment: .topLeading) {
-                if image != nil {
+                if media.has(first) {
                     Text(label).font(.footnote.weight(.medium)).foregroundStyle(Theme.label)
                         .lineLimit(1).minimumScaleFactor(0.8)
                         .padding(.horizontal, 12).padding(.vertical, 6)
@@ -496,6 +585,15 @@ struct SideBySide: View {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+    }
+
+    @ViewBuilder private func picture(first: Bool, label: String, identifier: String) -> some View {
+        switch media {
+        case .photos(let original, let compact):
+            LinkedZoomImage(image: first ? original : compact, link: link, label: label, identifier: identifier)
+        case .videos(let original, let compact, let size):
+            LinkedZoomPlayer(player: first ? original : compact, size: size, link: link, label: label, identifier: identifier)
+        }
     }
 
     /// An active fold (partly folded iPhone Duo), in the stage's coordinates.
