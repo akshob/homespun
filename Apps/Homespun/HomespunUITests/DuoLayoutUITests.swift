@@ -27,7 +27,7 @@ final class DuoLayoutUITests: XCTestCase {
         app.launch()
         app.pair(address: address, code: code)
         app.openTab("Library")
-        if app.gridItems("Ready to free up").count < 2 { _ = app.compactNewest(2) }
+        if app.gridItems("Ready to free up").count < 2 { _ = app.compactOldestOnScreen(2) }
 
         for (name, columns) in [("landscape", 6), ("portrait", 5)] {
             pose(name, file: poses)
