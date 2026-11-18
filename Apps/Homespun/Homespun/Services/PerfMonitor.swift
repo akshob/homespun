@@ -32,6 +32,11 @@ final class PerfMonitor {
     private(set) var longestFrame: CFTimeInterval = 0
     /// Frames longer than 50 ms (a visible stutter): the tests compare counts before and after.
     private(set) var slowFrames = 0
+    /// Grid cells on screen without their picture yet, and all grid cells on screen, summed over the
+    /// frames counted (the grid answers `blankProbe`).
+    private(set) var blankCells = 0
+    private(set) var shownCells = 0
+    var blankProbe: (() -> (blank: Int, shown: Int))?
     /// Other results (the autoscroll's phases), by name.
     private(set) var results: [String: Double] = [:]
     /// The latest duration of each interaction, in milliseconds, and the longest.
@@ -85,6 +90,10 @@ final class PerfMonitor {
                 hitches += 1
                 hitchTime += interval - refresh
             }
+            if let probe = blankProbe?() {
+                blankCells += probe.blank
+                shownCells += probe.shown
+            }
         }
         last = now
     }
@@ -117,6 +126,13 @@ final class PerfMonitor {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.end(name) } }
     }
 
+    /// Values for the tests that aren't spans (where the grid is, for one).
+    func note(_ values: [String: Double]) {
+        guard enabled else { return }
+        results.merge(values) { $1 }
+        changed()
+    }
+
     /// Records a span measured elsewhere (launch, from the process's start).
     func record(_ name: String, milliseconds: Double) {
         guard enabled else { return }
@@ -136,7 +152,7 @@ final class PerfMonitor {
     var summary: String {
         var parts = ["frames=\(frames)", "hitches=\(hitches)", String(format: "hitchMs=%.1f", hitchTime * 1000),
                      String(format: "scrollMs=%.0f", scrollTime * 1000), String(format: "longestMs=%.1f", longestFrame * 1000),
-                     "slowFrames=\(slowFrames)"]
+                     "slowFrames=\(slowFrames)", "blankCells=\(blankCells)", "shownCells=\(shownCells)"]
         for (name, value) in spans.sorted(by: { $0.key < $1.key }) {
             parts.append(String(format: "%@=%.1f", name, value))
             parts.append(String(format: "%@.max=%.1f", name, longestSpans[name] ?? value))
@@ -180,7 +196,7 @@ final class PerfMonitor {
             return changed()
         }
         for phase in Self.autoscrollPhases {
-            let before = (frames, hitchTime, scrollTime, slowFrames)
+            let before = (frames, hitchTime, scrollTime, slowFrames, blankCells, shownCells)
             longestFrame = 0
             scrollBegan()
             // One step per frame, like a finger: the offset the speed gives for the time that passed.
@@ -207,6 +223,8 @@ final class PerfMonitor {
             results["auto.\(phase.name).hitchMsPerS"] = seconds > 0 ? (hitchTime - before.1) * 1000 / seconds : 0
             results["auto.\(phase.name).slowFrames"] = Double(slowFrames - before.3)
             results["auto.\(phase.name).longestMs"] = longestFrame * 1000
+            let shown = shownCells - before.5
+            results["auto.\(phase.name).blankPct"] = shown > 0 ? Double(blankCells - before.4) * 100 / Double(shown) : 0
             try? await Task.sleep(for: .seconds(1))
         }
         results["autoscroll"] = 1

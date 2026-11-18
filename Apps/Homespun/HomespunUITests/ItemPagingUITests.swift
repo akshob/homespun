@@ -27,9 +27,6 @@ final class ItemPagingUITests: XCTestCase {
         XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 30))
         app.choose("grid.filter", "Videos")
         let video = app.gridItems().matching(NSPredicate(format: "label BEGINSWITH 'Video'")).firstMatch
-        // The older, position-based grid can keep a photo's label after filtering. A new size refreshes it.
-        let refresh = !video.waitForExistence(timeout: 2)
-        if refresh { app.chooseGridSize("Large") }
         XCTAssertTrue(video.waitForExistence(timeout: 10), "no seeded video")
         video.tap()
         let play = app.buttons["item.play"]
@@ -58,7 +55,6 @@ final class ItemPagingUITests: XCTestCase {
         }
         app.goBack()
         app.choose("grid.filter", "Photos and Videos")
-        if refresh { app.chooseGridSize("Medium") }
     }
 
     @MainActor func testSwipingAndTurningKeepTheItem() throws {

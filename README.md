@@ -331,6 +331,8 @@ For now the app talks plain HTTP, and only to servers on the home network (IP ad
 `.local` names); HTTPS comes later. The server checks each upload's SHA-256 before accepting it,
 stores originals read-only, and lets the app remove an original only after checking its copy
 again at that moment (`POST /api/v1/assets/{id}/verify`).
+If processing fails in files mode, "Try Again" re-registers the item and retries processing
+using originals the server already holds and has verified; they don't need to be uploaded again.
 
 Originals go in a folder per phone, by capture month: `<originals>/<phone name>/YYYY/MM/`
 (the phone's name when it paired; renaming the phone later keeps the folder). The originals
