@@ -21,8 +21,7 @@ struct StatusAccessoryModifier: ViewModifier {
             .onChange(of: visible) { _, visible in if !visible { layout = AccessoryLayout() } }
             .overlay {
                 GeometryReader { proxy in
-                    let size = layout.size == .zero ? proxy.size : layout.size
-                    let bounds = CGRect(origin: .zero, size: size).inset(by: layout.insets)
+                    let bounds = CGRect(origin: .zero, size: proxy.size).inset(by: layout.insets)
                     ZStack(alignment: .topLeading) {
                         if visible {
                             AccessoryInsets { layout = $0 }.allowsHitTesting(false)
@@ -30,9 +29,10 @@ struct StatusAccessoryModifier: ViewModifier {
                         if visible, bounds.width > 0, bounds.height > 100 {
                             VStack(spacing: 0) {
                                 Spacer(minLength: 0)
-                                StatusAccessory(status: status, serverName: model.library.serverName, open: open)
-                                    .padding(.vertical, 10)
-                                    .frame(width: min(640, max(0, bounds.width - 24)))
+                                StatusAccessory(status: status, serverName: model.library.serverName,
+                                                width: min(640, max(0, bounds.width - 24)), open: open)
+                                    // The combined accessibility and hit region must use the folded width too.
+                                    .id([proxy.size.width, proxy.size.height])
                                     .glassEffect(.regular, in: .rect(cornerRadius: 24))
                                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                             }

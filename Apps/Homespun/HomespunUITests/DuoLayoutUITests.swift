@@ -67,6 +67,11 @@ final class DuoLayoutUITests: XCTestCase {
         attach(app, "folded, another item")
         app.closeItem()
         checkGrid(app, columns: 4, pose: "folded")
+        let accessory = app.descendants(matching: .any)["remove.originals"].firstMatch
+        let serverTab = app.tab("Server")
+        if accessory.exists, serverTab.exists, serverTab.frame.midX > app.windows.firstMatch.frame.width * 0.8 {
+            XCTAssertLessThanOrEqual(accessory.frame.maxX, serverTab.frame.minX, "the floating status covers the folded tabs")
+        }
         // Folding goes back to the list, and its pages open with Back.
         app.openTab("Server")
         let check = app.buttons["settings.check"]

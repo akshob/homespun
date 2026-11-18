@@ -309,6 +309,7 @@ struct StatusAccessory: View {
 
     let status: AccessoryLadder.State?
     var serverName = "your computer"
+    let width: CGFloat
     let open: (Action) -> Void
     @Environment(\.showsTips) private var showsTips
 
@@ -368,6 +369,8 @@ struct StatusAccessory: View {
             }
         }
         .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(width: width)
         .contentShape(Rectangle())
         .onTapGesture(perform: action)
         .accessibilityElement(children: .combine)

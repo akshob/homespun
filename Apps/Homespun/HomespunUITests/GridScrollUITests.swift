@@ -160,6 +160,8 @@ final class GridScrollUITests: XCTestCase {
                 })
                 sleep(3)
             }
+            for _ in 0..<2 { app.tab("Library").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+            _ = try settled()
 
             for close in ["Back", "Swipe", "Paged"] {
                 let frames = app.tabFrames(), before = report()
@@ -178,9 +180,13 @@ final class GridScrollUITests: XCTestCase {
                 sleep(1)
                 if close == "Paged" {
                     for _ in 0..<Int(before.value("grid.columns")) * 2 + 1 {
-                        if poses != nil, screen.width > 500 {
-                            pose("swipe \(screen.width * 0.2) \(screen.height * 0.5) \(screen.width * 0.8) \(screen.height * 0.5)")
-                        } else { viewer.swipeRight() }
+                        let previous = viewer.value as? String
+                        viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.35))
+                            .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.35)),
+                                   withVelocity: .fast, thenHoldForDuration: 0)
+                        if poses != nil, screen.width > 500, viewer.value as? String == previous {
+                            pose("swipe \(screen.width * 0.2) \(screen.height * 0.35) \(screen.width * 0.8) \(screen.height * 0.35)")
+                        }
                     }
                     sleep(1)
                     let paged = report()
@@ -188,11 +194,10 @@ final class GridScrollUITests: XCTestCase {
                     XCTAssertEqual(paged.value("grid.zoom"), paged.value("grid.shown"), "closing would zoom into the wrong cell")
                 }
                 if close == "Swipe" {
-                    if poses != nil, screen.width > 500 {
-                        pose("swipe \(screen.width * 0.5) \(screen.height * 0.3) \(screen.width * 0.5) \(screen.height * 0.85)")
-                    } else {
-                        viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-                            .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.85)))
+                    viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.3))
+                        .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.85)))
+                    if poses != nil, screen.width > 500, !viewer.waitForNonExistence(timeout: 1) {
+                        pose("swipe \(screen.width * 0.3) \(screen.height * 0.3) \(screen.width * 0.3) \(screen.height * 0.85)")
                     }
                 } else {
                     app.goBack()
