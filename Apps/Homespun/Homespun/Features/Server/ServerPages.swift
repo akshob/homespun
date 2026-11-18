@@ -21,29 +21,46 @@ struct CompactPreview: Equatable {
     }
 }
 
-/// Automatic mode's settings with its status (DESIGN 05·2.1–2.2).
+/// Automatic mode's settings with its status (DESIGN 05·2.1–2.2). Without the purchase the page is
+/// the same; turning it on asks for the purchase first, then what to back up.
 struct AutomaticModeView: View {
     let model: AppModel
     @State private var askingScope = false
+    @State private var unlocking = false
+    /// Unlocked on the sheet: ask what to back up once it has closed.
+    @State private var turnOnAfterUnlock = false
     /// The slider's position while dragging (saved when it settles), and its live count.
     @State private var stop: Double?
     @State private var preview: CompactPreview?
 
     var body: some View {
-        let automatic = model.automatic, settings = model.settings
-        let enabled = automatic.enabled
+        let automatic = model.automatic, settings = model.settings, premium = model.premium
+        let enabled = automatic.enabled && premium.isUnlocked
         List {
             Section {
                 Toggle("Automatic Mode", isOn: Binding(get: { enabled }, set: { on in
-                    if on { askingScope = true } else { automatic.disable() }
+                    if !on {
+                        automatic.disable()
+                    } else if premium.isUnlocked {
+                        askingScope = true
+                    } else {
+                        unlocking = true
+                    }
                 }))
                 .tint(Theme.accent)
-                .disabled(!settings.canCompact || !model.premium.isUnlocked)
-                .accessibilityIdentifier("automatic.page.toggle")
+                .disabled(!settings.canCompact)
+                .accessibilityIdentifier("automatic.toggle")
+            } header: {
+                Text("New photos and videos are backed up and get their compact copies on their own, without being "
+                     + "selected.")
+                    .font(.body).foregroundStyle(Theme.label).textCase(nil)
             } footer: {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Usually overnight while this iPhone charges, and whenever you open Homespun. iOS decides the "
                          + "exact time.")
+                    if !premium.isUnlocked {
+                        Text("Turning it on is a one-time purchase, which unlocks Cloud Copies too.")
+                    }
                     if !settings.isPaired {
                         Text("Pair a server first.")
                     } else if UIApplication.shared.backgroundRefreshStatus == .denied {
@@ -91,6 +108,16 @@ struct AutomaticModeView: View {
         .homespunList()
         .navigationTitle("Automatic Mode")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $unlocking, onDismiss: {
+            if turnOnAfterUnlock {
+                turnOnAfterUnlock = false
+                askingScope = true
+            }
+        }) {
+            UnlockSheet(feature: .automatic, premium: premium, server: model.library.serverName) {
+                turnOnAfterUnlock = true
+            }
+        }
         .alert("Back up what's already here too?", isPresented: $askingScope) {
             Self.scopeButtons(automatic)
         } message: {

@@ -248,7 +248,8 @@ enum AccessoryLadder {
 /// was skipped, otherwise the Premium moment once. Get Started outranks the Premium moment.
 struct JourneyCard: View {
     let model: AppModel
-    @State private var showingPremium = false
+    /// Opens Automatic Mode's page, where turning it on asks for the purchase.
+    var openAutomatic: () -> Void = {}
 
     var body: some View {
         let journey = model.library.journey
@@ -311,22 +312,14 @@ struct JourneyCard: View {
                         .accessibilityIdentifier("premiumMoment.close")
                 }
                 Text("Automatic mode backs up new photos while this iPhone charges, and tells you when there's space to "
-                     + "free up. It's part of Premium.")
+                     + "free up. Turning it on is a one-time purchase.")
                     .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
-                Button("See Automatic Mode") { showingPremium = true }
+                Button("See Automatic Mode", action: openAutomatic)
                     .buttonStyle(.glass)
                     .accessibilityIdentifier("premiumMoment.open")
             }
             .accessibilityIdentifier("activity.premiumMoment")
         }
         .listRowBackground(Theme.card)
-        .sheet(isPresented: $showingPremium) {
-            NavigationStack {
-                PremiumView(premium: model.premium, model: model)
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) { Button("Done") { showingPremium = false } }
-                    }
-            }
-        }
     }
 }

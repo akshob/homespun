@@ -356,6 +356,26 @@ final class AutomaticMode {
         return parts.isEmpty ? "Nothing new." : parts.joined(separator: ", ") + "."
     }
 
+    /// The Server tab's value for its row: "Off", "On", or when it last ran ("On · ran last night").
+    nonisolated static func status(on: Bool, lastRun: Date?, now: Date = Date(), calendar: Calendar = .current) -> String {
+        guard on else { return "Off" }
+        guard let lastRun else { return "On" }
+        let hour = calendar.component(.hour, from: lastRun)
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: now).map { calendar.isDate(lastRun, inSameDayAs: $0) }
+        let date = Date.FormatStyle(calendar: calendar, timeZone: calendar.timeZone).month(.abbreviated).day()
+        let when: String
+        if calendar.isDate(lastRun, inSameDayAs: now) {
+            when = hour < 6 ? "last night" : "today"
+        } else if yesterday == true {
+            when = hour >= 20 ? "last night" : "yesterday"
+        } else if calendar.isDate(lastRun, equalTo: now, toGranularity: .year) {
+            when = lastRun.formatted(date)
+        } else {
+            when = lastRun.formatted(date.year())
+        }
+        return "On · ran \(when)"
+    }
+
     static func notify(_ summary: Summary) async {
         let content = UNMutableNotificationContent()
         content.title = "Ready to free up space"
