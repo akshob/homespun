@@ -180,6 +180,22 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         SKIP_INSTALL: YES
         APPLICATION_EXTENSION_API_ONLY: YES
+  HomespunWatchUITests:
+    type: bundle.ui-testing
+    platform: watchOS
+    sources: [HomespunWatchUITests]
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+      Profile: Signing.xcconfig
+    dependencies:
+      - target: HomespunWatch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).watchkitapp.uitests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: HomespunWatch
   # Runs inside the app on a simulator whose library holds only synthetic media.
   HomespunTests:
     type: bundle.unit-test
@@ -234,6 +250,12 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: Homespun
 schemes:
+  HomespunWatch:
+    build:
+      targets:
+        HomespunWatch: all
+    test:
+      targets: [HomespunWatchUITests]
   Homespun:
     build:
       targets:

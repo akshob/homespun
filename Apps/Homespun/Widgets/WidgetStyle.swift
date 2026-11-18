@@ -38,6 +38,8 @@ enum FactSymbol {
 }
 
 /// "Updated 10 min ago", kept current by the system between timeline entries.
+/// WidgetKit archives this safely. In a live app, don't put it in a List inside a TimelineView:
+/// the two time sources can invalidate layout continuously (including on watchOS).
 struct UpdatedText: View {
     let date: Date
 

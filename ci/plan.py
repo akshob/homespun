@@ -12,7 +12,8 @@ Writes key=value lines to $GITHUB_OUTPUT and a short note to the job summary.
 
 MODE (set by the workflow):
   pr       pull request (pr.yml): quick checks of what changed: UI runs `quick` (iPhone) and
-           `quick-duo` (iPhone Duo open, every pose); a draft gets build and unit tests only
+           `quick-duo` (iPhone Duo open, every pose), plus `watch` for watch-related changes;
+           a draft gets build and unit tests only
   main     after a merge (ci.yml): what changed, with every UI run (the extended suite)
   manual   Run workflow (ci.yml, any branch): everything, with the UI runs asked for (UI_INPUT)
 Nightly (nightly.yml) runs everything and needs no plan.
@@ -20,7 +21,9 @@ Nightly (nightly.yml) runs everything and needs no plan.
 import json, os, subprocess, sys
 
 QUICK = ["quick", "quick-duo"]
-FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "duo-cover", "duo-grid", "duo-open", "demo"]
+FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "duo-cover", "duo-grid", "duo-open", "demo", "watch"]
+WATCH_PATHS = ("Apps/Homespun/HomespunWatch/", "Apps/Homespun/HomespunWatchUITests/",
+               "Apps/Homespun/Widgets/", "Apps/Homespun/Shared/")
 ZERO = "0" * 40
 WORKFLOWS = (".github/workflows/pr.yml", ".github/workflows/ci.yml", ".github/workflows/suite.yml")
 
@@ -49,6 +52,9 @@ def plan(env, files):
     mode = env["MODE"]
     if mode == "manual":
         choice = env.get("UI_INPUT") or "quick"
+        if choice == "watch":
+            return {"server": False, "telemetry": False, "site": False, "app": True, "package": False,
+                    "ui": ["watch"], "why": f"Run workflow on {env.get('REF_NAME', '?')} (watch only)"}
         ui = {"none": [], "quick": QUICK, "full": FULL}[choice]
         return {"server": True, "telemetry": True, "site": True, "app": True, "package": True, "ui": ui,
                 "why": f"Run workflow on {env.get('REF_NAME', '?')} (UI: {choice})"}
@@ -60,7 +66,9 @@ def plan(env, files):
         touches(files, (), WORKFLOWS + ("ci/site-check.py", "ci/htmlvalidate.json"))
     if mode == "pr":
         draft = env.get("DRAFT") == "true"
-        ui = QUICK if app and not draft else []
+        ui = list(QUICK) if app and not draft else []
+        if app and not draft and touches(files, WATCH_PATHS, ("Apps/Homespun/project.yml", "ci/watch.sh")):
+            ui.append("watch")
         why = f"{'draft ' if draft else ''}pull request: {len(files)} files changed"
         return {"server": server, "telemetry": telemetry, "site": site, "app": app, "package": False, "ui": ui,
                 "why": why}
