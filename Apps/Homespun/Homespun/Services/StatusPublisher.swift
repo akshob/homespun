@@ -67,10 +67,23 @@ final class StatusPublisher {
         guard model != nil || demo != nil else { return }
         demo = model
         if started { observe() } else { start() }
-        Task { await publishNow() }
+        let background = model == nil ? UIApplication.shared.beginBackgroundTask(withName: "Leave the Demo") : .invalid
+        Task {
+            await publishNow()
+            if background != .invalid { UIApplication.shared.endBackgroundTask(background) }
+        }
     }
 
     private var activeDemo: AppModel? { settings.isPaired ? nil : demo }
+
+    /// Also runs on Welcome: if the app closed before leaving finished, the widgets and watch must
+    /// not keep a demo status just because the person's own setup isn't complete yet.
+    func clearDepartedDemo() async {
+        let destination = destination
+        let stored = await Task.detached(priority: .utility) { destination.read() }.value
+        guard activeDemo == nil, stored?.demo == true else { return }
+        await publishNow()
+    }
 
     /// From here on, every change is published (the first one shortly after).
     func start() {

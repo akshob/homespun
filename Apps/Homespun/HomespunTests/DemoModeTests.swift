@@ -237,11 +237,11 @@ import Testing
                                    items: [.init(assetID: photo.id, name: "Sample", result: .saved)]))
 
         let url = fixture.folder.appendingPathComponent("status.json"), messages = WatchMessages()
+        let destination = StatusPublisher.Destination(read: { StatusStore.read(from: url) },
+                                                       write: { StatusStore.write($0, to: url) }, reload: {},
+                                                       send: { data, _ in messages.receive(data) })
         let publisher = StatusPublisher(settings: own.settings, library: own.library, history: own.history,
-                                         automatic: own.automatic, premium: locked,
-                                         destination: .init(read: { StatusStore.read(from: url) },
-                                                            write: { StatusStore.write($0, to: url) }, reload: {},
-                                                            send: { data, _ in messages.receive(data) }))
+                                         automatic: own.automatic, premium: locked, destination: destination)
         publisher.showDemo(demo)
         await publisher.publishNow()
         let shown = try #require(StatusStore.read(from: url))
@@ -256,6 +256,15 @@ import Testing
         let cleared = try #require(StatusStore.read(from: url))
         #expect(cleared.demo == nil && !cleared.unlocked && cleared.server == nil)
         #expect(cleared.ready == .init(bytes: 0, count: 0) && cleared.lastBackup == nil && !cleared.automatic.enabled)
+        #expect(messages.all.last?.sameFacts(as: cleared) == true)
+
+        // A terminated process can leave its demo snapshot behind. Welcome clears it too, without
+        // starting a PhotoKit-backed library or waiting for setup to finish.
+        #expect(StatusStore.write(shown, to: url))
+        let relaunched = StatusPublisher(settings: own.settings, library: own.library, history: own.history,
+                                          automatic: own.automatic, premium: locked, destination: destination)
+        await relaunched.clearDepartedDemo()
+        #expect(StatusStore.read(from: url)?.sameFacts(as: cleared) == true)
         #expect(messages.all.last?.sameFacts(as: cleared) == true)
     }
 
