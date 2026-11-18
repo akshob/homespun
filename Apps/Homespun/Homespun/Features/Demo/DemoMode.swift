@@ -125,7 +125,7 @@ final class DemoMode {
         preparationID = nil
         endBackgroundTask()
         Announce.say(restarted
-                     ? "The demo started again because its sample photos were drawn again. Nothing on this iPhone is changed."
+                     ? "The demo started again because its sample photos were drawn again. The demo is ready. Nothing on this iPhone is changed."
                      : "The demo is ready. Nothing on this iPhone is changed.")
     }
 

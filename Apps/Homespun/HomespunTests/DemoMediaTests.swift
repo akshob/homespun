@@ -17,7 +17,7 @@ enum DemoTestMedia {
         let elapsed = ContinuousClock.now - start
         let duration = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
         seconds.withLock { $0 = duration }
-        print("DemoTestMedia: drew the whole library in \(String(format: "%.3f", duration)) seconds")
+        print("PERF DemoTestMedia: drew the whole library in \(String(format: "%.3f", duration)) seconds")
         return folder
     }
 
@@ -109,6 +109,7 @@ enum DemoTestMedia {
         #expect(samples.count == 30)
         #expect(samples.map(\.name) == DemoArt.recipes.map(\.name))
         let manager = FileManager.default
+        #expect(try folder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
         let names = try manager.contentsOfDirectory(atPath: folder.path)
         let photos = samples.filter { $0.kind == "photo" && $0.screenshot != true }
         #expect(photos.count == 25)
@@ -147,7 +148,7 @@ enum DemoTestMedia {
     @Test func drawingTakesLessThanABudget() async throws {
         _ = try await DemoTestMedia.ready.value
         let seconds = DemoTestMedia.seconds.withLock { $0 }
-        print("Demo media generation: \(String(format: "%.3f", seconds)) seconds (Debug simulator; 120 s sanity ceiling)")
+        print("PERF Demo media generation: \(String(format: "%.3f", seconds)) seconds (Debug simulator; 120 s sanity ceiling)")
         #expect(seconds > 0 && seconds < 120, "demo media took \(seconds) seconds")
     }
 
@@ -181,6 +182,24 @@ enum DemoTestMedia {
         #expect(updates.all.last?.done == 30 && updates.all.count == 3)
         #expect(await store.readyFolder() == store.folder)
         #expect(try untouched.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate == before)
+    }
+
+    @Test func concurrentPreparationSharesTheSameDrawing() async throws {
+        let ready = try await DemoTestMedia.ready.value, root = try DemoTestMedia.makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = DemoMediaStore(root: root)
+        try FileManager.default.copyItem(at: ready, to: store.folder)
+        try FileManager.default.removeItem(at: store.folder.appendingPathComponent("thumbs/IMG_0224.JPG"))
+        let updates = DemoTestMedia.Updates()
+        async let first = store.prepare {
+            updates.append($0)
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        async let second = store.prepare { updates.append($0) }
+        let (a, b) = try await (first, second)
+        #expect(a == b && a == store.folder)
+        #expect(updates.all.count == 2, "more than one generation reported progress")
+        #expect(await store.readyFolder() == store.folder)
     }
 
     @Test func launchDeletesTheLastLaunchsFolder() async throws {

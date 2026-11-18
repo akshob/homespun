@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 /// The demo's seeded pictures, shared by the app and scripts/demo-media.swift.
 /// Keep independent of UIKit and HomespunCore: an original's SHA-256 is its identity.
 enum DemoArt {
+    /// Bump when drawing or recipes change; a resumed demo checks the generated files' identities.
     nonisolated static let version = 1
     nonisolated static let thumbShortEdge = 360
     nonisolated static let heicQuality = 0.55, jpegQuality = 0.6, thumbQuality = 0.7

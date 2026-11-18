@@ -124,7 +124,7 @@ actor DemoMediaStore {
             let id = UUID()
             let task = Task.detached(priority: .userInitiated) { [self] in
                 do {
-                    _ = try await generator.run(progress: progress, currentLimit: { self.concurrency.withLock { $0 } })
+                    _ = try await generator.run(currentLimit: { self.concurrency.withLock { $0 } }, progress: progress)
                     try Task.checkCancellation()
                     return generator.output
                 } catch is CancellationError {
@@ -176,8 +176,8 @@ struct DemoMediaGenerator: Sendable {
         }
     }
 
-    func run(progress: @Sendable (DemoMediaStore.Progress) async -> Void,
-             currentLimit: @Sendable () -> Int = { .max }) async throws -> DemoMediaManifest {
+    func run(currentLimit: @Sendable () -> Int = { .max },
+             progress: @Sendable (DemoMediaStore.Progress) async -> Void) async throws -> DemoMediaManifest {
         let start = ContinuousClock.now
         let interval = PerfMonitor.signposter.beginInterval("DemoMediaDraw", id: PerfMonitor.signposter.makeSignpostID())
         defer { PerfMonitor.signposter.endInterval("DemoMediaDraw", interval) }

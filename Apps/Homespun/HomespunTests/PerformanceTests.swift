@@ -89,7 +89,7 @@ struct PerformanceTests {
             defer { try? FileManager.default.removeItem(at: root) }
             _ = try await DemoMediaGenerator(bundled: DemoMediaStore.bundledFolder, output: root, limit: 5).run { _ in }
         }
-        print("DemoMediaDraw median of 3: \(String(format: "%.0f", ms)) ms")
+        print("PERF DemoMediaDraw median of 3: \(String(format: "%.0f", ms)) ms")
         // Initial simulator budget; calibrate to a measured Profile median × 1.3 on the perf machine.
         #expect(ms < 15_000, "drawing demo media took \(ms) ms")
     }
