@@ -24,7 +24,8 @@ and may not exist in other checkouts.
 - App sources (`Apps/Homespun/Homespun`) are grouped by layer; XcodeGen picks up any folder:
   - `App/`: entry point, `AppModel` (composition root), root and tab shell, settings, journey/tips.
   - `Features/<Library|Item|Activity|Server|Setup|Premium|Feedback|Demo>/`: screens and their controllers.
-    `Demo/` is Try the Demo: its own `AppModel` on sample photos (`DemoLibrary`, media in `Resources/Demo`)
+    `Demo/` is Try the Demo: its own `AppModel` on sample photos (`DemoLibrary`, media drawn on the iPhone
+    by `DemoArt`/`DemoMedia`, plus the videos and Live Photo in `Resources/Demo`)
     and an in-app pretend server (`DemoServer`, reached through `ServerClient` by `DemoURLProtocol`).
   - `Backup/`: the engine (job queue, server pipeline, ledger, schedule, automatic mode, background runs,
     history, original removal, copy finder). No views.
@@ -93,6 +94,11 @@ and may not exist in other checkouts.
   `AppModel.status` is nil) or analytics (`Telemetry.paused`),
   never asks iOS for a permission, and pairs only with its pretend server. Leave the Demo deletes it all.
 - The demo changes nothing for real: its deletions ask in-app, say so, and remove only from the demo.
+- `DemoArt.swift` is the only drawing code, shared with `scripts/demo-media.swift`; keep it free of UIKit
+  and HomespunCore and deterministic (seeded): an original's SHA-256 is its identity, and a resumed demo
+  checks its drawn files against `media.json`. Drawn media lives in `Homespun Demo Media` (deleted at
+  launch, kept on leaving); demo state in `Homespun Demo` (deleted on leaving). `Resources/Demo` stays
+  ≤ 5 MB (`DemoMediaTests`).
 
 ## Safety invariants (never weaken)
 

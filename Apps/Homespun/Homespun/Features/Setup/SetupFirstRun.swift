@@ -122,7 +122,7 @@ struct EstimatePage: View {
                         SetupRow(symbol: "video", title: "Videos", value: row(estimate.videos))
                     }
                 }
-                Text(settings.isDemo ? "The demo's sample photos come with Homespun; your own library isn't read."
+                Text(settings.isDemo ? "The demo's sample photos are drawn by Homespun on this iPhone; your own library isn't read."
                      : "An estimate from your library, made on this iPhone. If iCloud Photos optimizes this iPhone's "
                         + "storage, you may free less here.")
                     .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)

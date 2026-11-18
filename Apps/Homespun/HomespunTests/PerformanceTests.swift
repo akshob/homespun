@@ -83,6 +83,17 @@ private let optimised: Bool = {
 struct PerformanceTests {
     fileprivate let big = BigLibrary()
 
+    @Test func demoMediaIsDrawnInTime() async throws {
+        let ms = try await medianAsync(runs: 3) {
+            let root = try DemoTestMedia.makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            _ = try await DemoMediaGenerator(bundled: DemoMediaStore.bundledFolder, output: root, limit: 5).run { _ in }
+        }
+        print("DemoMediaDraw median of 3: \(String(format: "%.0f", ms)) ms")
+        // Initial simulator budget; calibrate to a measured Profile median × 1.3 on the perf machine.
+        #expect(ms < 15_000, "drawing demo media took \(ms) ms")
+    }
+
     @Test func buildingTheLibraryStateIsQuick() {
         var state = LibraryState()
         let ms = median { state = big.state }
