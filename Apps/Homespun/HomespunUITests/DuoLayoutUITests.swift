@@ -27,7 +27,7 @@ final class DuoLayoutUITests: XCTestCase {
         app.launch()
         app.pair(address: address, code: code)
         app.openTab("Library")
-        if app.gridItems("Ready to free up").count < 2 { _ = app.compactNewest(2) }
+        if app.gridItems("Ready to free up").count < 2 { _ = app.compactOldestOnScreen(2) }
 
         for (name, columns) in [("landscape", 6), ("portrait", 5)] {
             pose(name, file: poses)
@@ -169,9 +169,10 @@ final class DuoLayoutUITests: XCTestCase {
             XCTAssertTrue(app.buttons["remove.compare"].firstMatch.frame.minY > max(original.frame.maxY, compact.frame.maxY) - 1,
                           "\(pose): the review isn't under the comparison")
         }
-        // Each photo fills its pane one way (a portrait photo its height, a landscape one its width).
+        // Each photo fills its pane one way (a portrait photo its height, a landscape one its width:
+        // beside the other, held wide, a quarter of the screen and more).
         for image in [original, compact] {
-            XCTAssertTrue(image.frame.height > screen.height * 0.4 || image.frame.width > screen.width * 0.3,
+            XCTAssertTrue(image.frame.height > screen.height * 0.4 || image.frame.width > screen.width * 0.25,
                           "\(pose): the comparison is small: \(image.frame)")
         }
         XCTAssertTrue(app.buttons["remove.keepOriginal"].exists, "\(pose): no Keep Original")

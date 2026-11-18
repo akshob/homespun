@@ -19,31 +19,25 @@ struct LibraryView: View {
     @State private var counts = SectionCounts()
     @State private var dataReady = false
     @State private var builtKey: GridKey?
-    @State private var anchor: Anchor?
+    /// Bumped whenever `data` is replaced, so the grid reloads only then.
+    @State private var dataVersion = 0
     @Namespace private var zoom
-    /// The Library tab was tapped again: the newest, once the system's own scroll ends.
-    @State private var newestPending = false
+    /// The cell an item zooms out of and back into.
+    @State private var gridZoom = GridZoom()
     /// Select mode's Newest (the tab bar, whose second tap does this, is hidden then).
     @State private var newestTaps = 0
-    @State private var preheater: ThumbnailPreheater?
     /// What Back Up and Free Up Space would take from the selection (worked out off the main thread).
     @State private var selectionParts = SelectionParts()
-    @Environment(\.displayScale) private var displayScale
     @State private var selectionBytes: (bytes: Int, exact: Bool)?
     @State private var sheet: Sheet?
     @State private var path: [String] = []
-    @State private var pinch: CGFloat = 1
     /// The grid's density: 2 (large), 4 (medium) or 6 (small) columns on an iPhone.
     @AppStorage("gridColumns") private var columns = 4
-    @State private var gridSize = CGSize.zero
-    /// Where the visible cells are, for drag-to-select (not observed: it changes as cells appear).
-    @State private var frames = CellFrames()
     /// Drag-to-select: where the drag started, whether it selects or deselects, and the selection before it.
-    @State private var dragAnchor: Int?
+    @State private var dragAnchor: String?
     @State private var dragSelects = true
     @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
-    @Environment(\.dynamicTypeSize) private var typeSize
     @Environment(\.showsTips) private var showsTips
 
     enum Sheet: Identifiable {
@@ -81,9 +75,11 @@ struct LibraryView: View {
                 .toolbar { toolbar }
                 .toolbar(selecting ? .hidden : .automatic, for: .tabBar)
                 .navigationDestination(for: String.self) { id in
-                    // Zooms from its cell, and a swipe down shrinks it back into the grid (like Photos).
-                    ItemViewer(model: model, ids: visibleIDs, start: id, details: $details, freeUp: openFreeUp)
-                        .navigationTransition(.zoom(sourceID: id, in: zoom))
+                    // Zooms from its cell, and a swipe down shrinks it back into the cell of the item
+                    // shown (the grid keeps it in view behind the viewer, like Photos).
+                    ItemViewer(model: model, ids: visibleIDs, start: id, details: $details, freeUp: openFreeUp,
+                               onShow: { gridZoom.shown = $0 })
+                        .navigationTransition(.zoom(sourceID: GridZoom.sourceID, in: zoom))
                 }
                 .sheet(item: $sheet) { sheet in
                     switch sheet {
@@ -184,8 +180,7 @@ struct LibraryView: View {
         if !same {
             let old = data
             data = new
-            // The preheater follows the grid's items (a filter changes them, not the library's version).
-            preheater?.configure(order: new.ids, side: thumbnailPixels)
+            dataVersion &+= 1
             releaseInBackground(old)
         } else {
             releaseInBackground(new)
@@ -208,146 +203,50 @@ struct LibraryView: View {
         PerfMonitor.shared.startAutoscrollIfAsked()
     }
 
-    /// The thumbnail's side in pixels, from the column width (the preheater caches the same size).
-    private var thumbnailPixels: CGFloat {
-        let width = gridSize.width > 0 ? gridSize.width : 402
-        let columns = max(1, gridLayout.count)
-        return (width / CGFloat(columns) * displayScale).rounded(.up)
-    }
-
-    /// One grid across the whole width, on the open iPhone Duo too (one screen, like Photos).
-    private var gridLayout: [GridItem] {
-        let count = GridColumns.count(width: gridSize.width > 0 ? gridSize.width : 402, density: columns,
-                                      accessibility: typeSize.isAccessibilitySize)
-        return Array(repeating: GridItem(.flexible(), spacing: 2), count: count)
-    }
-
+    /// The grid: a collection view whose cells are UIKit, with a SwiftUI stand-in for the zoom over
+    /// the cell an item opens from.
     private var grid: some View {
-        let data = data
-        let layout = gridLayout
-        let pixels = thumbnailPixels
-        let preheater = preheater
-        let shape = GridShape(columns: layout.count)
-        return ScrollViewReader { proxy in ScrollView {
-            VStack(spacing: 12) {
-                notice
-                LazyVGrid(columns: layout, spacing: 2) {
-                    ForEach(data.sections, id: \.key) { section in
-                        Section {
-                            // Positions as identities: cheap to compare for 35,000 items; each cell
-                            // follows the item at its position.
-                            ForEach(section.range, id: \.self) { position in
-                                let cell = data.cells[position]
-                                GridCell(initial: cell, library: controller.library, selection: selection,
-                                         serverName: controller.serverName, pixels: pixels)
-                                    .matchedTransitionSource(id: cell.id, in: zoom)
-                                    .onTapGesture { tapped(cell) }
-                                    .contextMenu { if !selecting { menu(for: cell) } }
-                                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .named("grid")) } action: {
-                                        frames.rects[position] = $0
-                                    }
-                                    .onAppear { preheater?.appeared(position) }
-                                    .onDisappear {
-                                        frames.rects[position] = nil
-                                        preheater?.disappeared(position)
-                                    }
-                            }
-                        } header: {
-                            MonthHeader(section: section, data: data, counts: counts, selection: selection, filter: filter,
-                                        paired: settings.isPaired)
-                        }
-                    }
-                }
-                .coordinateSpace(.named("grid"))
-                .gesture(HoldToDragSelect(enabled: selecting, changed: { dragSelect(to: $0, data) }, ended: endDragSelect))
-                .frame(maxWidth: .infinity)
-                if data.cells.isEmpty { empty }
-            }
-            // Inside the scroll view, to reach it: the system's own scroll to the top on a second tap
-            // of the tab would take the grid to the oldest items; that tap brings the newest instead.
-            .background(ScrollsToTop(enabled: false))
-        }
-        // A new grid when the columns change (the size menu, a pinch, unfolding iPhone Duo): a lazy
-        // grid given new columns measures its rows again from the top of the library down to where
-        // it is, which froze a 35,000-item library for seconds. A new one lays out only what's on
-        // screen, like at launch; it then scrolls back to the item that was in view.
-        .id(shape)
-        .task(id: shape) {
-            defer { PerfMonitor.shared.endAfterFrame("gridSize") }
-            guard let anchor, anchor.shape != shape else { return }
-            self.anchor = Anchor(item: anchor.item, shape: shape)
-            if let position = data.positions[anchor.item] { proxy.scrollTo(position, anchor: .center) }
-        }
-        .onScrollPhaseChange { _, phase in
-            guard phase == .idle else { return }
-            if newestPending {
-                newestPending = false
-                return showNewest(proxy)
-            }
-            anchor = currentAnchor(shape)
-        }
-        // The system scrolls to the top (the oldest) on that tap whatever the scroll view says; once
-        // it stops, the newest (or after a moment, if it didn't move).
-        .onChange(of: newestTaps) { showNewest(proxy) }
-        .onChange(of: controller.newestRequests) {
-            newestPending = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                if newestPending { newestPending = false; showNewest(proxy) }
-            }
-        }
-        .perfScrollTracking()
-        .onAppear {
-            Self.recordLaunch()
-            if self.preheater == nil { self.preheater = ThumbnailPreheater(library: controller.library) }
-            self.preheater?.configure(order: data.ids, side: pixels)
-        }
-        .onChange(of: data.stateVersion) { self.preheater?.configure(order: self.data.ids, side: thumbnailPixels) }
-        .onChange(of: pixels) { self.preheater?.configure(order: self.data.ids, side: thumbnailPixels) }
-        .background {
-            GeometryReader { proxy in
-                Color.clear
-                    .onAppear { measure(proxy) }
-                    .onChange(of: proxy.size) { _, _ in measure(proxy) }
-            }
-        }
-        .modifier(OpensAtNewest())
-        .simultaneousGesture(MagnifyGesture().onEnded { value in resize(value.magnification) })
-        .accessibilityIdentifier("grid")
-        }
+        GridView(library: controller.library, selection: selection, counts: counts, zoom: gridZoom, input: gridInput,
+                 actions: gridActions)
+            .overlay(alignment: .topLeading) { GridZoomSource(zoom: gridZoom, namespace: zoom) }
+            .ignoresSafeArea()
+            .onAppear { Self.recordLaunch() }
     }
 
-    /// The newest items at the bottom, like when the Library opens (its tab tapped again).
-    private func showNewest(_ proxy: ScrollViewProxy) {
-        guard let last = data.cells.indices.last else { return }
-        proxy.scrollTo(last, anchor: .bottom)
-        anchor = nil
+    private var gridInput: GridInput {
+        GridInput(data: data, dataVersion: dataVersion, stateVersion: controller.library.state.version, selecting: selecting,
+                  selectionVersion: selection.version, countsVersion: counts.version, filter: filter, paired: settings.isPaired,
+                  serverName: controller.serverName, density: columns, newest: controller.newestRequests &+ newestTaps,
+                  notice: AnyView(top), noticeKey: topKey)
     }
 
-    /// The grid's columns: a change makes a new grid.
-    private struct GridShape: Hashable {
-        var columns: Int
+    private var gridActions: GridActions {
+        GridActions(tapped: { tapped($0) }, menu: { menu(for: $0, opening: $1) }, dragSelect: { dragSelect(to: $0) },
+                    dragEnded: { endDragSelect() }, resize: { resize($0) })
     }
 
-    /// The item in the middle of the screen when scrolling last stopped, so a new grid (other
-    /// columns) shows it too. None at the newest end: a new grid opens there anyway.
-    private struct Anchor: Equatable {
-        var item: String
-        var shape: GridShape
+    /// Above the first month: the notice, and the empty state when nothing is shown (at their own
+    /// height: the grid measures them).
+    private var top: some View {
+        VStack(spacing: 12) {
+            notice
+            if data.cells.isEmpty { empty }
+        }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
-    private func currentAnchor(_ shape: GridShape) -> Anchor? {
-        let shown = frames.rects.keys.sorted()
-        guard let last = data.cells.indices.last, !shown.isEmpty, !shown.contains(last) else { return nil }
-        let middle = shown[shown.count / 2]
-        return middle < data.cells.count ? Anchor(item: data.cells[middle].id, shape: shape) : nil
+    /// What `top` says, so the grid draws and measures it again only when that changes.
+    private var topKey: String {
+        let notice = controller.access == .limited ? "limited" : !settings.isPaired ? "setup" : ""
+        let empty = !data.cells.isEmpty ? "" : controller.library.count == 0 ? "none"
+            : filter == .notBackedUp && media == .all ? "done.\(controller.serverName)" : "nothing.\(filter.rawValue)"
+        return [notice, empty].filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     /// Grid Size and pinching: timed from here to the new grid on screen.
     private func setColumns(_ new: Int) {
         guard new != columns else { return }
         PerfMonitor.shared.begin("gridSize")
-        // What's in view now (the last stop of scrolling may be older).
-        anchor = currentAnchor(GridShape(columns: gridLayout.count))
         columns = new
     }
 
@@ -541,21 +440,28 @@ struct LibraryView: View {
         .accessibilityIdentifier("grid.menu")
     }
 
-    @ViewBuilder private func menu(for cell: LibraryState.Cell) -> some View {
+    /// A cell's menu (none while selecting); `opening` goes first when it opens the item.
+    private func menu(for cell: LibraryState.Cell, opening: @escaping () -> Void) -> UIMenu {
+        var items: [UIMenuElement] = []
         if cell.canFree, let original = cell.original {
-            Button("Free Up Space", systemImage: "trash") { openFreeUp([original]) }
+            items.append(UIAction(title: "Free Up Space", image: UIImage(systemName: "trash")) { _ in openFreeUp([original]) })
         }
         if cell.canCompact, settings.isPaired {
-            Button("Back Up", systemImage: "arrow.up.circle") { backUp([cell.id]) }
-                .disabled(controller.backUpBlockedReason != nil)
+            items.append(UIAction(title: "Back Up", image: UIImage(systemName: "arrow.up.circle"),
+                                  attributes: controller.backUpBlockedReason != nil ? .disabled : []) { _ in backUp([cell.id]) })
         }
         if ItemAction.canRestore(cell, immich: settings.server?.mode == .immich) {
-            Button("Restore Original", systemImage: "arrow.uturn.backward.circle") { sheet = .restore([cell.id]) }
+            items.append(UIAction(title: "Restore Original", image: UIImage(systemName: "arrow.uturn.backward.circle")) { _ in
+                sheet = .restore([cell.id])
+            })
         }
-        Button("Show Details", systemImage: "info.circle") {
-            path.append(cell.id)
-        }
-        Text(cell.badge.label)
+        items.append(UIAction(title: "Show Details", image: UIImage(systemName: "info.circle")) { _ in
+            // The zoom's stand-in is drawn first, so the item zooms out of its cell.
+            opening()
+            DispatchQueue.main.async { path.append(cell.id) }
+        })
+        items.append(UIAction(title: cell.badge.label, attributes: .disabled) { _ in })
+        return UIMenu(children: items)
     }
 
     // MARK: Selecting
@@ -580,16 +486,16 @@ struct LibraryView: View {
         Announce.say(selected.isEmpty ? "None selected" : "\(selected.count) selected")
     }
 
-    /// Touch and hold, then drag across cells to select (or deselect) a run, like Photos.
-    private func dragSelect(to location: CGPoint, _ data: GridData) {
-        guard let index = frames.position(at: location), index < data.cells.count else { return }
-        let id = data.cells[index].id
+    /// Drag across cells to select (or deselect) a run, like Photos: from where the drag started to `id`.
+    /// By id: the items can change during the drag (a backup ends, a photo is deleted).
+    private func dragSelect(to id: String) {
+        guard let index = data.positions[id] else { return }
         if dragAnchor == nil {
-            dragAnchor = index
+            dragAnchor = id
             dragBase = selected
             dragSelects = !selected.contains(id)
         }
-        guard let anchor = dragAnchor else { return }
+        guard let anchor = dragAnchor.flatMap({ data.positions[$0] }) else { return }
         let run = data.cells[min(anchor, index)...max(anchor, index)].lazy.map(\.id).filter { counts.selectable.contains($0) }
         selected = dragSelects ? dragBase.union(run) : dragBase.subtracting(run)
     }
@@ -655,22 +561,8 @@ struct LibraryView: View {
         sheet = .legend
     }
 
-    private func measure(_ proxy: GeometryProxy) {
-        gridSize = proxy.size
-    }
-
     private func openSettings() {
         if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
-    }
-}
-
-/// The frames of the cells on screen by position, in the grid's coordinates; a plain store so
-/// updating it doesn't redraw the grid.
-final class CellFrames {
-    var rects: [Int: CGRect] = [:]
-
-    func position(at point: CGPoint) -> Int? {
-        rects.first { $0.value.contains(point) }?.key
     }
 }
 
@@ -678,14 +570,17 @@ final class CellFrames {
 /// grid's structure so badge changes update the headers alone.
 @MainActor @Observable
 final class SectionCounts {
-    private(set) var open: [Int: Int] = [:]
+    @ObservationIgnored private(set) var open: [Int: Int] = [:]
     @ObservationIgnored private(set) var selectable: Set<String> = []
+    /// Bumped on every update, for the grid's headers.
+    private(set) var version = 0
 
     func update(_ data: GridData) {
         let new = Dictionary(data.sections.map { ($0.id, $0.open) }, uniquingKeysWith: { a, _ in a })
         if new != open { open = new }
         let old = selectable
         selectable = data.selectable
+        version &+= 1
         releaseInBackground(old)
     }
 }
@@ -712,119 +607,6 @@ struct SelectionParts: Sendable {
         }
         backUp = positioned.sorted { $0.0 < $1.0 }.map(\.1)
         restorable = restoring.sorted { $0.0 < $1.0 }.map(\.1)
-    }
-}
-
-/// A month's header: its name, how many aren't backed up, and in Select mode its own Select All.
-private struct MonthHeader: View {
-    let section: GridData.Section
-    let data: GridData
-    let counts: SectionCounts
-    let selection: GridSelection
-    let filter: LibraryState.Filter
-    let paired: Bool
-
-    nonisolated(unsafe) private static let style = Date.FormatStyle.dateTime.month(.wide).year()
-
-    var body: some View {
-        let open = counts.open[section.id] ?? section.open
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).font(.headline)
-            if filter == .notBackedUp || (filter == .all && open > 0 && paired) {
-                Text("\(open) not backed up").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
-            }
-            Spacer()
-            if selection.active {
-                let selectable = data.cells[section.range].lazy.map(\.id).filter { counts.selectable.contains($0) }
-                if !selectable.isEmpty {
-                    let all = selectable.allSatisfy { selection.ids.contains($0) }
-                    Button(all ? "Deselect" : "Select All") {
-                        if all { selection.ids.subtract(selectable) } else { selection.ids.formUnion(selectable) }
-                    }
-                    .font(.subheadline.weight(.semibold))
-                }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 14)
-        .padding(.bottom, 6)
-        .accessibilityElement(children: .contain)
-        .accessibilityAddTraits(.isHeader)
-    }
-
-    private var title: String {
-        guard section.month > 0 else { return "Undated" }
-        let date = Calendar.current.date(from: DateComponents(year: section.month / 12, month: section.month % 12 + 1)) ?? .now
-        return Self.style.format(date)
-    }
-}
-
-/// Select mode's touch and hold, then drag. A UIKit long press: a finger that moves before the
-/// hold fails it at once, so the grid scrolls as usual; after the hold it has the touch, and the
-/// scroll view stays put while the drag selects. (SwiftUI's long press sequenced before a drag
-/// kept the touches from the scroll view: the grid couldn't scroll in Select mode.)
-struct HoldToDragSelect: UIGestureRecognizerRepresentable {
-    var enabled: Bool
-    var changed: (CGPoint) -> Void
-    var ended: () -> Void
-
-    func makeUIGestureRecognizer(context: Context) -> UILongPressGestureRecognizer {
-        let recognizer = UILongPressGestureRecognizer()
-        recognizer.minimumPressDuration = 0.25
-        recognizer.allowableMovement = 10
-        return recognizer
-    }
-
-    func updateUIGestureRecognizer(_ recognizer: UILongPressGestureRecognizer, context: Context) {
-        recognizer.isEnabled = enabled
-    }
-
-    func handleUIGestureRecognizerAction(_ recognizer: UILongPressGestureRecognizer, context: Context) {
-        switch recognizer.state {
-        case .began, .changed: changed(context.converter.location(in: .named("grid")))
-        case .ended, .cancelled, .failed: ended()
-        default: break
-        }
-    }
-}
-
-/// Turns the enclosing scroll view's scroll-to-top (status bar or a second tap on its tab) on or off.
-struct ScrollsToTop: UIViewRepresentable {
-    var enabled: Bool
-
-    final class Probe: UIView {
-        var enabled = true
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            apply()
-        }
-
-        func apply() {
-            var view = superview
-            while let current = view, !(current is UIScrollView) { view = current.superview }
-            (view as? UIScrollView)?.scrollsToTop = enabled
-        }
-    }
-
-    func makeUIView(context: Context) -> Probe {
-        let probe = Probe()
-        probe.isUserInteractionEnabled = false
-        probe.isHidden = true
-        return probe
-    }
-
-    func updateUIView(_ probe: Probe, context: Context) {
-        probe.enabled = enabled
-        probe.apply()
-    }
-}
-
-/// Opens a long library at the newest items, like Photos, while a short one stays at the top.
-struct OpensAtNewest: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.top, for: .alignment)
     }
 }
 

@@ -20,7 +20,7 @@ Nightly (nightly.yml) runs everything and needs no plan.
 import json, os, subprocess, sys
 
 QUICK = ["quick", "quick-duo"]
-FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "duo-cover", "duo-open", "demo"]
+FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "duo-cover", "duo-grid", "duo-open", "demo"]
 ZERO = "0" * 40
 WORKFLOWS = (".github/workflows/pr.yml", ".github/workflows/ci.yml", ".github/workflows/suite.yml")
 

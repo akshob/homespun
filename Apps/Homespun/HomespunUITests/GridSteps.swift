@@ -266,12 +266,23 @@ extension XCUIApplication {
     /// Selects the newest `count` items that aren't backed up, compacts them, and waits until
     /// done. Returns how many were selected.
     @MainActor func compactNewest(_ count: Int, file: StaticString = #filePath, line: UInt = #line) -> Int {
+        compactOnScreen(count, newest: true, file: file, line: line)
+    }
+
+    /// The same with the oldest items on screen: CI's synthetic photos (`EXTRA=`, the newest) are too
+    /// small to be made smaller, so they'd be kept as they are and never be ready to free up.
+    @MainActor func compactOldestOnScreen(_ count: Int, file: StaticString = #filePath, line: UInt = #line) -> Int {
+        compactOnScreen(count, newest: false, file: file, line: line)
+    }
+
+    @MainActor private func compactOnScreen(_ count: Int, newest: Bool, file: StaticString, line: UInt) -> Int {
         let candidates = gridItems("Not backed up")
         XCTAssertTrue(candidates.firstMatch.waitForExistence(timeout: 20), "the grid shows nothing to compact",
                       file: file, line: line)
         buttons["select.start"].tap()
+        // In the grid's order (oldest first).
         let all = candidates.allElementsBoundByIndex.filter { isOnScreen($0) }
-        let chosen = Array(all.suffix(min(count, all.count)))
+        let chosen = Array(newest ? all.suffix(min(count, all.count)) : all.prefix(min(count, all.count)))
         for item in chosen { item.tap() }
         XCTAssertTrue(hasScreen("\(chosen.count) Selected", timeout: 5), "selection count",
                       file: file, line: line)

@@ -80,8 +80,11 @@ final class PerformanceUITests: XCTestCase {
         let scrollMs = (after["scrollMs"] ?? 0) - (before["scrollMs"] ?? 0)
         let ratio = scrollMs > 0 ? hitchMs / (scrollMs / 1000) : 0
         let slow = (after["slowFrames"] ?? 0) - (before["slowFrames"] ?? 0)
-        print(String(format: "PERF %@: %.0f frames over %.0f ms, hitches %.1f ms/s, %.0f frames over 50 ms (longest so far %.1f ms)",
-                     what, frames, scrollMs, ratio, slow, after["longestMs"] ?? 0))
+        // Grid cells on screen still without their picture, over the frames counted.
+        let shown = (after["shownCells"] ?? 0) - (before["shownCells"] ?? 0)
+        let blank = shown > 0 ? ((after["blankCells"] ?? 0) - (before["blankCells"] ?? 0)) * 100 / shown : 0
+        print(String(format: "PERF %@: %.0f frames over %.0f ms, hitches %.1f ms/s, %.0f frames over 50 ms (longest so far %.1f ms), blank cells %.1f%%",
+                     what, frames, scrollMs, ratio, slow, after["longestMs"] ?? 0, blank))
         XCTAssertGreaterThan(frames, 30, "\(what): nothing scrolled", file: file, line: line)
         XCTAssertLessThanOrEqual(ratio, hitchBudget, "\(what): \(ratio) ms of hitches per second", file: file, line: line)
         XCTAssertLessThanOrEqual(slow, Self.gestureSlowFrameBudget, "\(what): \(slow) frames over 50 ms", file: file, line: line)
@@ -306,8 +309,9 @@ final class PerformanceUITests: XCTestCase {
         for phase in PerformanceUITestsPhases.names {
             let frames = values["auto.\(phase).frames"] ?? 0, ratio = values["auto.\(phase).hitchMsPerS"] ?? .infinity
             let slow = values["auto.\(phase).slowFrames"] ?? .infinity, longest = values["auto.\(phase).longestMs"] ?? 0
-            print(String(format: "PERF autoscroll %@: %.0f frames, hitches %.1f ms/s, %.0f frames over 50 ms, longest %.1f ms",
-                         phase, frames, ratio, slow, longest))
+            let blank = values["auto.\(phase).blankPct"] ?? 0
+            print(String(format: "PERF autoscroll %@: %.0f frames, hitches %.1f ms/s, %.0f frames over 50 ms, longest %.1f ms, blank cells %.1f%%",
+                         phase, frames, ratio, slow, longest, blank))
             XCTAssertGreaterThan(frames, 30, "autoscroll \(phase): nothing scrolled")
             XCTAssertLessThanOrEqual(ratio, Self.hitchBudget, "autoscroll \(phase): \(ratio) ms of hitches per second")
             XCTAssertLessThanOrEqual(slow, Self.slowFrameBudget, "autoscroll \(phase): \(slow) frames over 50 ms")

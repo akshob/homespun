@@ -4,7 +4,8 @@
 #
 #   ui.sh <name> <device type> <only-testing ids, comma-separated> <port> [open]
 #
-# Environment: EXTRA=n adds n small synthetic photos; DUO_POSES=1 lets the test fold and turn the
+# Environment: EXTRA=n adds n small synthetic photos, DATED=n as many taken over the past months
+# (12 a month); DUO_POSES=1 lets the test fold and turn the
 # Duo (it writes a pose to TEST_RUNNER_DUO_POSE_FILE; screenshots go to $RESULTS/<name>-shots);
 # STUB_PORT=p sends telemetry to a local stub and checks what arrived. SERVERLESS=1 (Try the Demo): no
 # temporary server, and no Photos access, so iOS would ask if anything needed it.
@@ -35,6 +36,11 @@ if [[ -n ${EXTRA:-} ]]; then
           && touch $MEDIA/.done
     fi
     xcrun simctl addmedia $SIM $(ls $MEDIA/*.JPG | head -$EXTRA)
+fi
+if [[ -n ${DATED:-} ]]; then
+    MEDIA=$CI_STATE/media/dated-$DATED
+    [[ -f $MEDIA/.done ]] || { swift ${0:A:h}/dated-photos.swift $MEDIA $DATED && touch $MEDIA/.done; }
+    xcrun simctl addmedia $SIM $MEDIA/*.JPG
 fi
 CODE="" LINK=""
 if [[ -z ${SERVERLESS:-} ]]; then
