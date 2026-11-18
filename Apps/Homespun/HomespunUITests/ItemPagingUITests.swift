@@ -20,6 +20,43 @@ final class ItemPagingUITests: XCTestCase {
 
     private var poses: String? { ProcessInfo.processInfo.environment["DUO_POSE_FILE"] }
 
+    @MainActor func testAVideoPlaysInTheViewer() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 30))
+        app.choose("grid.filter", "Videos")
+        let video = app.gridItems().matching(NSPredicate(format: "label BEGINSWITH 'Video'")).firstMatch
+        XCTAssertTrue(video.waitForExistence(timeout: 10), "no seeded video")
+        video.tap()
+        let play = app.buttons["item.play"]
+        XCTAssertTrue(play.waitForExistence(timeout: 10), "no video controls")
+        func labeled(_ label: String) -> Bool {
+            XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label),
+                                                          object: play)], timeout: 8) == .completed
+        }
+        XCTAssertTrue(labeled("Pause"), "the video didn't autoplay")
+        XCTAssertTrue(labeled("Play"), "the video didn't end")
+        let position = app.sliders["item.position"]
+        let ended = position.value as? String ?? ""
+        XCTAssertTrue(ended.hasPrefix("0:03") || ended.hasPrefix("0:02"), "no progress: \(ended)")
+        play.tap()
+        XCTAssertTrue(labeled("Pause"), "Play didn't restart")
+        app.shownPage().tap()
+        XCTAssertTrue(labeled("Play"), "tapping the page didn't pause")
+        XCTAssertEqual(app.shownPage().value as? String, "Paused")
+        if poses == nil {
+            position.adjust(toNormalizedSliderPosition: 0.5)
+            XCTAssertTrue((position.value as? String ?? "").hasPrefix("0:01"), "the scrubber didn't seek")
+            let picture = XCTAttachment(screenshot: app.screenshot())
+            picture.name = "Video controls"
+            picture.lifetime = .keepAlways
+            add(picture)
+        }
+        app.goBack()
+        app.choose("grid.filter", "Photos and Videos")
+    }
+
     @MainActor func testSwipingAndTurningKeepTheItem() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]

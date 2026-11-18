@@ -94,6 +94,11 @@ first removal it explains what removal means (including iCloud Photos) and shows
 copies to compare with their originals (from the server); "They Look Right" frees them up. Setup
 and the Get Started card open the Library to pick a few items to try.
 
+Videos play in the item viewer, with Play/Pause and a position slider below the picture.
+Autoplay follows the iPhone's accessibility setting. On the open iPhone Duo, Compare can show
+both videos side by side: they play, pause, seek and zoom together, with sound from one copy
+at a time. Sound switches between the original and the compact copy.
+
 **Try the Demo** (on the first setup page, and in Server › Help and About) shows all of this without
 a server: about 30 sample photos and videos drawn for the purpose (`Resources/Demo`, made by
 `scripts/demo-media.swift`; a Live Photo, videos, a screenshot) and a pretend server, "Homespun Demo",

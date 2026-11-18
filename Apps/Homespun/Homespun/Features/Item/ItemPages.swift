@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import AVKit
 import Photos
 import PhotosUI
-import SwiftUI
 import UIKit
 
 /// A page of the item viewer: exactly the layout's size, nothing to measure.
@@ -151,86 +149,164 @@ final class PhotoContent: UIView {
     }
 }
 
-/// A video page: its SwiftUI player in a hosting controller (the player needs one), reused for the
-/// next video.
+/// A video page has only a poster and a player layer. The viewer owns its one player and controls.
 final class VideoPageCell: ItemPageCell {
     static let reuse = "video"
+    private let poster = UIImageView()
+    private let surface = PlayerSurface()
+    private let glyph = UIVisualEffectView(effect: UIGlassEffect())
+    private let spinner = UIActivityIndicatorView(style: .large)
+    private let failure = UILabel()
+    private var id: String?
+    private var item: (any LibraryItem)?
+    private var current = false
+    private weak var playback: VideoPlayback?
+    private var loading: Task<Void, Never>?
+    private var waiting: Task<Void, Never>?
 
-    struct Key: Equatable {
-        var id: String
-        var current: Bool
-        var label: String
-        var placeholder: Bool
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        for view in [poster, surface] {
+            view.frame = contentView.bounds
+            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.isUserInteractionEnabled = false
+            contentView.addSubview(view)
+        }
+        poster.contentMode = .scaleAspectFit
+        surface.isHidden = true
+        surface.onReady = { [weak self] ready in
+            guard let self else { return }
+            surface.isHidden = !ready || !current
+            poster.isHidden = ready && current
+        }
+        let icon = UIImageView(image: UIImage(systemName: "play.fill",
+                                              withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .semibold)))
+        icon.tintColor = .white
+        icon.contentMode = .center
+        icon.frame = CGRect(x: 0, y: 0, width: 72, height: 72)
+        glyph.contentView.addSubview(icon)
+        glyph.clipsToBounds = true
+        glyph.layer.cornerRadius = 36
+        glyph.isUserInteractionEnabled = false
+        failure.font = .preferredFont(forTextStyle: .footnote)
+        failure.adjustsFontForContentSizeCategory = true
+        failure.textColor = .white
+        failure.textAlignment = .center
+        failure.numberOfLines = 0
+        for view in [glyph, spinner, failure] { contentView.addSubview(view) }
+        contentView.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+        isAccessibilityElement = true
+        accessibilityIdentifier = "item.page"
+        accessibilityTraits = [.image, .startsMediaSession]
+        render()
     }
 
-    var host: UIHostingController<ItemVideoPage>?
-    var key: Key?
-}
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-/// A video: its poster (the screen-size image) until it's the page shown, then the player, which
-/// pauses when the page isn't shown any more.
-struct ItemVideoPage: View {
-    let item: (any LibraryItem)?
-    let isCurrent: Bool
-    let label: String
-    /// The screen-size image, when the pager has it already.
-    var placeholder: UIImage?
-    var images: ItemImages?
-    @State private var loaded = Media()
-
-    private struct Media {
-        var id: String?
-        var image: UIImage?
-        var player: AVPlayer?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        glyph.frame = CGRect(x: (contentView.bounds.width - 72) / 2, y: (contentView.bounds.height - 72) / 2,
+                             width: 72, height: 72)
+        spinner.center = CGPoint(x: contentView.bounds.midX, y: contentView.bounds.midY)
+        let size = failure.sizeThatFits(CGSize(width: max(0, contentView.bounds.width - 48), height: .greatestFiniteMagnitude))
+        failure.frame = CGRect(x: 24, y: (contentView.bounds.height - size.height) / 2,
+                               width: max(0, contentView.bounds.width - 48), height: size.height)
     }
 
-    private struct Load: Equatable {
-        var id: String?
-        var current: Bool
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        detach()
+        loading?.cancel()
+        loading = nil
+        id = nil
+        item = nil
+        poster.image = nil
     }
 
-    /// What's loaded, if it's for this item (the page may have just been given another).
-    private var media: Media { loaded.id == item?.localIdentifier ? loaded : Media(id: item?.localIdentifier) }
-    private var image: UIImage? { media.image ?? placeholder }
+    func endDisplaying() { detach() }
 
-    var body: some View {
-        Group {
-            if let player = media.player {
-                VideoPlayer(player: player)
-                    .accessibilityLabel(label)
-                    .accessibilityIdentifier("item.page")
-            } else {
-                Color.black.overlay {
-                    if let image { Image(uiImage: image).resizable().scaledToFit() }
-                }
-                .accessibilityElement()
-                .accessibilityLabel(label)
-                .accessibilityValue(image == nil ? "Loading" : "")
-                .accessibilityAddTraits(.isImage)
-                .accessibilityIdentifier("item.page")
+    func show(id: String, item: () -> (any LibraryItem)?, current: Bool, label: String, placeholder: UIImage?,
+              images: ItemImages, playback: VideoPlayback) {
+        if self.id != id {
+            detach()
+            loading?.cancel()
+            loading = nil
+            self.id = id
+            self.item = item()
+            poster.image = nil
+        }
+        self.playback = playback
+        accessibilityLabel = label
+        if poster.image == nil { poster.image = placeholder }
+        if poster.image == nil, loading == nil, let item = self.item {
+            loading = Task { [weak self] in
+                let image = await images.load(item)
+                guard let self, self.id == id, !Task.isCancelled else { return }
+                if poster.image == nil { poster.image = image }
             }
         }
-        .ignoresSafeArea()
-        .task(id: Load(id: item?.localIdentifier, current: isCurrent)) { await load() }
-        .onChange(of: isCurrent) { _, current in if !current { loaded.player?.pause() } }
-        .onDisappear { loaded.player?.pause() }
+        if !current {
+            detach()
+        } else {
+            self.current = true
+            surface.player = playback.player
+            playback.stateOwner = self
+            playback.stateChanged = { [weak self] in self?.render() }
+            if let item = self.item {
+                playback.load(item, id: id, autoplay: UIAccessibility.isVideoAutoplayEnabled)
+            }
+        }
+        render()
     }
 
-    private func load() async {
-        guard let item else { return }
-        let id = item.localIdentifier
-        if loaded.id != id {
-            loaded.player?.pause()
-            loaded = Media(id: id)
+    private func detach() {
+        current = false
+        surface.player = nil
+        surface.isHidden = true
+        poster.isHidden = false
+        waiting?.cancel()
+        waiting = nil
+        if let id, let playback, playback.stateOwner === self {
+            playback.unload(id: id)
+            playback.stateChanged = nil
+            playback.stateOwner = nil
         }
-        if loaded.image == nil {
-            var image = placeholder
-            if image == nil { image = await images?.load(item) }
-            guard loaded.id == id else { return }
-            loaded.image = image
+    }
+
+    private func render() {
+        let status = current ? playback?.status ?? .idle : .idle
+        glyph.isHidden = !(current && status == .ready && playback?.isPlaying == false)
+        failure.isHidden = true
+        if status != .loading {
+            waiting?.cancel()
+            waiting = nil
+            spinner.stopAnimating()
         }
-        guard isCurrent, !Task.isCancelled, loaded.player == nil else { return }
-        let player = await item.player()
-        if loaded.id == id, !Task.isCancelled { loaded.player = player }
+        switch status {
+        case .idle: accessibilityValue = poster.image == nil ? "Loading" : nil
+        case .loading:
+            accessibilityValue = "Loading"
+            if waiting == nil {
+                waiting = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    guard let self, !Task.isCancelled, current, playback?.status == .loading else { return }
+                    spinner.startAnimating()
+                }
+            }
+        case .ready: accessibilityValue = playback?.isPlaying == true ? "Playing" : "Paused"
+        case .failed(let message):
+            accessibilityValue = message
+            failure.text = message
+            failure.isHidden = false
+            setNeedsLayout()
+        }
+    }
+
+    @objc private func tapped() { if current { playback?.toggle() } }
+
+    override func accessibilityActivate() -> Bool {
+        guard current else { return false }
+        playback?.toggle()
+        return true
     }
 }

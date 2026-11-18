@@ -63,16 +63,27 @@ enum ItemMedia {
         return box.value
     }
 
-    @MainActor static func player(_ asset: PHAsset) async -> AVPlayer? {
+    @MainActor static func playerItem(_ asset: PHAsset) async -> Result<AVPlayerItem, Error> {
         let options = PHVideoRequestOptions()
         options.deliveryMode = .automatic
         options.isNetworkAccessAllowed = true
-        let box: Box<AVPlayerItem?> = await withCheckedContinuation { continuation in
-            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, _ in
-                continuation.resume(returning: Box(item))
+        let box: Box<Result<AVPlayerItem, Error>> = await withCheckedContinuation { continuation in
+            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, info in
+                let result: Result<AVPlayerItem, Error>
+                if let item {
+                    result = .success(item)
+                } else {
+                    result = .failure(info?[PHImageErrorKey] as? Error
+                        ?? PhotoLibrary.Failure.unsupported("This video can't be played here."))
+                }
+                continuation.resume(returning: Box(result))
             }
         }
-        return box.value.map(AVPlayer.init(playerItem:))
+        return box.value
+    }
+
+    @MainActor static func player(_ asset: PHAsset) async -> AVPlayer? {
+        (try? await playerItem(asset).get()).map(AVPlayer.init(playerItem:))
     }
 
     /// A downloaded photo, upright, with its facts.

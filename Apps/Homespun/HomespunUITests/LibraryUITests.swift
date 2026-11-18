@@ -48,29 +48,22 @@ final class LibraryUITests: XCTestCase {
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         app.launch()
         XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 20), "no photos in the Library")
-        func choose(_ menu: String, _ item: String) {
-            app.descendants(matching: .any)[menu].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-            let option = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", item)).firstMatch
-            XCTAssertTrue(option.waitForExistence(timeout: 5), "no \(item)")
-            option.tap()
-            sleep(1)
-        }
         for (filter, size) in [("Live Photos", "Small"), ("Videos", "Large"), ("Live Photos", "Medium")] {
-            choose("grid.filter", filter)
-            choose("grid.menu", "Grid Size")
+            app.choose("grid.filter", filter)
+            app.choose("grid.menu", "Grid Size")
             let sizeItem = app.buttons[size].firstMatch
             XCTAssertTrue(sizeItem.waitForExistence(timeout: 5), "no grid size \(size)")
             sizeItem.tap()
             sleep(1)
-            choose("grid.filter", "Photos and Videos")
-            choose("grid.filter", "All Items")
+            app.choose("grid.filter", "Photos and Videos")
+            app.choose("grid.filter", "All Items")
             app.openTab("Library")
             app.openTab("Library")
             sleep(2)
             XCTAssertEqual(app.state, .runningForeground, "crashed after \(filter), \(size), then All")
             XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 10), "no grid after \(filter), \(size), then All")
         }
-        choose("grid.menu", "Grid Size")
+        app.choose("grid.menu", "Grid Size")
         let medium = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Medium")).firstMatch
         if medium.waitForExistence(timeout: 3) { medium.tap() }
     }

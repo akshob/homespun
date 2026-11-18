@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+import AVFoundation
 import Foundation
 import HomespunCore
+import HomespunTestSupport
 import Testing
 @testable import Homespun
 
@@ -163,6 +165,146 @@ import Testing
         #expect(ZoomScrollView.fitted(CGSize(width: 1080, height: 1920), in: CGSize(width: 400, height: 400))
             == CGSize(width: 225, height: 400))
         #expect(ZoomScrollView.fitted(.zero, in: CGSize(width: 400, height: 800)) == CGSize(width: 400, height: 800))
+    }
+
+    @Test func compareOffersOnlyModesThatFitTheMediaAndScreen() {
+        #expect(CompareView.modes(video: false, regular: true) == [.sideBySide, .split, .original, .compact])
+        #expect(CompareView.modes(video: false, regular: false) == [.original, .compact, .split])
+        #expect(CompareView.modes(video: true, regular: true) == [.sideBySide, .original, .compact])
+        #expect(CompareView.modes(video: true, regular: false) == [.original, .compact])
+        #expect(CompareView.adjusted(.split, video: false, regular: true) == .sideBySide)
+        #expect(CompareView.adjusted(.split, video: true, regular: true) == .sideBySide)
+        #expect(CompareView.adjusted(.sideBySide, video: true, regular: false) == .compact)
+        #expect(CompareView.adjusted(.sideBySide, video: false, regular: false) == .split)
+        #expect(CompareView.adjusted(.split, video: true, regular: false) == .compact)
+        #expect(CompareView.adjusted(.original, video: true, regular: true) == .original)
+    }
+
+    @Test func videoTimeFloorsAndIncludesHoursWhenNeeded() {
+        #expect(VideoTime.text(2.99) == "0:02")
+        #expect(VideoTime.text(3661.9) == "1:01:01")
+        #expect(VideoTime.text(.nan) == "0:00")
+        #expect(VideoTime.text(-1) == "0:00")
+    }
+
+    @Test func videoPlaybackAutoplaysEndsRestartsAndUnloads() async throws {
+        let videos = try await videos()
+        defer { try? FileManager.default.removeItem(at: videos.folder) }
+        let playback = VideoPlayback()
+        defer { playback.unload(id: "first") }
+        playback.load(item: AVPlayerItem(url: videos.original), id: "first", duration: 3, autoplay: true)
+        try #require(await eventually { playback.isPlaying && playback.time > 0.3 })
+        let player = playback.player
+        try #require(await eventually { !playback.isPlaying && playback.time > 2.9 })
+        #expect(abs(playback.time - playback.duration) < 0.05)
+        playback.play()
+        try #require(await eventually { playback.isPlaying && playback.time > 0.1 && playback.time < 1 })
+        playback.beginScrub()
+        playback.scrub(to: 0.5)
+        playback.scrub(to: 1)
+        playback.scrub(to: 2)
+        playback.endScrub()
+        try #require(await eventually { playback.isPlaying && playback.time >= 2 })
+        playback.unload(id: "another")
+        #expect(playback.id == "first")
+        playback.unload(id: "first")
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(playback.status == .idle && !playback.isPlaying && playback.time == 0)
+        #expect(player.currentItem == nil && player === playback.player)
+        playback.load(item: AVPlayerItem(url: videos.compact), id: "second", duration: 3, autoplay: false)
+        try #require(await eventually { playback.status == .ready })
+        #expect(!playback.isPlaying && playback.player === player)
+        let item = DemoItem(id: "second", created: nil, width: 320, height: 180, duration: 3, favorite: false,
+                            screenshot: false, kind: .video, files: [.video: videos.compact], thumbnail: nil)
+        let oldCell = VideoPageCell(frame: .zero), newCell = VideoPageCell(frame: .zero), images = ItemImages()
+        for cell in [oldCell, newCell] {
+            cell.show(id: "second", item: { item }, current: true, label: "Video", placeholder: nil,
+                      images: images, playback: playback)
+        }
+        // A library reload can replace a cell without changing the item shown.
+        oldCell.endDisplaying()
+        #expect(playback.id == "second" && player.currentItem != nil)
+        newCell.endDisplaying()
+        #expect(playback.status == .idle && player.currentItem == nil)
+    }
+
+    @Test func videoPairPlaysSeeksAndEndsTogetherWithOneSound() async throws {
+        let videos = try await videos()
+        defer { try? FileManager.default.removeItem(at: videos.folder) }
+        let original = AVPlayer(url: videos.original), compact = AVPlayer(url: videos.compact)
+        let pair = VideoPair()
+        defer { pair.stop() }
+        pair.attach(original: original, compact: compact)
+        pair.active = true
+        try #require(await eventually { original.currentItem?.status == .readyToPlay && compact.currentItem?.status == .readyToPlay })
+        #expect(original.isMuted && !compact.isMuted)
+        pair.heard = .original
+        #expect(!original.isMuted && compact.isMuted)
+        pair.play()
+        try await Task.sleep(for: .milliseconds(1200))
+        pair.pause()
+        try #require(await eventually {
+            abs(original.currentTime().seconds - compact.currentTime().seconds) < 0.05
+        })
+        #expect(pair.time > 0.6)
+        pair.beginScrub()
+        pair.scrub(to: 0.2)
+        pair.scrub(to: 1)
+        pair.scrub(to: 2)
+        pair.endScrub()
+        try #require(await eventually {
+            abs(original.currentTime().seconds - 2) < 0.04 && abs(compact.currentTime().seconds - 2) < 0.04
+        })
+        pair.play()
+        try #require(await eventually { !pair.isPlaying && pair.time > 2.9 })
+        pair.active = false
+        #expect(!original.isMuted && !compact.isMuted)
+    }
+
+    @Test func videoPairJoinsALateOriginalWithoutChangingSound() async throws {
+        let videos = try await videos()
+        defer { try? FileManager.default.removeItem(at: videos.folder) }
+        let compact = AVPlayer(url: videos.compact)
+        let pair = VideoPair()
+        defer { pair.stop() }
+        pair.attach(original: nil, compact: compact)
+        pair.active = true
+        try #require(await eventually { compact.currentItem?.status == .readyToPlay })
+        pair.play()
+        try #require(await eventually { pair.time > 0.5 })
+        let original = AVPlayer(url: videos.original)
+        pair.attach(original: original, compact: compact)
+        try #require(await eventually {
+            original.timeControlStatus == .playing && abs(original.currentTime().seconds - compact.currentTime().seconds) < 0.1
+        })
+        try await Task.sleep(for: .seconds(1))
+        #expect(abs(original.currentTime().seconds - compact.currentTime().seconds) < 0.1)
+        #expect(pair.heard == .compact && original.isMuted && !compact.isMuted)
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(15)
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(30))
+        }
+        return condition()
+    }
+
+    private func videos() async throws -> (folder: URL, original: URL, compact: URL) {
+        let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("video-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let original = folder.appendingPathComponent("original.mov"), compact = folder.appendingPathComponent("compact.mov")
+        do {
+            try await Task.detached {
+                try await Synthetic.video(at: original, .init(width: 640, height: 360, frames: 90, audioChannels: 0))
+                try await Synthetic.video(at: compact, .init(width: 320, height: 180, frames: 90, audioChannels: 0))
+            }.value
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
+        return (folder, original, compact)
     }
 
     @Test func detailsFooterSaysWhereMotionWasCompressedAndWhatItSaves() {

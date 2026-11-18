@@ -265,8 +265,9 @@ extension XCUIApplication {
 
     /// Selects the newest `count` items that aren't backed up, compacts them, and waits until
     /// done. Returns how many were selected.
-    @MainActor func compactNewest(_ count: Int, file: StaticString = #filePath, line: UInt = #line) -> Int {
-        compactOnScreen(count, newest: true, file: file, line: line)
+    @MainActor func compactNewest(_ count: Int, matching: NSPredicate? = nil,
+                                  file: StaticString = #filePath, line: UInt = #line) -> Int {
+        compactOnScreen(count, newest: true, matching: matching, file: file, line: line)
     }
 
     /// The same with the oldest items on screen: CI's synthetic photos (`EXTRA=`, the newest) are too
@@ -275,8 +276,9 @@ extension XCUIApplication {
         compactOnScreen(count, newest: false, file: file, line: line)
     }
 
-    @MainActor private func compactOnScreen(_ count: Int, newest: Bool, file: StaticString, line: UInt) -> Int {
-        let candidates = gridItems("Not backed up")
+    @MainActor private func compactOnScreen(_ count: Int, newest: Bool, matching: NSPredicate? = nil,
+                                           file: StaticString, line: UInt) -> Int {
+        let candidates = matching.map { gridItems("Not backed up").matching($0) } ?? gridItems("Not backed up")
         XCTAssertTrue(candidates.firstMatch.waitForExistence(timeout: 20), "the grid shows nothing to compact",
                       file: file, line: line)
         buttons["select.start"].tap()
@@ -294,6 +296,15 @@ extension XCUIApplication {
         repeat { sleep(2) } while (busy.count > 0 || progress.exists) && Date() < deadline
         XCTAssertEqual(busy.count, 0, "items still working after 15 minutes", file: file, line: line)
         return chosen.count
+    }
+
+    /// Picks an option from a Library menu, including menus in iPhone Duo's strip.
+    @MainActor func choose(_ menu: String, _ item: String, file: StaticString = #filePath, line: UInt = #line) {
+        descendants(matching: .any)[menu].firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let option = buttons.matching(NSPredicate(format: "label BEGINSWITH %@", item)).firstMatch
+        XCTAssertTrue(option.waitForExistence(timeout: 5), "no \(item)", file: file, line: line)
+        option.tap()
+        sleep(1)
     }
 
     /// Opens Activity's latest run and checks every item finished without failing. Returns the

@@ -20,6 +20,7 @@ struct ItemViewer: View {
     @State private var restoring = false
     @State private var zoomed = false
     @State private var comparing: String?
+    @State private var playback = VideoPlayback()
     /// Swipe down to close: how far the item has been dragged.
     @State private var drag: CGSize = .zero
     @Environment(\.dismiss) private var dismiss
@@ -51,7 +52,11 @@ struct ItemViewer: View {
                 .offset(x: drag.width, y: max(drag.height, 0))
             if let cell, !zoomed, drag == .zero { stateLine(cell, asset: asset) }
         }
-
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if asset?.itemKind == .video, !zoomed, drag == .zero {
+                VideoScrubber(playback: playback).padding(.horizontal, 20).padding(.bottom, 8)
+            }
+        }
         .navigationTitle(ItemText.title(asset?.creationDate))
         .navigationSubtitle(ItemText.subtitle(asset?.creationDate, kind: asset?.itemKind,
                                               duration: asset?.duration ?? 0))
@@ -59,7 +64,7 @@ struct ItemViewer: View {
         .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
         .toolbar(.hidden, for: .tabBar)
-        .toolbar { toolbar(cell) }
+        .toolbar { toolbar(cell, isVideo: asset?.itemKind == .video) }
         .itemScreen()
         .onAppear { PerfMonitor.shared.endAfterFrame("open") }
         .onChange(of: current) { _, id in
@@ -70,7 +75,10 @@ struct ItemViewer: View {
             if details != nil { details = id }
         }
         // Compare goes over the viewer, and Back leaves it: Details close.
-        .onDisappear { details = nil }
+        .onDisappear {
+            details = nil
+            playback.pause()
+        }
         .sheet(isPresented: $restoring) {
             RestoreOriginalSheet(controller: model.library, compacts: [shown]) { restored in
                 // The compact copy shown is gone: back to the grid, where the original is.
@@ -87,7 +95,7 @@ struct ItemViewer: View {
     /// Every item the viewer goes through, a page each (UIKit: exact pages, reused).
     private var pager: some View {
         // From the item shown, should SwiftUI make the pager again while the viewer stays.
-        ItemPager(ids: ids, start: shown, current: $current, zoomed: $zoomed,
+        ItemPager(ids: ids, start: shown, current: $current, zoomed: $zoomed, playback: playback,
                   item: { model.library.library.item($0) }, label: spokenLabel) { drag = $0 } released: { translation, velocity in
             if translation.height > 120 || velocity.height > 900 {
                 dismiss()
@@ -153,7 +161,7 @@ struct ItemViewer: View {
 
     // MARK: Toolbar
 
-    @ToolbarContentBuilder private func toolbar(_ cell: LibraryState.Cell?) -> some ToolbarContent {
+    @ToolbarContentBuilder private func toolbar(_ cell: LibraryState.Cell?, isVideo: Bool) -> some ToolbarContent {
         ToolbarItem(placement: .bottomBar) {
             Button("Details", systemImage: "info.circle") { details = shown }
                 .tint(.white)
@@ -169,6 +177,16 @@ struct ItemViewer: View {
                 .tint(.white)
                 .accessibilityIdentifier("item.compare")
                 .popoverTip(showsTips ? CompareTip() : nil)
+            }
+        }
+        if isVideo {
+            ToolbarItem(placement: .bottomBar) {
+                Button(playback.isPlaying ? "Pause" : "Play", systemImage: playback.isPlaying ? "pause.fill" : "play.fill") {
+                    playback.toggle()
+                }
+                .tint(.white)
+                .disabled(playback.status != .ready)
+                .accessibilityIdentifier("item.play")
             }
         }
         ToolbarSpacer(.flexible, placement: .bottomBar)
