@@ -78,7 +78,7 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 
 ## iOS app
 
-Version 1.0 supports iOS 26 and later. Release build numbers are timestamps from `testflight.sh`.
+Version 1.0.0 supports iOS 26 and later. Release build numbers are timestamps from `testflight.sh`.
 
 On first launch the app explains what it does, connects to a server (tap one found on the
 network: a Mac asks you to click Allow on its screen, a Linux server gives you a code; or use a
@@ -137,8 +137,8 @@ Turning on Automatic Mode in the demo asks for the real one-time purchase.
 
 Automatic Mode's page (Server › Backups) opens with or without the purchase. Turning it on asks for the
 purchase first, with Restore Purchase, then carries on; one purchase unlocks Automatic Mode and widgets,
-with Family Sharing. The local StoreKit configuration uses the 1.0 price, USD 2.99.
-Cloud Copies is hidden in 1.0 behind `AppFeatures.cloudCopies` until the server ships a Microsoft app ID.
+with Family Sharing. The local StoreKit configuration uses the 1.0.0 price, USD 2.99.
+Cloud Copies is hidden in 1.0.0 behind `AppFeatures.cloudCopies` until the server ships a Microsoft app ID.
 The server's connector support stays available separately (see below).
 
 Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
@@ -418,7 +418,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/homespun
 
 The server can also copy each original somewhere else once it has stored and checked it (for
 items waiting for their compact copy, once it's made, so cleaned-up photos never go out), as
-an extra backup (Cloud Copies is hidden in the 1.0 app). Copies never count toward removing an
+an extra backup (Cloud Copies is hidden in the 1.0.0 app). Copies never count toward removing an
 original from the iPhone; only the server's own verified copy does. Each copy is checked
 where the service allows it, and a full or offline destination is retried later without
 holding up compact copies.

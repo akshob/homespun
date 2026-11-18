@@ -98,7 +98,7 @@ actor DemoServer {
     static let hardware = ServerAPI.Hardware(kind: .desktop, model: "Mac mini")
 
     static var info: ServerAPI.ServerInfo {
-        ServerAPI.ServerInfo(name: name, version: "1.0 (demo)", mode: .files, profile: .standard, platform: platform,
+        ServerAPI.ServerInfo(name: name, version: "1.0.0 (demo)", mode: .files, profile: .standard, platform: platform,
                              hardware: hardware, freeBytes: folders[0].free)
     }
 

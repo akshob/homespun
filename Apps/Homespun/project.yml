@@ -7,7 +7,7 @@ options:
 # The app, its widgets and the watch app share one version (the App Store requires it).
 settings:
   base:
-    MARKETING_VERSION: "1.0"
+    MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
 # Profile: Release's optimisation with testability, for the performance tests only (never shipped).
 configs:

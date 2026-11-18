@@ -65,7 +65,7 @@ Strings in `app` and `device` may not contain control characters.
 ```json
 {
   "install": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b",
-  "app": {"version": "1.0", "build": "42", "channel": "testflight"},
+  "app": {"version": "1.0.0", "build": "42", "channel": "testflight"},
   "device": {"model": "iPhone18,1", "os": "27.2", "family": "iphone"},
   "events": [
     {"name": "app.launch", "time": "2026-11-15T21:40:00Z", "props": {"cold": true}},
@@ -303,7 +303,7 @@ npx wrangler d1 migrations apply homespun-telemetry --local
 npm run dev
 curl localhost:8787/v1/health
 curl -H 'X-Homespun-Key: homespun-app-v1' -H 'Content-Type: application/json' \
-  -d '{"install":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","app":{"version":"1.0","build":"1","channel":"debug"},"device":{"model":"iPhone18,1","os":"27.2","family":"iphone"},"events":[{"name":"analytics.optin","time":"2026-11-15T21:40:00Z","props":{}}]}' \
+  -d '{"install":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","app":{"version":"1.0.0","build":"1","channel":"debug"},"device":{"model":"iPhone18,1","os":"27.2","family":"iphone"},"events":[{"name":"analytics.optin","time":"2026-11-15T21:40:00Z","props":{}}]}' \
   localhost:8787/v1/events
 npx wrangler dev --test-scheduled   # then: curl 'localhost:8787/cdn-cgi/handler/scheduled'
 ```
