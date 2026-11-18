@@ -10,7 +10,7 @@ import UIKit
 struct FreeUpColumn<Head: View, Title: View, Tail: View>: UIViewRepresentable {
     let pairs: [FreeUpPair]
     let selected: FreeUpPair?
-    let manager: PHCachingImageManager
+    let library: LibraryModel
     var compare: (FreeUpPair) -> Void
     @ViewBuilder var head: Head
     @ViewBuilder var title: Title
@@ -23,7 +23,7 @@ struct FreeUpColumn<Head: View, Title: View, Tail: View>: UIViewRepresentable {
         view.backgroundColor = .clear
         view.alwaysBounceVertical = true
         view.accessibilityIdentifier = "remove.review"
-        context.coordinator.attach(to: view, manager: manager, scale: context.environment.displayScale)
+        context.coordinator.attach(to: view, library: library, scale: context.environment.displayScale)
         update(view, context.coordinator)
         return view
     }
@@ -73,11 +73,11 @@ final class FreeUpColumnSource: NSObject, UICollectionViewDataSource, UICollecti
         grid.section = Part.grid.rawValue
     }
 
-    func attach(to view: UICollectionView, manager: PHCachingImageManager, scale: CGFloat) {
+    func attach(to view: UICollectionView, library: LibraryModel, scale: CGFloat) {
         self.view = view
         view.register(UICollectionViewCell.self, forCellWithReuseIdentifier: Self.hosted)
         // About the largest side the column gives a thumbnail.
-        grid.attach(to: view, manager: manager, side: 100, scale: scale, own: false)
+        grid.attach(to: view, library: library, side: 100, scale: scale, own: false)
         view.dataSource = self
         view.delegate = self
         view.prefetchDataSource = self

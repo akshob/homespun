@@ -412,6 +412,13 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     private(set) var loaded = false
     @ObservationIgnored private var libraryRead = false
     let thumbnails = PHCachingImageManager()
+    /// Where the items come from when it isn't Photos (the demo's sample photos); nil: Photos.
+    let catalog: (any ItemCatalog)?
+
+    init(catalog: (any ItemCatalog)? = nil) {
+        self.catalog = catalog
+        super.init()
+    }
 
     struct Inputs: Sendable {
         var ledger: [String: CompactLedger.Entry] = [:]
@@ -453,6 +460,12 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     func asset(_ id: String) -> PHAsset? { source.asset(id) }
 
+    /// The item shown in the grid, for the viewer.
+    func item(_ id: String) -> (any LibraryItem)? {
+        if let catalog { return catalog.item(id) }
+        return source.asset(id)
+    }
+
     /// The item's kind, length and date (nil until the library is read).
     func info(_ id: String) -> MediaInfo? { media[id] }
 
@@ -460,6 +473,38 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     func loadAsset(_ id: String) async -> PHAsset? {
         let source = source
         return await Task.detached(priority: .userInitiated) { Unchecked(value: source.asset(id)) }.value.value
+    }
+
+    /// A cell's thumbnail as it gets sharper (Photos' quick one, then the real one), or nil if the item
+    /// is gone.
+    func thumbnails(_ id: String, side: CGFloat) async -> AsyncStream<UIImage>? {
+        if let catalog {
+            return AsyncStream { continuation in
+                let task = Task {
+                    if let image = await catalog.thumbnail(id, side: side) { continuation.yield(image) }
+                    continuation.finish()
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
+        }
+        guard let asset = await loadAsset(id), !Task.isCancelled else { return nil }
+        return ThumbnailPreheater.thumbnails(for: asset, side: side, manager: thumbnails)
+    }
+
+    /// A small thumbnail for a list or a sheet (not the grid): delivered once or twice as it gets sharper.
+    func requestThumbnail(_ id: String, side: CGFloat, deliver: @escaping @MainActor (UIImage) -> Void) async {
+        if let catalog {
+            if let image = await catalog.thumbnail(id, side: side * 3) { deliver(image) }
+            return
+        }
+        guard let asset = PhotoLibrary.asset(id) else { return }
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.isNetworkAccessAllowed = true
+        let size = CGSize(width: side * 3, height: side * 3)
+        thumbnails.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: options) { result, _ in
+            MainActor.assumeIsolated { if let result { deliver(result) } }
+        }
     }
 
     private struct Loaded: @unchecked Sendable {
@@ -475,6 +520,10 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     /// Reads the whole library (at launch, or when access changes) in the background.
     func reload() async {
+        if let catalog {
+            await read(catalog)
+            return
+        }
         guard PHPhotoLibrary.authorizationStatus(for: .readWrite).allowsReading else {
             assets = nil
             albumAssets = nil
@@ -525,6 +574,37 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         }
     }
 
+    /// Reads a catalog's items (they're few), and again whenever they change.
+    private func read(_ catalog: any ItemCatalog) async {
+        if !observing {
+            observing = true
+            catalog.observe { [weak self] in Task { @MainActor in await self?.readAgain(catalog) } }
+        }
+        let contents = await Task.detached(priority: .userInitiated) { catalog.contents() }.value
+        apply(contents)
+        libraryRead = true
+        await rebuild()
+    }
+
+    private func readAgain(_ catalog: any ItemCatalog) async {
+        let contents = await Task.detached(priority: .userInitiated) { catalog.contents() }.value
+        apply(contents)
+        changedContents()
+    }
+
+    private func apply(_ contents: LibraryContents) {
+        mediaCache = [:]
+        library = contents.ids
+        var index: [String: Int] = [:]
+        for (position, id) in contents.ids.enumerated() where index[id] == nil { index[id] = position }
+        self.index = index
+        count = contents.ids.count
+        months = contents.months
+        media = contents.media
+        monthsVersion += 1
+        album = contents.album
+    }
+
     /// Reads every item of the fetch the grid shows from the snapshot (in the background, at low
     /// priority) and takes what Photos says if anything differs.
     private func confirm(_ fetched: PHFetchResult<PHAsset>) async {
@@ -549,6 +629,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// Writes the library's current contents for the next launch (after Photos changes), a little
     /// after the last change.
     private func saveSnapshot() {
+        guard catalog == nil else { return }
         snapshotSave?.cancel()
         let snapshot = LibrarySnapshot(ids: library, months: months, media: media)
         snapshotSave = Task.detached(priority: .background) {
@@ -739,7 +820,8 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     /// Items created after a date (for "new since the last backup"), read in the background.
     func identifiers(createdAfter date: Date) async -> Set<String> {
-        await Task.detached(priority: .utility) {
+        if catalog != nil { return Set(media.filter { ($0.value.created ?? .distantPast) > date }.keys) }
+        return await Task.detached(priority: .utility) {
             let options = PHFetchOptions()
             options.predicate = NSPredicate(format: "creationDate > %@", date as NSDate)
             return Set(LibraryModel.identifiers(PHAsset.fetchAssets(with: options)))
@@ -750,6 +832,16 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     func identifiers(_ media: Media) async -> Set<String>? {
         guard media != .all else { return nil }
         if let cached = mediaCache[media] { return cached }
+        if catalog != nil {
+            let kind: MediaInfo.Kind = switch media {
+            case .videos: .video
+            case .livePhotos: .livePhoto
+            default: .photo
+            }
+            let found = Set(self.media.filter { $0.value.kind == kind }.keys)
+            mediaCache[media] = found
+            return found
+        }
         let found = await Task.detached(priority: .userInitiated) {
             let options = PHFetchOptions()
             options.predicate = switch media {
@@ -971,8 +1063,8 @@ struct GridCell: View {
             image = nil
             imageItem = initial.id
         }
-        guard let asset = await library.loadAsset(initial.id), !Task.isCancelled else { return }
-        for await result in ThumbnailPreheater.thumbnails(for: asset, side: pixels, manager: library.thumbnails) {
+        guard let stream = await library.thumbnails(initial.id, side: pixels), !Task.isCancelled else { return }
+        for await result in stream {
             let prepared = await result.byPreparingForDisplay() ?? result
             guard !Task.isCancelled else { return }
             image = prepared
@@ -1060,6 +1152,8 @@ final class ThumbnailPreheater {
     }
 
     private func update() {
+        // A catalog (the demo's) makes its own thumbnails: nothing to cache in Photos.
+        guard library.catalog == nil else { return }
         guard side > 0, let (window, center, span) = Self.window(visible: visible, count: order.count) else { return }
         // Only when the window moved by a third of a screen.
         guard lastCenter < 0 || abs(center - lastCenter) > span / 3 else { return }

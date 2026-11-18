@@ -148,8 +148,21 @@ struct ReportProblemView: View {
         }
     }
 
+    /// The demo sends nothing: Send shows what would happen.
+    private var demo: Bool { model.settings.isDemo }
+
     private var form: some View {
         List {
+            if demo {
+                Section {
+                    InlineNotice(tone: .info, title: "Reports aren't sent from the demo",
+                                 message: "Try it: Send shows what happens, but nothing leaves this iPhone. To report a problem "
+                                    + "with your own Homespun, leave the demo first.")
+                        .accessibilityIdentifier("report.demo")
+                }
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+            }
             if afterCrash {
                 Section {
                     InlineNotice(tone: .info, title: "Homespun quit unexpectedly",
@@ -226,7 +239,29 @@ struct ReportProblemView: View {
         .onAppear { messageFocused = true }
     }
 
-    private func sent(_ id: String) -> some View {
+    @ViewBuilder private func sent(_ id: String) -> some View {
+        if demo { demoSent } else { reached(id) }
+    }
+
+    /// What Send did in the demo: nothing.
+    private var demoSent: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "play.rectangle.fill").font(.system(size: 48)).foregroundStyle(Theme.accent)
+                .accessibilityHidden(true)
+            Text("Not sent: this is the demo").displayTitle().multilineTextAlignment(.center).accessibilityAddTraits(.isHeader)
+            Text("Outside the demo, your report goes to Homespun's developer and you get a report number to quote. Leave the "
+                 + "demo to send a real one.")
+                .multilineTextAlignment(.center).foregroundStyle(Theme.secondaryLabel)
+                .accessibilityIdentifier("report.demoSent")
+            PrimaryButton(title: "Done", id: "report.done") { dismiss() }
+                .padding(.top, 8)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background)
+    }
+
+    private func reached(_ id: String) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "checkmark.circle.fill").font(.system(size: 48)).foregroundStyle(Theme.teal)
                 .accessibilityHidden(true)
@@ -250,6 +285,10 @@ struct ReportProblemView: View {
     }
 
     private func send() async {
+        guard !demo else {
+            sentID = "DEMO"
+            return
+        }
         sending = true
         error = nil
         defer { sending = false }

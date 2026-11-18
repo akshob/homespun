@@ -113,6 +113,11 @@ struct PairPage: View {
                         Text("A window opened on \(name)'s screen. Check that it shows the same number.")
                             .font(.body).foregroundStyle(Theme.secondaryLabel)
                     }
+                    if flow.settings.isDemo {
+                        Text("In the demo, no one needs to click: \(name) allows this iPhone by itself in a moment.")
+                            .font(.footnote).foregroundStyle(Theme.secondaryLabel)
+                            .accessibilityIdentifier("pair.demo")
+                    }
                     if let match {
                         Text(match.map(String.init).joined(separator: " "))
                             .font(.system(size: 56, weight: .medium, design: .rounded)).monospacedDigit()
@@ -202,6 +207,9 @@ struct PairPage: View {
                     Text("Pairing with \(name)…")
                 }
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
+            } else if flow.settings.isDemo {
+                Text("In the demo, any code works: try DEMO-2468.")
+                    .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
             } else {
                 Text("Codes work once, for 10 minutes after you run the command.")
                     .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)

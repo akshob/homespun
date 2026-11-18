@@ -10,6 +10,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// A session starts when the app comes back from the background (or launches).
     @State private var wasBackground = true
+    /// A pairing link opened while the demo is on.
+    @State private var linkInDemo = false
 
     var body: some View {
         @Bindable var settings = model.settings
@@ -29,10 +31,17 @@ struct RootView: View {
         }
         .onOpenURL { url in
             if let link = PairingLink(url) {
-                settings.pendingLink = link
+                // The demo pairs only with its pretend server: a link is for the person's own Homespun.
+                if settings.isDemo { linkInDemo = true } else { settings.pendingLink = link }
             } else if let link = AppLink(url) {
                 model.router.pending = link
             }
+        }
+        .alert("You're in the demo", isPresented: $linkInDemo) {
+            Button("Stay in the Demo", role: .cancel) {}
+            Button("Leave the Demo") { DemoMode.shared.leave() }
+        } message: {
+            Text("Leave the demo, then open the pairing link again to pair your own server.")
         }
         // Each item's phase, not its progress messages: badges change only when the phase does.
         .onChange(of: model.job.phaseVersion) { _, _ in model.library.jobChanged() }
@@ -77,7 +86,7 @@ struct RootView: View {
                 wasBackground = true
                 SessionMarker.shared.background()
                 model.automatic.schedule()
-                model.status.publishInBackground()
+                model.status?.publishInBackground()
                 Telemetry.shared.flushInBackground()
             default: break
             }
@@ -173,7 +182,7 @@ struct MainTabView: View {
             open(link)
         }
         .task {
-            await model.library.start { model.status.start() }
+            await model.library.start { model.status?.start() }
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-deleteNewestBackedUp") {
                 await model.library.deleteNewestBackedUpForTesting()
@@ -291,6 +300,7 @@ struct StatusAccessory: View {
     var serverName = "your computer"
     let open: (Action) -> Void
     @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+    @Environment(\.showsTips) private var showsTips
 
     var body: some View {
         switch status {
@@ -344,7 +354,7 @@ struct StatusAccessory: View {
             if let button {
                 Button(button, action: action).buttonStyle(.glassProminent).tint(Theme.accent).controlSize(.small)
                     .accessibilityIdentifier("accessory.action")
-                    .popoverTip(button == "Free Up" ? FreeUpTip(server: serverName) : nil)
+                    .popoverTip(button == "Free Up" && showsTips ? FreeUpTip(server: serverName) : nil)
             }
         }
         .padding(.horizontal, 14)

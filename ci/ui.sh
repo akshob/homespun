@@ -6,7 +6,8 @@
 #
 # Environment: EXTRA=n adds n small synthetic photos; DUO_POSES=1 lets the test fold and turn the
 # Duo (it writes a pose to TEST_RUNNER_DUO_POSE_FILE; screenshots go to $RESULTS/<name>-shots);
-# STUB_PORT=p sends telemetry to a local stub and checks what arrived.
+# STUB_PORT=p sends telemetry to a local stub and checks what arrived. SERVERLESS=1 (Try the Demo): no
+# temporary server, and no Photos access, so iOS would ask if anything needed it.
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 TYPE=$2 ONLY=$3 PORT=$4 POSE=${5:-}
@@ -23,7 +24,7 @@ cleanup() {
     rm -rf $DATA
 }
 trap cleanup EXIT
-xcrun simctl privacy $SIM grant photos photos.homespun.app.dev
+[[ -z ${SERVERLESS:-} ]] && xcrun simctl privacy $SIM grant photos photos.homespun.app.dev
 # iPhone Duo starts closed (the cover); "open" unfolds it first.
 if [[ -n $POSE ]]; then $DUOCTL -d $SIM $POSE >/dev/null 2>&1; sleep 15; fi
 xcrun simctl addmedia $SIM $SEED/IMG_2001.HEIC $SEED/IMG_2001.MOV $SEED/IMG_2002.JPG $SEED/IMG_2003.MOV
@@ -35,16 +36,19 @@ if [[ -n ${EXTRA:-} ]]; then
     fi
     xcrun simctl addmedia $SIM $(ls $MEDIA/*.JPG | head -$EXTRA)
 fi
-export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
-       HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
-wait_port_free $PORT || exit 1
-$SERVER_BIN serve > $DATA.log 2>&1 &
-SERVER=$!
-wait_for_server $PORT || exit 1
-# The server answering is this one (not one still stopping from an earlier try).
-kill -0 $SERVER 2>/dev/null || { echo "the test server didn't start"; cat $DATA.log; exit 1; }
-OUT=$(pairing_output) || { echo "no pairing code"; exit 1; }
-CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
+CODE="" LINK=""
+if [[ -z ${SERVERLESS:-} ]]; then
+    export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
+           HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
+    wait_port_free $PORT || exit 1
+    $SERVER_BIN serve > $DATA.log 2>&1 &
+    SERVER=$!
+    wait_for_server $PORT || exit 1
+    # The server answering is this one (not one still stopping from an earlier try).
+    kill -0 $SERVER 2>/dev/null || { echo "the test server didn't start"; cat $DATA.log; exit 1; }
+    OUT=$(pairing_output) || { echo "no pairing code"; exit 1; }
+    CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
+fi
 if [[ -n ${STUB_PORT:-} ]]; then
     STUBLOG=$DATA/telemetry.jsonl; : > $STUBLOG
     python3 ${0:A:h}/telemetry-stub.py $STUB_PORT $STUBLOG & STUB=$!; sleep 1

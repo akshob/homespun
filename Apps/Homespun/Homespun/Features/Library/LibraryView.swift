@@ -44,6 +44,7 @@ struct LibraryView: View {
     @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.showsTips) private var showsTips
 
     enum Sheet: Identifiable {
         case backUp([String]), legend, setup, restore([String])
@@ -396,16 +397,18 @@ struct LibraryView: View {
             guard let selectionBytes, !selected.isEmpty else { return "" }
             return (selectionBytes.exact ? "" : "About ") + LibraryController.bytes(selectionBytes.bytes)
         }
+        // The demo says so, always.
+        let demo = settings.isDemo ? "Demo · " : ""
         let state = controller.library.state
         if filter != .all || media != .all {
             let name = filter == .all ? media.title : filter.title
-            return "\(name) · \(data.cells.count.formatted())"
+            return demo + "\(name) · \(data.cells.count.formatted())"
         }
-        guard settings.isPaired else { return "\(state.cells.count.formatted()) items · not connected" }
-        if case .unreachable = settings.serverStatus { return "Can't reach \(controller.serverName)" }
+        guard settings.isPaired else { return demo + "\(state.cells.count.formatted()) items · not connected" }
+        if case .unreachable = settings.serverStatus { return demo + "Can't reach \(controller.serverName)" }
         let open = state.count(.notBackedUp)
-        return open == 0 ? "All backed up · \(controller.serverName)"
-            : "\(open.formatted()) not backed up · \(controller.serverName)"
+        return demo + (open == 0 ? "All backed up · \(controller.serverName)"
+            : "\(open.formatted()) not backed up · \(controller.serverName)")
     }
 
     private var selectionTitle: String {
@@ -482,12 +485,12 @@ struct LibraryView: View {
             controller.journey.used(.select)
         }
         .accessibilityIdentifier("select.start")
-        .popoverTip(SelectTip())
+        .popoverTip(showsTips ? SelectTip() : nil)
     }
 
     private var filterButton: some View {
         filterMenu
-            .popoverTip(BadgeTip()) { action in
+            .popoverTip(showsTips ? BadgeTip() : nil) { action in
                 if action.id == "guide" { openLegend() }
             }
     }
@@ -635,7 +638,8 @@ struct LibraryView: View {
         }
         try? await Task.sleep(for: .milliseconds(150))
         guard !Task.isCancelled else { return }
-        let result = await Task.detached(priority: .userInitiated) { PhotoLibrary.estimatedBytes(ids) }.value
+        let photos = settings.photos
+        let result = await Task.detached(priority: .userInitiated) { photos.estimatedBytes(ids, sample: 300) }.value
         if !Task.isCancelled { selectionBytes = result }
     }
 
@@ -858,8 +862,8 @@ struct BackUpSheet: View {
         }
         .presentationDetents([.medium, .large])
         .task {
-            let ids = identifiers
-            estimate = await Task.detached { PhotoLibrary.estimatedBytes(ids) }.value
+            let ids = identifiers, photos = controller.settings.photos
+            estimate = await Task.detached { photos.estimatedBytes(ids, sample: 300) }.value
         }
     }
 

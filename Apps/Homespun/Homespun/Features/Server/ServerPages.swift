@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import HomespunCore
-import Photos
 import SwiftUI
 import UserNotifications
 
@@ -203,9 +202,8 @@ struct AutomaticModeView: View {
         try? await Task.sleep(for: .milliseconds(150))
         guard !Task.isCancelled else { return }
         var now = 0, wait = 0, kept = 0
-        PHAsset.fetchAssets(withLocalIdentifiers: cells, options: nil).enumerateObjects { asset, _, _ in
-            let due = schedule.due(created: asset.creationDate, firstSeen: automatic.state.firstSeen[asset.localIdentifier],
-                                   favorite: asset.isFavorite)
+        for (id, item) in model.settings.photos.summaries(cells) {
+            let due = schedule.due(created: item.created, firstSeen: automatic.state.firstSeen[id], favorite: item.favorite)
             if let due { if due <= Date() { now += 1 } else { wait += 1 } } else { kept += 1 }
         }
         preview = CompactPreview(days: schedule.days, now: now, wait: wait, favorites: kept)
@@ -275,6 +273,10 @@ struct NotificationsView: View {
             .listRowBackground(Color.clear)
             Section {
                 switch status {
+                // The demo sends no notifications, and doesn't ask iOS for them.
+                case _ where model.settings.isDemo:
+                    InlineNotice(tone: .info, title: "No notifications in the demo",
+                                 message: "With your own server, Homespun asks once, then tells you when space is ready.")
                 case .notDetermined?:
                     Button {
                         Task {
@@ -428,6 +430,7 @@ struct HelpAboutView: View {
                 }
             }
             .listRowBackground(Theme.card)
+            DemoHelpSection(model: model)
             Section {
                 Button { settings.onboardingComplete = false } label: {
                     ServerRow(title: "Set Up Again", symbol: "arrow.counterclockwise", value: nil)

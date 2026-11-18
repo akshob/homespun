@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import HomespunCore
-import Photos
 import SwiftUI
 
 // The first task (DESIGN 01·1.10–1.15, 7.1–7.4, §16.2): this library's own number, then the 10
@@ -14,33 +13,8 @@ enum LibraryMeasure {
         var candidates: [FirstTask.Candidate]
     }
 
-    static func measure(excluding backedUp: Set<String>) async -> Result {
-        await Task.detached(priority: .userInitiated) {
-            let album = PhotoLibrary.albumMembers()
-            let options = PHFetchOptions()
-            options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-            options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d",
-                                            PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
-            var photos: [String] = [], live: [String] = [], videos: [String] = []
-            var candidates: [FirstTask.Candidate] = []
-            PHAsset.fetchAssets(with: options).enumerateObjects { asset, _, _ in
-                let id = asset.localIdentifier
-                guard !album.contains(id), let kind = PhotoLibrary.kind(of: asset) else { return }
-                switch kind {
-                case .photo: photos.append(id)
-                case .livePhoto: live.append(id)
-                case .video: videos.append(id)
-                }
-                guard !backedUp.contains(id) else { return }
-                candidates.append(.init(id: id, isVideo: kind == .video, duration: asset.duration,
-                                        isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot)))
-            }
-            func group(_ ids: [String]) -> FirstTask.Estimate.Group {
-                .init(count: ids.count, bytes: Int64(PhotoLibrary.estimatedBytes(ids, sample: 200).bytes))
-            }
-            return Result(estimate: .init(photos: group(photos), livePhotos: group(live), videos: group(videos)),
-                          candidates: candidates)
-        }.value
+    static func measure(excluding backedUp: Set<String>, photos: any PhotoSource) async -> Result {
+        await Task.detached(priority: .userInitiated) { photos.measure(excluding: backedUp) }.value
     }
 }
 
@@ -52,7 +26,7 @@ struct EstimatePage: View {
     @State private var choosingFolder = false
 
     private var settings: AppSettings { flow.settings }
-    private var library: LibraryController { flow.library ?? AppModel.shared.library }
+    private var library: LibraryController { flow.library ?? AppModel.current.library }
     private var name: String { flow.serverName }
     private var immich: Bool { settings.server?.mode == .immich }
     private var motionOnPhone: Bool { settings.server?.platform?.os != .macOS }
@@ -82,7 +56,7 @@ struct EstimatePage: View {
         guard flow.estimate == nil else { return }
         let backedUp = Set(await library.job.ledger.snapshot().keys)
         async let folder = settings.client?.storage()
-        let result = await LibraryMeasure.measure(excluding: backedUp)
+        let result = await LibraryMeasure.measure(excluding: backedUp, photos: settings.photos)
         storage = try? await folder
         flow.notBackedUp = result.candidates.map(\.id)
         flow.taskIDs = FirstTask.pick(result.candidates)
@@ -116,6 +90,8 @@ struct EstimatePage: View {
             Text(immich
                  ? "\(name) reads originals from your Immich, so Homespun starts with recent photos Immich has already "
                     + "backed up."
+                 : settings.isDemo ? "The demo's \(estimate.count.formatted()) sample \(what) take about \(total). As compact "
+                    + "copies they'd take about \(compact)."
                  : "Your \(estimate.count.formatted()) \(what) take about \(total) on this iPhone. As compact copies "
                     + "they'd take about \(compact).")
                 .font(.body).foregroundStyle(Theme.secondaryLabel)
@@ -146,8 +122,9 @@ struct EstimatePage: View {
                         SetupRow(symbol: "video", title: "Videos", value: row(estimate.videos))
                     }
                 }
-                Text("An estimate from your library, made on this iPhone. If iCloud Photos optimizes this iPhone's "
-                     + "storage, you may free less here.")
+                Text(settings.isDemo ? "The demo's sample photos come with Homespun; your own library isn't read."
+                     : "An estimate from your library, made on this iPhone. If iCloud Photos optimizes this iPhone's "
+                        + "storage, you may free less here.")
                     .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
             }
         } actions: {
@@ -208,7 +185,7 @@ struct FirstTaskPage: View {
     @State private var stopping = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var library: LibraryController { flow.library ?? AppModel.shared.library }
+    private var library: LibraryController { flow.library ?? AppModel.current.library }
     private var job: CompactJob { library.job }
     private var name: String { flow.serverName }
     private var ids: [String] { flow.taskIDs }
@@ -301,7 +278,7 @@ struct FirstTaskPage: View {
     }
 
     private func tile(_ id: String) -> some View {
-        Thumbnail(identifier: id, manager: library.library.thumbnails, side: 64)
+        Thumbnail(identifier: id, library: library.library, side: 64)
             .frame(maxWidth: .infinity)
             .aspectRatio(1, contentMode: .fit)
             .overlay(alignment: .topTrailing) {
@@ -371,7 +348,7 @@ struct ReceiptPage: View {
     @State private var entries: [String: CompactLedger.Entry] = [:]
     @State private var outcome: OriginalRemover.Report?
 
-    private var library: LibraryController { flow.library ?? AppModel.shared.library }
+    private var library: LibraryController { flow.library ?? AppModel.current.library }
     private var name: String { flow.serverName }
     /// What made it home, in the task's order.
     private var safe: [String] { flow.taskIDs.filter { entries[$0]?.serverAssetID != nil } }
@@ -454,7 +431,7 @@ struct ReceiptPage: View {
         }
         .task {
             entries = await library.job.ledger.snapshot()
-            sample = safe.first { PhotoLibrary.asset($0)?.mediaType == .image }
+            sample = safe.first { [.photo, .livePhoto].contains(library.settings.photos.item($0)?.itemKind) }
         }
     }
 
@@ -468,7 +445,7 @@ struct ReceiptPage: View {
 
     private func side(_ id: String, _ caption: String) -> some View {
         VStack(spacing: 6) {
-            Thumbnail(identifier: id, manager: library.library.thumbnails, side: 140)
+            Thumbnail(identifier: id, library: library.library, side: 140)
                 .frame(maxWidth: .infinity)
                 .aspectRatio(4 / 3, contentMode: .fit)
                 .clipped()
@@ -512,7 +489,7 @@ struct FreedPage: View {
     let flow: SetupFlow
     @State private var restBytes: Int64?
 
-    private var library: LibraryController { flow.library ?? AppModel.shared.library }
+    private var library: LibraryController { flow.library ?? AppModel.current.library }
     private var name: String { flow.serverName }
     private var rest: [String] { flow.notBackedUp.filter { !flow.taskIDs.contains($0) } }
 
@@ -554,7 +531,8 @@ struct FreedPage: View {
         .onAppear { Announce.say("Freed \(SetupAdvisor.roughBytes(report.freedBytes)).") }
         .task {
             let rest = rest
-            restBytes = await Task.detached { Int64(PhotoLibrary.estimatedBytes(rest, sample: 200).bytes) }.value
+            let photos = library.settings.photos
+            restBytes = await Task.detached { Int64(photos.estimatedBytes(rest, sample: 200).bytes) }.value
         }
     }
 }

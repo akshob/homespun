@@ -3,7 +3,7 @@
 # take one run each (the ci workflow's matrix); on one Mac, name several, or a group.
 #   lane.sh <run|group> ...
 #   runs:   quick quick-duo (a pull request's) · iphone library later copies onboarding telemetry
-#           duo-cover duo-open (after a merge) · large (nightly)
+#           duo-cover duo-open demo (after a merge) · large (nightly)
 #   groups: pr (both quick runs), iphone-all, duo-all, full (every run after a merge)
 # Ports differ, so runs of different jobs can share a Mac. RETRY_UI=1: a failing test runs once
 # more in place (Xcode's retry; the summary names tests that passed then as flaky). Tests in
@@ -24,7 +24,7 @@ for name in "$@"; do
     pr) runs+=(quick quick-duo) ;;
     iphone-all) runs+=(iphone library later copies onboarding telemetry) ;;
     duo-all) runs+=(duo-cover duo-open) ;;
-    full) runs+=(iphone library later copies onboarding telemetry duo-cover duo-open) ;;
+    full) runs+=(iphone library later copies onboarding telemetry duo-cover duo-open demo) ;;
     *) runs+=($name) ;;
   esac
 done
@@ -64,6 +64,10 @@ for one in $runs; do
     duo-open)
       run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo \
         HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests 8793 open ;;
+    demo)
+      # Try the Demo needs no server and no Photos access: on an iPhone, then on iPhone Duo's cover.
+      run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests 8800
+      run demo-duo env SERVERLESS=1 zsh $D/ui.sh demo-duo iPhone-Duo HomespunUITests/DemoModeUITests 8801 ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;
   esac

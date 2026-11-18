@@ -94,6 +94,17 @@ first removal it explains what removal means (including iCloud Photos) and shows
 copies to compare with their originals (from the server); "They Look Right" frees them up. Setup
 and the Get Started card open the Library to pick a few items to try.
 
+**Try the Demo** (on the first setup page, and in Server › Help and About) shows all of this without
+a server: about 30 sample photos and videos drawn for the purpose (`Resources/Demo`, made by
+`scripts/demo-media.swift`; a Live Photo, videos, a screenshot) and a pretend server, "Homespun Demo",
+that is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
+Backing up, compact copies, Compare, Free Up Space (with a question that says nothing is deleted),
+Keep Original, Restore Original, Activity and the Server tab all work on them. The demo never reads or
+changes Photos, asks iOS for nothing, records no analytics and sends no reports (the widgets and the
+Apple Watch keep showing the person's own Homespun); its settings and records are kept apart and deleted
+by Leave the Demo (the Server tab, or the Demo mark in setup).
+Turning on Automatic Mode or Cloud Copies in the demo asks for the real one-time purchase.
+
 **Premium** (one-time In-App Purchase; everything above stays free):
 
 - **Automatic mode**: new photos and videos (or, if chosen, everything not backed up yet) are

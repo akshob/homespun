@@ -48,7 +48,7 @@ final class SetupFlow {
     let pairOnly: Bool
     var path: [Page] = []
     private(set) var root: Page
-    let discovery = ServerDiscovery()
+    let discovery: ServerDiscovery
     /// Kept on Back (L6).
     var answers = Set<SetupAdvisor.Answer>()
     /// "I already use Immich" was chosen, so Immich mode follows pairing (01·5.1).
@@ -84,8 +84,8 @@ final class SetupFlow {
 
     /// The Local Network promises were shown and Continue tapped; later looks skip them (1.2).
     private var localNetworkExplained: Bool {
-        get { UserDefaults.standard.bool(forKey: "setup.localNetworkExplained") }
-        set { UserDefaults.standard.set(newValue, forKey: "setup.localNetworkExplained") }
+        get { settings.defaults.bool(forKey: "setup.localNetworkExplained") }
+        set { settings.defaults.set(newValue, forKey: "setup.localNetworkExplained") }
     }
 
     init(settings: AppSettings, library: LibraryController?, start: Page? = nil, pairOnly: Bool = false) {
@@ -93,8 +93,11 @@ final class SetupFlow {
         self.library = library
         self.pairOnly = pairOnly
         isSheet = settings.onboardingComplete || pairOnly
-        root = start ?? (settings.onboardingComplete ? .localNetwork : .welcome)
-        if root == .localNetwork, localNetworkExplained { root = .looking }
+        // The demo's pretend server is found without looking on the network: no Local Network
+        // promises, and it starts looking (Try the Demo was the welcome's choice).
+        discovery = settings.isDemo ? ServerDiscovery(pretend: [(DemoServer.name, DemoServer.baseURL)]) : ServerDiscovery()
+        root = start ?? (settings.isDemo ? .looking : settings.onboardingComplete ? .localNetwork : .welcome)
+        if root == .localNetwork, localNetworkExplained || settings.isDemo { root = .looking }
     }
 
     var serverName: String { settings.server?.name ?? "your computer" }
@@ -115,7 +118,7 @@ final class SetupFlow {
 
     /// Find My Home Computer: the promises page once, then looking (1.2 → 1.4).
     func findHomeComputer() {
-        go(localNetworkExplained ? .looking : .localNetwork)
+        go(localNetworkExplained || settings.isDemo ? .looking : .localNetwork)
     }
 
     /// Continue on the Local Network promises: looking starts the browse, which shows the alert.
@@ -246,7 +249,8 @@ final class SetupFlow {
 
     /// Lists Keychain tokens left by an earlier install, and keeps the first that still works.
     func checkReturning() async {
-        guard !settings.isPaired, returning == nil, !declinedReturning, root == .welcome else { return }
+        // The demo never reads the Keychain: its pairings are pretend.
+        guard !settings.isPaired, !settings.isDemo, returning == nil, !declinedReturning, root == .welcome else { return }
         for account in Self.keychainServers() {
             guard let url = URL(string: account), let token = Keychain.token(for: account) else { continue }
             var client = ServerClient(baseURL: url, token: token)
@@ -293,7 +297,8 @@ final class SetupFlow {
             finish()
             return
         }
-        if Telemetry.shared.consent == .unasked {
+        // Sharing analytics is the app's own choice, not the demo's (the demo sends none).
+        if Telemetry.shared.consent == .unasked, !settings.isDemo {
             go(.analytics)
             return
         }
@@ -306,7 +311,7 @@ final class SetupFlow {
     }
 
     private func toPhotos() {
-        switch PHPhotoLibrary.authorizationStatus(for: .readWrite) {
+        switch settings.photos.authorization() {
         case .authorized: go(.estimate)
         case .notDetermined: go(.photos)
         default: go(.limitedPhotos)

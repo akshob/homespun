@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import Photos
 import SwiftUI
 
 /// An original ready to free up, and its compact copy in Photos.
@@ -66,7 +65,7 @@ struct FreeUpSpaceScreen: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { closeButton }
                 .navigationDestination(for: FreeUpPair.self) { pair in
-                    CompareView(model: AppModel.shared, compactIdentifier: pair.compact)
+                    CompareView(model: AppModel.current, compactIdentifier: pair.compact)
                         .safeAreaBar(edge: .bottom) {
                             KeepOriginalButton(controller: controller, pair: pair) { path.removeAll() }
                                 .padding(.horizontal, 24).padding(.bottom, 8)
@@ -107,7 +106,7 @@ struct FreeUpSpaceScreen: View {
 
     @ViewBuilder private var comparison: some View {
         if let selected {
-            CompareView(model: AppModel.shared, compactIdentifier: selected.compact, standalone: false)
+            CompareView(model: AppModel.current, compactIdentifier: selected.compact, standalone: false)
                 .id(selected)
                 .safeAreaBar(edge: .bottom) {
                     KeepOriginalButton(controller: controller, pair: selected) { advance(from: selected) }
@@ -159,7 +158,9 @@ struct KeepOriginalButton: View {
             }
             .buttonStyle(.glass)
             .disabled(working || controller.isRemoving)
-            .accessibilityHint("Keeps this original on this iPhone full size and deletes its compact copy. iOS asks first.")
+            .accessibilityHint(controller.settings.isDemo
+                               ? "Keeps this original full size and deletes its compact copy from the demo. You're asked first."
+                               : "Keeps this original on this iPhone full size and deletes its compact copy. iOS asks first.")
             .accessibilityIdentifier("remove.keepOriginal")
             Text("Keeps this one full size here; its compact copy is deleted.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
@@ -234,11 +235,14 @@ struct FreeUpSpacePanel: View {
             ContentUnavailableView("Nothing to free up yet", systemImage: "circle.lefthalf.filled",
                                    description: Text("Back up some photos first. Their originals can then be removed here."))
         } else if brief {
+            demoNotice
             Text("\(LibraryController.bytes(bytes)) · \(count) original\(count == 1 ? "" : "s") safe on \(controller.serverName)")
                 .font(.headline).monospacedDigit().foregroundStyle(Theme.label)
                 .accessibilityIdentifier("remove.bytes")
-            Text("Homespun checks each original with \(controller.serverName) again, then iOS asks you. "
-                 + "Removed originals stay in Recently Deleted for 30 days.")
+            Text(demo ? "Homespun checks each original with \(controller.serverName) again, then asks you, as iOS would. "
+                    + "In the demo, nothing is deleted."
+                 : "Homespun checks each original with \(controller.serverName) again, then iOS asks you. "
+                    + "Removed originals stay in Recently Deleted for 30 days.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel)
             if !pairs.isEmpty { strip }
         } else {
@@ -250,7 +254,7 @@ struct FreeUpSpacePanel: View {
 
     /// The review as one column with the compact copies as a grid in it (beside the comparison).
     private var column: some View {
-        FreeUpColumn(pairs: pairs, selected: selected, manager: controller.library.thumbnails, compare: compare) {
+        FreeUpColumn(pairs: pairs, selected: selected, library: controller.library, compare: compare) {
             VStack(alignment: .leading, spacing: 20) { summary }
                 .frame(maxWidth: .infinity, alignment: .leading)
         } title: {
@@ -266,11 +270,13 @@ struct FreeUpSpacePanel: View {
 
     /// How much, and from how many originals.
     @ViewBuilder private var summary: some View {
+        demoNotice
         Text(LibraryController.bytes(bytes)).font(.system(size: 44, weight: .semibold, design: .rounded))
             .monospacedDigit().foregroundStyle(Theme.label)
             .accessibilityIdentifier("remove.bytes")
         Text("\(count) original\(count == 1 ? " is" : "s are") safe on \(controller.serverName). "
              + (trial ? "Their compact copies stay in Photos."
+                : demo ? "Homespun checks each one again, then asks you, as iOS would."
                 : "Homespun checks each one again, then iOS asks you."))
             .foregroundStyle(Theme.secondaryLabel)
     }
@@ -279,7 +285,8 @@ struct FreeUpSpacePanel: View {
     @ViewBuilder private var promises: some View {
         if trial {
             promise("checkmark.shield", "First, Homespun checks each original with \(controller.serverName) again, byte for byte.")
-            promise("trash", "Then iOS asks you. Removed originals stay in Recently Deleted for 30 days.")
+            promise("trash", demo ? "Then Homespun asks you, as iOS would. In the demo, nothing is deleted."
+                    : "Then iOS asks you. Removed originals stay in Recently Deleted for 30 days.")
             promise("icloud", "With iCloud Photos, they're also removed from iCloud and your other devices. Compact copies stay.")
             if somethingWrong {
                 InlineNotice(tone: .info, title: "Nothing has been removed",
@@ -296,6 +303,16 @@ struct FreeUpSpacePanel: View {
                 .padding(.top, 8)
             }
             .tint(Theme.accent)
+        }
+    }
+
+    private var demo: Bool { controller.settings.isDemo }
+
+    @ViewBuilder private var demoNotice: some View {
+        if demo {
+            InlineNotice(tone: .info, title: "In the demo, nothing is deleted",
+                         message: "You'll see every step and a question like the one iOS asks; the sample photos only leave the demo.")
+                .accessibilityIdentifier("remove.demo")
         }
     }
 
@@ -318,7 +335,7 @@ struct FreeUpSpacePanel: View {
 
     /// The compact copies in a row that scrolls sideways (UIKit: a reused cell per copy on screen).
     private var strip: some View {
-        ThumbnailRow(items: thumbnails, manager: controller.library.thumbnails, side: 72, spacing: 8,
+        ThumbnailRow(items: thumbnails, library: controller.library, side: 72, spacing: 8,
                      accessibility: (FreeUpThumbnails.label, FreeUpThumbnails.identifier)) { compare(pairs[$0]) }
     }
 
@@ -333,7 +350,9 @@ struct FreeUpSpacePanel: View {
         ProgressView().frame(maxWidth: .infinity)
         Text(message).font(.subheadline.monospacedDigit()).foregroundStyle(Theme.secondaryLabel)
             .accessibilityIdentifier("remove.progress")
-        Text("Each original on this iPhone must match the server's copy exactly (SHA-256). Nothing is removed until iOS asks you.")
+        Text(demo ? "Each original must match the server's copy exactly (SHA-256). Nothing is removed until you say so, "
+                + "and in the demo nothing is deleted."
+             : "Each original on this iPhone must match the server's copy exactly (SHA-256). Nothing is removed until iOS asks you.")
             .font(.footnote).foregroundStyle(Theme.secondaryLabel)
     }
 
@@ -349,8 +368,11 @@ struct FreeUpSpacePanel: View {
             .font(.title2.weight(.semibold))
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("remove.summary")
-            Text("\(report.removed.count) original\(report.removed.count == 1 ? " is" : "s are") in Recently Deleted until "
-                 + "\(Date.now.addingTimeInterval(30 * 86_400).formatted(.dateTime.month(.wide).day())).")
+            Text(controller.settings.isDemo
+                 ? "In the demo, nothing was deleted: \(report.removed.count == 1 ? "the original has" : "the originals have") left "
+                    + "only the demo's library. With your own photos, they'd stay in Recently Deleted for 30 days."
+                 : "\(report.removed.count) original\(report.removed.count == 1 ? " is" : "s are") in Recently Deleted until "
+                    + "\(Date.now.addingTimeInterval(30 * 86_400).formatted(.dateTime.month(.wide).day())).")
                 .foregroundStyle(Theme.secondaryLabel)
         } else if report.cancelled {
             Label("Nothing was removed", systemImage: "hand.raised").font(.title2.weight(.semibold))
@@ -413,7 +435,7 @@ struct FreeUpSpacePanel: View {
 /// One item's thumbnail, loaded on appear.
 struct Thumbnail: View {
     let identifier: String
-    let manager: PHCachingImageManager
+    let library: LibraryModel
     var side: CGFloat = 56
     @State private var image: UIImage?
 
@@ -423,14 +445,7 @@ struct Thumbnail: View {
             .overlay { if let image { Image(uiImage: image).resizable().scaledToFill() } }
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .task(id: identifier) {
-                guard let asset = PhotoLibrary.asset(identifier) else { return }
-                let options = PHImageRequestOptions()
-                options.deliveryMode = .opportunistic
-                options.isNetworkAccessAllowed = true
-                let size = CGSize(width: side * 3, height: side * 3)
-                manager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: options) { result, _ in
-                    MainActor.assumeIsolated { if let result { image = result } }
-                }
+                await library.requestThumbnail(identifier, side: side) { image = $0 }
             }
     }
 }
