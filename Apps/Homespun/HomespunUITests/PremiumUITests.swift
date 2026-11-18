@@ -5,6 +5,7 @@ import XCTest
 /// rows say whether they're on and their pages open. Turning one on asks for the purchase (with the
 /// price and Restore Purchase); closing that leaves it off. Pairs with a running server: pass
 /// `HOMESPUN_SERVER` and `HOMESPUN_PAIRING_CODE` to `xcodebuild test` with a `TEST_RUNNER_` prefix.
+/// Widgets' links need no server: a locked widget asks for the purchase, an unlocked one opens its place.
 final class PremiumUITests: XCTestCase {
     @MainActor func testTurningOnAsksForThePurchase() throws {
         let environment = ProcessInfo.processInfo.environment
@@ -58,7 +59,32 @@ final class PremiumUITests: XCTestCase {
         XCTAssertTrue(signIn.exists)
     }
 
-    /// The sheet: the feature, that one purchase unlocks both, buy and restore; then Close.
+    /// A locked widget's tap (homespun://unlock?feature=widgets) asks for the purchase.
+    @MainActor func testWidgetUnlockLinkAsksForThePurchase() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES", "-hideTips"]
+        app.launch()
+        XCTAssertTrue(app.hasTab("Library"))
+        app.open(URL(string: "homespun://unlock?feature=widgets")!)
+        expectUnlockSheet(app, title: "Unlock Widgets")
+    }
+
+    /// An unlocked widget's taps open their places: Activity, and Automatic Mode in the Server tab.
+    @MainActor func testWidgetLinksOpenTheirPlaces() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        XCTAssertTrue(app.hasTab("Library"))
+        app.open(URL(string: "homespun://activity")!)
+        let activity = app.tab("Activity")
+        XCTAssertTrue(activity.waitForExistence(timeout: 20))
+        let selected = expectation(for: NSPredicate(format: "isSelected == true"), evaluatedWith: activity)
+        wait(for: [selected], timeout: 20)
+        app.open(URL(string: "homespun://automatic")!)
+        XCTAssertTrue(app.automaticToggle.waitForExistence(timeout: 20), "Automatic Mode didn't open")
+    }
+
+    /// The sheet: the feature, that one purchase unlocks them all, buy and restore; then Close.
     @MainActor private func expectUnlockSheet(_ app: XCUIApplication, title: String,
                                               file: StaticString = #filePath, line: UInt = #line) {
         let buy = app.buttons["unlock.buy"]

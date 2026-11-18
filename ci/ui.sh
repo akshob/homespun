@@ -18,7 +18,7 @@ SERVER="" STUB="" WATCH=""
 cleanup() {
     [[ -n $WATCH ]] && kill $WATCH 2>/dev/null
     [[ -n $STUB ]] && kill $STUB 2>/dev/null
-    [[ -n $SERVER ]] && kill $SERVER 2>/dev/null
+    [[ -n $SERVER ]] && { kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; }
     cp $DATA.log $RESULTS/$NAME-server.log 2>/dev/null
     remove_simulator $SIM
     rm -rf $DATA
@@ -43,9 +43,12 @@ if [[ -n ${DATED:-} ]]; then
 fi
 export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
        HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
+wait_port_free $PORT || exit 1
 $SERVER_BIN serve > $DATA.log 2>&1 &
 SERVER=$!
 wait_for_server $PORT || exit 1
+# The server answering is this one (not one still stopping from an earlier try).
+kill -0 $SERVER 2>/dev/null || { echo "the test server didn't start"; cat $DATA.log; exit 1; }
 OUT=$(pairing_output) || { echo "no pairing code"; exit 1; }
 CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
 if [[ -n ${STUB_PORT:-} ]]; then
@@ -72,13 +75,14 @@ if [[ -n ${DUO_POSES:-} ]]; then
     export TEST_RUNNER_DUO_POSE_FILE=$POSEFILE
 fi
 RESULT=$RESULTS/$NAME.xcresult
+SKIP=($(quarantined $ONLY $RESULTS/$NAME-quarantined.txt))
 cd $APP
 run_tests() {
     rm -rf $RESULT
     TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_PAIR_LINK="$LINK" \
     TEST_RUNNER_HOMESPUN_REMOVE=1 \
       xcodebuild test-without-building -project Homespun.xcodeproj -scheme Homespun -destination id=$SIM -derivedDataPath $DD \
-      -resultBundlePath $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} 2>&1 | tee $RESULTS/$NAME.log | filter
+      -resultBundlePath $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} $SKIP $(test_retries) 2>&1 | tee $RESULTS/$NAME.log | filter
     return ${pipestatus[1]}
 }
 run_tests; STATUS=$?

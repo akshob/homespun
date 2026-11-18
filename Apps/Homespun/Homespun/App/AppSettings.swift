@@ -15,7 +15,11 @@ final class AppSettings {
     private let defaults: UserDefaults
     private(set) var serverURL: URL?
     private(set) var server: ServerAPI.ServerInfo?
-    private(set) var serverStatus: ServerStatus = .unknown
+    private(set) var serverStatus: ServerStatus = .unknown {
+        didSet { if serverStatus != .checking, serverStatus != .unknown { serverCheckedAt = Date() } }
+    }
+    /// When the server last answered, or didn't (for the widgets).
+    private(set) var serverCheckedAt: Date?
     /// A pairing link opened from the Camera app, waiting for the user to confirm.
     var pendingLink: PairingLink?
 

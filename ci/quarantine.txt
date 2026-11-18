@@ -1,0 +1,2 @@
+# Known UI test failures, kept out of runs until their issue is fixed: <test id> <issue>.
+# A run reports what it skipped. The pull request that fixes the issue removes its line.

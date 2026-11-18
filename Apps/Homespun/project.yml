@@ -3,6 +3,12 @@ name: Homespun
 options:
   deploymentTarget:
     iOS: "26.0"
+    watchOS: "26.0"
+# The app, its widgets and the watch app share one version (the App Store requires it).
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
 # Profile: Release's optimisation with testability, for the performance tests only (never shipped).
 configs:
   Debug: debug
@@ -15,7 +21,8 @@ targets:
   Homespun:
     type: application
     platform: iOS
-    sources: [Homespun]
+    # Shared: the widgets' status (StatusSnapshot), written by the app and read by the widgets.
+    sources: [Homespun, Shared]
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig
@@ -42,17 +49,21 @@ targets:
         # One window: on iPhone Duo the scene resizes as it folds; a second window adds nothing.
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        # The App Group the app shares with its widgets (Homespun.entitlements).
+        HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
     dependencies:
       - package: HomespunPackage
         product: HomespunCore
       - package: HomespunPackage
         product: HomespunMedia
+      # Home Screen and Lock Screen widgets, and the Apple Watch app with its own widgets.
+      - target: HomespunWidgets
+      - target: HomespunWatch
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID)
         PRODUCT_NAME: Homespun
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_ENTITLEMENTS: Homespun/Resources/Homespun.entitlements
         SWIFT_VERSION: "6.0"
         SWIFT_OBJC_BRIDGING_HEADER: Homespun/Support/Homespun-Bridging-Header.h
         TARGETED_DEVICE_FAMILY: "1"
@@ -68,6 +79,99 @@ targets:
       configs:
         Profile:
           ENABLE_TESTABILITY: YES
+  # The Home Screen and Lock Screen widgets (WidgetKit). They read what the app wrote; no network.
+  HomespunWidgets:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, Shared]
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+      Profile: Signing.xcconfig
+    info:
+      path: HomespunWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Homespun
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).widgets
+        PRODUCT_NAME: HomespunWidgets
+        CODE_SIGN_ENTITLEMENTS: HomespunWidgets/HomespunWidgets.entitlements
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+  # Homespun on Apple Watch: one screen with what the iPhone last sent (WatchConnectivity), and the
+  # watch's widgets. Needs the iPhone app; it can't reach the server itself.
+  HomespunWatch:
+    type: application
+    platform: watchOS
+    sources:
+      - HomespunWatch
+      - Shared
+      - Widgets/WidgetStyle.swift
+      - path: Homespun/Resources/AppIcon.icon
+        buildPhase: resources
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+      Profile: Signing.xcconfig
+    info:
+      path: HomespunWatch/Info.plist
+      properties:
+        CFBundleDisplayName: Homespun
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: $(HOMESPUN_BUNDLE_ID)
+        WKRunsIndependentlyOfCompanionApp: false
+        HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
+    dependencies:
+      - target: HomespunWatchWidgets
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).watchkitapp
+        # Not "Homespun": its symbols would take the iPhone app's name (scripts/symbolicate.py).
+        PRODUCT_NAME: HomespunWatch
+        CODE_SIGN_ENTITLEMENTS: HomespunWatch/HomespunWatch.entitlements
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "4"
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  HomespunWatchWidgets:
+    type: app-extension
+    platform: watchOS
+    sources: [Widgets, Shared]
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+      Profile: Signing.xcconfig
+    info:
+      path: HomespunWatchWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Homespun
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).watchkitapp.widgets
+        PRODUCT_NAME: HomespunWatchWidgets
+        CODE_SIGN_ENTITLEMENTS: HomespunWatchWidgets/HomespunWatchWidgets.entitlements
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "4"
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
   # Runs inside the app on a simulator whose library holds only synthetic media.
   HomespunTests:
     type: bundle.unit-test
@@ -84,6 +188,24 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).tests
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+  # The widgets' views drawn in every size and state, without the app or WidgetKit (no simulator setup).
+  HomespunWidgetTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - HomespunWidgetTests
+      - Shared
+      - path: Widgets
+        excludes: [HomespunWidgets.swift]
+    configFiles:
+      Debug: Signing.xcconfig
+      Release: Signing.xcconfig
+      Profile: Signing.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).widgettests
         SWIFT_VERSION: "6.0"
         GENERATE_INFOPLIST_FILE: YES
   # Drives the workflows through the app's own screens on a simulator.
@@ -112,7 +234,7 @@ schemes:
       # Purchases in builds run from Xcode use this local App Store, never real money.
       storeKitConfiguration: Homespun.storekit
     test:
-      targets: [HomespunTests, HomespunUITests]
+      targets: [HomespunTests, HomespunWidgetTests, HomespunUITests]
   # The performance tests (ci/perf.sh): no automatic screenshots or UI snapshots,
   # which make the app walk its accessibility tree on the main thread at every gesture.
   HomespunPerf:
