@@ -2,7 +2,7 @@
 # folded, iPhone Duo open in every pose) and the server's package tests on macOS; the website goes
 # live when it changed. One run at a time: a running one finishes, and only the newest waiting
 # merge runs next. A failure opens (or updates) the "main is failing" issue; a pass closes it.
-# Run workflow tests any branch: UI runs none, quick (the pull request's) or full.
+# Run workflow tests any branch: UI runs none, quick (the pull request's), full or watch only.
 name: CI
 
 on:
@@ -14,7 +14,7 @@ on:
       ui:
         description: UI runs
         type: choice
-        options: [none, quick, full]
+        options: [none, quick, full, watch]
         default: quick
 
 permissions:
@@ -50,7 +50,9 @@ jobs:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
           UI_INPUT: ${{ inputs.ui }}
-        run: python3 ci/plan.py
+        run: |
+          python3 -m unittest discover -s ci -p 'test_*.py'
+          python3 ci/plan.py
 
   suite:
     name: CI

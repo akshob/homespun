@@ -6,6 +6,23 @@ import SwiftUI
 @main
 struct HomespunWatchApp: App {
     init() {
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        if let index = args.firstIndex(of: "-watchDemo"), index + 1 < args.count {
+            let now = Date()
+            var demo = StatusSnapshot.sample(now: now)
+            demo.updatedAt = now.addingTimeInterval(args[index + 1] == "stale" ? -7 * 3600 : -5 * 60)
+            if args.contains("-watchDemoLater") {
+                if let url = StatusStore.url { try? FileManager.default.removeItem(at: url) }
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(3))
+                    WatchStatus.shared.apply(demo)
+                }
+            } else {
+                StatusStore.write(demo)
+            }
+        }
+        #endif
         PhoneLink.shared.activate()
     }
 

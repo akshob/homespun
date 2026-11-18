@@ -3,7 +3,7 @@
 # take one run each (the ci workflow's matrix); on one Mac, name several, or a group.
 #   lane.sh <run|group> ...
 #   runs:   quick quick-duo (a pull request's) · iphone library later copies onboarding telemetry
-#           duo-cover duo-grid duo-open demo (after a merge) · large (nightly)
+#           duo-cover duo-grid duo-open demo watch (after a merge) · large (nightly)
 #   groups: pr (both quick runs), iphone-all, duo-all, full (every run after a merge)
 # Ports differ, so runs of different jobs can share a Mac. RETRY_UI=1: a failing test runs once
 # more in place (Xcode's retry; the summary names tests that passed then as flaky). Tests in
@@ -24,7 +24,7 @@ for name in "$@"; do
     pr) runs+=(quick quick-duo) ;;
     iphone-all) runs+=(iphone library later copies onboarding telemetry) ;;
     duo-all) runs+=(duo-cover duo-grid duo-open) ;;
-    full) runs+=(iphone library later copies onboarding telemetry duo-cover duo-grid duo-open demo) ;;
+    full) runs+=(iphone library later copies onboarding telemetry duo-cover duo-grid duo-open demo watch) ;;
     *) runs+=($name) ;;
   esac
 done
@@ -59,6 +59,8 @@ for one in $runs; do
       run onboarding zsh $D/ui.sh onboarding iPhone-18-Pro HomespunUITests/OnboardingUITests 8797 ;;
     telemetry)
       run telemetry env STUB_PORT=8899 zsh $D/ui.sh telemetry iPhone-18-Pro HomespunUITests/TelemetryUITests 8798 ;;
+    watch)
+      run watch zsh $D/watch.sh ;;
     duo-cover)
       run duo-cover zsh $D/ui.sh duo-cover iPhone-Duo \
         HomespunUITests/LibraryUITests,HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests 8795 ;;
