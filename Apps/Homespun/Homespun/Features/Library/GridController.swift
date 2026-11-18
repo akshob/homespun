@@ -188,6 +188,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        let updateBars = !appeared || resizeAnchor != nil
         isFront = true
         lastInsets = collectionView.adjustedContentInset
         view.setNeedsLayout()
@@ -196,6 +197,12 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             if placed, pinned { setOffset(offsetRange.upperBound) }
         } else if let resizeAnchor {
             restore(resizeAnchor)
+        }
+        if updateBars {
+            // Newly installed bars learn the existing position before the next displayed frame.
+            let offset = collectionView.contentOffset
+            collectionView.contentOffset = CGPoint(x: offset.x, y: offset.y - 1)
+            collectionView.contentOffset = offset
         }
     }
 
@@ -657,7 +664,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private func zoomCell(for id: String) -> UIView? {
         guard let position = data.positions[id] else { return nil }
         let frame = layout.geometry.frame(ofItem: position)
-        if !visibleRect.contains(frame), collectionView.bounds.height > 0 { follow(id) }
+        if !visibleRect.intersects(frame), collectionView.bounds.height > 0 { follow(id) }
         collectionView.layoutIfNeeded()
         let cell = collectionView.cellForItem(at: indexPath(of: position))
         if PerfMonitor.shared.enabled {
@@ -996,6 +1003,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var samples = 0
     private var isClosing = false
     private var publishedAt: CFTimeInterval = 0
+    private var deltas: [String: Double] = [:]
 
     init(sample: @escaping () -> Sample?) {
         self.sample = sample
@@ -1026,7 +1034,10 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     private func publish() {
         publishedAt = CACurrentMediaTime()
-        PerfMonitor.shared.note(["behind.changes": Double(changes), "behind.samples": Double(samples)])
+        var values = deltas
+        values["behind.changes"] = Double(changes)
+        values["behind.samples"] = Double(samples)
+        PerfMonitor.shared.note(values)
     }
 
     @objc private func tick() {
@@ -1039,6 +1050,20 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         // Paging may deliberately move the grid before closing; the bars must never change.
         baseline.offset = closingOffset ?? now.offset
         if !isClosing { now.offset = baseline.offset }
+        let nav = now.navFrame ?? .zero, oldNav = baseline.navFrame ?? .zero
+        let tab = now.tabFrame ?? .zero, oldTab = baseline.tabFrame ?? .zero
+        let safe = now.safeArea ?? .zero, oldSafe = baseline.safeArea ?? .zero
+        let measured: [String: CGFloat] = [
+            "behind.top": now.insets.top - baseline.insets.top, "behind.bottom": now.insets.bottom - baseline.insets.bottom,
+            "behind.left": now.insets.left - baseline.insets.left, "behind.right": now.insets.right - baseline.insets.right,
+            "behind.navY": nav.minY - oldNav.minY, "behind.navHeight": nav.height - oldNav.height,
+            "behind.tabY": tab.minY - oldTab.minY, "behind.tabHeight": tab.height - oldTab.height,
+            "behind.tabWidth": tab.width - oldTab.width, "behind.tabAlpha": (now.tabAlpha ?? 0) - (baseline.tabAlpha ?? 0),
+            "behind.safeTop": safe.top - oldSafe.top, "behind.safeBottom": safe.bottom - oldSafe.bottom,
+            "behind.safeLeft": safe.left - oldSafe.left, "behind.safeRight": safe.right - oldSafe.right,
+            "behind.offset": now.offset - baseline.offset,
+        ]
+        for (key, value) in measured { deltas[key] = max(deltas[key] ?? 0, Double(abs(value))) }
         if now != baseline { changes += 1 }
         if isClosing, CACurrentMediaTime() - publishedAt > 0.1 { publish() }
     }

@@ -204,6 +204,7 @@ final class GridScrollUITests: XCTestCase {
                 XCTAssertTrue(viewer.waitForNonExistence(timeout: 3))
                 let after = report()
                 print("BEHIND \(name) \(close): changes=\(after.value("behind.changes")) samples=\(after.value("behind.samples"))")
+                print("BEHIND deltas: \(after.values.filter { $0.key.hasPrefix("behind.") })")
                 XCTAssertEqual(after.value("behind.changes"), 0, "\(name), \(close): the app behind the viewer changed")
                 XCTAssertGreaterThan(after.value("behind.samples"), 10)
                 XCTAssertGreaterThanOrEqual(after.value("grid.source"), 0, "the zoom didn't have a real cell to land in")
