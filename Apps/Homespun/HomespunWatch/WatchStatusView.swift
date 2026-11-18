@@ -4,13 +4,28 @@ import SwiftUI
 /// The four facts as the iPhone last saw them, and how long ago that was.
 struct WatchStatusView: View {
     let status: WatchStatus
+    @State private var now = Date()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
-            TimelineView(.everyMinute) { context in
-                List { content(now: context.date) }
+            // A TimelineView around this List loops in layout when its self-updating footer appears.
+            List { content(now: now) }
+                .navigationTitle("Homespun")
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            now = Date()
+            while !Task.isCancelled {
+                let next = Calendar.current.nextDate(after: Date(), matching: DateComponents(second: 0),
+                                                     matchingPolicy: .nextTime) ?? Date().addingTimeInterval(60)
+                do {
+                    try await Task.sleep(for: .seconds(max(1, next.timeIntervalSinceNow)))
+                } catch {
+                    return
+                }
+                now = Date()
             }
-            .navigationTitle("Homespun")
         }
     }
 

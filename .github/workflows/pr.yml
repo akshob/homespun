@@ -1,6 +1,7 @@
 # Quick checks of a pull request to main (about 20–25 minutes): only what it changes (ci/plan.py):
 # the server on Linux, the telemetry Worker, the website, the app's build and unit tests, and two
 # short UI runs side by side: iPhone (`quick`) and iPhone Duo open in every pose (`quick-duo`).
+# Watch-related changes also run the timed watch regression.
 # A draft gets the build and unit tests only. "PR / Result" sums it up; main requires it.
 # The extended suite runs after the merge (ci.yml). Pull requests from forks run after the owner
 # approves them and never see secrets.
@@ -41,7 +42,9 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
           SHA: ${{ github.event.pull_request.head.sha }}
           DRAFT: ${{ github.event.pull_request.draft }}
-        run: python3 ci/plan.py
+        run: |
+          python3 -m unittest discover -s ci -p 'test_*.py'
+          python3 ci/plan.py
 
   checks:
     name: PR
