@@ -62,7 +62,7 @@ if [[ -n ${DUO_POSES:-} ]]; then
             portrait) $DUOCTL -d $SIM hinge 180; turn portrait;;
             laptop) $DUOCTL -d $SIM hinge 180; turn portrait; $DUOCTL -d $SIM hinge 100;;
             folded) $DUOCTL -d $SIM hinge 0; sleep 2; turn portrait;;
-          esac >> $DATA.poses 2>&1
+          esac >> $RESULTS/$NAME-poses.log 2>&1
           rm -f $POSEFILE
         fi
         sleep 0.5
@@ -80,8 +80,9 @@ run_tests() {
     return ${pipestatus[1]}
 }
 run_tests; STATUS=$?
-# Now and then the simulator can't start the test runner, and no test runs: once more, rebooted.
-if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log && grep -q "failed to launch" $RESULTS/$NAME.log; then
+# Now and then the simulator can't start or reach the test runner, and no test runs: once more, rebooted.
+if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
+    && grep -qE "failed to launch|Failed to establish communication|Channel disconnected|crashed while preparing" $RESULTS/$NAME.log; then
     echo "the test runner didn't start; rebooting the simulator and trying once more"
     xcrun simctl shutdown $SIM; xcrun simctl boot $SIM && xcrun simctl bootstatus $SIM -b >/dev/null
     run_tests; STATUS=$?

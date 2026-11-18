@@ -21,6 +21,9 @@ for bundle in sorted(glob.glob(os.path.join(results, "*.xcresult"))):
     passed, failed, skipped = summary.get("passedTests", 0), summary.get("failedTests", 0), summary.get("skippedTests", 0)
     # A run that never got to its tests (no project, no simulator) failed too.
     mark = "❌" if failed or passed + failed + skipped == 0 else "✅"
+    # Passed on the second try (lane.sh, RETRY_UI): the first try's bundle is in attempt1/.
+    if mark == "✅" and os.path.exists(os.path.join(results, "attempt1", os.path.basename(bundle))):
+        mark = "⚠️ flaky, passed on retry ·"
     lines.append(f"| {mark} {name} | {passed} | {failed} | {skipped} |")
     if passed + failed + skipped == 0:
         failures.append(f"- **{name}**: no tests ran (see the job's log)")
