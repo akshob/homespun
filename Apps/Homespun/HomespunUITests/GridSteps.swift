@@ -306,15 +306,32 @@ extension XCUIApplication {
 
     /// Taps one of Free Up Space's compact copies. They're a UIKit row in a SwiftUI page, which
     /// XCTest doesn't scroll by itself: in a half-height sheet the row can be under the buttons at the
-    /// bottom (a tap there lands on them), so the sheet is pulled up to full height first, by its bar.
-    @MainActor func tapCompactCopy(_ thumbnail: XCUIElement) {
-        let buttons = self.buttons["remove.confirm"], close = self.buttons["remove.close"]
-        for _ in 0..<2 {
-            guard thumbnail.exists, buttons.exists, close.exists, thumbnail.frame.maxY > buttons.frame.minY - 12 else { break }
-            let bar = close.coordinate(withNormalizedOffset: CGVector(dx: 3, dy: 0.5))
-            bar.press(forDuration: 0.1, thenDragTo: bar.withOffset(CGVector(dx: 0, dy: -500)))
-            sleep(1)
+    /// bottom (a tap there lands on them), so the sheet is pulled up to full height first by its grabber
+    /// (Close is on the left on an iPhone and on the right on the iPhone Duo's cover), then the page is
+    /// scrolled if the row is still covered.
+    @MainActor func tapCompactCopy(_ thumbnail: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        let buttons = self.buttons["remove.confirm"]
+        func covered() -> Bool { thumbnail.exists && buttons.exists && thumbnail.frame.maxY > buttons.frame.minY - 12 }
+        func settle() { let end = Date().addingTimeInterval(3); while covered(), Date() < end { usleep(200_000) } }
+        if covered() {
+            let grabber = self.buttons["Sheet Grabber"].firstMatch
+            let bar = navigationBars["Free Up Space"]
+            let from = grabber.exists ? grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                                      : bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+            from.press(forDuration: 0.1, thenDragTo: coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)),
+                       withVelocity: .slow, thenHoldForDuration: 0.2)
+            settle()
         }
+        let amount = staticTexts["remove.bytes"]
+        for _ in 0..<3 {
+            guard covered(), amount.exists else { break }
+            let from = amount.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            let distance = thumbnail.frame.maxY - buttons.frame.minY + 40
+            from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: -distance)),
+                       withVelocity: .slow, thenHoldForDuration: 0.3)
+            settle()
+        }
+        XCTAssertFalse(covered(), "the compact copy is still under Free Up Space's buttons", file: file, line: line)
         thumbnail.tap()
     }
 
