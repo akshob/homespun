@@ -12,12 +12,15 @@ final class PremiumUITests: XCTestCase {
         app.launchArguments = ["-onboardingComplete", "YES", "-hideTips", "-releaseFeatures", "NO"]
         app.launch()
         XCTAssertTrue(app.hasTab("Library"))
+        app.openTab("Library")
 
         for link in ["unlock?feature=widgets", "unlock?feature=automatic", "automatic", "activity", "server", "free-up"] {
             app.open(URL(string: "homespun://\(link)")!)
             XCTAssertFalse(app.buttons["unlock.buy"].waitForExistence(timeout: 1), link)
             XCTAssertFalse(app.switches["automatic.toggle"].exists, link)
             XCTAssertFalse(app.buttons["premium.restore"].exists, link)
+            XCTAssertTrue(app.tab("Library").isSelected, link)
+            XCTAssertFalse(app.buttons["remove.confirm"].exists, link)
         }
         app.openTab("Activity")
         XCTAssertFalse(app.descendants(matching: .any)["activity.premiumMoment"].exists)
