@@ -8,8 +8,7 @@ import Synchronization
 import UIKit
 import UniformTypeIdentifiers
 
-/// One of the demo's sample photos and videos, as listed in `Resources/Demo/samples.json` (drawn by
-/// `scripts/demo-media.swift`).
+/// One of the demo's sample photos and videos, listed by DemoMedia in its launch-scoped folder.
 struct DemoSample: Codable, Sendable, Equatable {
     var name: String
     /// "photo", "live_photo" or "video".
@@ -30,9 +29,7 @@ struct DemoSample: Codable, Sendable, Equatable {
     var id: String { "demo:" + name }
     var itemKind: PhotoLibrary.Kind { kind == "video" ? .video : kind == "live_photo" ? .livePhoto : .photo }
 
-    static let folder = Bundle.main.bundleURL.appendingPathComponent("Demo", isDirectory: true)
-
-    static func load(from folder: URL = DemoSample.folder) -> [DemoSample] {
+    static func load(from folder: URL) -> [DemoSample] {
         guard let data = try? Data(contentsOf: folder.appendingPathComponent("samples.json")) else { return [] }
         return (try? JSONDecoder().decode([DemoSample].self, from: data)) ?? []
     }
@@ -197,7 +194,7 @@ enum DemoPictures {
     }
 }
 
-/// The demo's photo library: the sample photos and videos that come with the app, and the compact
+/// The demo's photo library: the generated photos and cloned videos and Live Photo, and the compact
 /// copies the demo makes of them, kept in the demo's folder. It stands in for Photos everywhere
 /// (`PhotoSource`, `ItemCatalog`) and never reads or changes the person's own library. Deleting
 /// asks with an in-app question that says it's pretend, and removes only from the demo.
@@ -235,7 +232,7 @@ final class DemoLibrary: ItemCatalog, Sendable {
     /// Each sample's main file's SHA-256, worked out when first needed.
     private let hashes = Mutex<[String: String]?>(nil)
 
-    init(folder: URL, media: URL = DemoSample.folder, ask: @escaping @Sendable (Question) async -> Bool) {
+    init(folder: URL, media: URL, ask: @escaping @Sendable (Question) async -> Bool) {
         self.folder = folder
         self.media = media
         self.ask = ask

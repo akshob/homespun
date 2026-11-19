@@ -13,6 +13,8 @@ zmodload zsh/system
 : >> $CI_STATE/dd/$SHA.lock
 zsystem flock -f lockfd $CI_STATE/dd/$SHA.lock    # held until this script ends
 if [[ -f $DD/.built && -x $SERVER_BIN ]]; then echo "already built for $SHA"; exit 0; fi
+xcrun swiftc -parse-as-library -typecheck Apps/Homespun/Homespun/Features/Demo/DemoArt.swift \
+  Apps/Homespun/scripts/demo-media.swift
 swift build -c release --product homespun-server 2>&1 | tail -3
 cd $APP
 set -o pipefail

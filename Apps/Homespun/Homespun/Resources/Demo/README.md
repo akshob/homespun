@@ -1,8 +1,12 @@
-# The demo's sample photos and videos
+# The demo's videos and Live Photo
 
 SPDX-License-Identifier: Apache-2.0
 
-Drawn by `Apps/Homespun/scripts/demo-media.swift` (no photographs, no third-party media) for Try the
-Demo. `samples.json` lists them; `compact/` holds the compact copies the demo's pretend server sends
-back for videos and the Live Photo (it makes the photos' own by shrinking them); `thumbs/` the grid's
-small pictures.
+Drawn by `Apps/Homespun/scripts/demo-media.sh` (`demo-media.swift` with the app's
+`Features/Demo/DemoArt.swift`; no photographs, no third-party media).
+
+The demo's photos, screenshot and grid pictures aren't here: the app draws them on the iPhone
+with the same `DemoArt.swift` when the demo starts (`DemoMedia.swift`), and writes `samples.json`
+then. `compact/` holds the compact copies the pretend server sends back for the videos and the
+Live Photo (it makes the photos' own by shrinking them). A unit test
+(`DemoMediaTests.bundledMediaFitsTheBudget`) keeps this folder at 5 MB or less.
