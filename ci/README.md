@@ -43,9 +43,11 @@ flows fail if their log reports a skip for missing runner configuration rather t
 passing without coverage.
 
 Only the app build and `watch` jobs need XcodeGen. They share the Xcode package checkout cache
-(`$CI_STATE/spm`, `xcode-spm-<Package.resolved hash>` with a prefix restore); Homebrew downloads
-are cached by month. The watch job still builds its own watchOS test bundle, then runs its
-own `.xctestrun` without resolving the graph a second time.
+(`$CI_STATE/spm`, `xcode-spm-<Package.resolved hash>` with a prefix restore). Homebrew uses its
+normal install path: a download-cache trial increased Tools from the 21–38 s baseline to
+197–361 s despite a cache hit, so that optional cache is deferred. The watch job still builds
+its own watchOS test bundle, then runs its own `.xctestrun` without resolving the graph a
+second time.
 
 Performance budgets (`perf.sh`) need a Mac with a large iPhone Duo library (`setup-perf-sim.sh`,
 35,000 photos) and steady timings, which shared cloud machines don't give; the owner runs them
