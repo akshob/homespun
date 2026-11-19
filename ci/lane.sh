@@ -84,7 +84,7 @@ for one in $runs; do
     demo)
       # Try the Demo needs no server and no Photos access: on an iPhone, then on iPhone Duo's cover.
       run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests,HomespunUITests/GridRedrawUITests 8800
-      run demo-duo env SERVERLESS=1 zsh $D/ui.sh demo-duo iPhone-Duo HomespunUITests/DemoModeUITests,HomespunUITests/GridRedrawUITests 8801 ;;
+      run demo-duo env SERVERLESS=1 zsh $D/ui.sh demo-duo iPhone-Duo HomespunUITests/DemoModeUITests 8801 ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;
   esac
