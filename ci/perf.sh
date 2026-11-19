@@ -7,7 +7,9 @@ PERF_DD=$CI_STATE/dd-profile
 PERF_SIM=$(cat $CI_STATE/perf-udid 2>/dev/null) || { echo "No performance simulator: run ci/setup-perf-sim.sh once."; exit 1; }
 # Its slot ends with the script, so the simulator shuts down too.
 SERVER_PID=""
+BACKUP_SIM=""
 cleanup() {
+    [[ -z $BACKUP_SIM ]] || remove_simulator $BACKUP_SIM
     xcrun simctl shutdown $PERF_SIM 2>/dev/null
     [[ -z $SERVER_PID ]] || { kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; }
     [[ -z ${BACKUP_DATA:-} ]] || rm -rf $BACKUP_DATA
@@ -28,7 +30,8 @@ echo "::group::backup budget server"
 SERVER_BIN=$ROOT/.build/release/homespun-server
 BACKUP_DATA=$CI_STATE/servers/perf-backup-$$
 mkdir -p $BACKUP_DATA/originals
-export HOMESPUN_DATA=$BACKUP_DATA HOMESPUN_ORIGINALS=$BACKUP_DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=18808
+export HOMESPUN_DATA=$BACKUP_DATA HOMESPUN_ORIGINALS=$BACKUP_DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=18808 \
+       HOMESPUN_PUBLIC_URL=127.0.0.1:18808 HOMESPUN_NAME="Budget Server"
 wait_port_free $HOMESPUN_PORT || exit 1
 $SERVER_BIN serve > $RESULTS/perf-backup-server.log 2>&1 & SERVER_PID=$!
 wait_for_server $HOMESPUN_PORT || exit 1
@@ -53,7 +56,8 @@ for pose in close open; do
     xcrun simctl privacy $PERF_SIM grant photos photos.homespun.app
     rm -rf $RESULTS/perf-ui-$pose.xcresult
     # On the open Duo XCTest's gestures don't reach the app: only what the app drives itself counts there.
-    TESTS=(-only-testing:HomespunUITests/PerformanceUITests)
+    TESTS=(-only-testing:HomespunUITests/PerformanceUITests
+      -skip-testing:HomespunUITests/PerformanceUITests/test11BackUpTwentyItemsWhileGridIsStill)
     [[ $pose == open ]] && TESTS=(-only-testing:HomespunUITests/PerformanceUITests/test01LaunchToGrid
       -only-testing:HomespunUITests/PerformanceUITests/test06SwitchTabs -only-testing:HomespunUITests/PerformanceUITests/test10AutoscrollTheLibrary)
     TEST_RUNNER_HOMESPUN_PERF=1 SIM=$PERF_SIM DD=$PERF_DD XCTESTRUN=$PERF_RUN \
@@ -63,6 +67,26 @@ for pose in close open; do
     grep -Eq 'Needs perf.sh|Run with ci/perf.sh' $RESULTS/perf-ui-$pose.log && failed+=environment-$pose
     echo "::endgroup::"
 done
+echo "::group::backup budgets (isolated library clone)"
+xcrun simctl shutdown $PERF_SIM 2>/dev/null
+BACKUP_SIM=$(xcrun simctl clone $PERF_SIM "HS CI Backup Budget") || exit 1
+xcrun simctl bootstatus $BACKUP_SIM -b >/dev/null 2>&1
+$DUOCTL -d $BACKUP_SIM close >/dev/null 2>&1
+sleep 15
+# Clear only the clone's app, not its synthetic Photos library or the performance simulator's cache.
+xcrun simctl uninstall $BACKUP_SIM photos.homespun.app 2>/dev/null
+xcrun simctl privacy $BACKUP_SIM grant photos photos.homespun.app
+rm -rf $RESULTS/perf-backup.xcresult
+TEST_RUNNER_HOMESPUN_PERF=1 SIM=$BACKUP_SIM DD=$PERF_DD XCTESTRUN=$PERF_RUN \
+  test_without_building $RESULTS/perf-backup.xcresult \
+  -only-testing:HomespunUITests/PerformanceUITests/test11BackUpTwentyItemsWhileGridIsStill 2>&1 \
+  | tee $RESULTS/perf-backup.log | filter
+(( ${pipestatus[1]} == 0 )) || failed+=backup
+grep -Eq 'Needs perf.sh|Run with ci/perf.sh' $RESULTS/perf-backup.log && failed+=backup-environment
+remove_simulator $BACKUP_SIM
+BACKUP_SIM=""
+xcrun simctl bootstatus $PERF_SIM -b >/dev/null 2>&1
+echo "::endgroup::"
 echo "::group::launch"
 $DUOCTL -d $PERF_SIM close >/dev/null 2>&1; sleep 5
 values=()

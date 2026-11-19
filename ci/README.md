@@ -56,7 +56,8 @@ attached to this public one.
 The demo lane also checks app-side redraw counters (`-perfMonitor YES`): eight backups and Select All must not
 reload the grid, blank unchanged pictures, or reevaluate the root per item. The filtered variant
 checks incremental removals. `perf.sh` backs up twenty items against its own disposable HTTPS
-server (port 18808): zero frames over 50 ms, hitch time ≤ 5 ms/s, `GridApply` p95 ≤ 2 ms,
+server (port 18808) and a disposable clone of the synthetic library: zero frames over 50 ms,
+hitch time ≤ 5 ms/s, `GridApply` p95 ≤ 2 ms,
 and at most one `BuildState` per finished item. These counters and timings appear in `perf.monitor`.
 
 ## The scripts (`ci/`)
