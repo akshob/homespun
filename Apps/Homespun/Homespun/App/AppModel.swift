@@ -64,7 +64,6 @@ final class AppModel {
     nonisolated static func registerBackgroundRun() {
         guard ReleaseFeatures.automaticMode else {
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: AutomaticMode.taskID)
-            AutomaticMode.clearNotifications()
             return
         }
         BGTaskScheduler.shared.register(forTaskWithIdentifier: AutomaticMode.taskID, using: nil) { task in

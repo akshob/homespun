@@ -24,6 +24,10 @@ struct RootView: View {
         }
         .tint(Theme.accent)
         .task {
+            if !ReleaseFeatures.automaticMode {
+                // Notification cleanup can wait on an XPC reply; never block app launch or the main thread.
+                await Task.detached(priority: .utility) { AutomaticMode.clearNotifications() }.value
+            }
             if !settings.isDemo { await model.status?.clearDepartedDemo() }
         }
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
