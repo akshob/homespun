@@ -23,6 +23,9 @@ struct RootView: View {
             }
         }
         .tint(Theme.accent)
+        .task {
+            if !settings.isDemo { await model.status?.clearDepartedDemo() }
+        }
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
         .modifier(QuitUnexpectedly(model: model))
         .onChange(of: scenePhase, initial: true) { _, phase in
@@ -215,7 +218,8 @@ struct MainTabView: View {
                     tab = .server
                     model.router.serverRoute = .premium
                 } else {
-                    sheet = .unlock(PremiumFeature(rawValue: feature) ?? .widgets)
+                    let requested = PremiumFeature(rawValue: feature) ?? .widgets
+                    sheet = .unlock(requested.isAvailable ? requested : .widgets)
                 }
             }
         }

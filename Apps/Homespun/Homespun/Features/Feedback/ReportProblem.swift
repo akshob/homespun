@@ -213,6 +213,10 @@ struct ReportProblemView: View {
                      + "or address.")
             }
             .listRowBackground(Theme.card)
+            Section {
+                PrivacyPolicyRow()
+            }
+            .listRowBackground(Theme.card)
             if let error {
                 Section {
                     InlineNotice(tone: .error, title: error) {

@@ -31,6 +31,7 @@ struct AnalyticsPage: View {
                 ForEach(AnalyticsPromises.all) { promise in
                     PromiseRow(symbol: promise.symbol, title: promise.title, detail: promise.detail)
                 }
+                PrivacyPolicyRow()
             }
             .padding(.top, 8)
         } actions: {
@@ -92,8 +93,13 @@ struct AnalyticsSettingsView: View {
                 }
                 if let error { FieldError(text: error) }
             } footer: {
-                Text("Deletes everything this iPhone shared, including problem reports. Crash and speed reports also need "
-                     + "Share With App Developers in Settings › Privacy & Security › Analytics & Improvements.")
+                Text("Deletes analytics and reports linked to this iPhone's analytics identifier. To delete other reports, "
+                     + "contact support@homespun.photos with the report number. Crash and speed reports also need Share With App "
+                     + "Developers in Settings › Privacy & Security › Analytics & Improvements.")
+            }
+            .listRowBackground(Theme.card)
+            Section {
+                PrivacyPolicyRow()
             }
             .listRowBackground(Theme.card)
         }
@@ -115,7 +121,8 @@ struct AnalyticsSettingsView: View {
                 }
             }
         } message: {
-            Text("Analytics, crash reports, and problem reports from this iPhone are deleted from the developer's service.")
+            Text("Analytics, crash reports, and problem reports linked to this iPhone's analytics identifier are deleted "
+                 + "from the developer's service.")
         }
     }
 }

@@ -185,3 +185,13 @@ private func snapshot(unlocked: Bool = true, ready: Int = 0, readyBytes: Int = 0
     inputs.serverName = nil
     #expect(StatusPublisher.snapshot(inputs, previous: away, now: now).server == nil)
 }
+
+@Test func aDemoSnapshotLeftByAnEarlierProcessNeverLeaksIntoRealStatus() {
+    var demo = StatusSnapshot.sample(now: now)
+    demo.demo = true
+    let inputs = StatusPublisher.Inputs(unlocked: false, ready: nil, lastBackup: nil, historyLoaded: true,
+                                        serverName: nil, status: .unknown, checkedAt: nil, automatic: false, lastRun: nil)
+    let cleared = StatusPublisher.snapshot(inputs, previous: demo, now: now + 60)
+    #expect(cleared.demo == nil && cleared.server == nil && cleared.lastBackup == nil)
+    #expect(cleared.ready == .init(bytes: 0, count: 0) && !cleared.unlocked && !cleared.automatic.enabled)
+}

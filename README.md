@@ -78,6 +78,8 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 
 ## iOS app
 
+Version 1.0.0 supports iOS 26 and later. Release build numbers are timestamps from `testflight.sh`.
+
 On first launch the app explains what it does, connects to a server (tap one found on the
 network: a Mac asks you to click Allow on its screen, a Linux server gives you a code; or use a
 QR code, link, or address), shows the server's self-check, and asks for Photos access. A paired
@@ -108,11 +110,12 @@ The pretend server, "Homespun Demo",
 is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
 Backing up, compact copies, Compare, Free Up Space (with a question that says nothing is deleted),
 Keep Original, Restore Original, Activity and the Server tab all work on them. The demo never reads or
-changes Photos, asks iOS for nothing, records no analytics and sends no reports (the widgets and the
-Apple Watch keep showing the person's own Homespun); its settings and records are kept apart and deleted
-by Leave the Demo (the Server tab, or the Demo mark in setup).
+changes Photos, asks iOS for nothing, records no analytics and sends no reports. Without a paired real
+server, its live status also appears in the widgets and on Apple Watch, without a purchase; leaving
+clears those demo facts. With a paired server, its real status is never replaced. The demo's settings
+and records are kept apart and deleted by Leave the Demo (the Server tab, or the Demo mark in setup).
 Leaving the demo deletes what it did; the drawn photos stay until Homespun next starts from scratch.
-Turning on Automatic Mode or Cloud Copies in the demo asks for the real one-time purchase.
+Turning on Automatic Mode in the demo asks for the real one-time purchase.
 
 **Premium** (one-time In-App Purchase; everything above stays free):
 
@@ -129,7 +132,6 @@ Turning on Automatic Mode or Cloud Copies in the demo asks for the real one-time
   - **Cleaned-up items**: a waiting item you delete on the iPhone (Photos reports the deletion)
     moves to the server's trash, `<originals>/.trash/<item>/`, and is deleted after 30 days;
     recovering it on the iPhone puts it back. Anything with a compact copy is never trashed.
-- **Cloud copies**: the server's connectors (see below).
 - **Widgets**: what's ready to free up (size and items), the last backup (when, how many), whether
   the server can be reached (by name) and Automatic Mode ("Tonight while charging", "Off"), on the
   Home Screen (small, medium), the Lock Screen (circular, rectangular, inline) and Apple Watch
@@ -137,9 +139,11 @@ Turning on Automatic Mode or Cloud Copies in the demo asks for the real one-time
   or the server can't be reached). Tapping one opens that place in the app. Locked, they say
   "Unlock widgets in the Homespun app" and open the unlock sheet (`homespun://unlock?feature=widgets`).
 
-Their pages (Server › Backups) open with or without the purchase. Turning either one on (automatic
-mode's switch, or signing in to or turning on a cloud service) asks for the purchase first, with
-Restore Purchase, then carries on; one purchase unlocks both, and the widgets too.
+Automatic Mode's page (Server › Backups) opens with or without the purchase. Turning it on asks for the
+purchase first, with Restore Purchase, then carries on; one purchase unlocks Automatic Mode and widgets,
+with Family Sharing. The local StoreKit configuration uses the 1.0.0 price, USD 2.99.
+Cloud Copies is hidden in 1.0.0 behind `AppFeatures.cloudCopies` until the server ships a Microsoft app ID.
+The server's connector support stays available separately (see below).
 
 Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
 TestFlight builds are unlocked too while the App Store has no Premium product; once it exists,
@@ -418,7 +422,7 @@ docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/homespun
 
 The server can also copy each original somewhere else once it has stored and checked it (for
 items waiting for their compact copy, once it's made, so cleaned-up photos never go out), as
-an extra backup (Server › Cloud Copies in the app). Copies never count toward removing an
+an extra backup (Cloud Copies is hidden in the 1.0.0 app). Copies never count toward removing an
 original from the iPhone; only the server's own verified copy does. Each copy is checked
 where the service allows it, and a full or offline destination is retried later without
 holding up compact copies.
@@ -492,19 +496,22 @@ what Homespun knew after reinstalling the app or moving to a new iPhone.
 The app asks once, during setup (after pairing, before Photos access), whether to share
 anonymous analytics; it can be changed in Server › Share Analytics, which can also delete what
 was shared. Sharing sends rounded counts and short codes (setup steps, pairing, the server's kind
-and version, run sizes, features, error codes) and MetricKit's metrics and crash/hang diagnostics;
+and version, run sizes, features, purchase views and outcomes, error codes) and MetricKit's metrics and crash/hang diagnostics;
 never photos, file names, places, or the server's name or address. Each opt-in gets a new random
 install ID. Report a Problem (Server › Help and About) sends what the person writes, an optional
-email, and diagnostics they can read first; it works without sharing analytics. If Homespun quit
+email, and diagnostics they can read first; it works without sharing analytics. Reports with an email
+never include the analytics install ID. Delete Shared Data deletes reports linked to an install;
+reports with an email can be deleted by emailing support@homespun.photos with the report number. If Homespun quit
 while on screen, the next launch offers a report once (iOS shows nothing itself when an app
 crashes). Debug builds send only to an endpoint given with `-telemetryEndpoint <url>`.
 
 Everything goes to `services/telemetry`, a Cloudflare Worker (D1, R2, Email Routing for reports);
 see its README for the API, tests, deployment and queries. `PrivacyInfo.xcprivacy` declares the
 collected data. App Store Connect › App Privacy answers to match: Data Not Linked to You: Product
-Interaction, Device ID, Crash Data, Performance Data, Other Diagnostic Data (Analytics; crash and
-diagnostics also App Functionality); Data Linked to You: Email Address and Customer Support (App
-Functionality), only from problem reports; no tracking.
+Interaction, Device ID, Performance Data and Purchase History (Analytics); Data Linked to You: Email
+Address and Customer Support (App Functionality), Crash Data and Other Diagnostic Data (Analytics and
+App Functionality), because reports can include an email; no tracking. The in-app Privacy Policy links
+in Help and About, Share Analytics, setup, and Report a Problem lead to `https://homespun.photos/privacy`.
 
 ## Website
 
