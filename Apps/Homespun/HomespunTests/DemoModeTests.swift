@@ -205,6 +205,94 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: mine.path))
     }
 
+    private final class WatchMessages: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [StatusSnapshot] = []
+        func receive(_ data: Data) {
+            if let value = StatusStore.decode(data) { lock.withLock { values.append(value) } }
+        }
+        var all: [StatusSnapshot] { lock.withLock { values } }
+    }
+
+    @Test func demoStatusReachesWidgetsAndWatchAndLeavingClearsIt() async throws {
+        let fixture = Fixture()
+        let ownName = "demo-status-own-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: ownName) }
+        let ownSession = DemoSession(folder: fixture.folder.appendingPathComponent("own"),
+                                     defaults: UserDefaults(suiteName: ownName)!, pace: 0)
+        let locked = Premium(ownBuild: false, owned: { false }, testFlightWithoutProduct: { false }, listens: false)
+        let own = AppModel(demo: ownSession, premium: locked)
+        let demo = AppModel(demo: fixture.session, premium: locked)
+        let client = try await fixture.pairedClient()
+        try demo.settings.finishPairing(serverURL: DemoServer.baseURL,
+                                        response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info))
+        let photo = try sample(fixture.session.library, "photo")
+        let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: demo.job.ledger,
+                                      pollInterval: .zero)
+        _ = try await compactor.compact(photo.id, compactNow: true) { _ in }
+        await demo.library.refreshReady()
+        await demo.history.load()
+        let end = Date()
+        demo.history.record(.init(kind: .backUp, trigger: .manual, start: end - 60, end: end,
+                                   items: [.init(assetID: photo.id, name: "Sample", result: .saved)]))
+
+        let url = fixture.folder.appendingPathComponent("status.json"), messages = WatchMessages()
+        let destination = StatusPublisher.Destination(read: { StatusStore.read(from: url) },
+                                                       write: { StatusStore.write($0, to: url) }, reload: {},
+                                                       send: { data, _ in messages.receive(data) })
+        let publisher = StatusPublisher(settings: own.settings, library: own.library, history: own.history,
+                                         automatic: own.automatic, premium: locked, destination: destination)
+        publisher.showDemo(demo)
+        await publisher.publishNow()
+        let shown = try #require(StatusStore.read(from: url))
+        #expect(shown.demo == true && shown.unlocked && !locked.isUnlocked)
+        #expect(shown.server?.name == "Homespun Demo" && shown.server?.reachable == true)
+        #expect(shown.ready.count == 1 && shown.ready.bytes == demo.library.ready.bytes && shown.ready.bytes > 0)
+        #expect(shown.lastBackup?.count == 1 && shown.lastBackup?.date == end)
+        #expect(messages.all.last?.sameFacts(as: shown) == true)
+
+        publisher.showDemo(nil)
+        await publisher.publishNow()
+        let cleared = try #require(StatusStore.read(from: url))
+        #expect(cleared.demo == nil && !cleared.unlocked && cleared.server == nil)
+        #expect(cleared.ready == .init(bytes: 0, count: 0) && cleared.lastBackup == nil && !cleared.automatic.enabled)
+        #expect(messages.all.last?.sameFacts(as: cleared) == true)
+
+        // A terminated process can leave its demo snapshot behind. Welcome clears it too, without
+        // starting a PhotoKit-backed library or waiting for setup to finish.
+        #expect(StatusStore.write(shown, to: url))
+        let relaunched = StatusPublisher(settings: own.settings, library: own.library, history: own.history,
+                                          automatic: own.automatic, premium: locked, destination: destination)
+        await relaunched.clearDepartedDemo()
+        #expect(StatusStore.read(from: url)?.sameFacts(as: cleared) == true)
+        #expect(messages.all.last?.sameFacts(as: cleared) == true)
+    }
+
+    @Test func demoNeverReplacesAPairedPersonsStatus() throws {
+        let fixture = Fixture()
+        let ownName = "demo-status-paired-\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: ownName) }
+        let ownSession = DemoSession(folder: fixture.folder.appendingPathComponent("own"),
+                                     defaults: UserDefaults(suiteName: ownName)!, pace: 0)
+        let premium = Premium(ownBuild: true, listens: false)
+        let own = AppModel(demo: ownSession, premium: premium)
+        try own.settings.finishPairing(serverURL: DemoServer.baseURL,
+                                       response: .init(deviceID: "own", token: "own-token", server: DemoServer.info))
+        let demo = AppModel(demo: fixture.session, premium: premium)
+        let original = StatusSnapshot.sample(), url = fixture.folder.appendingPathComponent("status.json")
+        try FileManager.default.createDirectory(at: fixture.folder, withIntermediateDirectories: true)
+        #expect(StatusStore.write(original, to: url))
+        let messages = WatchMessages()
+        let publisher = StatusPublisher(settings: own.settings, library: own.library, history: own.history,
+                                         automatic: own.automatic, premium: premium,
+                                         destination: .init(read: { StatusStore.read(from: url) },
+                                                            write: { StatusStore.write($0, to: url) }, reload: {},
+                                                            send: { data, _ in messages.receive(data) }))
+        publisher.showDemo(demo)
+        publisher.showDemo(nil)
+        #expect(StatusStore.read(from: url) == original && messages.all.isEmpty)
+    }
+
     /// The demo is found without looking on the network, as Homespun Demo, ready to pair.
     @Test func pretendServerIsFound() async throws {
         let fixture = Fixture()

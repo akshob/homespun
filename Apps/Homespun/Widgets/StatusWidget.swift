@@ -12,8 +12,8 @@ struct StatusWidget: Widget {
             StatusWidgetView(entry: entry)
         }
         .configurationDisplayName("Homespun")
-        .description("What's ready to free up, your last backup, your server and Automatic Mode. Unlocked with the same "
-                     + "one-time purchase as Automatic Mode and Cloud Copies.")
+        .description("What's ready to free up, your last backup, your server and Automatic Mode. A one-time purchase "
+                     + "unlocks \(PremiumFeature.purchaseDescription).")
         .supportedFamilies(Self.families)
     }
 

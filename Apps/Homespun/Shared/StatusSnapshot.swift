@@ -38,6 +38,8 @@ struct StatusSnapshot: Codable, Equatable, Sendable {
     var automatic: Automatic
     /// When the iPhone wrote it: the watch says how old it is.
     var updatedAt: Date
+    /// Old snapshots have no marker. Demo facts must never become the person's cached status.
+    var demo: Bool?
 
     /// The same facts, whenever they were written or checked: nothing worth redrawing a widget for.
     func sameFacts(as other: StatusSnapshot?) -> Bool {

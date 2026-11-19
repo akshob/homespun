@@ -61,7 +61,10 @@ final class DemoMode {
         // Setup's pages reach the server through the shared session.
         URLProtocol.registerClass(DemoURLProtocol.self)
         Telemetry.shared.paused = true
-        model = AppModel(demo: session, premium: AppModel.shared.premium)
+        let own = AppModel.shared
+        let model = AppModel(demo: session, premium: own.premium, status: own.status)
+        self.model = model
+        own.status?.showDemo(model)
     }
 
     /// Ends the demo: what it was doing stops, and everything it kept is deleted.
@@ -70,6 +73,7 @@ final class DemoMode {
         model.job.stop()
         model.library.stopRestoring()
         model.copyFinder.stop()
+        AppModel.shared.status?.showDemo(nil)
         self.model = nil
         DemoServer.running.withLock { $0 = nil }
         URLProtocol.unregisterClass(DemoURLProtocol.self)
