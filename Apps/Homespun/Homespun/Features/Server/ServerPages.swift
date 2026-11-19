@@ -37,7 +37,7 @@ struct AutomaticModeView: View {
         if ReleaseFeatures.automaticMode { content }
     }
 
-    private var content: some View {
+    @ViewBuilder private var content: some View {
         let automatic = model.automatic, settings = model.settings, premium = model.premium
         let enabled = automatic.enabled && premium.isUnlocked
         List {

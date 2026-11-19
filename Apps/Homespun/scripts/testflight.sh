@@ -43,7 +43,8 @@ zsh scripts/generate-project.sh
 xcodebuild archive -project Homespun.xcodeproj -scheme Homespun -configuration Release \
   -destination generic/platform=iOS -archivePath $WORK/Homespun.xcarchive \
   -derivedDataPath $WORK/dd -clonedSourcePackagesDirPath $WORK/spm \
-  CURRENT_PROJECT_VERSION=$BUILD CODE_SIGNING_ALLOWED=NO | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" | grep -v appintents
+  CURRENT_PROJECT_VERSION=$BUILD CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$WORK/archive.log" \
+  | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" | grep -v appintents
 [[ -d $WORK/Homespun.xcarchive ]] || exit 1
 # An unsigned bundle has no entitlements, and the export keeps only the ones it finds: sign each bundle
 # ad hoc (no certificate needed) with its own, inside out, so the App Group survives.
