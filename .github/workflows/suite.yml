@@ -17,7 +17,7 @@ on:
       retry: {type: boolean, default: true, description: A failed UI run gets one more try}
       performance: {type: boolean, default: false, description: Opt-in nightly TLS upload regression}
       traits: {type: boolean, default: false, description: Probe simulator traits in existing iPhone and Duo lanes}
-      snapshots: {type: string, default: verify, description: Snapshot mode (verify, record or record-missing)}
+      snapshots: {type: string, default: verify, description: "Snapshot mode (verify, record or record-missing)"}
 
 permissions:
   contents: read
