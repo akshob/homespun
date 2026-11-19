@@ -22,8 +22,8 @@ final class AppModel {
     let library: LibraryController
     /// Widget links waiting for the main screen.
     let router = AppRouter()
-    /// Keeps the widgets and the Apple Watch current (started by the main screen). The demo has none:
-    /// they show the person's own Homespun.
+    /// Keeps the widgets and the Apple Watch current. The demo shares the publisher, which shows
+    /// demo facts only when the person's own Homespun has no paired server.
     let status: StatusPublisher?
 
     private init() {
@@ -43,7 +43,7 @@ final class AppModel {
     }
 
     /// The demo's: everything kept in its folder and settings (`DemoSession`).
-    init(demo: DemoSession, premium: Premium) {
+    init(demo: DemoSession, premium: Premium, status: StatusPublisher? = nil) {
         settings = AppSettings(defaults: demo.defaults, photos: demo.library, tokens: demo.tokens, session: DemoServer.session,
                                isDemo: true)
         job = CompactJob(settings: settings, ledger: CompactLedger(url: demo.folder.appendingPathComponent("ledger.json")))
@@ -54,7 +54,7 @@ final class AppModel {
         job.history = history
         library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
                                     copyFinder: copyFinder)
-        status = nil
+        self.status = status
         let history = history
         Task { await history.load() }
     }

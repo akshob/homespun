@@ -89,8 +89,9 @@ and may not exist in other checkouts.
   the viewer's pages show `LibraryModel.item` (`any LibraryItem`). New PhotoKit calls go behind
   `PhotoSource`, so the demo never touches the person's library.
 - The demo's model keeps its own settings (`photos.homespun.demo`), folder (`Homespun Demo`), token and
-  records; it never writes the person's settings, Keychain, TipKit tips, widgets or watch status (its
-  `AppModel.status` is nil) or analytics (`Telemetry.paused`),
+  records; it never writes the person's settings, Keychain, TipKit tips or analytics (`Telemetry.paused`).
+  It shares `StatusPublisher` only to show demo facts in widgets and on the watch when no real server is
+  paired; leaving clears them, and a paired person's real status is never replaced. The demo
   never asks iOS for a permission, and pairs only with its pretend server. Leave the Demo deletes it all.
 - The demo changes nothing for real: its deletions ask in-app, say so, and remove only from the demo.
 

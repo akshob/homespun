@@ -20,9 +20,10 @@ final class PremiumUITests: XCTestCase {
         // The rows: what's on, never "Premium".
         app.openTab("Server")
         let automatic = app.buttons["settings.automatic"], cloud = app.buttons["settings.connectors"]
-        XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
+        if AppFeatures.cloudCopies { XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row") }
         XCTAssertTrue(app.reveal(automatic), "no Automatic Mode row")
-        for (row, title) in [(automatic, "Automatic Mode"), (cloud, "Cloud Copies")] {
+        let rows = [(automatic, "Automatic Mode")] + (AppFeatures.cloudCopies ? [(cloud, "Cloud Copies")] : [])
+        for (row, title) in rows {
             // Cloud copies' status comes from the server.
             let off = NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH 'Off'", title)
             let deadline = Date().addingTimeInterval(15)
@@ -43,6 +44,10 @@ final class PremiumUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Everything not backed up yet"].exists, "asked what to back up without the purchase")
         app.goBack(from: "Automatic Mode")
 
+        guard AppFeatures.cloudCopies else {
+            XCTAssertFalse(cloud.exists, "Cloud Copies is hidden in this release")
+            return
+        }
         // Cloud Copies: signing in to a service asks for the purchase; Close doesn't start signing in.
         XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
         cloud.tap()

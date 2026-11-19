@@ -5,7 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy policy · Homespun</title>
-  <meta name="description" content="Homespun does not collect your data. Your photos stay on your iPhone or on a server you run.">
+  <meta name="description" content="Your photos go only to your own server. Analytics are optional; problem reports are sent only when you choose.">
   <link rel="canonical" href="https://homespun.photos/privacy">
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -16,7 +16,7 @@
   </header>
   <main>
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated November 17, 2026</p>
+    <p class="updated">Last updated November 18, 2026</p>
 
     <p><strong>In short:</strong> Your photos and videos stay on your iPhone or go to a server that you run. The
       developer of Homespun never receives them. The app has no accounts, ads, or tracking, and it never sells or
@@ -35,6 +35,11 @@
       The server's address and the pairing token it issues are stored on your iPhone (the token in the Keychain) and
       used only to talk to your server. An Immich API key, if you use one, stays on your server. The developer of
       Homespun has no access to your server or its contents.</p>
+    <p>Local Network access finds Homespun Server using Bonjour (<code>_homespun._tcp</code> only) and connects
+      to it. Camera access is used only to scan a pairing QR code; camera images are not stored or sent.</p>
+    <p>If you separately configure a cloud connector on your server, that server sends originals to the service
+      you choose. OneDrive sign-in uses a code on Microsoft's website; its tokens stay on your server. The
+      developer receives no originals or sign-in details. Cloud Copies is not available in the 1.0.0 app.</p>
 
     <h2>Widgets and Apple Watch</h2>
     <p>To show its widgets and Homespun on Apple Watch, the app keeps a short status on your iPhone, shared only with
@@ -50,7 +55,7 @@
     <ul>
       <li><strong>Usage counts</strong>, with numbers rounded: which setup steps you went through, whether pairing
         worked, your server's kind and version, how many items a backup or Free Up Space handled and roughly how
-        large they were, which features were used, and short error codes.</li>
+        large they were, which features were used, purchase-sheet views and purchase outcomes, and short error codes.</li>
       <li><strong>Crash and performance reports</strong> that iOS gives the app (MetricKit), such as where it crashed
         or hung and how long it took to start. iOS provides these only if Share With App Developers is on in
         Settings › Privacy &amp; Security › Analytics &amp; Improvements.</li>
@@ -68,19 +73,29 @@
       of recent backups, the app's log from that session, and iOS's latest crash report. Like analytics, they never
       include photos, file names, or your server's name or address. Reports are sent whether or not you share
       analytics, because you send them on purpose.</p>
+    <p>A report without an email includes your analytics install identifier only while you share analytics.
+      A report with an email never includes that identifier, so it cannot link your analytics to your reply address.
+      The email, message, and any included crash or diagnostic data can be linked to you; analytics, performance
+      data, device identifiers, and purchase events are not linked to your identity.</p>
 
     <h2>The demo</h2>
     <p>Try the Demo uses sample photos that come with the app and a pretend server inside the app. In the demo,
       Homespun doesn't read or change your Photos library, records no analytics, sends no problem reports, and pairs
-      with no server. Leaving the demo deletes everything it kept.</p>
+      with no real server. If you haven't paired your own server, the widgets and Apple Watch show the demo's
+      status, including sample counts and the name "Homespun Demo", without a purchase. Leaving clears that
+      status and deletes the demo's settings and records. If you have paired a server, its status stays unchanged.</p>
 
     <h2>Where it goes and how long it's kept</h2>
     <p>Analytics, crash reports, and problem reports go to a service the developer runs on Cloudflare
-      (telemetry.homespun.photos), and problem reports are also emailed to the developer. Usage counts are kept
+      (telemetry.homespun.photos), and problem reports are also emailed to the developer. Cloudflare processes
+      this data on the developer's behalf, under obligations that provide the same protection described here.
+      Usage counts are kept
       for about 13 months, performance reports for 3 months, crash reports for 12 months, and problem reports for
-      2 years, then deleted. To delete everything your iPhone shared sooner, open Server › Share Analytics in the app and choose
-      Delete Shared Data, or email <!--email_off--><a href="mailto:support@homespun.photos">support@homespun.photos</a><!--/email_off--> with your
-      report number.</p>
+      2 years, then deleted. To delete shared analytics and reports associated with an install identifier sooner,
+      open Server › Share Analytics in the app and choose Delete Shared Data. Reports with an email have no install
+      identifier: to delete one, email
+      <!--email_off--><a href="mailto:support@homespun.photos">support@homespun.photos</a><!--/email_off-->
+      with its report number. You can also use that address to request deletion of any report.</p>
 
     <h2>This website</h2>
     <p>This website uses no cookies, analytics, or third-party scripts. It is hosted by Cloudflare, which
@@ -88,9 +103,9 @@
       <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>.</p>
 
     <h2>Purchases</h2>
-    <p>Automatic Mode, Cloud Copies and widgets are unlocked with an in-app purchase. Apple handles the payment; the app only
-      asks the App Store whether your Apple Account owns the purchase. Homespun never sees your payment details or
-      your Apple Account.</p>
+    <p>Automatic Mode and widgets are unlocked with an in-app purchase. Apple handles the payment; the app asks
+      the App Store whether your Apple Account owns the purchase. If you share analytics, purchase outcomes are
+      also sent as described above, without a receipt, payment details, or your Apple Account.</p>
 
     <h2>Changes</h2>
     <p>If this policy changes, the new version will be posted on this page with a new date.</p>

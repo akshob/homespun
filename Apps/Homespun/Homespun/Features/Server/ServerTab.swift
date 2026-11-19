@@ -225,17 +225,16 @@ struct ServerTab: View {
     /// asks for when the feature is turned on.
     private var backupsSection: some View {
         Section("Backups") {
-            NavigationLink(value: Route.automatic) {
-                ServerRow(title: "Automatic Mode", symbol: "bolt.fill", value: automaticValue)
+            ForEach(PremiumFeature.backupFeatures) { feature in
+                let route = feature == .automatic ? Route.automatic : .connectors
+                NavigationLink(value: route) {
+                    ServerRow(title: feature.name, symbol: feature.symbol,
+                              value: feature == .automatic ? automaticValue : cloudValue)
+                }
+                .disabled(feature == .cloudCopies && !model.settings.isPaired)
+                .accessibilityIdentifier(feature == .automatic ? "settings.automatic" : "settings.connectors")
+                .sidebarRow(route)
             }
-            .accessibilityIdentifier("settings.automatic")
-            .sidebarRow(Route.automatic)
-            NavigationLink(value: Route.connectors) {
-                ServerRow(title: "Cloud Copies", symbol: "icloud.and.arrow.up", value: cloudValue)
-            }
-            .disabled(!model.settings.isPaired)
-            .accessibilityIdentifier("settings.connectors")
-            .sidebarRow(Route.connectors)
         }
         .listRowBackground(Theme.card)
     }
@@ -284,7 +283,10 @@ struct ServerTab: View {
         case .existingLibrary: ExistingLibraryView(model: model)
         case .immich: ImmichConnectView(settings: settings).homespunList()
         case .automatic: AutomaticModeView(model: model)
-        case .connectors: ConnectorsView(settings: settings, premium: model.premium) { cloud = $0 }
+        case .connectors:
+            if PremiumFeature.cloudCopies.isAvailable {
+                ConnectorsView(settings: settings, premium: model.premium) { cloud = $0 }
+            }
         case .compactCopies: CompactCopiesView(server: settings.server)
         case .devices: DevicesView(settings: settings, rename: { path.append(.deviceName) }) { path.append(.addDevice) }
         case .deviceName: DeviceNameView(settings: settings) { updated in
@@ -350,7 +352,7 @@ struct ServerTab: View {
         async let storage = try? client.storage()
         async let report = try? client.setup()
         async let devices = try? client.devices()
-        async let cloud = try? client.connectors()
+        async let cloud = loadCloud(client)
         let (newStorage, newReport, newDevices, newCloud) = await (storage, report, devices, cloud)
         self.storage = newStorage ?? self.storage
         checks = newReport?.checks ?? checks
@@ -358,6 +360,11 @@ struct ServerTab: View {
         thisDevice = newDevices?.first(where: \.isThisDevice) ?? thisDevice
         self.cloud = newCloud ?? self.cloud
         await notifications
+    }
+
+    private func loadCloud(_ client: ServerClient) async -> [ServerAPI.ConnectorInfo]? {
+        guard AppFeatures.cloudCopies else { return nil }
+        return try? await client.connectors()
     }
 
     private func loadNotifications() async {
