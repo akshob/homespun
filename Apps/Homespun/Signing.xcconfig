@@ -15,3 +15,4 @@ HOMESPUN_BUNDLE_ID = photos.homespun.app
 HOMESPUN_BUNDLE_ID[config=Debug] = photos.homespun.app.dev
 
 #include? "Local.xcconfig"
+#include "ReleaseFeatures.xcconfig"

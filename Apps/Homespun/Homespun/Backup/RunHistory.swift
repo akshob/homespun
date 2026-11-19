@@ -281,7 +281,8 @@ extension RunHistory.Run {
             title = end.formatted(.dateTime.month(.abbreviated).day().year())
         }
         switch trigger {
-        case .automatic: title += " · automatic"
+        case .automatic:
+            if ReleaseFeatures.automaticMode { title += " · automatic" }
         case .firstTask: title += " · your 10 newest"
         case .manual: break
         }

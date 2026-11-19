@@ -4,6 +4,8 @@
      person chooses Share Analytics; an email address and the problem description only when they
      send a problem report. Nothing is used for tracking or advertising. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Purchase-history declaration retained conservatively for disabled, future purchase code.
+     Version 1.0.0 does not query purchase products or entitlements, or send purchase events. -->
 <plist version="1.0">
 <dict>
 	<key>NSPrivacyTracking</key>

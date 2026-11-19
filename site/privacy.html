@@ -47,14 +47,8 @@
       to it. Camera access is used only to scan a pairing QR code; camera images are not stored or sent.</p>
     <p>If you separately configure a cloud connector on your server, that server sends originals to the service
       you choose. OneDrive sign-in uses a code on Microsoft's website; its tokens stay on your server. The
-      developer receives no originals or sign-in details. Cloud Copies is not available in the 1.0.0 app.</p>
-
-    <h2>Widgets and Apple Watch</h2>
-    <p>To show its widgets and Homespun on Apple Watch, the app keeps a short status on your iPhone, shared only with
-      its own widgets: how much is ready to free up, when your last backup was and how many items it had, your
-      server's name and whether it could be reached, and whether Automatic Mode is on. The same status goes to your
-      paired Apple Watch over the iPhone's own connection to it. It has no photos, file names, places or server
-      address, never leaves your iPhone and Apple Watch, and the developer never receives it.</p>
+      developer receives no originals or sign-in details. These connectors are configured separately on the server,
+      not in the 1.0.0 app.</p>
 
     <h2>Analytics you choose to share</h2>
     <p>Homespun asks once, during setup, whether you want to share anonymous analytics with its developer, and you
@@ -63,7 +57,7 @@
     <ul>
       <li><strong>Usage counts</strong>, with numbers rounded: which setup steps you went through, whether pairing
         worked, your server's kind and version, how many items a backup or Free Up Space handled and roughly how
-        large they were, which features were used, purchase-sheet views and purchase outcomes, and short error codes.</li>
+        large they were, which features were used, and short error codes.</li>
       <li><strong>Crash and performance reports</strong> that iOS gives the app (MetricKit), such as where it crashed
         or hung and how long it took to start. iOS provides these only if Share With App Developers is on in
         Settings › Privacy &amp; Security › Analytics &amp; Improvements.</li>
@@ -84,16 +78,14 @@
     <p>A report without an email includes your analytics install identifier only while you share analytics.
       A report with an email never includes that identifier, so it cannot link your analytics to your reply address.
       The email, message, and any included crash or diagnostic data can be linked to you; analytics, performance
-      data, device identifiers, and purchase events are not linked to your identity.</p>
+      data and device identifiers are not linked to your identity.</p>
 
     <h2>The demo</h2>
     <p>Try the Demo uses sample photos that Homespun draws on your iPhone (and a few videos that come with the app)
       and a pretend server inside the app. The drawn photos are deleted the next time Homespun starts. In the demo,
       Homespun doesn't read or change your Photos library, records no analytics, sends no problem reports, and pairs
-      with no real server. If you haven't paired your own server, the widgets and Apple Watch show the demo's
-      status, including sample counts and the name "Homespun Demo", without a purchase. Leaving clears that
-      status and deletes the demo's settings and records; the drawn samples stay until the next launch.
-      If you have paired a server, its status stays unchanged.</p>
+      with no real server. Leaving deletes the demo's settings and records; the drawn samples stay until the next launch.
+      Your own server's settings and records stay unchanged.</p>
 
     <h2>Where it goes and how long it's kept</h2>
     <p>Analytics, crash reports, and problem reports go to a service the developer runs on Cloudflare
@@ -113,9 +105,9 @@
       <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>.</p>
 
     <h2>Purchases</h2>
-    <p>Automatic Mode and widgets are unlocked with an in-app purchase. Apple handles the payment; the app asks
-      the App Store whether your Apple Account owns the purchase. If you share analytics, purchase outcomes are
-      also sent as described above, without a receipt, payment details, or your Apple Account.</p>
+    <p>Version 1.0.0 has no in-app purchases and sends no purchase events. Its privacy manifest conservatively
+      retains a purchase-history declaration for code reserved for a later version. If purchases become available,
+      this policy will describe their handling before that version ships.</p>
 
     <h2>Changes</h2>
     <p>If this policy changes, the new version will be posted on this page with a new date.</p>

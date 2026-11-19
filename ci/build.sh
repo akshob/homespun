@@ -6,7 +6,7 @@ set -euo pipefail
 source ${0:A:h}/env.sh
 cd $ROOT
 # Only build jobs need the generated project; test jobs use the archived .xctestrun.
-(cd $APP && xcodegen generate --quiet)
+(cd $APP && zsh scripts/generate-project.sh --testing)
 # A branch's push and its pull request build the same commit at once: one builds, the other waits.
 mkdir -p $CI_STATE/dd
 zmodload zsh/system
@@ -20,6 +20,9 @@ cd $APP
 set -o pipefail
 xcodebuild build-for-testing -project Homespun.xcodeproj -scheme Homespun -destination "generic/platform=iOS Simulator" \
   -derivedDataPath $DD -clonedSourcePackagesDirPath $CI_STATE/spm 2>&1 | tee $RESULTS/build.log | filter
+xcodebuild build-for-testing -project Homespun.xcodeproj -scheme HomespunReleaseScope \
+  -destination "generic/platform=iOS Simulator" -derivedDataPath $DD \
+  -clonedSourcePackagesDirPath $CI_STATE/spm 2>&1 | tee $RESULTS/release-scope-build.log | filter
 cp $ROOT/.build/release/homespun-server $SERVER_BIN
 touch $DD/.built
 # For a run's other jobs on other machines: the built app, its tests and the server in one archive

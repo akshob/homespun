@@ -51,7 +51,7 @@ final class ServerTabUITests: XCTestCase {
         }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         app.pair(address: address, code: code)
 
         // The status card and the rows, top to bottom.
@@ -90,7 +90,7 @@ final class ServerTabUITests: XCTestCase {
             app.goBack(from: title)
         }
         let backups = [("settings.automatic", "Automatic Mode")]
-            + (AppFeatures.cloudCopies ? [("settings.connectors", "Cloud Copies")] : [])
+            + (ReleaseFeatures.cloudCopies ? [("settings.connectors", "Cloud Copies")] : [])
         let lower = (backups.map(\.0) + ["settings.compactCopies", "settings.devices",
                      "settings.notifications", "settings.premium", "settings.help", "server.unpair"]).map { app.buttons[$0] }
         for row in lower {
@@ -106,7 +106,7 @@ final class ServerTabUITests: XCTestCase {
         }
         XCTAssertFalse(app.switches["automatic.toggle"].exists, "a switch for automatic mode in the list")
         attach(app, "Server, scrolled")
-        if !AppFeatures.cloudCopies { XCTAssertFalse(app.buttons["settings.connectors"].exists) }
+        if !ReleaseFeatures.cloudCopies { XCTAssertFalse(app.buttons["settings.connectors"].exists) }
         for (row, title) in backups + [("settings.compactCopies", "Compact Copies"), ("settings.notifications", "Notifications"),
                              ("settings.help", "Help and About")] {
             XCTAssertTrue(app.reveal(app.buttons[row]), "no \(row)")
@@ -194,7 +194,7 @@ final class ServerTabUITests: XCTestCase {
         }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         app.showTab("Server")
         let status = app.descendants(matching: .any)["server.status"]
         let unreachable = NSPredicate(format: "label CONTAINS[c] \"Can't reach\"")
@@ -223,7 +223,7 @@ extension ServerTabUITests {
               let output = environment["HOMESPUN_PAIRING_OUTPUT_FILE"] else { throw XCTSkip("Needs temporary pairing-code action.") }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         app.pair(address: address, code: code)
         app.showTab("Server")
         let row = app.buttons["settings.deviceName"]
@@ -275,7 +275,7 @@ extension ServerTabUITests {
             ["url": "https://\(moved)", "serviceName": "Home Mac (test)"]
         ])
         app.launchEnvironment["HOMESPUN_SERVER_CANDIDATES"] = String(decoding: candidates, as: UTF8.self)
-        app.launch()
+        app.launchWithFeatures()
         app.pair(address: address, code: code)
         app.showTab("Server")
         app.buttons["settings.check"].tap()
@@ -324,7 +324,7 @@ extension ServerTabUITests {
               let action = environment["HOMESPUN_HOST_ACTION_FILE"] else { throw XCTSkip("Needs the temporary server's host-action watcher.") }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         app.pair(address: address, code: code)
         app.showTab("Server")
         app.buttons["settings.check"].tap()
@@ -350,7 +350,7 @@ extension ServerTabUITests {
         }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         app.pair(address: address, code: code)
         app.showTab("Server")
         let row = app.buttons["settings.deviceName"]

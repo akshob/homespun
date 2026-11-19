@@ -29,7 +29,7 @@ Homespun always works with a server you run; the app doesn't compress on its own
 | `HomespunMedia` | iOS, macOS, Linux | Media backends. Linux: libvips photos (EXIF copied byte for byte, so Live Photo identifiers survive) and x265 via the `ffmpeg` tool. Apple: ImageIO photos, AVFoundation video and Live Photo motion, `PHLivePhoto` pair validation |
 | `HomespunTestSupport` | iOS, macOS | Synthetic photos, Live Photos, and videos for tests (not product code) |
 | `HomespunServerKit`, `homespun-server` | Linux, macOS | Hummingbird server: SQLite catalog, pairing, verified uploads, compression jobs, Immich originals |
-| `Apps/Homespun` | iOS, watchOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media from this package; its widgets, and Homespun on Apple Watch |
+| `Apps/Homespun` | iOS, watchOS | SwiftUI app (bundle ID `photos.homespun.app`), uses Core and Media; widgets and Apple Watch are planned, not shipped in 1.0.0 |
 | `services/telemetry` | Cloudflare Workers | Opt-in analytics, MetricKit reports and problem reports from the app (`telemetry.homespun.photos`) |
 
 Live Photo motion is compressed only with AVFoundation (on the phone or a Mac).
@@ -111,13 +111,13 @@ is found as if on the Wi‑Fi, pairs by itself, and answers the app's server cal
 Backing up, compact copies, Compare, Free Up Space (with a question that says nothing is deleted),
 Keep Original, Restore Original, Activity and the Server tab all work on them. The demo never reads or
 changes Photos, asks iOS for nothing, records no analytics and sends no reports. Without a paired real
-server, its live status also appears in the widgets and on Apple Watch, without a purchase; leaving
-clears those demo facts. With a paired server, its real status is never replaced. The demo's settings
+server, future feature-enabled builds can share its live status with widgets and Apple Watch; this is off
+in 1.0.0. With a paired server, its real status is never replaced. The demo's settings
 and records are kept apart and deleted by Leave the Demo (the Server tab, or the Demo mark in setup).
 Leaving the demo deletes what it did; the drawn photos stay until Homespun next starts from scratch.
-Turning on Automatic Mode in the demo asks for the real one-time purchase.
+The demo has the same release scope as the app.
 
-**Premium** (one-time In-App Purchase; everything above stays free):
+**Planned Premium features** (not available in 1.0.0; the implementation is retained):
 
 - **Automatic mode**: new photos and videos (or, if chosen, everything not backed up yet) are
   backed up and compacted without being selected: when the app opens and in a background
@@ -141,14 +141,32 @@ Turning on Automatic Mode in the demo asks for the real one-time purchase.
 
 Automatic Mode's page (Server › Backups) opens with or without the purchase. Turning it on asks for the
 purchase first, with Restore Purchase, then carries on; one purchase unlocks Automatic Mode and widgets,
-with Family Sharing. The local StoreKit configuration uses the 1.0.0 price, USD 2.99.
-Cloud Copies is hidden in 1.0.0 behind `AppFeatures.cloudCopies` until the server ships a Microsoft app ID.
+with Family Sharing in feature-enabled builds. The local StoreKit configuration is for testing only.
+Cloud Copies also needs a Microsoft app ID in the server before a later launch.
 The server's connector support stays available separately (see below).
 
-Builds made in Xcode (Debug) have Premium unlocked; release builds check the App Store.
-TestFlight builds are unlocked too while the App Store has no Premium product; once it exists,
-TestFlight shows the real purchase (free in the sandbox).
+**1.0.0 release scope:** `Apps/Homespun/ReleaseFeatures.xcconfig` is the single shipping switch:
+`HOMESPUN_RELEASE_FEATURES = NO`. Release and TestFlight have no Premium, Automatic Mode,
+Cloud Copies, widgets or Watch app, and never query purchase products or entitlements. Change it to `YES` and regenerate
+with `zsh Apps/Homespun/scripts/generate-project.sh` to restore runtime features and embedding together.
+All targets remain in `project.yml`. The generator's `--testing` option selects
+`project-features.yml` to embed widgets and Watch for CI, without changing the shipping switch.
+Debug runtime features require `-releaseFeatures YES` or `HOMESPUN_RELEASE_FEATURES=1`;
+`-releaseFeatures NO` overrides the environment for release-scope regression tests.
+Release ignores both overrides. The Homespun test scheme opts in, as do feature UI tests.
+`HomespunReleaseScope` runs the disabled-feature unit regression separately.
+Debug feature-enabled builds are unlocked unless `-premiumLocked YES` is set.
+Feature-enabled TestFlight builds retain the existing sandbox-product policy.
 `Homespun.storekit` is a local App Store for trying the purchase on the simulator.
+
+The dormant automatic BGTask identifier and `processing` mode remain: there is no registration or
+scheduling while disabled, and user-started backups still use BGContinuedProcessingTask.
+The App Group entitlement is harmless without a publisher or embedded extensions and stays.
+Purchase-history privacy declarations stay conservative for retained code; disabled builds drop
+purchase telemetry, including queued events from older builds. The website describes 1.0.0 only.
+`HOMESPUN_SKIP_EXPORT=1 zsh Apps/Homespun/scripts/testflight.sh` makes and checks an unsigned archive
+without credentials, export or upload. Normal uploads check both the archive and exported IPA for
+unwanted widgets and a Watch folder and fail closed if either is present.
 
 On a Mac with Xcode:
 

@@ -17,4 +17,17 @@ test_without_building $RESULTS/unit.xcresult -only-testing:HomespunTests -only-t
   | tee $RESULTS/unit.log | filter
 STATUS=$?
 stamp xcodebuild.end
+if (( STATUS == 0 )); then
+    specs=($DD/Build/Products/HomespunReleaseScope_*iphonesimulator*.xctestrun(N))
+    if (( ${#specs} != 1 )); then
+        echo "error: missing release-scope test manifest" >&2
+        exit 1
+    fi
+    rm -rf $RESULTS/release-scope.xcresult
+    stamp release-scope.start
+    XCTESTRUN=$specs[1] test_without_building $RESULTS/release-scope.xcresult 2>&1 \
+      | tee $RESULTS/release-scope.log | filter
+    STATUS=$?
+    stamp release-scope.end
+fi
 exit $STATUS

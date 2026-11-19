@@ -4,10 +4,50 @@ import Testing
 @testable import Homespun
 
 @Test func premiumRowsAndPurchaseCopyExcludeUnavailableFeatures() {
-    #expect(PremiumFeature.available == [.automatic, .widgets])
-    #expect(PremiumFeature.backupFeatures == [.automatic])
-    #expect(!PremiumFeature.cloudCopies.isAvailable)
-    #expect(PremiumFeature.purchaseDescription == "Automatic Mode and widgets")
+    #expect(PremiumFeature.available == [.automatic, .cloudCopies, .widgets])
+    #expect(PremiumFeature.backupFeatures == [.automatic, .cloudCopies])
+    #expect(PremiumFeature.cloudCopies.isAvailable)
+    #expect(PremiumFeature.purchaseDescription == "Automatic Mode, Cloud Copies and widgets")
+}
+
+@Test func releaseFeaturesDefaultOffAndDebugOverrideIsExplicit() {
+    #expect(!ReleaseFeatures.resolve(shipping: false, arguments: [], environment: [:]))
+    #expect(ReleaseFeatures.resolve(shipping: true, arguments: [], environment: [:]))
+    #if DEBUG
+    #expect(ReleaseFeatures.resolve(shipping: false, arguments: [], environment: ["HOMESPUN_RELEASE_FEATURES": "1"]))
+    #expect(!ReleaseFeatures.resolve(shipping: true, arguments: ["-releaseFeatures", "NO"],
+                                     environment: ["HOMESPUN_RELEASE_FEATURES": "1"]))
+    #expect(ReleaseFeatures.resolve(shipping: false, arguments: ["-releaseFeatures", "YES"], environment: [:]))
+    #else
+    #expect(!ReleaseFeatures.resolve(shipping: false, arguments: ["-releaseFeatures", "YES"],
+                                     environment: ["HOMESPUN_RELEASE_FEATURES": "1"]))
+    #endif
+}
+
+@MainActor @Test(.enabled(if: !ReleaseFeatures.enabled))
+func releaseScopeDisablesRuntimeEntryPoints() async throws {
+    let premium = Premium(ownBuild: true, owned: { Issue.record("Queried the App Store"); return true },
+                          testFlightWithoutProduct: { Issue.record("Queried TestFlight"); return true })
+    await premium.load()
+    await premium.refresh()
+    #expect(!premium.isUnlocked && premium.product == nil)
+    await #expect(throws: Premium.PurchaseError.self) { try await premium.purchase() }
+    await #expect(throws: Premium.PurchaseError.self) { try await premium.restore() }
+    let folder = URL.applicationSupportDirectory.appendingPathComponent("ReleaseScope-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let automatic = AutomaticMode(url: folder.appendingPathComponent("automatic.json"), system: false)
+    await automatic.enable(existing: true)
+    #expect(!automatic.enabled && !automatic.state.enabled)
+    #expect(automatic.state.lastRun == nil)
+    #expect(AppModel.shared.status == nil)
+    #expect(PremiumFeature.available.isEmpty && PremiumFeature.backupFeatures.isEmpty)
+    #expect(!ServerTab.Route.automatic.isAvailable && !ServerTab.Route.premium.isAvailable
+            && !ServerTab.Route.connectors.isAvailable)
+    #expect(!Journey.premiumMomentDue(owned: false, freedBytes: 2_000_000_000,
+                                    manualBackupDays: [.now, .now.addingTimeInterval(-86_400)], dismissed: false))
+    for link in [AppLink.freeUp, .activity, .server, .automatic, .unlock(feature: "widgets")] {
+        #expect(!link.isAvailable)
+    }
 }
 
 @Test func automaticModePicksNewItemsNotYetBackedUp() {

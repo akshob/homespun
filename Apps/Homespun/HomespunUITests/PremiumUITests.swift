@@ -7,6 +7,56 @@ import XCTest
 /// `HOMESPUN_SERVER` and `HOMESPUN_PAIRING_CODE` to `xcodebuild test` with a `TEST_RUNNER_` prefix.
 /// Widgets' links need no server: a locked widget asks for the purchase, an unlocked one opens its place.
 final class PremiumUITests: XCTestCase {
+    @MainActor func testReleaseScopeHidesPremiumAndAutomaticSurfaces() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-onboardingComplete", "YES", "-hideTips", "-releaseFeatures", "NO"]
+        app.launch()
+        XCTAssertTrue(app.hasTab("Library"))
+
+        for link in ["unlock?feature=widgets", "unlock?feature=automatic", "automatic", "activity", "server", "free-up"] {
+            app.open(URL(string: "homespun://\(link)")!)
+            XCTAssertFalse(app.buttons["unlock.buy"].waitForExistence(timeout: 1), link)
+            XCTAssertFalse(app.switches["automatic.toggle"].exists, link)
+            XCTAssertFalse(app.buttons["premium.restore"].exists, link)
+        }
+        app.openTab("Activity")
+        XCTAssertFalse(app.descendants(matching: .any)["activity.premiumMoment"].exists)
+        XCTAssertFalse(app.buttons["activity.automatic"].exists)
+        assertReleaseCopy(app)
+
+        app.openTab("Server")
+        app.swipeUpInContent()
+        for id in ["settings.premium", "settings.automatic", "settings.connectors"] {
+            XCTAssertFalse(app.buttons[id].exists, id)
+        }
+        assertReleaseCopy(app)
+        let notifications = app.buttons["settings.notifications"]
+        XCTAssertTrue(app.reveal(notifications))
+        notifications.tap()
+        XCTAssertTrue(app.staticTexts["Backup results are in Activity. Homespun doesn't send notifications in this version."]
+            .waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["notifications.continue"].exists)
+        assertReleaseCopy(app)
+        app.goBack(from: "Notifications")
+        let help = app.buttons["settings.help"]
+        XCTAssertTrue(app.reveal(help))
+        help.tap()
+        XCTAssertTrue(app.buttons["settings.onboarding"].waitForExistence(timeout: 10))
+        assertReleaseCopy(app)
+        app.buttons["settings.onboarding"].tap()
+        XCTAssertTrue(app.buttons["setup.find"].waitForExistence(timeout: 10))
+        assertReleaseCopy(app)
+    }
+
+    @MainActor private func assertReleaseCopy(_ app: XCUIApplication, file: StaticString = #filePath,
+                                              line: UInt = #line) {
+        let forbidden = NSPredicate(format: "label CONTAINS[c] 'Premium' OR label CONTAINS[c] 'Automatic Mode' "
+                                    + "OR label CONTAINS[c] 'widgets' OR label CONTAINS[c] 'Apple Watch' "
+                                    + "OR label CONTAINS[c] 'Cloud Copies' OR label CONTAINS[c] 'Restore Purchase'")
+        XCTAssertEqual(app.staticTexts.matching(forbidden).count, 0, file: file, line: line)
+        XCTAssertEqual(app.buttons.matching(forbidden).count, 0, file: file, line: line)
+    }
+
     @MainActor func testTurningOnAsksForThePurchase() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"] else {
@@ -14,15 +64,15 @@ final class PremiumUITests: XCTestCase {
         }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         app.pair(address: address, code: code)
 
         // The rows: what's on, never "Premium".
         app.openTab("Server")
         let automatic = app.buttons["settings.automatic"], cloud = app.buttons["settings.connectors"]
-        if AppFeatures.cloudCopies { XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row") }
+        if ReleaseFeatures.cloudCopies { XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row") }
         XCTAssertTrue(app.reveal(automatic), "no Automatic Mode row")
-        let rows = [(automatic, "Automatic Mode")] + (AppFeatures.cloudCopies ? [(cloud, "Cloud Copies")] : [])
+        let rows = [(automatic, "Automatic Mode")] + (ReleaseFeatures.cloudCopies ? [(cloud, "Cloud Copies")] : [])
         for (row, title) in rows {
             // Cloud copies' status comes from the server.
             let off = NSPredicate(format: "label BEGINSWITH %@ AND label ENDSWITH 'Off'", title)
@@ -44,7 +94,7 @@ final class PremiumUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Everything not backed up yet"].exists, "asked what to back up without the purchase")
         app.goBack(from: "Automatic Mode")
 
-        guard AppFeatures.cloudCopies else {
+        guard ReleaseFeatures.cloudCopies else {
             XCTAssertFalse(cloud.exists, "Cloud Copies is hidden in this release")
             return
         }
@@ -68,7 +118,7 @@ final class PremiumUITests: XCTestCase {
     @MainActor func testWidgetUnlockLinkAsksForThePurchase() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-premiumLocked", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         XCTAssertTrue(app.hasTab("Library"))
         app.open(URL(string: "homespun://unlock?feature=widgets")!)
         expectUnlockSheet(app, title: "Unlock Widgets")
@@ -78,7 +128,7 @@ final class PremiumUITests: XCTestCase {
     @MainActor func testWidgetLinksOpenTheirPlaces() throws {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         XCTAssertTrue(app.hasTab("Library"))
         app.open(URL(string: "homespun://activity")!)
         let activity = app.tab("Activity")

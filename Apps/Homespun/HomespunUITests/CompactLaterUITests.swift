@@ -16,7 +16,7 @@ final class CompactLaterUITests: XCTestCase {
     @MainActor private func launch(_ arguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"] + arguments
-        app.launch()
+        app.launchWithFeatures()
         return app
     }
 

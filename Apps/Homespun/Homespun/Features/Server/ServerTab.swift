@@ -11,6 +11,15 @@ struct ServerTab: View {
     enum Route: Hashable {
         case check, originals, existingLibrary, immich, automatic, connectors, compactCopies, devices, addDevice
         case notifications, premium, help, analytics, deviceName
+
+        var isAvailable: Bool {
+            switch self {
+            case .automatic: ReleaseFeatures.automaticMode
+            case .connectors: ReleaseFeatures.cloudCopies
+            case .premium: ReleaseFeatures.premium
+            default: true
+            }
+        }
     }
 
     @State private var path: [Route] = []
@@ -50,7 +59,7 @@ struct ServerTab: View {
         .onChange(of: model.router.serverRoute, initial: true) { _, route in
             guard let route else { return }
             model.router.serverRoute = nil
-            path = [route]
+            if route.isAvailable { path = [route] }
         }
     }
 
@@ -127,7 +136,7 @@ struct ServerTab: View {
                 .sidebarRow(Route.immich)
             }
             .listRowBackground(Theme.card)
-            backupsSection
+            if ReleaseFeatures.premium { backupsSection }
             Section {
                 NavigationLink(value: Route.compactCopies) {
                     ServerRow(title: "Compact Copies", symbol: "slider.horizontal.3",
@@ -232,7 +241,7 @@ struct ServerTab: View {
                 .padding(.vertical, 10)
             }
             .listRowBackground(Theme.card)
-            backupsSection
+            if ReleaseFeatures.premium { backupsSection }
             thisIPhoneSection
         }
         .homespunList()
@@ -282,12 +291,14 @@ struct ServerTab: View {
             }
             .accessibilityIdentifier("settings.analytics")
             .sidebarRow(Route.analytics)
-            NavigationLink(value: Route.premium) {
-                ServerRow(title: "Premium", symbol: "sparkles",
-                          value: model.premium.isUnlocked ? "Unlocked" : nil)
+            if ReleaseFeatures.premium {
+                NavigationLink(value: Route.premium) {
+                    ServerRow(title: "Premium", symbol: "sparkles",
+                              value: model.premium.isUnlocked ? "Unlocked" : nil)
+                }
+                .accessibilityIdentifier("settings.premium")
+                .sidebarRow(Route.premium)
             }
-            .accessibilityIdentifier("settings.premium")
-            .sidebarRow(Route.premium)
             NavigationLink(value: Route.help) {
                 ServerRow(title: "Help and About", symbol: "questionmark.circle", value: nil)
             }
@@ -304,7 +315,8 @@ struct ServerTab: View {
         case .originals: OriginalsFolderView(settings: settings)
         case .existingLibrary: ExistingLibraryView(model: model)
         case .immich: ImmichConnectView(settings: settings).homespunList()
-        case .automatic: AutomaticModeView(model: model)
+        case .automatic:
+            if ReleaseFeatures.automaticMode { AutomaticModeView(model: model) }
         case .connectors:
             if PremiumFeature.cloudCopies.isAvailable {
                 ConnectorsView(settings: settings, premium: model.premium) { cloud = $0 }
@@ -317,7 +329,8 @@ struct ServerTab: View {
         }
         case .addDevice: AddDeviceView(settings: settings)
         case .notifications: NotificationsView(model: model)
-        case .premium: PremiumView(premium: model.premium, model: model)
+        case .premium:
+            if ReleaseFeatures.premium { PremiumView(premium: model.premium, model: model) }
         case .help: HelpAboutView(model: model)
         case .analytics: AnalyticsSettingsView(demo: settings.isDemo)
         }
@@ -386,7 +399,7 @@ struct ServerTab: View {
     }
 
     private func loadCloud(_ client: ServerClient) async -> [ServerAPI.ConnectorInfo]? {
-        guard AppFeatures.cloudCopies else { return nil }
+        guard ReleaseFeatures.cloudCopies else { return nil }
         return try? await client.connectors()
     }
 

@@ -16,6 +16,10 @@ struct PremiumView: View {
     private var server: String { model?.library.serverName ?? "Your server" }
 
     var body: some View {
+        if ReleaseFeatures.premium { content }
+    }
+
+    private var content: some View {
         ScrollView {
             if justUnlocked { unlocked } else { features }
         }
@@ -190,6 +194,10 @@ struct UnlockSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        if ReleaseFeatures.premium, feature.isAvailable { content }
+    }
+
+    private var content: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 14) {

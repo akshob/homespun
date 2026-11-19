@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Development/test embedding; the shipping generator selects this only when the release switch is on.
+include: [project.yml]
+targets:
+  Homespun:
+    dependencies:
+      - target: HomespunWidgets
+      - target: HomespunWatch

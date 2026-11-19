@@ -141,7 +141,7 @@ private struct Receipt: View {
             : Calendar.current.isDateInYesterday(run.end) ? "Yesterday"
             : run.end.formatted(.dateTime.month(.abbreviated).day())
         let how = switch run.trigger {
-        case .automatic: ", automatic"
+        case .automatic: ReleaseFeatures.automaticMode ? ", automatic" : ""
         case .firstTask: ", your 10 newest"
         case .manual: ""
         }

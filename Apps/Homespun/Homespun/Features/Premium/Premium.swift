@@ -26,7 +26,7 @@ final class Premium {
     /// Whether this Apple Account owns Premium (the App Store, or a stand-in in tests).
     private let owned: @Sendable () async -> Bool
 
-    var isUnlocked: Bool { purchased || ownBuild || beta }
+    var isUnlocked: Bool { ReleaseFeatures.premium && (purchased || ownBuild || beta) }
 
     static var isOwnBuild: Bool {
         #if DEBUG
@@ -42,7 +42,7 @@ final class Premium {
         self.ownBuild = ownBuild
         self.owned = owned
         self.testFlightWithoutProduct = testFlightWithoutProduct
-        guard listens else { return }
+        guard ReleaseFeatures.premium, listens else { return }
         // Purchases made elsewhere (another device, Family Sharing, Ask to Buy) and refunds.
         updates = Task { [weak self] in
             for await update in Transaction.updates {
@@ -54,6 +54,7 @@ final class Premium {
 
     /// Loads the product and checks what this Apple Account owns.
     func load() async {
+        guard ReleaseFeatures.premium else { return }
         loading = true
         defer { loading = false }
         if product == nil { product = try? await Product.products(for: [Self.productID]).first }
@@ -61,6 +62,7 @@ final class Premium {
     }
 
     func refresh() async {
+        guard ReleaseFeatures.premium else { return }
         purchased = await owned()
         // Once per launch: a product added meanwhile shows up the next time the app starts.
         if !ownBuild, !betaChecked {
@@ -90,6 +92,7 @@ final class Premium {
     enum Outcome: Equatable { case purchased, cancelled, pending }
 
     func purchase() async throws -> Outcome {
+        guard ReleaseFeatures.premium else { throw PurchaseError.unavailable }
         if product == nil { await load() }
         guard let product else { throw PurchaseError.unavailable }
         switch try await product.purchase() {
@@ -106,6 +109,7 @@ final class Premium {
 
     /// Asks the App Store again for this Apple Account's purchases.
     func restore() async throws {
+        guard ReleaseFeatures.premium else { throw PurchaseError.unavailable }
         try await AppStore.sync()
         await refresh()
     }

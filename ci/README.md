@@ -60,7 +60,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 
 | Script | Does |
 |---|---|
-| `build.sh` | typechecks `scripts/demo-media.swift` with `DemoArt.swift`, then release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it); the app embeds its widgets and the Apple Watch app, so this also builds for the watchOS simulator (Xcode's watchOS SDK; no watch simulator runs) |
+| `build.sh` | typechecks `scripts/demo-media.swift` with `DemoArt.swift`, then release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it); `generate-project.sh --testing` embeds the retained widgets and Watch app for tests only (the shipping generator omits them in 1.0.0) |
 | `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access, and the widgets' (`HomespunWidgetTests`, every size drawn) |
 | `watch.sh` | separate watchOS build and timed Crown/swipe regression on a fresh Apple Watch simulator (fresh, stale and arriving status, each crossing a minute boundary); no server or paired iPhone; downloads the watchOS runtime if missing |
 | `presim.sh <device type>` | queue the first simulator's boot in the background, overlapping cache/artifact setup; disabled when `SIM_SLOTS_DIR` is set |

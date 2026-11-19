@@ -3,6 +3,11 @@ import XCTest
 
 /// Steps shared by the workflow tests: pair, select in the Library, back up, and check Activity.
 extension XCUIApplication {
+    @MainActor func launchWithFeatures() {
+        launchEnvironment["HOMESPUN_RELEASE_FEATURES"] = "1"
+        launch()
+    }
+
     /// Pairs with the server at `address` using a code from `homespun-server pair`, unless
     /// already paired, and waits until it's connected. Goes through setup from the Library's Set Up
     /// notice: Connect Another Way › Enter Address and Code, then Ready, and Not Now on the estimate.

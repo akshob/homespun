@@ -119,7 +119,8 @@ enum Journey {
     /// different days within 14 days. Once; dismissing it means never again.
     static func premiumMomentDue(owned: Bool, freedBytes: Int, manualBackupDays: [Date], dismissed: Bool,
                                  now: Date = .now) -> Bool {
-        guard !owned, !dismissed, freedBytes >= 1_000_000_000 else { return false }
+        guard ReleaseFeatures.premium, ReleaseFeatures.automaticMode,
+              !owned, !dismissed, freedBytes >= 1_000_000_000 else { return false }
         let recent = Set(manualBackupDays.filter { now.timeIntervalSince($0) <= 14 * 86_400 }
             .map { Calendar.current.startOfDay(for: $0) })
         return recent.count >= 2
