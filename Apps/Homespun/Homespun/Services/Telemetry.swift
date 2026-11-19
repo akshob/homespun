@@ -207,11 +207,12 @@ final class Telemetry {
     }
 
     /// Sends a problem report; returns its number ("HS-…"). Reports work whether or not the person
-    /// shares analytics (they're sent on purpose); the install ID goes along only if they share.
+    /// shares analytics (they're sent on purpose). A reply address must never link analytics to a person.
     func sendReport(_ report: ProblemReport) async throws -> String {
         guard let endpoint else { throw TelemetryError.unavailable }
         let channel = await currentChannel()
-        var body: [String: Any] = ["install": installID.map { $0.uuidString.lowercased() as Any } ?? NSNull(),
+        let reportInstall = report.email == nil && isSharing ? installID : nil
+        var body: [String: Any] = ["install": reportInstall.map { $0.uuidString.lowercased() as Any } ?? NSNull(),
                                    "app": AppInfo.current(channel: channel).dictionary,
                                    "device": DeviceInfo.current.dictionary, "message": report.message]
         if let email = report.email { body["email"] = email }
@@ -224,7 +225,7 @@ final class Telemetry {
               let id = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["id"] as? String else {
             throw status == 429 ? TelemetryError.tooMany : TelemetryError.rejected
         }
-        if let installID { markSent(installID) }
+        if let reportInstall { markSent(reportInstall) }
         record(.reportSent(withDiagnostics: report.diagnostics != nil))
         return id
     }

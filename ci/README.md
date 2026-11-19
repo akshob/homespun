@@ -60,6 +60,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `release-guard.py <commit>` | whether a commit may go to TestFlight |
 | `site-check.py`, `htmlvalidate.json` | the website's checks |
 | `summary.py <results>` | the Markdown report each job adds to its summary (failures, flaky tests, known failures skipped) |
+| `timing.py <results> <destination>` | collect phase stamps, logs and each result bundle's SQLite metadata, without its large image/video payloads |
 | `quarantine.txt` | known UI test failures, each with its issue, skipped until fixed |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
@@ -68,6 +69,23 @@ stops or restarts that test server; the matching `.ack` file confirms completion
 status-layout regression uses it at the newest end and mid-scroll, on iPhone and in the Duo poses.
 Its Debug-only `-probeServerStatus` launch argument checks the real server every five seconds without
 leaving the Library, so foregrounding or changing tabs cannot hide an inset jump.
+
+Every UI and unit job also uploads `timing-<run>-<workflow id>` for **7 days**, even when it
+passes: `<segment>-timing.tsv`, logs and each `*.xcresult/database.sqlite3` (no `Data/`).
+`stamp` in `env.sh` writes `⏱ <UTC time> <segment> <phase>` to the job log and tab-separated
+`<segment> <phase> <epoch seconds>` to the TSV. Setup, bootstatus, initial Duo pose and its
+15-second wait, each media generation/import, server readiness/pairing, test execution,
+reboot retry, telemetry and cleanup have separate stamps. Duo pose logs include the UTC
+request time and each tool call's start/end; these overlap test time, not simulator setup.
+The output filter is line-buffered, so test lines and first/last-test stamps arrive live.
+
+The summary's **Timing** table gives seconds per segment: simulator setup, media, server,
+xcodebuild preparation (start to first test), tests (first start to last result), teardown
+(last result to xcodebuild exit, plus cleanup), and total. Retries contribute separately;
+unavailable phases show `–` and incomplete totals show `≥`. The job's instrumented span
+excludes checkout, brew and artifact transfer; use the Actions step durations for those.
+Use the TSV for individual boot/media/pose measurements and the SQLite metadata for
+per-test activity analysis. Lane membership, retries and quarantine are unchanged.
 
 The `watch` run is in `full` and nightly too. Its 15-second per-step budget includes XCUITest's
 idle wait: merely finding an element can pass even when SwiftUI is continuously relaying out.
@@ -92,5 +110,5 @@ On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulator
 ```sh
 gh run watch                      # the latest run, live
 gh run view <id> --log-failed     # only what failed
-gh run download <id> -D /tmp/r    # the failure's result bundles and screenshots
+gh run download <id> -D ci-results/downloaded    # timing metadata, or a failure's full results
 ```

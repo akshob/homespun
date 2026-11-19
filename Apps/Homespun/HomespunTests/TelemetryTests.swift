@@ -126,6 +126,26 @@ private final class FakeService: @unchecked Sendable {
     }
 }
 
+@MainActor @Test func aReplyAddressNeverLinksAReportToAnalytics() async throws {
+    let service = FakeService()
+    let (telemetry, _) = makeTelemetry(service)
+    telemetry.setSharing(true)
+    let install = try #require(telemetry.installID)
+    service.status = 201
+    service.body = Data(#"{"id":"HS-7K3QWX"}"#.utf8)
+
+    _ = try await telemetry.sendReport(ProblemReport(message: "It stopped", email: "me@example.com"))
+    let identified = try #require(try JSONSerialization.jsonObject(with: service.sent[0].httpBody!) as? [String: Any])
+    #expect(identified["install"] is NSNull && identified["email"] as? String == "me@example.com")
+    #expect(!telemetry.hasSharedData)
+    #expect(telemetry.queued.contains { $0.name == "report.sent" })
+
+    _ = try await telemetry.sendReport(ProblemReport(message: "No reply needed"))
+    let anonymous = try #require(try JSONSerialization.jsonObject(with: service.sent[1].httpBody!) as? [String: Any])
+    #expect(anonymous["install"] as? String == install.uuidString.lowercased())
+    #expect(anonymous["email"] == nil && telemetry.hasSharedData)
+}
+
 @Test func numbersAreRounded() {
     #expect([0, 1, 2, 3, 4, 5, 9, 10, 49, 50, 99, 999, 1000, 12_345].map(Bucket.count)
             == [0, 1, 2, 2, 2, 5, 5, 10, 20, 50, 50, 500, 1000, 10_000])

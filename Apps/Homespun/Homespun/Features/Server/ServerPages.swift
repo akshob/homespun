@@ -59,7 +59,7 @@ struct AutomaticModeView: View {
                     Text("Usually overnight while this iPhone charges, and whenever you open Homespun. iOS decides the "
                          + "exact time.")
                     if !premium.isUnlocked {
-                        Text("Turning it on is a one-time purchase, which unlocks Cloud Copies too.")
+                        Text("A one-time purchase unlocks \(PremiumFeature.purchaseDescription).")
                     }
                     if !settings.isPaired {
                         Text("Pair a server first.")
@@ -428,6 +428,7 @@ struct HelpAboutView: View {
                 Link(destination: URL(string: "https://homespun.photos")!) {
                     ServerRow(title: "homespun.photos", symbol: "safari", value: nil)
                 }
+                PrivacyPolicyRow()
             }
             .listRowBackground(Theme.card)
             DemoHelpSection(model: model)

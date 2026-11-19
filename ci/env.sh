@@ -1,4 +1,5 @@
 # Sourced by the CI scripts (GitHub's macOS machines, or any Mac): paths and tools.
+# SPDX-License-Identifier: Apache-2.0
 #   ROOT      the checkout
 #   CI_STATE  what lasts between runs: built products, the duoctl cache, the perf simulator (~/ci)
 #   DD        Xcode's derived data for this commit (shared by the jobs of one run)
@@ -21,6 +22,24 @@ DUOCTL=${DUOCTL:-$ROOT/ci/tools/duoctl/duoctl}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$CI_STATE/duo-cache}
 APP=$ROOT/Apps/Homespun
 mkdir -p $CI_STATE $RESULTS
+zmodload zsh/datetime
+
+# Stamps go to stderr: command substitutions (notably the simulator UDID) stay unchanged.
+stamp() {
+    [[ -n ${NAME:-} ]] || return 0
+    local now=${2:-$EPOCHSECONDS} utc
+    TZ=UTC strftime -s utc '%H:%M:%S' $now
+    print -u2 -r -- "⏱ $utc $NAME $1"
+    printf '%s\t%s\t%s\n' "$NAME" "$1" "$now" >> $RESULTS/$NAME-timing.tsv
+}
+
+timed() {
+    local phase=$1 code=0; shift
+    stamp $phase.start
+    "$@" || code=$?
+    stamp $phase.end
+    return $code
+}
 
 # The newest installed simulator runtime for a device type (iPhone Duo has a runtime of its own).
 runtime_for() {
@@ -67,9 +86,11 @@ fi
 
 # A fresh simulator of a device type; prints its UDID. (KEEP_SIM=1: one that outlives the job.)
 new_simulator() {
+    stamp simulator.create.start
     local sim=$(xcrun simctl create "$2" com.apple.CoreSimulator.SimDeviceType.$1 $(runtime_for $1))
+    stamp simulator.create.end
     [[ -n ${JOB_RECORD:-} && -z ${KEEP_SIM:-} ]] && print -r -- $sim >> $JOB_STATE.sims
-    xcrun simctl boot $sim && xcrun simctl bootstatus $sim -b >/dev/null
+    timed simulator.boot xcrun simctl boot $sim && timed simulator.bootstatus xcrun simctl bootstatus $sim -b >/dev/null
     echo $sim
 }
 
@@ -127,4 +148,23 @@ pairing_output() {
 remove_simulator() { xcrun simctl shutdown $1 2>/dev/null; xcrun simctl delete $1 2>/dev/null; true; }
 
 # Lines of xcodebuild's output worth keeping in the log.
-filter() { grep -E "error:|warning: .*Homespun|Test Case.*(passed|failed|skipped)|TEST (SUCC|FAIL)|BUILD (SUCC|FAIL)|PERF |✘|✔ Test run|recorded an issue" | grep -v appintents; true; }
+filter() {
+    grep --line-buffered -E "error:|warning: .*Homespun|Test Case.*(started|passed|failed|skipped)|Test run started|TEST (SUCC|FAIL)|BUILD (SUCC|FAIL)|PERF |✘|✔ Test run|recorded an issue" \
+      | grep --line-buffered -v appintents | {
+        local line first="" last=""
+        while IFS= read -r line; do
+            if [[ $line == *"Test Case"*"started"* || $line == *"Test run started"* ]]; then
+                if [[ -z $first ]]; then
+                    stamp xcodebuild.first-test
+                    first=1
+                fi
+            fi
+            if [[ $line == *"Test Case"*("passed"|"failed"|"skipped")* || $line == *"✔ Test run"* ]]; then
+                last=$EPOCHSECONDS
+            fi
+            print -r -- "$line"
+        done
+        [[ -z $last ]] || stamp xcodebuild.last-test $last
+      }
+    true
+}

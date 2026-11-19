@@ -86,13 +86,15 @@ final class ServerTabUITests: XCTestCase {
             }
             app.goBack(from: title)
         }
-        let lower = ["settings.automatic", "settings.connectors", "settings.compactCopies", "settings.devices",
-                     "settings.notifications", "settings.premium", "settings.help", "server.unpair"].map { app.buttons[$0] }
+        let backups = [("settings.automatic", "Automatic Mode")]
+            + (AppFeatures.cloudCopies ? [("settings.connectors", "Cloud Copies")] : [])
+        let lower = (backups.map(\.0) + ["settings.compactCopies", "settings.devices",
+                     "settings.notifications", "settings.premium", "settings.help", "server.unpair"]).map { app.buttons[$0] }
         for row in lower {
             XCTAssertTrue(app.reveal(row), "no \(row)")
         }
         // Automatic mode and cloud copies say whether they're on (their switches are on their pages).
-        for (row, title) in [("settings.automatic", "Automatic Mode"), ("settings.connectors", "Cloud Copies")] {
+        for (row, title) in backups {
             let element = app.buttons[row]
             XCTAssertTrue(app.reveal(element), "no \(row)")
             let status = NSPredicate(format: "label BEGINSWITH %@ AND (label CONTAINS 'Off' OR label CONTAINS 'On')", title)
@@ -101,8 +103,8 @@ final class ServerTabUITests: XCTestCase {
         }
         XCTAssertFalse(app.switches["automatic.toggle"].exists, "a switch for automatic mode in the list")
         attach(app, "Server, scrolled")
-        for (row, title) in [("settings.automatic", "Automatic Mode"), ("settings.connectors", "Cloud Copies"),
-                             ("settings.compactCopies", "Compact Copies"), ("settings.notifications", "Notifications"),
+        if !AppFeatures.cloudCopies { XCTAssertFalse(app.buttons["settings.connectors"].exists) }
+        for (row, title) in backups + [("settings.compactCopies", "Compact Copies"), ("settings.notifications", "Notifications"),
                              ("settings.help", "Help and About")] {
             XCTAssertTrue(app.reveal(app.buttons[row]), "no \(row)")
             app.buttons[row].tap()

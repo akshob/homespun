@@ -17,7 +17,8 @@ find crashes and hangs.
 - **MetricKit**: Apple's daily performance metrics and crash/hang diagnostics (call stacks of
   app and system binaries, termination reasons). No user content.
 - **Bug reports**: the message the user writes, an optional reply email, and optional
-  diagnostics the app attaches. Emailed to the developer and kept for replies.
+  diagnostics the app attaches. Reports include an install ID only while sharing and with no email;
+  a reply address is never linked to analytics. Emailed to the developer and kept for replies.
 
 Never sent or stored: photos, videos, file names, album names, server addresses, pairing codes,
 account identifiers. IP addresses are used only transiently as rate-limit keys and are not
@@ -25,7 +26,9 @@ stored; per-request invocation logs are turned off (`wrangler.jsonc`).
 
 Retention (by time received, enforced by a daily cron): events 400 days, MetricKit metrics 90
 days, MetricKit diagnostics 365 days, reports 730 days. `DELETE /v1/installs/<install>` removes
-everything for an install immediately (the app calls it when the user stops sharing).
+everything for an install immediately (the app calls it when the person chooses Delete Shared Data).
+Reports without an install ID, including those with an email, can be deleted on request to
+support@homespun.photos with the report number.
 
 The Worker also enforces a hard usage budget so the public app key can't run up a bill; see
 [Budget](#budget).
@@ -62,7 +65,7 @@ Strings in `app` and `device` may not contain control characters.
 ```json
 {
   "install": "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b",
-  "app": {"version": "1.0", "build": "42", "channel": "testflight"},
+  "app": {"version": "1.0.0", "build": "42", "channel": "testflight"},
   "device": {"model": "iPhone18,1", "os": "27.2", "family": "iphone"},
   "events": [
     {"name": "app.launch", "time": "2026-11-15T21:40:00Z", "props": {"cold": true}},
@@ -300,7 +303,7 @@ npx wrangler d1 migrations apply homespun-telemetry --local
 npm run dev
 curl localhost:8787/v1/health
 curl -H 'X-Homespun-Key: homespun-app-v1' -H 'Content-Type: application/json' \
-  -d '{"install":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","app":{"version":"1.0","build":"1","channel":"debug"},"device":{"model":"iPhone18,1","os":"27.2","family":"iphone"},"events":[{"name":"analytics.optin","time":"2026-11-15T21:40:00Z","props":{}}]}' \
+  -d '{"install":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","app":{"version":"1.0.0","build":"1","channel":"debug"},"device":{"model":"iPhone18,1","os":"27.2","family":"iphone"},"events":[{"name":"analytics.optin","time":"2026-11-15T21:40:00Z","props":{}}]}' \
   localhost:8787/v1/events
 npx wrangler dev --test-scheduled   # then: curl 'localhost:8787/cdn-cgi/handler/scheduled'
 ```

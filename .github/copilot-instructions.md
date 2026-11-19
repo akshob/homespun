@@ -89,8 +89,9 @@ and may not exist in other checkouts.
   the viewer's pages show `LibraryModel.item` (`any LibraryItem`). New PhotoKit calls go behind
   `PhotoSource`, so the demo never touches the person's library.
 - The demo's model keeps its own settings (`photos.homespun.demo`), folder (`Homespun Demo`), token and
-  records; it never writes the person's settings, Keychain, TipKit tips, widgets or watch status (its
-  `AppModel.status` is nil) or analytics (`Telemetry.paused`),
+  records; it never writes the person's settings, Keychain, TipKit tips or analytics (`Telemetry.paused`).
+  It shares `StatusPublisher` only to show demo facts in widgets and on the watch when no real server is
+  paired; leaving clears them, and a paired person's real status is never replaced. The demo
   never asks iOS for a permission, and pairs only with its pretend server. Leave the Demo deletes it all.
 - The demo changes nothing for real: its deletions ask in-app, say so, and remove only from the demo.
 
@@ -131,6 +132,10 @@ and may not exist in other checkouts.
 - A new UI test class goes into a run in `ci/lane.sh` (with a free port); a new run also goes into
   `FULL` in `ci/plan.py` (after merge) and the nightly list in `.github/workflows/nightly.yml`; only
   short, critical-path tests belong in `quick`/`quick-duo`. New test media goes into `ci/`.
+- UI and unit jobs always upload `timing-<run>-<workflow id>` (7 days): phase TSVs, logs and
+  result-bundle SQLite metadata. Read the summary's Timing table before changing CI waits or
+  lane packing; use Actions step durations for checkout, brew and artifact transfer. Keep the
+  `stamp`/`timed` boundaries in `ci/env.sh` and each segment accurate when editing CI scripts.
 
 ## Build and test
 
