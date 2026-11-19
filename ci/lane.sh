@@ -87,7 +87,7 @@ for one in $runs; do
       run probe-iphone env SERVERLESS=1 TRAIT_PROBE_ONLY=1 zsh $D/ui.sh probe-iphone iPhone-18-Pro \
         HomespunUITests/SnapshotProbeUITests 8803
       run probe-duo env SERVERLESS=1 TRAIT_PROBE_ONLY=1 DUO_POSES=1 zsh $D/ui.sh probe-duo iPhone-Duo \
-        HomespunUITests/SnapshotProbeUITests 8804 open ;;
+        HomespunUITests/SnapshotProbeUITests 8804 ;;
     demo)
       # Try the Demo needs no server and no Photos access: on an iPhone, then on iPhone Duo's cover.
       run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests 8800

@@ -19,11 +19,19 @@ final class SnapshotProbeUITests: XCTestCase {
             let file = try XCTUnwrap(environment["DUO_POSE_FILE"])
             let initial = app.frame.width < 600 ? "folded" : app.frame.width > app.frame.height ? "landscape" : "portrait"
             defer { try? pose(initial, file: file) }
-            try pose("folded", file: file)
+            if initial != "folded" {
+                app.terminate()
+                try pose("folded", file: file)
+                app.launch()
+            }
             try capture("duoCover", app: app, folder: folder, wide: false, maximumWidth: 600)
+            app.terminate()
             try pose("portrait", file: file)
+            app.launch()
             try capture("duoInnerPortrait", app: app, folder: folder, wide: false, minimumWidth: 600)
+            app.terminate()
             try pose("landscape", file: file)
+            app.launch()
             try capture("duoInnerLandscape", app: app, folder: folder, wide: true, minimumWidth: 600)
         } else {
             XCUIDevice.shared.orientation = .portrait
@@ -66,7 +74,7 @@ final class SnapshotProbeUITests: XCTestCase {
     @MainActor private func pose(_ value: String, file: String) throws {
         let url = URL(fileURLWithPath: file)
         try Data(value.utf8).write(to: url, options: .atomic)
-        let deadline = Date().addingTimeInterval(180)
+        let deadline = Date().addingTimeInterval(240)
         while FileManager.default.fileExists(atPath: file), Date() < deadline {
             Thread.sleep(forTimeInterval: 0.2)
         }
