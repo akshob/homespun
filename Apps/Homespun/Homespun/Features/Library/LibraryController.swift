@@ -56,6 +56,8 @@ final class LibraryController {
     /// Originals from the current Back Up; offered once the run finishes.
     private var batch = Set<String>()
     private var started = false
+    /// Keep the running accessory until the finished/ready facts have arrived, without a hide/show.
+    private var finishingBackups = 0
 
     init(settings: AppSettings, job: CompactJob, premium: Premium, automatic: AutomaticMode, copyFinder: CopyFinder) {
         self.settings = settings
@@ -69,8 +71,10 @@ final class LibraryController {
         access = settings.photos.authorization()
         job.onPhaseChange = { [weak self] in self?.jobChanged() }
         job.onRunFinished = { [weak self] in
-            Task {
+            self?.finishingBackups += 1
+            Task { [weak self] in
                 await self?.jobFinished()
+                self?.finishingBackups -= 1
                 await Telemetry.shared.flush()
             }
         }
@@ -176,9 +180,9 @@ final class LibraryController {
         inputs.paired = settings.isPaired
         if case .unreachable = settings.serverStatus { inputs.unreachable = serverName }
         if case .checking(let message) = removal { inputs.removing = message }
-        if job.isRunning {
+        if job.isRunning || finishingBackups > 0 {
             let run = job.runProgress
-            inputs.backingUp = (run.done, run.total, run.current?.name)
+            inputs.backingUp = (run.done, run.total, run.current?.name ?? (finishingBackups > 0 ? job.items.last?.name : nil))
         }
         if let finished { inputs.finished = (finished.count, finished.bytes, Set(finished.originals)) }
         inputs.readyCount = ready.count

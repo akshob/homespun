@@ -32,7 +32,6 @@ struct LibraryView: View, Equatable {
     @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
     @Environment(\.showsTips) private var showsTips
-    @Environment(\.statusAccessoryInset) private var accessoryInset
 
     enum Sheet: Identifiable {
         case backUp([String]), legend, setup, identity, restore([String])
@@ -188,7 +187,6 @@ struct LibraryView: View, Equatable {
         GridInput(selecting: selecting,
                   selectionVersion: selection.version, filter: filter, paired: settings.isPaired,
                   serverName: controller.serverName, density: columns, newest: controller.newestRequests &+ newestTaps,
-                  accessoryInset: accessoryInset,
                   notice: AnyView(top), noticeKey: topKey)
     }
 

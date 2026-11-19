@@ -17,7 +17,7 @@ struct StatusAccessoryModifier: ViewModifier {
     func body(content: Content) -> some View {
         let _ = RenderProbe.count("render.accessory")
         content
-            .environment(\.statusAccessoryInset, visible ? height + 8 : 0)
+            .environment(\.statusAccessoryInset, visible && height > 0 ? height + 8 : 0)
             .onChange(of: visible) { _, visible in if !visible { layout = AccessoryLayout() } }
             .overlay {
                 AccessoryContent(model: model, open: open, layout: $layout, height: $height, visible: $visible)

@@ -14,7 +14,6 @@ struct GridInput {
     var density: Int
     /// Bumped to bring the newest items (the Library tab tapped again, Select mode's Newest).
     var newest: Int
-    var accessoryInset: CGFloat
     /// What's above the first month (the notice, or the empty state), and what it says, so it's
     /// measured again only when that changes.
     var notice: AnyView
@@ -36,6 +35,7 @@ struct GridActions {
 
 /// The Library grid: a collection view with `GridLayout`, hosted in SwiftUI.
 struct GridView: UIViewControllerRepresentable {
+    @Environment(\.statusAccessoryInset) private var accessoryInset
     let library: LibraryModel
     let selection: GridSelection
     let counts: SectionCounts
@@ -44,11 +44,12 @@ struct GridView: UIViewControllerRepresentable {
     var actions: GridActions
 
     func makeUIViewController(context: Context) -> GridController {
-        GridController(library: library, selection: selection, counts: counts, store: store, input: input, actions: actions)
+        GridController(library: library, selection: selection, counts: counts, store: store, input: input, actions: actions,
+                       accessoryInset: accessoryInset)
     }
 
     func updateUIViewController(_ controller: GridController, context: Context) {
-        controller.update(input, actions: actions)
+        controller.update(input, actions: actions, accessoryInset: accessoryInset)
     }
 }
 
@@ -65,6 +66,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var actions: GridActions
     private var data = GridData()
     private var dataVersion = -1
+    private var accessoryInset: CGFloat
     private let layout = GridLayout()
     private var collectionView: UICollectionView!
     private let thumbnails: GridThumbnails
@@ -103,13 +105,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var pendingOpen: (id: String, details: Bool)?
 
     init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, store: GridStore, input: GridInput,
-         actions: GridActions) {
+         actions: GridActions, accessoryInset: CGFloat) {
         self.library = library
         self.selection = selection
         self.counts = counts
         self.store = store
         self.input = input
         self.actions = actions
+        self.accessoryInset = accessoryInset
         thumbnails = GridThumbnails(manager: library.thumbnails, source: { [unowned library] in library.source },
                                     catalog: library.catalog)
         super.init(nibName: nil, bundle: nil)
@@ -134,7 +137,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                                 withReuseIdentifier: MonthHeaderView.reuse)
         collectionView.accessibilityIdentifier = "grid"
         self.collectionView = collectionView
-        collectionView.contentInset.bottom = input.accessoryInset
+        collectionView.contentInset.bottom = accessoryInset
         view = collectionView
         installGestures()
     }
@@ -224,15 +227,16 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     // MARK: Updates from SwiftUI
 
-    func update(_ new: GridInput, actions: GridActions) {
+    func update(_ new: GridInput, actions: GridActions, accessoryInset: CGFloat) {
         let old = input
         input = new
         self.actions = actions
         if new.selecting != old.selecting { resizeAnchor = nil }
-        if new.accessoryInset != old.accessoryInset {
+        if accessoryInset != self.accessoryInset {
+            self.accessoryInset = accessoryInset
             resizeAnchor = nil
             let offset = collectionView.contentOffset
-            collectionView.contentInset.bottom = new.accessoryInset
+            collectionView.contentInset.bottom = accessoryInset
             collectionView.contentOffset = offset
             if placed {
                 pinned = isFront && abs(offset.y - offsetRange.upperBound) < 1
