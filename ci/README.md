@@ -109,6 +109,29 @@ before allowing fresh creation; a stalled producer fails the segment instead of 
 second device. The separate `presim` timing row overlaps setup, so do not sum it with the
 segment total; the job's instrumented span includes that overlap only once.
 
+### Measured startup baseline
+
+The timestamp-only baseline is [run 44440086157](https://github.com/akshob/homespun/actions/runs/44440086157)
+at `55cc7d4`: **329.6 macOS machine-minutes**, or **204.4 minutes including shared-runner queues**.
+Its iPhone lane failed ItemViewer's Free Up state assertion and reachability on retry; the
+other lanes passed. Test windows include retries, so compare startup phases separately.
+
+| Phase | Baseline seconds |
+|---|---:|
+| Duo open: segment start → server launch (cover for comparison) | 1085 (325) |
+| Duo open: initial pose / fixed wait / seed import | 150 / 15 / 572 |
+| EXTRA: generation / import, iPhone 200 items | 30 / 221 |
+| DATED 240: generation / import, iPhone and Duo | 19–74 / 10–13 |
+| Unit: simulator / xcodebuild preparation / tests / teardown | 193 / 365 / 32 / 150 |
+| Brew, all macOS jobs | 21–38 |
+
+The Duo gap is not solely the first pose: media import dominates it. Keep pose/media
+ordering changes separate from package-free test execution. Fresh simulator setup
+(create, boot, privacy) plus seed import took **227 / 243 / 193 seconds** in copies,
+iPhone and unit respectively (unit has no seed import). That meets the 150-second
+threshold for considering later reuse **only** within the same-seed `iphone-flows` job;
+background preparation does not itself reuse a simulator between segments.
+
 ## Repository settings
 
 - Actions › fork pull requests: approval required for all outside contributors.
