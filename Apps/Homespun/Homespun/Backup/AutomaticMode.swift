@@ -391,10 +391,4 @@ final class AutomaticMode {
         let request = UNNotificationRequest(identifier: "homespun.removable", content: content, trigger: nil)
         try? await UNUserNotificationCenter.current().add(request)
     }
-
-    nonisolated static func clearNotifications() {
-        let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: ["homespun.removable"])
-        center.removeDeliveredNotifications(withIdentifiers: ["homespun.removable"])
-    }
 }
