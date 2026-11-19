@@ -55,9 +55,11 @@ public enum ServerAPI {
     public struct Health: Codable, Equatable, Sendable {
         public var status: String
         public var apiVersion: Int
-        public init(status: String = "ok", apiVersion: Int = ServerAPI.version) {
+        public var tls: Bool?
+        public init(status: String = "ok", apiVersion: Int = ServerAPI.version, tls: Bool? = nil) {
             self.status = status
             self.apiVersion = apiVersion
+            self.tls = tls
         }
     }
 
@@ -72,10 +74,11 @@ public enum ServerAPI {
         public var hardware: Hardware?
         /// Free space where originals go.
         public var freeBytes: Int64?
+        public var tls: TLSInfo?
 
         public init(name: String, version: String, apiVersion: Int = ServerAPI.version, mode: StorageMode,
                     profile: CompressionProfile, platform: ServerSetup.Platform? = nil, hardware: Hardware? = nil,
-                    freeBytes: Int64? = nil) {
+                    freeBytes: Int64? = nil, tls: TLSInfo? = nil) {
             self.name = name
             self.version = version
             self.apiVersion = apiVersion
@@ -84,6 +87,7 @@ public enum ServerAPI {
             self.platform = platform
             self.hardware = hardware
             self.freeBytes = freeBytes
+            self.tls = tls
         }
     }
 
@@ -98,9 +102,11 @@ public enum ServerAPI {
     public struct PairRequest: Codable, Equatable, Sendable {
         public var code: String
         public var deviceName: String
-        public init(code: String, deviceName: String) {
+        public var challenge: String?
+        public init(code: String, deviceName: String, challenge: String? = nil) {
             self.code = code
             self.deviceName = deviceName
+            self.challenge = challenge
         }
     }
 
@@ -131,14 +137,18 @@ public enum ServerAPI {
         public var hardware: Hardware?
         /// Free space where originals go.
         public var freeBytes: Int64?
+        public var pairingVersion: Int?
+        public var encrypted: Bool?
         public init(serverName: String, canApprove: Bool, pairCommand: String, platform: ServerSetup.Platform? = nil,
-                    hardware: Hardware? = nil, freeBytes: Int64? = nil) {
+                    hardware: Hardware? = nil, freeBytes: Int64? = nil, pairingVersion: Int? = nil, encrypted: Bool? = nil) {
             self.serverName = serverName
             self.canApprove = canApprove
             self.pairCommand = pairCommand
             self.platform = platform
             self.hardware = hardware
             self.freeBytes = freeBytes
+            self.pairingVersion = pairingVersion
+            self.encrypted = encrypted
         }
     }
 
@@ -186,7 +196,11 @@ public enum ServerAPI {
     /// `POST /api/v1/pair/requests`: ask someone at the server to allow this device.
     public struct ApprovalRequest: Codable, Equatable, Sendable {
         public var deviceName: String
-        public init(deviceName: String) { self.deviceName = deviceName }
+        public var commitment: String?
+        public init(deviceName: String, commitment: String? = nil) {
+            self.deviceName = deviceName
+            self.commitment = commitment
+        }
     }
 
     /// The pending request. Poll `GET /api/v1/pair/requests/{id}` with `secret` as the bearer token.
@@ -196,11 +210,13 @@ public enum ServerAPI {
         /// Shown on both screens, so the person at the server allows the right device.
         public var match: String
         public var expiresIn: Int
-        public init(id: String, secret: String, match: String, expiresIn: Int) {
+        public var serverNonce: String?
+        public init(id: String, secret: String, match: String, expiresIn: Int, serverNonce: String? = nil) {
             self.id = id
             self.secret = secret
             self.match = match
             self.expiresIn = expiresIn
+            self.serverNonce = serverNonce
         }
     }
 
@@ -723,5 +739,8 @@ public enum ServerAPI {
         public static let compactCopy = "compact_copy"
         /// `removed` for an item whose original the server keeps (it has a compact copy, or was kept as is).
         public static let keptOriginal = "kept_original"
+        public static let challengeRequired = "challenge_required"
+        public static let commitmentRequired = "commitment_required"
+        public static let tooManyChallenges = "too_many_challenges"
     }
 }
