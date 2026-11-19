@@ -35,6 +35,18 @@ simulators for iPhone 18 Pro and iPhone Duo). The macOS build job builds once an
 its tests and the release server to the other jobs as an archive (`build`). Every job starts on a
 fresh machine. Pull requests from forks run after the owner approves them and never see secrets.
 
+Test jobs unpack the archive and run its **`.xctestrun`**, not a project or scheme, so they do
+not regenerate the project, resolve SwiftPM or clone packages. A missing manifest fails CI;
+local Macs with older builds keep the project-based fallback in `test_without_building`.
+Test selectors, per-test retries and `TEST_RUNNER_*` variables pass through unchanged. Server
+flows fail if their log reports a skip for missing runner configuration rather than silently
+passing without coverage.
+
+Only the app build and `watch` jobs need XcodeGen. They share the Xcode package checkout cache
+(`$CI_STATE/spm`, `xcode-spm-<Package.resolved hash>` with a prefix restore); Homebrew downloads
+are cached by month. The watch job still builds its own watchOS test bundle, then runs its
+own `.xctestrun` without resolving the graph a second time.
+
 Performance budgets (`perf.sh`) need a Mac with a large iPhone Duo library (`setup-perf-sim.sh`,
 35,000 photos) and steady timings, which shared cloud machines don't give; the owner runs them
 nightly on a Mac of their own, from a separate private repository, so no self-hosted runner is ever
@@ -50,10 +62,11 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `build.sh` | release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it); the app embeds its widgets and the Apple Watch app, so this also builds for the watchOS simulator (Xcode's watchOS SDK; no watch simulator runs) |
 | `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access, and the widgets' (`HomespunWidgetTests`, every size drawn) |
 | `watch.sh` | separate watchOS build and timed Crown/swipe regression on a fresh Apple Watch simulator (fresh, stale and arriving status, each crossing a minute boundary); no server or paired iPhone; downloads the watchOS runtime if missing |
+| `presim.sh <device type>` | queue the first simulator's boot in the background, overlapping tool/cache/artifact setup; disabled when `SIM_SLOTS_DIR` is set |
 | `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DATED=`, `DUO_POSES=1`, `STUB_PORT=`; `SERVERLESS=1`: no server and no Photos access, for the demo) |
 | `dated-photos.swift` | small synthetic photos taken over the past months (EXIF dates) for `DATED=`: month headers, scrolling across months |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
-| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `RETRY_UI=1` retries a failed run once |
+| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `--first-device <run\|group>` selects the device for background boot; `RETRY_UI=1` retries a failed run once |
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
 | `plan.py` | what a run needs (see above) |
@@ -87,6 +100,14 @@ Planner regression tests: `python3 -m unittest discover -s ci -p 'test_*.py'`.
 
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).
+
+On CI, the first step after checkout reserves `$CI_STATE/presim/<device>.pending`, then
+starts `presim.sh`. It publishes the created, boot-requested UDID atomically; `new_simulator`
+waits for publication, claims it once, renames it and waits on `bootstatus`. Later segments
+still create and delete their own simulator. A failed preparation deletes its simulator
+before allowing fresh creation; a stalled producer fails the segment instead of booting a
+second device. The separate `presim` timing row overlaps setup, so do not sum it with the
+segment total; the job's instrumented span includes that overlap only once.
 
 ## Repository settings
 

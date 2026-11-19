@@ -1,10 +1,11 @@
 #!/bin/zsh
+# SPDX-License-Identifier: Apache-2.0
 # Builds what the tests need, once per commit: the release server (the UI tests' temporary
 # servers) and the app with its tests (Debug, for any simulator). Later jobs of the run reuse it.
 set -euo pipefail
 source ${0:A:h}/env.sh
 cd $ROOT
-# Every job's checkout needs the project (it isn't committed), also when it reuses a build.
+# Only build jobs need the generated project; test jobs use the archived .xctestrun.
 (cd $APP && xcodegen generate --quiet)
 # A branch's push and its pull request build the same commit at once: one builds, the other waits.
 mkdir -p $CI_STATE/dd
@@ -16,7 +17,7 @@ swift build -c release --product homespun-server 2>&1 | tail -3
 cd $APP
 set -o pipefail
 xcodebuild build-for-testing -project Homespun.xcodeproj -scheme Homespun -destination "generic/platform=iOS Simulator" \
-  -derivedDataPath $DD 2>&1 | tee $RESULTS/build.log | filter
+  -derivedDataPath $DD -clonedSourcePackagesDirPath $CI_STATE/spm 2>&1 | tee $RESULTS/build.log | filter
 cp $ROOT/.build/release/homespun-server $SERVER_BIN
 touch $DD/.built
 # For a run's other jobs on other machines: the built app, its tests and the server in one archive

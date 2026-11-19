@@ -86,12 +86,56 @@ fi
 
 # A fresh simulator of a device type; prints its UDID. (KEEP_SIM=1: one that outlives the job.)
 new_simulator() {
-    stamp simulator.create.start
-    local sim=$(xcrun simctl create "$2" com.apple.CoreSimulator.SimDeviceType.$1 $(runtime_for $1))
-    stamp simulator.create.end
+    local manifest=$CI_STATE/presim/$1 sim="" tries=0
+    # The workflow reserves this before spawning presim, so an early consumer cannot boot a second one.
+    stamp simulator.presim-wait.start
+    while [[ -f $manifest.pending ]]; do
+        if (( tries++ >= ${PRESIM_TIMEOUT:-180} )); then
+            stamp simulator.presim-wait.end
+            echo "background simulator creation timed out for $1" >&2
+            return 1
+        fi
+        sleep 1
+    done
+    stamp simulator.presim-wait.end
+    if [[ -f $manifest ]] && mv $manifest $manifest.claim-$$ 2>/dev/null; then
+        sim=$(<$manifest.claim-$$)
+        rm -f $manifest.claim-$$
+        timed simulator.rename xcrun simctl rename $sim "$2" >&2 || { remove_simulator $sim; return 1; }
+    else
+        stamp simulator.create.start
+        sim=$(xcrun simctl create "$2" com.apple.CoreSimulator.SimDeviceType.$1 $(runtime_for $1)) || return 1
+        stamp simulator.create.end
+        timed simulator.boot xcrun simctl boot $sim >&2 || { remove_simulator $sim; return 1; }
+    fi
     [[ -n ${JOB_RECORD:-} && -z ${KEEP_SIM:-} ]] && print -r -- $sim >> $JOB_STATE.sims
-    timed simulator.boot xcrun simctl boot $sim && timed simulator.bootstatus xcrun simctl bootstatus $sim -b >/dev/null
+    timed simulator.bootstatus xcrun simctl bootstatus $sim -b >/dev/null || { remove_simulator $sim; return 1; }
     echo $sim
+}
+
+# An archived .xctestrun is relocatable with Build/Products and never resolves the package graph.
+test_without_building() {
+    local result=$1; shift
+    local specs=($DD/Build/Products/Homespun_*iphonesimulator*.xctestrun(N))
+    local spec=${XCTESTRUN:-${specs[1]:-}}
+    if [[ -f $spec ]]; then
+        xcodebuild test-without-building -xctestrun "$spec" -destination id=$SIM \
+          -resultBundlePath "$result" "$@"
+    elif [[ ${GITHUB_ACTIONS:-} == true ]]; then
+        echo "error: the build artifact has no Homespun simulator .xctestrun" >&2
+        return 1
+    else
+        (cd $APP && xcodebuild test-without-building -project Homespun.xcodeproj -scheme Homespun \
+          -destination id=$SIM -derivedDataPath $DD -resultBundlePath "$result" "$@")
+    fi
+}
+
+# Missing TEST_RUNNER_* variables must not turn a server flow into a green, skipped suite.
+require_test_environment() {
+    if grep -Eq 'Set HOMESPUN_SERVER|Needs a server\.|Run with ci/(later\.sh|lane\.sh telemetry)|Run on (the open iPhone Duo|the iPhone Duo with)' "$1"; then
+        echo "error: server or runner variables did not reach the tests (see $1)" >&2
+        return 1
+    fi
 }
 
 # Waits until nothing answers on this port (a server from an earlier try may still be stopping).

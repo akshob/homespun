@@ -135,6 +135,12 @@ and may not exist in other checkouts.
   result-bundle SQLite metadata. Read the summary's Timing table before changing CI waits or
   lane packing; use Actions step durations for checkout, brew and artifact transfer. Keep the
   `stamp`/`timed` boundaries in `ci/env.sh` and each segment accurate when editing CI scripts.
+- Test jobs use the archived `.xctestrun` through `test_without_building` in `ci/env.sh`, not
+  `-project`/`-scheme` (which resolve SwiftPM again). Keep test selectors and `TEST_RUNNER_*`
+  forwarding intact, and do not weaken the missing-runner-configuration guard. Only build
+  jobs (including watch) generate projects and use `$CI_STATE/spm`. A new run must also be
+  mapped by `ci/lane.sh --first-device` so background boot prepares the right device; it
+  never permits two booted simulators in one job or bypasses shared simulator slots.
 
 ## Build and test
 

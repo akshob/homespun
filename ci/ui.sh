@@ -15,7 +15,7 @@ source ${0:A:h}/env.sh
 NAME=$1 TYPE=$2 ONLY=$3 PORT=$4 POSE=${5:-}
 stamp segment.start
 timed simulator.slot take_sim_slot
-SIM=$(new_simulator $TYPE "HS CI $NAME $PORT")
+SIM=$(new_simulator $TYPE "HS CI $NAME $PORT") || exit 1
 DATA=$CI_STATE/servers/$NAME-$PORT; rm -rf $DATA; mkdir -p $DATA/originals
 SERVER="" STUB="" WATCH=""
 cleanup() {
@@ -105,14 +105,13 @@ if [[ -n ${DUO_POSES:-} ]]; then
 fi
 RESULT=$RESULTS/$NAME.xcresult
 SKIP=($(quarantined $ONLY $RESULTS/$NAME-quarantined.txt))
-cd $APP
 run_tests() {
     rm -rf $RESULT
     stamp xcodebuild.start
     TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_PAIR_LINK="$LINK" \
     TEST_RUNNER_HOMESPUN_REMOVE=1 \
-      xcodebuild test-without-building -project Homespun.xcodeproj -scheme Homespun -destination id=$SIM -derivedDataPath $DD \
-      -resultBundlePath $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} $SKIP $(test_retries) 2>&1 | tee $RESULTS/$NAME.log | filter
+      test_without_building $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} $SKIP $(test_retries) \
+      2>&1 | tee $RESULTS/$NAME.log | filter
     local code=${pipestatus[1]}
     stamp xcodebuild.end
     return $code
@@ -126,6 +125,9 @@ if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
     xcrun simctl shutdown $SIM; xcrun simctl boot $SIM && xcrun simctl bootstatus $SIM -b >/dev/null
     stamp simulator.reboot.end
     run_tests; STATUS=$?
+fi
+if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests)* ]]; then
+    require_test_environment $RESULTS/$NAME.log || STATUS=1
 fi
 if [[ -n ${STUB_PORT:-} ]]; then
     timed telemetry.check python3 ${0:A:h}/telemetry-check.py $STUBLOG "Home Mac" "127.0.0.1:$PORT" "IMG_200" || STATUS=1
