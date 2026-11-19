@@ -97,6 +97,11 @@ jobs:
         run: brew install --quiet xcodegen ffmpeg
       - uses: actions/cache@v4
         with:
+          path: ~/ci/spm
+          key: xcode-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: xcode-spm-
+      - uses: actions/cache@v4
+        with:
           path: .build
           key: macos-build-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
           restore-keys: macos-build-${{ hashFiles('Package.resolved') }}-
@@ -157,13 +162,19 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Tools
-        run: brew install --quiet xcodegen ffmpeg
+        run: brew install --quiet ffmpeg
+      # Concurrent brew and simulator boot regressed Tools to several minutes.
+      - name: Prepare the first simulator
+        run: |
+          mkdir -p ~/ci/presim ci-results
+          touch ~/ci/presim/iPhone-18-Pro.pending
+          nohup zsh ci/presim.sh iPhone-18-Pro > ci-results/presim.log 2>&1 < /dev/null &
       - uses: actions/download-artifact@v4
         with:
           name: build
           path: ${{ runner.temp }}
       - name: The build of this commit
-        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd && zsh ci/build.sh
+        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd
       - name: Unit tests (and the PhotoKit ones, in the app)
         run: zsh ci/unit.sh
       - name: Summary
@@ -204,13 +215,35 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: Tools
-        run: brew install --quiet xcodegen ffmpeg
+        env:
+          CI_RUN: ${{ matrix.run }}
+        run: |
+          if [[ "$CI_RUN" == watch ]]; then
+            brew install --quiet xcodegen ffmpeg
+          else
+            brew install --quiet ffmpeg
+          fi
+      # Keep the same post-brew boot ordering as the unit job.
+      - name: Prepare the first simulator
+        env:
+          CI_RUN: ${{ matrix.run }}
+        run: |
+          device=$(zsh ci/lane.sh --first-device "$CI_RUN")
+          mkdir -p ~/ci/presim ci-results
+          touch ~/ci/presim/"$device".pending
+          nohup zsh ci/presim.sh "$device" > ci-results/presim.log 2>&1 < /dev/null &
+      - uses: actions/cache@v4
+        if: matrix.run == 'watch'
+        with:
+          path: ~/ci/spm
+          key: xcode-spm-${{ hashFiles('Package.resolved') }}
+          restore-keys: xcode-spm-
       - uses: actions/download-artifact@v4
         with:
           name: build
           path: ${{ runner.temp }}
       - name: The build of this commit
-        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd && zsh ci/build.sh
+        run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd
       - name: UI tests
         env:
           RETRY_UI: ${{ inputs.retry && '1' || '' }}

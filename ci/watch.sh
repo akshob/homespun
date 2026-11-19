@@ -19,16 +19,18 @@ timed build.generate xcodegen generate --quiet
 stamp build.start
 STATUS=0
 xcodebuild build-for-testing -project Homespun.xcodeproj -scheme HomespunWatch \
-  -destination 'generic/platform=watchOS Simulator' -derivedDataPath $WATCH_DD 2>&1 \
+  -destination 'generic/platform=watchOS Simulator' -derivedDataPath $WATCH_DD \
+  -clonedSourcePackagesDirPath $CI_STATE/spm 2>&1 \
   | tee $RESULTS/watch-build.log | filter || STATUS=$?
 stamp build.end
 (( STATUS == 0 )) || { stamp segment.end; exit $STATUS; }
-SIM=$(new_simulator $DEVICE "HS CI Watch $SHA")
+SIM=$(new_simulator $DEVICE "HS CI Watch $SHA") || exit 1
 trap 'stamp cleanup.start; remove_simulator $SIM; stamp cleanup.end; stamp segment.end' EXIT
 rm -rf $RESULTS/watch.xcresult
+WATCH_SPECS=($WATCH_DD/Build/Products/HomespunWatch_*watchsimulator*.xctestrun(N))
+(( ${#WATCH_SPECS} )) || { echo "error: watch build produced no .xctestrun"; exit 1; }
 stamp xcodebuild.start
-xcodebuild test-without-building -project Homespun.xcodeproj -scheme HomespunWatch \
-  -destination id=$SIM -derivedDataPath $WATCH_DD -resultBundlePath $RESULTS/watch.xcresult \
+XCTESTRUN=$WATCH_SPECS[1] test_without_building $RESULTS/watch.xcresult \
   -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 240 \
   $(test_retries) 2>&1 | tee $RESULTS/watch.log | filter || STATUS=$?
 stamp xcodebuild.end

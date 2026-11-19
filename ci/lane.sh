@@ -1,4 +1,5 @@
 #!/bin/zsh
+# SPDX-License-Identifier: Apache-2.0
 # UI test runs, each on its own simulator and temporary server; fails if any did. GitHub's machines
 # take one run each (the ci workflow's matrix); on one Mac, name several, or a group.
 #   lane.sh <run|group> ...
@@ -10,6 +11,16 @@
 # quarantine.txt (known failures with an issue) are skipped and reported.
 set -u
 D=${0:A:h}
+if [[ ${1:-} == --first-device ]]; then
+    case ${2:-} in
+      quick-duo|duo-cover|duo-grid|duo-open|duo-all) print -r -- iPhone-Duo ;;
+      watch) print -r -- Apple-Watch-Series-12-46mm ;;
+      quick|iphone|library|later|copies|onboarding|telemetry|demo|large|pr|iphone-all|full)
+        print -r -- iPhone-18-Pro ;;
+      *) echo "unknown run: ${2:-}" >&2; exit 1 ;;
+    esac
+    exit 0
+fi
 failed=()
 source $D/env.sh
 run() {
