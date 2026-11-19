@@ -260,7 +260,7 @@ schemes:
         HOMESPUN_RELEASE_FEATURES: "0"
       targets:
         - name: HomespunTests
-          selectedTests: [releaseScopeDisablesRuntimeEntryPoints()]
+          selectedTests: [ReleaseScopeTests]
   HomespunWatch:
     build:
       targets:

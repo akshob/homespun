@@ -172,12 +172,12 @@ On a Mac with Xcode:
 
 ```bash
 brew install xcodegen
-cd Apps/Homespun && xcodegen generate && open Homespun.xcodeproj
+cd Apps/Homespun && zsh scripts/generate-project.sh && open Homespun.xcodeproj
 ```
 
 The Xcode project is generated from `project.yml` and not committed.
 
-### Widgets and Apple Watch
+### Planned widgets and Apple Watch (not in 1.0.0)
 
 The widgets never use the network. Whenever what they show changes (a backup, freeing up space,
 the server's answer, Automatic Mode, Premium), the app writes a small status (`Shared/StatusSnapshot.swift`:
@@ -198,7 +198,8 @@ they stay current without redrawing.
 
 Debug builds add `.dev` after `photos.homespun.app`, like the app. Links from the widgets:
 `homespun://free-up`, `activity`, `server`, `automatic` and `unlock?feature=widgets`. Debug builds
-launched with `-widgetDemo ready|away|nothing|locked|unpaired` show made-up facts in the widgets.
+generated with `--testing` and launched with `-releaseFeatures YES -widgetDemo ready|away|nothing|locked|unpaired`
+show made-up facts in the widgets.
 `HomespunWidgetTests` draws every size in every state; with `TEST_RUNNER_HOMESPUN_WIDGET_SHOTS=<folder>`
 it saves them as PNGs, and `WidgetGalleryUITests` (not in CI) adds the real widgets to the simulator's
 Home Screen from the widget gallery and saves screenshots there too.
