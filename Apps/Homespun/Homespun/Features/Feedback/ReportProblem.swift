@@ -12,12 +12,13 @@ enum ReportDiagnostics {
     @MainActor static func make(model: AppModel, checks: ServerSetup.Report?) async -> [String: Any] {
         let settings = model.settings, state = model.library.library.state
         // Not the iPhone's free space: that's read only to show it (its required reason keeps it on the device).
-        let library: [String: Any] = [
+        var library: [String: Any] = [
             "access": accessName(model.library.access),
             "items": state.count(.all), "notBackedUp": state.count(.notBackedUp), "readyToFree": state.count(.readyToFree),
-            "originalAtHome": state.count(.atHome), "compactLater": state.count(.copyLater),
+            "originalAtHome": state.count(.atHome),
             "needsAttention": state.count(.needsAttention), "freedBytes": settings.freedBytes,
         ]
+        if ReleaseFeatures.automaticMode { library["compactLater"] = state.count(.copyLater) }
         var server: [String: Any] = ["paired": settings.isPaired, "status": statusName(settings.serverStatus)]
         if let info = settings.server {
             server["version"] = info.version
@@ -31,25 +32,32 @@ enum ReportDiagnostics {
         if let checks {
             server["checks"] = checks.checks.map { ["id": $0.id, "status": $0.status.rawValue] }
         }
-        let schedule = model.automatic.compactSchedule
-        let automatic: [String: Any] = [
-            "enabled": model.automatic.enabled, "everything": model.automatic.backsUpEverything,
-            "cutoffDays": schedule.days, "keepFavorites": schedule.keepFavorites,
-            "lastRun": model.automatic.state.lastRun.map { $0.ISO8601Format() } ?? "never",
-            "lastSummary": model.automatic.state.lastSummary ?? "",
-        ]
         let runs: [[String: Any]] = model.history.runs.prefix(5).map { run in
-            ["kind": run.kind.rawValue, "trigger": run.trigger.rawValue, "end": run.end.ISO8601Format(),
-             "seconds": Int(run.end.timeIntervalSince(run.start)), "items": run.items.count,
-             "compacted": run.count(.saved), "backedUp": run.count(.backedUp), "kept": run.count(.kept),
-             "notYet": run.count(.notYet), "failed": run.count(.failed), "freedBytes": run.freedBytes]
+            var result: [String: Any] = [
+                "kind": run.kind.rawValue, "end": run.end.ISO8601Format(),
+                "seconds": Int(run.end.timeIntervalSince(run.start)), "items": run.items.count,
+                "compacted": run.count(.saved), "backedUp": run.count(.backedUp), "kept": run.count(.kept),
+                "notYet": run.count(.notYet), "failed": run.count(.failed), "freedBytes": run.freedBytes,
+            ]
+            if ReleaseFeatures.automaticMode || run.trigger != .automatic { result["trigger"] = run.trigger.rawValue }
+            return result
         }
         var report: [String: Any] = [
-            "library": library, "server": server, "automatic": automatic, "recentRuns": runs,
-            "premium": model.premium.isUnlocked, "analytics": Telemetry.shared.consent.rawValue,
+            "library": library, "server": server, "recentRuns": runs,
+            "analytics": Telemetry.shared.consent.rawValue,
             "lastSessionEndedUnexpectedly": SessionMarker.shared.endedUnexpectedly,
             "log": recentLog(),
         ]
+        if ReleaseFeatures.automaticMode {
+            let schedule = model.automatic.compactSchedule
+            report["automatic"] = [
+                "enabled": model.automatic.enabled, "everything": model.automatic.backsUpEverything,
+                "cutoffDays": schedule.days, "keepFavorites": schedule.keepFavorites,
+                "lastRun": model.automatic.state.lastRun.map { $0.ISO8601Format() } ?? "never",
+                "lastSummary": model.automatic.state.lastSummary ?? "",
+            ]
+        }
+        if ReleaseFeatures.premium { report["premium"] = model.premium.isUnlocked }
         if let crash = DiagnosticsStore.shared.latest() { report["metricKitDiagnostics"] = crash }
         return report
     }

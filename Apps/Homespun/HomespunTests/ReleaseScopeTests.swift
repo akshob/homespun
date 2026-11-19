@@ -48,6 +48,9 @@ final class ReleaseScopeTests: XCTestCase {
         _ = await automatic.run(settings: model.settings, job: model.job, premium: premium, notify: true)
         XCTAssertNil(automatic.state.lastRun)
         XCTAssertNil(model.status)
+        let diagnostics = await ReportDiagnostics.make(model: model, checks: nil)
+        XCTAssertNil(diagnostics["premium"])
+        XCTAssertNil(diagnostics["automatic"])
         XCTAssertTrue(PremiumFeature.available.isEmpty && PremiumFeature.backupFeatures.isEmpty)
         XCTAssertFalse(ServerTab.Route.automatic.isAvailable || ServerTab.Route.premium.isAvailable
                        || ServerTab.Route.connectors.isAvailable)
