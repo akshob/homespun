@@ -4,9 +4,8 @@ import Observation
 import StoreKit
 
 /// Homespun Premium: a one-time purchase that unlocks automatic mode, cloud copies and widgets.
-/// Everything else, including freeing up space, stays free. Builds made in Xcode (Debug)
-/// are unlocked, so the owner's own builds never need a purchase, and so are TestFlight builds
-/// while the App Store has no Premium product yet.
+/// Everything else, including freeing up space, stays free. When release features are enabled,
+/// Debug builds are unlocked, as are TestFlight builds while the App Store has no Premium product.
 @MainActor @Observable
 final class Premium {
     nonisolated static let productID = "photos.homespun.app.premium"

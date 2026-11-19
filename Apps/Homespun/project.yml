@@ -1,4 +1,4 @@
-# Generate the Xcode project on a Mac:  brew install xcodegen && xcodegen generate
+# Generate on a Mac with scripts/generate-project.sh; --testing also embeds retained test features.
 name: Homespun
 options:
   deploymentTarget:
@@ -106,6 +106,7 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
+        HomespunReleaseFeatures: $(HOMESPUN_RELEASE_FEATURES)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).widgets
@@ -141,6 +142,7 @@ targets:
         WKCompanionAppBundleIdentifier: $(HOMESPUN_BUNDLE_ID)
         WKRunsIndependentlyOfCompanionApp: false
         HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
+        HomespunReleaseFeatures: $(HOMESPUN_RELEASE_FEATURES)
     dependencies:
       - target: HomespunWatchWidgets
     settings:
@@ -171,6 +173,7 @@ targets:
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
         HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
+        HomespunReleaseFeatures: $(HOMESPUN_RELEASE_FEATURES)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(HOMESPUN_BUNDLE_ID).watchkitapp.widgets
