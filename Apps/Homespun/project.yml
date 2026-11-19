@@ -26,7 +26,8 @@ targets:
       - path: Homespun
         excludes: ["Resources/Demo", "Resources/Demo/**"]
       - Shared
-      # Try the Demo's sample photos and videos (drawn by scripts/demo-media.swift), as one folder.
+      # Try the Demo's videos and Live Photo (scripts/demo-media.sh); its photos and grid pictures
+      # are drawn on the iPhone (DemoArt.swift).
       - path: Homespun/Resources/Demo
         type: folder
         buildPhase: resources

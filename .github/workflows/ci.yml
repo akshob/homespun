@@ -2,7 +2,7 @@
 # folded, iPhone Duo open in every pose) and the server's package tests on macOS; the website goes
 # live when it changed. One run at a time: a running one finishes, and only the newest waiting
 # merge runs next. A failure opens (or updates) the "main is failing" issue; a pass closes it.
-# Run workflow tests any branch: UI runs none, quick (the pull request's), full or watch only.
+# Run workflow tests any branch: UI runs none, quick (the pull request's), full or a single regression lane.
 name: CI
 
 on:
@@ -14,7 +14,7 @@ on:
       ui:
         description: UI runs
         type: choice
-        options: [none, quick, full, watch]
+        options: [none, quick, full, watch, duo-open]
         default: quick
 
 permissions:
