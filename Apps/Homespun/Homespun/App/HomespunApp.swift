@@ -24,14 +24,25 @@ private struct AppRoot: View {
     let demo: DemoMode
 
     var body: some View {
-        if let model = demo.model {
-            RootView(model: model)
-                // The demo's view settings (grid size, …) are its own, and its taps don't change the app's tips.
-                .defaultAppStorage(model.settings.defaults)
-                .environment(\.showsTips, false)
-                .id(ObjectIdentifier(model))
-        } else {
-            RootView(model: .shared)
+        ZStack {
+            if let model = demo.model {
+                RootView(model: model)
+                    // The demo's view settings (grid size, …) are its own, and its taps don't change the app's tips.
+                    .defaultAppStorage(model.settings.defaults)
+                    .environment(\.showsTips, false)
+                    .id(ObjectIdentifier(model))
+            } else if demo.origin == .launch {
+                Theme.background.ignoresSafeArea()
+            } else {
+                RootView(model: .shared)
+                    .accessibilityHidden(demo.preparation != nil)
+                    .allowsHitTesting(demo.preparation == nil)
+            }
+            // Both start points are in the root window. A future sheet needs its own full-screen cover.
+            if demo.preparation != nil {
+                DemoPreparingView(demo: demo).transition(.opacity).zIndex(1)
+            }
         }
+        .animation(.default, value: demo.preparation == nil)
     }
 }

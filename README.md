@@ -102,15 +102,19 @@ both videos side by side: they play, pause, seek and zoom together, with sound f
 at a time. Sound switches between the original and the compact copy.
 
 **Try the Demo** (on the first setup page, and in Server › Help and About) shows all of this without
-a server: about 30 sample photos and videos drawn for the purpose (`Resources/Demo`, made by
-`scripts/demo-media.swift`; a Live Photo, videos, a screenshot) and a pretend server, "Homespun Demo",
-that is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
+a server: about 30 sample photos and videos drawn for the purpose. The photos, a screenshot and the
+grid's pictures are drawn on the iPhone when the demo starts ("Preparing the Demo", a few seconds,
+once per launch; `Features/Demo/DemoArt.swift`). The videos and a Live Photo come with the app
+(`Resources/Demo`, about 3.4 MB, made by `scripts/demo-media.sh` from the same drawing code).
+The pretend server, "Homespun Demo",
+is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
 Backing up, compact copies, Compare, Free Up Space (with a question that says nothing is deleted),
 Keep Original, Restore Original, Activity and the Server tab all work on them. The demo never reads or
 changes Photos, asks iOS for nothing, records no analytics and sends no reports. Without a paired real
 server, its live status also appears in the widgets and on Apple Watch, without a purchase; leaving
 clears those demo facts. With a paired server, its real status is never replaced. The demo's settings
 and records are kept apart and deleted by Leave the Demo (the Server tab, or the Demo mark in setup).
+Leaving the demo deletes what it did; the drawn photos stay until Homespun next starts from scratch.
 Turning on Automatic Mode in the demo asks for the real one-time purchase.
 
 **Premium** (one-time In-App Purchase; everything above stays free):

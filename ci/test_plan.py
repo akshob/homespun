@@ -48,5 +48,14 @@ class PackagePlanTests(unittest.TestCase):
             self.assertFalse(result[key], key)
 
 
+class TargetedUIPlanTests(unittest.TestCase):
+    def test_manual_duo_open_does_not_repeat_the_full_matrix(self):
+        result = plan({"MODE": "manual", "UI_INPUT": "duo-open"}, [])
+        self.assertTrue(result["app"])
+        self.assertEqual(result["ui"], ["duo-open"])
+        for key in ("server", "telemetry", "site", "package"):
+            self.assertFalse(result[key], key)
+
+
 if __name__ == "__main__":
     unittest.main()

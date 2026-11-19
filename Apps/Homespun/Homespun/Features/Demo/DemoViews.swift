@@ -9,7 +9,7 @@ struct TryTheDemoButton: View {
     var body: some View {
         VStack(spacing: 0) {
             SecondaryButton(title: "Try the Demo", systemImage: "play.rectangle", id: "setup.demo") { DemoMode.shared.start() }
-                .disabled(DemoMode.shared.settling)
+                .disabled(DemoMode.shared.settling || DemoMode.shared.isPreparing)
             Text("See how Homespun works with sample photos. Nothing on this iPhone is changed.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
@@ -40,7 +40,7 @@ struct DemoHelpSection: View {
                     ServerRow(title: "Try the Demo", symbol: "play.rectangle", value: nil, chevron: true)
                 }
                 .buttonStyle(.plain)
-                .disabled(busy != nil || DemoMode.shared.settling)
+                .disabled(busy != nil || DemoMode.shared.settling || DemoMode.shared.isPreparing)
                 .accessibilityHint(busy.map { "Available once Homespun has finished \($0)." } ?? "")
                 .accessibilityIdentifier("help.demo")
             }
