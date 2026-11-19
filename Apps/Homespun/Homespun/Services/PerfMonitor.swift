@@ -10,6 +10,16 @@ import UIKit
 enum RenderProbe {
     private static var counters: [String: Double] = [:]
     private static var pending: DispatchWorkItem?
+    private static var samples: [String: [Double]] = [:]
+
+    static func resetSamples(_ name: String) { samples[name] = [] }
+
+    static func sample(_ name: String, milliseconds: Double) {
+        guard PerfMonitor.shared.enabled else { return }
+        if samples[name, default: []].count == 4096 { samples[name]?.removeFirst(2048) }
+        samples[name, default: []].append(milliseconds)
+        count("\(name).n")
+    }
 
     static func count(_ name: String, by amount: Int = 1) {
         guard PerfMonitor.shared.enabled else { return }
@@ -18,6 +28,10 @@ enum RenderProbe {
         let work = DispatchWorkItem {
             MainActor.assumeIsolated {
                 pending = nil
+                for (name, values) in samples where !values.isEmpty {
+                    let sorted = values.sorted()
+                    counters["\(name).p95"] = sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.95))]
+                }
                 PerfMonitor.shared.note(counters)
             }
         }
@@ -43,6 +57,22 @@ final class PerfMonitor {
     /// Something is scrolling (a grid, a list, the item pager); frames count only then, so the
     /// test runner's own pauses (it inspects the app between gestures) don't.
     private var scrolling = 0
+    private var frameSpans: [String: (hitch: CFTimeInterval, time: CFTimeInterval, slow: Int)] = [:]
+
+    func framesBegan(_ name: String) {
+        guard enabled, frameSpans[name] == nil else { return }
+        RenderProbe.resetSamples("GridApply")
+        frameSpans[name] = (hitchTime, scrollTime, slowFrames)
+        scrollBegan()
+    }
+
+    func framesEnded(_ name: String) {
+        guard let before = frameSpans.removeValue(forKey: name) else { return }
+        scrollEnded()
+        let seconds = scrollTime - before.time
+        note(["\(name).hitchMsPerS": seconds > 0 ? (hitchTime - before.hitch) * 1000 / seconds : 0,
+              "\(name).slowFrames": Double(slowFrames - before.slow), "\(name).seconds": seconds])
+    }
     private var link: CADisplayLink?
     private var last: CFTimeInterval = 0
     private(set) var frames = 0

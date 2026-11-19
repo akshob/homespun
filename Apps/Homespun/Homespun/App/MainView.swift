@@ -4,7 +4,7 @@ import Photos
 import SwiftUI
 
 /// Setup until it's done, then the three tabs. Handles what belongs to the whole app: pairing
-/// links, coming back to the foreground, and the job's progress.
+/// links and coming back to the foreground.
 struct RootView: View {
     let model: AppModel
     @Environment(\.scenePhase) private var scenePhase
@@ -60,16 +60,6 @@ struct RootView: View {
             Button("Leave the Demo") { DemoMode.shared.leave() }
         } message: {
             Text("Leave the demo, then open the pairing link again to pair your own server.")
-        }
-        // Each item's phase, not its progress messages: badges change only when the phase does.
-        .onChange(of: model.job.phaseVersion) { _, _ in model.library.jobChanged() }
-        .onChange(of: model.job.isRunning) { _, running in
-            if !running {
-                Task {
-                    await model.library.jobFinished()
-                    await Telemetry.shared.flush()
-                }
-            }
         }
         .onChange(of: settings.onboardingComplete) { _, done in
             if done { model.library.journey.setupFinished() }
@@ -148,6 +138,7 @@ struct MainTabView: View {
         })) {
             Tab("Library", systemImage: "photo.on.rectangle", value: TabID.library) {
                 LibraryView(model: model, freeUp: { openFreeUp($0) })
+                    .equatable()
                     .onAppear { PerfMonitor.shared.endAfterFrame("tab") }
             }
             .accessibilityIdentifier("tab.library")

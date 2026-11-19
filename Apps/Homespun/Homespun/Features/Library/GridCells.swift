@@ -54,14 +54,15 @@ final class GridCell: UICollectionViewCell {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// Shows an item: its picture (asked for if it's another item or another size), then its state.
-    func show(_ item: String, info: MediaInfo?, loader: GridThumbnails, pixels: CGFloat) {
+    func show(_ item: String, info: MediaInfo?, loader: GridThumbnails, pixels: CGFloat, keepImage: Bool = false) {
         self.info = info
         if item != self.item || pixels != self.pixels || request == nil && !sharp {
-            if item != self.item {
-                if imageView.image != nil { RenderProbe.count("grid.imageClears") }
+            if item != self.item, !keepImage {
                 // Another item's picture never stays on: blank until this one's arrives (a new size
                 // keeps the old picture meanwhile).
-                imageView.image = nil
+                let cached = loader.cached(item, pixels: pixels)
+                if imageView.image != nil, cached == nil { RenderProbe.count("grid.imageClears") }
+                imageView.image = cached
             }
             cancelRequest()
             self.item = item
@@ -93,8 +94,14 @@ final class GridCell: UICollectionViewCell {
             badgeView.image = image
         }
         if state.badge == .working { spinner.startAnimating() } else { spinner.stopAnimating() }
+        updateSelection(selecting: selecting, selected: selected)
+        setNeedsLayout()
+    }
+
+    func updateSelection(selecting: Bool, selected: Bool) {
+        RenderProbe.count("grid.selections")
         dim.isHidden = !selected
-        let selectable = state.canCompact || state.canFree || state.canRestore
+        let selectable = state.map { $0.canCompact || $0.canFree || $0.canRestore } ?? false
         let mark = selecting ? (selected ? GridStyle.checkmark(traitCollection) : selectable ? GridStyle.circle : nil) : nil
         if selectView.image !== mark { selectView.image = mark }
         selectView.isHidden = mark == nil

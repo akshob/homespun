@@ -13,7 +13,53 @@ final class GridRedrawUITests: XCTestCase {
         try backUp(allItems: false)
     }
 
-    @MainActor private func backUp(allItems: Bool) throws {
+    @MainActor func testSelectAllKeepsTheGridStill() throws {
+        try backUp(allItems: true, selectAll: true)
+    }
+
+    @MainActor func testRealServerBackUpTouchesOnlyChangedCells() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"],
+              !code.isEmpty else { throw XCTSkip("Needs a server.") }
+        let app = XCUIApplication()
+        app.launchArguments = ["-onboardingComplete", "YES", "-hideTips", "-perfMonitor", "YES"]
+        app.launch()
+        app.pair(address: address, code: code)
+        app.openTab("Library")
+        let select = app.buttons["select.start"]
+        XCTAssertTrue(select.waitForExistence(timeout: 20))
+        select.tap()
+        let screen = app.windows.firstMatch.frame
+        let chosen = Array(app.gridItems("Not backed up").allElementsBoundByIndex.filter {
+            $0.isHittable && $0.frame.midY > screen.minY + 120 && $0.frame.midY < screen.maxY - 180
+        }.suffix(8))
+        XCTAssertEqual(chosen.count, 8)
+        for item in chosen { item.tap() }
+        XCTAssertTrue(app.hasScreen("8 Selected", timeout: 5))
+        sleep(2)
+        let before = app.renderReport()
+        app.buttons["compact.selected"].tap()
+        let deadline = Date().addingTimeInterval(300)
+        var after = before
+        repeat {
+            sleep(5)
+            after = app.renderReport()
+        } while (after["job.finished"] ?? 0) - (before["job.finished"] ?? 0) < 8 && Date() < deadline
+        sleep(2)
+        after = app.renderReport()
+        func delta(_ key: String) -> Double { (after[key] ?? 0) - (before[key] ?? 0) }
+        print("GRID REDRAW server: \(after.keys.sorted().map { "\($0)=\(delta($0))" }.joined(separator: ";"))")
+        XCTAssertEqual(delta("job.finished"), 8)
+        XCTAssertLessThanOrEqual(delta("render.root"), 2)
+        XCTAssertLessThanOrEqual(delta("render.mainTab"), 2)
+        XCTAssertLessThanOrEqual(delta("render.library"), 4)
+        XCTAssertEqual(delta("grid.reloads"), 0)
+        XCTAssertEqual(delta("grid.imageClears"), 0)
+        XCTAssertLessThanOrEqual(delta("grid.thumbRequests"), 8)
+        XCTAssertLessThanOrEqual(delta("grid.configs"), 40)
+    }
+
+    @MainActor private func backUp(allItems: Bool, selectAll: Bool = false) throws {
         let app = XCUIApplication()
         app.launchArguments = ["-hideTips", "-resetDemo", "-perfMonitor", "YES"]
         app.launch()
@@ -36,9 +82,19 @@ final class GridRedrawUITests: XCTestCase {
         }
         let items = app.gridItems("Not backed up")
         XCTAssertTrue(items.firstMatch.waitForExistence(timeout: 20))
-        let chosen = Array(items.allElementsBoundByIndex.filter { app.isOnScreen($0) }.suffix(8))
-        XCTAssertEqual(chosen.count, 8)
-        for item in chosen { item.tap() }
+        let expected = selectAll ? 30 : 8
+        if selectAll {
+            try tap("select.all")
+        } else {
+            let screen = app.windows.firstMatch.frame
+            let chosen = Array(items.allElementsBoundByIndex.filter {
+                let frame = $0.frame
+                return $0.isHittable && frame.midY > screen.minY + 120 && frame.midY < screen.maxY - 180
+            }.suffix(expected))
+            XCTAssertEqual(chosen.count, expected)
+            for item in chosen { item.tap() }
+        }
+        XCTAssertTrue(app.hasScreen("\(expected) Selected", timeout: 5), "not every item was selected")
         sleep(2)
         let before = app.renderReport()
         // The probe label must not cause the root to redraw while idle.
@@ -60,7 +116,7 @@ final class GridRedrawUITests: XCTestCase {
         attachment.name = "Grid redraw counters"
         attachment.lifetime = .keepAlways
         add(attachment)
-        XCTAssertEqual(n, 8)
+        XCTAssertEqual(n, Double(expected))
         XCTAssertLessThanOrEqual(delta("render.root"), 2)
         XCTAssertLessThanOrEqual(delta("render.mainTab"), 2)
         XCTAssertLessThanOrEqual(delta("render.library"), 4)
@@ -69,7 +125,7 @@ final class GridRedrawUITests: XCTestCase {
             XCTAssertGreaterThanOrEqual(delta("grid.swaps"), 1)
             XCTAssertEqual(delta("grid.imageClears"), 0)
             XCTAssertLessThanOrEqual(delta("grid.thumbRequests"), n)
-            XCTAssertLessThanOrEqual(delta("grid.configs"), 4 * n + 8)
+            XCTAssertLessThanOrEqual(delta("grid.configs"), (selectAll ? 2.5 : 4) * n + 8)
             XCTAssertLessThanOrEqual(delta("grid.layouts"), 4)
         } else {
             XCTAssertGreaterThanOrEqual(delta("grid.batches"), 1)

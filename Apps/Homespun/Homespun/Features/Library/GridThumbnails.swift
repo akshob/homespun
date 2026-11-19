@@ -21,12 +21,24 @@ final class GridThumbnails {
     /// Items the collection view asked to prefetch that the window didn't cover (yet).
     private(set) var prefetched = Set<String>()
     private var order: [String] = []
+    private let images = NSCache<NSString, UIImage>()
 
     init(manager: PHCachingImageManager, source: @escaping () -> AssetSource, catalog: (any ItemCatalog)? = nil) {
         self.manager = manager
         self.source = source
         self.catalog = catalog
         manager.allowsCachingHighQualityImages = false
+        images.totalCostLimit = 32 * 1024 * 1024
+        images.countLimit = 200
+    }
+
+    private func key(_ id: String, pixels: CGFloat) -> NSString { "\(id)@\(Int(pixels))" as NSString }
+
+    func cached(_ id: String, pixels: CGFloat) -> UIImage? { images.object(forKey: key(id, pixels: pixels)) }
+
+    private func remember(_ image: UIImage, id: String, pixels: CGFloat) {
+        images.setObject(image, forKey: key(id, pixels: pixels),
+                         cost: Int(image.size.width * image.size.height * image.scale * image.scale * 4))
     }
 
     private static let queue = DispatchQueue(label: "photos.homespun.preheat", qos: .userInitiated)
@@ -55,11 +67,15 @@ final class GridThumbnails {
                 guard let image = await catalog.thumbnail(id, side: pixels), !Task.isCancelled else { return }
                 let prepared = await image.byPreparingForDisplay() ?? image
                 guard !Task.isCancelled else { return }
+                remember(prepared, id: id, pixels: pixels)
                 handler(prepared, true)
             })
         }
         guard let asset = source().asset(id) else { return nil }
-        let deliver = Delivery(handler: handler)
+        let deliver = Delivery { [weak self] image, final in
+            if final { self?.remember(image, id: id, pixels: pixels) }
+            handler(image, final)
+        }
         return .photos(manager.requestImage(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: .aspectFill,
                                             options: Self.options()) { image, info in
             let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
@@ -99,6 +115,17 @@ final class GridThumbnails {
         self.pixels = pixels
         window = 0..<0
         prefetched = []
+    }
+
+    /// Keep Photos' preheated window alive when an original becomes its compact copy.
+    func retarget(order: [String], positions: [String: Int]) {
+        let old = Set(self.order[window.clamped(to: 0..<self.order.count)])
+        let removed = prefetched.filter { positions[$0] == nil }
+        prefetched.subtract(removed)
+        self.order = order
+        window = window.clamped(to: 0..<order.count)
+        let new = Set(order[window])
+        cache(start: Array(new.subtracting(old)), stop: Array(old.subtracting(new).union(removed)))
     }
 
     /// Keeps the thumbnails of `wanted` (positions in the order) ready, and lets go of the rest.

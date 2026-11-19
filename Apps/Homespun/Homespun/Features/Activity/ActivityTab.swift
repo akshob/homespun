@@ -217,7 +217,7 @@ private struct NowCard: View {
                         Text("Continue picks up where it stopped.").font(.subheadline)
                             .foregroundStyle(Theme.secondaryLabel)
                     } else if let current = run.current {
-                        Text("\(current.name) · \(current.message)").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                        Text("\(current.name) · \(job.currentMessage)").font(.subheadline).foregroundStyle(Theme.secondaryLabel)
                             .lineLimit(1).truncationMode(.middle)
                     }
                 }

@@ -67,6 +67,13 @@ final class LibraryController {
         library = LibraryModel(catalog: settings.photos as? any ItemCatalog)
         journey = JourneyLog(defaults: settings.defaults, tips: !settings.isDemo)
         access = settings.photos.authorization()
+        job.onPhaseChange = { [weak self] in self?.jobChanged() }
+        job.onRunFinished = { [weak self] in
+            Task {
+                await self?.jobFinished()
+                await Telemetry.shared.flush()
+            }
+        }
     }
 
     var isRemoving: Bool { if case .checking = removal { true } else { false } }
@@ -102,7 +109,7 @@ final class LibraryController {
     func start(loaded: () -> Void = {}) async {
         guard !started else { return }
         started = true
-        library.onChange = { @MainActor [weak self] in Task { await self?.refreshGrid() } }
+        library.onChange = { @MainActor [weak self] in self?.scheduleRefreshGrid() }
         await refresh()
         // Only what this Apple Account owns; the product itself loads where the purchase is offered.
         await premium.refresh()
@@ -251,6 +258,10 @@ final class LibraryController {
             }
         }
         guard finished else { return }
+        scheduleRefreshGrid()
+    }
+
+    private func scheduleRefreshGrid() {
         pendingRebuild?.cancel()
         pendingRebuild = Task {
             try? await Task.sleep(for: .milliseconds(400))
@@ -262,9 +273,9 @@ final class LibraryController {
     @ObservationIgnored private var pendingRebuild: Task<Void, Never>?
 
     func jobFinished() async {
+        jobChanged()
         journey.backupFinished()
         await refreshReady()
-        await refreshGrid()
         let backedUp = batch
         batch = []
         guard !backedUp.isEmpty, settings.isPaired else { return }

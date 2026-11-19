@@ -60,7 +60,7 @@ for one in $runs; do
       # A bigger library (the newest cells far from the oldest; the filter crash needed it; paging
       # through items and turning the iPhone needs a few), over many months.
       run library env EXTRA=200 DATED=240 zsh $D/ui.sh library iPhone-18-Pro \
-        HomespunUITests/LibraryUITests,HomespunUITests/ItemPagingUITests,HomespunUITests/GridScrollUITests 8799 ;;
+        HomespunUITests/LibraryUITests,HomespunUITests/ItemPagingUITests,HomespunUITests/GridScrollUITests,HomespunUITests/GridRedrawUITests/testRealServerBackUpTouchesOnlyChangedCells 8799 ;;
     later)
       run later zsh $D/later.sh later iPhone-18-Pro 8796 ;;
     copies)
