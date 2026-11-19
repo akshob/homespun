@@ -30,11 +30,12 @@ enum SnapshotCanvas {
         container.view.backgroundColor = .systemBackground
         window.frame = CGRect(origin: .zero, size: device.size)
         window.rootViewController = container
+        container.view.frame = window.bounds
         container.addChild(controller)
+        controller.view.frame = container.view.bounds
         container.view.addSubview(controller.view)
         controller.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         controller.didMove(toParent: container)
-        window.makeKeyAndVisible()
         defer {
             controller.willMove(toParent: nil)
             controller.view.removeFromSuperview()
@@ -45,22 +46,13 @@ enum SnapshotCanvas {
             UIView.setAnimationsEnabled(animations)
         }
 
-        func render() throws -> CGImage {
+        func layout() {
             window.frame = CGRect(origin: .zero, size: device.size)
             container.view.frame = window.bounds
             controller.view.frame = container.view.bounds
             window.layoutIfNeeded()
             container.view.layoutIfNeeded()
             controller.view.layoutIfNeeded()
-            func pauseIndicators(_ view: UIView) {
-                if view is UIActivityIndicatorView {
-                    // This runs a layer animation even when UIView animations are disabled.
-                    view.layer.speed = 0
-                    view.layer.timeOffset = 0
-                }
-                for child in view.subviews { pauseIndicators(child) }
-            }
-            pauseIndicators(container.view)
             // Cancel the host phone's system insets before applying this measured configuration.
             let actual = container.view.safeAreaInsets
             let extra = container.additionalSafeAreaInsets
@@ -72,6 +64,19 @@ enum SnapshotCanvas {
             if adjusted != extra { container.additionalSafeAreaInsets = adjusted }
             container.view.layoutIfNeeded()
             controller.view.layoutIfNeeded()
+        }
+
+        func render() throws -> CGImage {
+            layout()
+            func pauseIndicators(_ view: UIView) {
+                if view is UIActivityIndicatorView {
+                    // This runs a layer animation even when UIView animations are disabled.
+                    view.layer.speed = 0
+                    view.layer.timeOffset = 0
+                }
+                for child in view.subviews { pauseIndicators(child) }
+            }
+            pauseIndicators(container.view)
             let format = UIGraphicsImageRendererFormat()
             format.scale = 2
             format.preferredRange = .standard
@@ -85,6 +90,8 @@ enum SnapshotCanvas {
             return try SnapshotImage.sRGB(cgImage)
         }
 
+        layout()
+        window.makeKeyAndVisible()
         let initial = try render()
         var bytes = initial.dataProvider?.data
         let deadline = ProcessInfo.processInfo.systemUptime + 2

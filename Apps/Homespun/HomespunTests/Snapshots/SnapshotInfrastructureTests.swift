@@ -95,6 +95,13 @@ struct SnapshotInfrastructureTests {
         @MainActor final class Geometry {
             var insets = EdgeInsets()
         }
+        @MainActor final class FrameHost: UIHostingController<AnyView> {
+            var firstAppearance: CGRect?
+            override func viewWillAppear(_ animated: Bool) {
+                super.viewWillAppear(animated)
+                if firstAppearance == nil { firstAppearance = view.bounds }
+            }
+        }
         for size in [CGSize(width: 320, height: 640), CGSize(width: 951, height: 669)] {
             let insets = UIEdgeInsets(top: 20, left: 13, bottom: 31, right: size.width > 800 ? 84 : 7)
             let device = SnapshotDevice(size: size, safeArea: insets, horizontal: .regular, vertical: .regular,
@@ -104,7 +111,7 @@ struct SnapshotInfrastructureTests {
                 .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: {
                 geometry.insets = $0
             }
-            let controller = UIHostingController(rootView: content)
+            let controller = FrameHost(rootView: AnyView(content))
             let image = try await SnapshotCanvas.capture(controller, device: device) { controller in
                 #expect(controller.view.safeAreaInsets == insets)
                 #expect(controller.traitCollection.displayScale == 3)
@@ -112,6 +119,7 @@ struct SnapshotInfrastructureTests {
                 #expect(geometry.insets.bottom == insets.bottom && geometry.insets.trailing == insets.right)
             }
             #expect(image.width == Int(size.width * 2) && image.height == Int(size.height * 2))
+            #expect(controller.firstAppearance?.size == size)
             if size.width > 800 {
                 let data = try #require(image.dataProvider?.data)
                 let pixels = try #require(CFDataGetBytePtr(data))

@@ -92,10 +92,18 @@ final class SnapshotWorld {
     func setup(_ page: SetupFlow.Page) -> SetupFlow {
         settings.onboardingComplete = false
         let found = ServerDiscovery.Found(name: StubServer.info.name, url: StubServer.baseURL, options: StubServer.options)
-        return SetupFlow(settings: settings, library: library, start: page,
-                         discovery: ServerDiscovery(known: page == .looking ? [] : [found]),
-                         returning: (StubServer.baseURL, "synthetic-token", StubServer.info, StubServer.pins),
-                         autofocusFields: false)
+        let flow = SetupFlow(settings: settings, library: library, start: page,
+                             discovery: ServerDiscovery(known: page == .looking ? [] : [found]),
+                             returning: (StubServer.baseURL, "synthetic-token", StubServer.info, StubServer.pins),
+                             autofocusFields: false)
+        if page == .estimate {
+            let backedUp = Set((FixtureCatalog.ready + [FixtureCatalog.freed]).map(FixtureCatalog.original))
+            let measured = catalog.measure(excluding: backedUp)
+            flow.estimate = measured.estimate
+            flow.notBackedUp = measured.candidates.map(\.id)
+            flow.taskIDs = FirstTask.pick(measured.candidates)
+        }
+        return flow
     }
 
     func comparison(_ id: String) async throws -> CompareModel {
