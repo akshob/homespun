@@ -323,6 +323,15 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(app.openItem(), "\(pose): no viewer before an app link")
         app.open(URL(string: "homespun://activity")!)
         XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "\(pose): an app link left the viewer over the app")
+        let deadline = Date().addingTimeInterval(5)
+        var arrived = false
+        repeat {
+            let activity = app.tab("Activity")
+            arrived = activity.exists && activity.isSelected
+            if arrived { break }
+            usleep(200_000)
+        } while Date() < deadline
+        XCTAssertTrue(arrived, "\(pose): the app link didn't finish opening Activity")
         app.openTab("Library")
     }
 

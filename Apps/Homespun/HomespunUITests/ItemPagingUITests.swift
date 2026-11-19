@@ -35,9 +35,16 @@ final class ItemPagingUITests: XCTestCase {
             XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label),
                                                           object: play)], timeout: 8) == .completed
         }
-        XCTAssertTrue(labeled("Pause"), "the video didn't autoplay")
-        XCTAssertTrue(labeled("Play"), "the video didn't end")
         let position = app.sliders["item.position"]
+        let autoplayed = NSPredicate { _, _ in
+            // A short clip can finish during a snapshot, before XCTest observes its Pause label.
+            let elapsed = (position.value as? String ?? "").split(separator: " ").first ?? ""
+            let parts = elapsed.split(separator: ":").compactMap { Int($0) }
+            return (parts.count >= 2 && parts.contains { $0 > 0 }) || play.label == "Pause"
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: autoplayed, object: nil)], timeout: 8),
+                       .completed, "the video didn't autoplay")
+        XCTAssertTrue(labeled("Play"), "the video didn't end")
         let ended = position.value as? String ?? ""
         XCTAssertTrue(ended.hasPrefix("0:03") || ended.hasPrefix("0:02"), "no progress: \(ended)")
         play.tap()
