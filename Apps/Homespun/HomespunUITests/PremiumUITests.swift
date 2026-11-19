@@ -9,7 +9,9 @@ import XCTest
 final class PremiumUITests: XCTestCase {
     @MainActor func testReleaseScopeHidesPremiumAndAutomaticSurfaces() throws {
         let app = XCUIApplication()
-        app.launchArguments = ["-onboardingComplete", "YES", "-hideTips", "-releaseFeatures", "NO"]
+        app.launchArguments = ["-onboardingComplete", "YES", "-hideTips", "-releaseFeatures", "NO",
+                               "-freedBytes", "0", "-journey.sessions", "3", "-journey.setupSession", "1",
+                               "-journey.getStartedClosed", "NO"]
         app.launch()
         XCTAssertTrue(app.hasTab("Library"))
         app.openTab("Library")
@@ -23,6 +25,7 @@ final class PremiumUITests: XCTestCase {
             XCTAssertFalse(app.buttons["remove.confirm"].exists, link)
         }
         app.openTab("Activity")
+        XCTAssertTrue(app.descendants(matching: .any)["activity.getStarted"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.descendants(matching: .any)["activity.premiumMoment"].exists)
         XCTAssertFalse(app.buttons["activity.automatic"].exists)
         assertReleaseCopy(app)
