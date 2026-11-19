@@ -35,6 +35,19 @@ simulators for iPhone 18 Pro and iPhone Duo). The macOS build job builds once an
 its tests and the release server to the other jobs as an archive (`build`). Every job starts on a
 fresh machine. Pull requests from forks run after the owner approves them and never see secrets.
 
+Test jobs unpack the archive and run its **`.xctestrun`**, not a project or scheme, so they do
+not regenerate the project, resolve SwiftPM or clone packages. A missing manifest fails CI;
+local Macs with older builds keep the project-based fallback in `test_without_building`.
+Test selectors, per-test retries and `TEST_RUNNER_*` variables pass through unchanged. Server
+flows fail if their log reports a skip for missing runner configuration rather than silently
+passing without coverage.
+
+Only the app build and `watch` jobs need XcodeGen. They share the Xcode package checkout cache
+(`$CI_STATE/spm`, `xcode-spm-<Package.resolved hash>` with a prefix restore). Homebrew uses its
+normal install path; the optional download cache is deferred. The watch job still builds
+its own watchOS test bundle, then runs its own `.xctestrun` without resolving the graph a
+second time.
+
 Performance budgets (`perf.sh`) need a Mac with a large iPhone Duo library (`setup-perf-sim.sh`,
 35,000 photos) and steady timings, which shared cloud machines don't give; the owner runs them
 nightly on a Mac of their own, from a separate private repository, so no self-hosted runner is ever
@@ -50,10 +63,11 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `build.sh` | typechecks `scripts/demo-media.swift` with `DemoArt.swift`, then release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it); the app embeds its widgets and the Apple Watch app, so this also builds for the watchOS simulator (Xcode's watchOS SDK; no watch simulator runs) |
 | `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access, and the widgets' (`HomespunWidgetTests`, every size drawn) |
 | `watch.sh` | separate watchOS build and timed Crown/swipe regression on a fresh Apple Watch simulator (fresh, stale and arriving status, each crossing a minute boundary); no server or paired iPhone; downloads the watchOS runtime if missing |
+| `presim.sh <device type>` | queue the first simulator's boot in the background, overlapping cache/artifact setup; disabled when `SIM_SLOTS_DIR` is set |
 | `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DATED=`, `DUO_POSES=1`, `STUB_PORT=`; `SERVERLESS=1`: no server and no Photos access, for the demo) |
 | `dated-photos.swift` | small synthetic photos taken over the past months (EXIF dates) for `DATED=`: month headers, scrolling across months |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
-| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `RETRY_UI=1` retries a failed run once |
+| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `--first-device <run\|group>` selects the device for background boot; `RETRY_UI=1` retries a failed run once |
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
 | `tls-bench.zsh` | opt-in HTTPS upload measurement: a 1 GiB synthetic file, its own data folder and port 18787; never an installed server |
@@ -120,6 +134,40 @@ After a lane-only fix, use its targeted input to validate it without repeating t
 
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).
+
+After tool installation, CI reserves `$CI_STATE/presim/<device>.pending`, then starts
+`presim.sh`. Boot deliberately does not overlap brew: trials took **197–361 s** with a
+download-cache hit and **459 s** without it, versus **31 s** in the contemporaneous build
+job (no simulator). It overlaps the remaining package-cache/artifact setup instead.
+It publishes the created, boot-requested UDID atomically; `new_simulator`
+waits for publication, claims it once, renames it and waits on `bootstatus`. Later segments
+still create and delete their own simulator. A failed preparation deletes its simulator
+before allowing fresh creation; a stalled producer fails the segment instead of booting a
+second device. The separate `presim` timing row overlaps setup, so do not sum it with the
+segment total; the job's instrumented span includes that overlap only once.
+
+### Measured startup baseline
+
+The timestamp-only baseline is [run 44440086157](https://github.com/akshob/homespun/actions/runs/44440086157)
+at `55cc7d4`: **329.6 macOS machine-minutes**, or **204.4 minutes including shared-runner queues**.
+Its iPhone lane failed ItemViewer's Free Up state assertion and reachability on retry; the
+other lanes passed. Test windows include retries, so compare startup phases separately.
+
+| Phase | Baseline seconds |
+|---|---:|
+| Duo open: segment start → server launch (cover for comparison) | 1085 (325) |
+| Duo open: initial pose / fixed wait / seed import | 150 / 15 / 572 |
+| EXTRA: generation / import, iPhone 200 items | 30 / 221 |
+| DATED 240: generation / import, iPhone and Duo | 19–74 / 10–13 |
+| Unit: simulator / xcodebuild preparation / tests / teardown | 193 / 365 / 32 / 150 |
+| Brew, all macOS jobs | 21–38 |
+
+The Duo gap is not solely the first pose: media import dominates it. Keep pose/media
+ordering changes separate from package-free test execution. Fresh simulator setup
+(create, boot, privacy) plus seed import took **227 / 243 / 193 seconds** in copies,
+iPhone and unit respectively (unit has no seed import). That meets the 150-second
+threshold for considering later reuse **only** within the same-seed `iphone-flows` job;
+background preparation does not itself reuse a simulator between segments.
 
 ## Repository settings
 
