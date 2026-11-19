@@ -5,7 +5,7 @@ import Foundation
 /// `ServerCommand.run(connectors:)` from its own `main`.
 public enum ServerCommand {
     static let usage = """
-        usage: homespun-server [serve | pair | install-service | devices | revoke <device-id> | import <manifest>] [options]
+        usage: homespun-server [serve | pair | certificate | install-service | devices | revoke <device-id> | import <manifest>] [options]
 
           serve              Run the server (default).
           pair               Show a QR code and link to pair the Homespun app (one use, 10 minutes;
@@ -13,6 +13,8 @@ public enum ServerCommand {
           install-service    Copy the server to ~/.local/bin and start it now and whenever this
                              computer starts (systemd user service on Linux, LaunchAgent on macOS).
           devices            List paired devices.
+          certificate        Show the server's key fingerprint. --renew renews the certificate;
+                             --new-key replaces the key and keeps the previous identity in tls/.
           revoke <id>        Stop a device from using the server.
           import <manifest>  Record originals already kept elsewhere, and the compact copies made from
                              them before Homespun, so the app recognises those copies. The originals
@@ -77,9 +79,26 @@ public enum ServerCommand {
             let server = try await HomespunServer(configuration: configuration, connectors: connectors)
             switch command {
             case "serve":
-                print("Homespun Server \(ServerConfiguration.version) on \(configuration.host):\(configuration.port), "
+                print("Homespun Server \(ServerConfiguration.version) on https://\(configuration.host):\(configuration.port) "
+                      + "(key \(server.fingerprint.display)), "
                       + "data in \(configuration.dataDirectory.path)")
                 try await server.run()
+            case "certificate":
+                guard arguments.count <= 2,
+                      arguments.count == 1 || ["--renew", "--new-key"].contains(arguments[1]) else { print(usage); return 2 }
+                let identity: TLSIdentity
+                if arguments.contains("--new-key") {
+                    identity = try TLSStore.replaceKey(data: configuration.dataDirectory)
+                    print("Paired iPhones will confirm the new key with their pairing. Devices that were revoked or lost can't.")
+                } else if arguments.contains("--renew") {
+                    identity = try TLSStore.renew(data: configuration.dataDirectory)
+                } else {
+                    identity = server.identity.current
+                }
+                print("Key: \(identity.fingerprint.display)\nFingerprint: \(identity.fingerprint.base64url)")
+                print("curl: --pinnedpubkey \(identity.fingerprint.curlPin)")
+                print("Valid until: \(identity.notAfter.formatted(.iso8601))\nNames: \(identity.names.hostnames.joined(separator: ", "))")
+                print("File: \(TLSStore.identityFile(configuration.dataDirectory).path)")
             case "pair":
                 guard let minutes = pairingMinutes(Array(arguments.dropFirst())) else {
                     FileHandle.standardError.write(Data("pair: --minutes takes a number from 1 to 1440.\n".utf8))

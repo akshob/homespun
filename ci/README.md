@@ -7,7 +7,7 @@ pull request; the extended suite runs after the merge; everything runs every nig
 |---|---|---|
 | `pr.yml` | pull request to `main` | quick checks of what it changes (about 20–25 minutes): the server on Linux, the telemetry Worker, the website, the app's build and unit tests (PhotoKit ones included), and two short UI runs side by side: `quick` (iPhone: pair, back up, compare, Keep Original, free up, the viewer, Select All, rename) and `quick-duo` (iPhone Duo open in every pose). Watch, widget, shared-status or project changes also run `watch`. A draft gets the build and unit tests only. `PR / Result` sums it up; `main` requires it. |
 | `ci.yml` | after a merge to `main` | the extended suite: what changed, with every UI run, one per machine: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`) and iPhone Duo (`duo-cover`, `duo-grid`, `duo-open`), Try the Demo on both (`demo`, no server), and the server's package tests on macOS; the website goes live when it changed (environment `website`). One run at a time; only the newest waiting merge runs next. A failure opens or updates the issue "main is failing"; a pass closes it. |
-| `ci.yml` | Run workflow (any branch) | everything, with UI runs `none`, `quick` or `full`; `watch` or `duo-open` builds the app, runs its unit tests and that regression lane only |
+| `ci.yml` | Run workflow (any branch) | everything with UI runs `none`, `quick` or `full`; `watch` or `duo-open` builds the app, runs its unit tests and that regression lane only; `package` runs only the macOS package job |
 | `nightly.yml` | every night | everything on `main`, plus long runs (`large`: 3,000 photos). Failures: the issue "nightly is failing". |
 | `testflight.yml` | on demand, by the owner, who approves each run | only for a commit that passed the extended suite (`release-guard.py`); archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
 | `docker.yml` | `main` and version tags, when the server changes | the server's Docker image |
@@ -56,6 +56,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `RETRY_UI=1` retries a failed run once |
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
+| `tls-bench.zsh` | opt-in HTTPS upload measurement: a 1 GiB synthetic file, its own data folder and port 18787; never an installed server |
 | `plan.py` | what a run needs (see above) |
 | `release-guard.py <commit>` | whether a commit may go to TestFlight |
 | `site-check.py`, `htmlvalidate.json` | the website's checks |
@@ -64,6 +65,26 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `quarantine.txt` | known UI test failures, each with its issue, skipped until fixed |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
+Test servers accept only HTTPS. Readiness probes derive an SPKI pin from that test server's
+`tls/certificate.pem` and use `curl -k --pinnedpubkey`; port-occupancy checks are tokenless HTTPS
+probes. Pairing links carry `fp=`, and address-and-code runs authenticate the server's code proof.
+`ui.sh` gives tests `HOMESPUN_HOST_ACTION_FILE` (with the `TEST_RUNNER_` prefix when launching
+Xcode); writing `rotate-key` there rotates only that run's temporary server key.
+The address-recovery test uses `wrong-key-port` and `move-port`: it first refuses a separate-key
+server, then restarts the original data/key on the lane's port plus 1000. A DEBUG-only candidate
+list simulates Bonjour results in the simulator, but the TLS pin probe is real and cannot be
+bypassed. The harness tracks the current server PID so every restarted server is stopped.
+The pairing-retention UI test renames this iPhone, unpairs and pairs again with a fresh code
+from the `pairing-code` host action. It checks the confirmed name and one active Devices row.
+
+Nightly's Linux server job opts into `HOMESPUN_PERF=1 swift test -c release --filter
+tlsUploadThroughput`: 256 MiB through real registration, chunk upload, disk staging and hashing.
+It compares a test-only plaintext listener with the production TLS builder; production never
+serves plaintext. It reports both rates and checks the Linux budgets (TLS/plain ≥ 0.70 and TLS
+≥ 200 MiB/s). macOS only reports the rates when explicitly opted in. `tls-bench.zsh` measures
+HTTPS alone, since a production server has no plaintext comparison path; run it explicitly on
+a test machine with a built release server, not against an installed service.
+
 Every UI and unit job also uploads `timing-<run>-<workflow id>` for **7 days**, even when it
 passes: `<segment>-timing.tsv`, logs and each `*.xcresult/database.sqlite3` (no `Data/`).
 `stamp` in `env.sh` writes `⏱ <UTC time> <segment> <phase>` to the job log and tab-separated
@@ -84,6 +105,10 @@ per-test activity analysis. Lane membership, retries and quarantine are unchange
 The `watch` run is in `full` and nightly too. Its 15-second per-step budget includes XCUITest's
 idle wait: merely finding an element can pass even when SwiftUI is continuously relaying out.
 Planner regression tests: `python3 -m unittest discover -s ci -p 'test_*.py'`.
+After a test-only package fix, `gh workflow run ci.yml --ref <branch> -f ui=package` validates
+only the macOS package job at the new head. This avoids repeating a full passing UI matrix:
+GitHub's Re-run Job otherwise checks out the original, immutable commit. Package failures
+keep their complete log in the `package-results-<run>` artifact.
 After a lane-only fix, use its targeted input to validate it without repeating the full matrix.
 
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once

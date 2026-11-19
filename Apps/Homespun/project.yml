@@ -49,7 +49,9 @@ targets:
         UIBackgroundModes: [processing]
         # Backups the person starts continue in the background with the system's progress.
         BGTaskSchedulerPermittedIdentifiers: [photos.homespun.app.automatic, "$(PRODUCT_BUNDLE_IDENTIFIER).backup.*"]
-        # Plain HTTP only to servers on the home network (IP addresses and .local names).
+        # Pinned self-signed HTTPS on IP addresses, .local and unqualified names.
+        # ATS won't let the pin check accept a self-signed certificate elsewhere; iOS 17+
+        # blocks IP addresses without this. ServerClient refuses plain HTTP.
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
         # Only the system's encryption (HTTPS, Keychain): exempt, so uploads skip the export question.

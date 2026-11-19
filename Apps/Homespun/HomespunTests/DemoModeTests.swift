@@ -51,9 +51,9 @@ import Testing
         }
 
         func pairedClient() async throws -> ServerClient {
-            let pairing = try await ServerClient(baseURL: DemoServer.baseURL, session: DemoServer.session)
-                .pair(code: "DEMO-0000", deviceName: "Test iPhone")
-            return ServerClient(baseURL: DemoServer.baseURL, token: pairing.token, session: DemoServer.session)
+            let pairing = try await ServerPairing.pair(link: .init(serverURL: DemoServer.baseURL, code: "DEMO-2468"),
+                deviceName: "Test iPhone", installID: try DefaultsInstallation(defaults: session.defaults).load().id)
+            return ServerClient(baseURL: DemoServer.baseURL, token: pairing.response.token, trust: .demo)
         }
     }
 
@@ -188,7 +188,8 @@ import Testing
         model.settings.onboardingComplete = true
         let client = try await fixture.pairedClient()
         try model.settings.finishPairing(serverURL: DemoServer.baseURL,
-                                          response: .init(deviceID: "demo-iphone", token: client.token!, server: DemoServer.info))
+                                          response: .init(deviceID: "demo-iphone", token: client.token!, server: DemoServer.info),
+                                          pins: ServerPins(pins: [DemoServer.fingerprint], source: "code"))
         #expect(model.settings.isPaired && model.settings.client?.session === DemoServer.session)
         #expect(Keychain.token(for: DemoServer.baseURL.absoluteString) == nil, "the demo's token went to the Keychain")
         #expect(UserDefaults.standard.object(forKey: "onboardingComplete") as? Bool == own, "the demo changed the app's own setting")
@@ -230,7 +231,8 @@ import Testing
         let demo = AppModel(demo: fixture.session, premium: locked)
         let client = try await fixture.pairedClient()
         try demo.settings.finishPairing(serverURL: DemoServer.baseURL,
-                                        response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info))
+                                        response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                                        pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
         let photo = try sample(fixture.session.library, "photo")
         let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: demo.job.ledger,
                                       pollInterval: .zero)
@@ -282,7 +284,8 @@ import Testing
         let premium = Premium(ownBuild: true, listens: false)
         let own = AppModel(demo: ownSession, premium: premium)
         try own.settings.finishPairing(serverURL: DemoServer.baseURL,
-                                       response: .init(deviceID: "own", token: "own-token", server: DemoServer.info))
+                                       response: .init(deviceID: "own", token: "own-token", server: DemoServer.info),
+                                       pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
         let demo = AppModel(demo: fixture.session, premium: premium)
         let original = StatusSnapshot.sample(), url = fixture.folder.appendingPathComponent("status.json")
         try FileManager.default.createDirectory(at: fixture.folder, withIntermediateDirectories: true)
@@ -309,6 +312,75 @@ import Testing
         discovery.stop()
         let found = try #require(discovery.ready.first)
         #expect(found.name == DemoServer.name && found.options?.canApprove == true && found.url == DemoServer.baseURL)
+    }
+
+    @Test func demoPairsByCommitRevealAndVerifiesItsIdentity() async throws {
+        let fixture = try await Fixture.make()
+        defer { withExtendedLifetime(fixture) {} }
+        var number: String?
+        let paired = try await ServerPairing.approve(url: DemoServer.baseURL, deviceName: "Test iPhone",
+            installID: try DefaultsInstallation(defaults: fixture.session.defaults).load().id,
+            onNumber: { value, _ in number = value }, confirmNumber: { _ in
+                #expect(await fixture.session.server.snapshot.devices.allSatisfy { $0.installID == nil })
+                return true
+            })
+        #expect(number?.count == 6 && paired.pins.pins == [DemoServer.fingerprint])
+        let verified = try await ServerPairing.verify(url: DemoServer.baseURL, token: paired.response.token)
+        #expect(verified.fingerprint == DemoServer.fingerprint && verified.url.scheme == "https")
+    }
+
+    @Test func compareDownloadsThroughItsOwnDemoSession() async throws {
+        let fixture = try await Fixture.make()
+        let client = try await fixture.pairedClient()
+        let original = try sample(fixture.session.library, "photo")
+        let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: fixture.ledger, pollInterval: .zero)
+        _ = try await compactor.compact(original.id, compactNow: true) { _ in }
+        let entry = try #require(await fixture.ledger.entry(for: original.id))
+        let asset = try #require(entry.serverAssetID)
+        let file = try await CompareModel.fetch(client, assetID: asset, role: .photo,
+                                                to: fixture.folder.appendingPathComponent("compare"), name: "original.jpg") { _, _ in }
+        #expect(try Fingerprint.sha256(of: file) == asset)
+    }
+
+    @Test func rejectingTheNumberNeverDisclosesTheInstallationOrCreatesADevice() async throws {
+        let fixture = try await Fixture.make()
+        do {
+            _ = try await ServerPairing.approve(url: DemoServer.baseURL, deviceName: "Test iPhone",
+                installID: UUID().uuidString, onNumber: { _, _ in }, confirmNumber: { _ in false })
+            Issue.record("An unconfirmed server received an installation identity")
+        } catch is ServerPairing.IdentityFailure {}
+        #expect(await fixture.session.server.snapshot.devices.allSatisfy { $0.installID == nil && $0.token == nil })
+    }
+
+    @Test func rePairSendsThePersistentInstallIDAndConfirmedName() async throws {
+        let fixture = try await Fixture.make()
+        let installation = DefaultsInstallation(defaults: fixture.session.defaults)
+        let original = try installation.load()
+        try installation.confirm(name: "Family Phone")
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+                                   tokens: fixture.session.tokens, isDemo: true)
+        let link = PairingLink(serverURL: DemoServer.baseURL, code: "DEMO-2468")
+        try await settings.pair(link)
+        let first = try #require(await fixture.session.server.snapshot.devices.first { $0.token != nil })
+        #expect(first.name == "Family Phone" && first.installID == original.id)
+        settings.unpair()
+        #expect(try settings.pairingIdentity().id == original.id && settings.pairingName == "Family Phone")
+        try await settings.pair(link)
+        let again = try #require(await fixture.session.server.snapshot.devices.first { $0.token != nil })
+        #expect(again.id == first.id && again.name == "Family Phone" && settings.pairingName == "Family Phone")
+        #expect(await fixture.session.server.snapshot.devices.filter { $0.token != nil }.count == 1)
+    }
+
+    @Test func demoMigratesItsOwnHTTPPairingWithoutReadingTheKeychain() async throws {
+        let fixture = try await Fixture.make()
+        let old = "http://\(DemoServer.host):8787"
+        fixture.session.defaults.set(URL(string: old)!, forKey: "serverURL")
+        try fixture.session.tokens.setToken("demo token", for: old)
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+                                   tokens: fixture.session.tokens, isDemo: true)
+        #expect(settings.serverURL == DemoServer.baseURL && settings.pins?.pins == [DemoServer.fingerprint])
+        #expect(fixture.session.tokens.token(for: old) == nil)
+        #expect(fixture.session.tokens.token(for: DemoServer.baseURL.absoluteString) == "demo token")
     }
 
     final class Messages: @unchecked Sendable {

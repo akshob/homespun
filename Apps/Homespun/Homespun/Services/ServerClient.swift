@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import os
 import UniformTypeIdentifiers
 
 /// Talks to Homespun Server's `/api/v1`.
@@ -13,18 +14,121 @@ struct ServerClient: Sendable {
         var errorDescription: String? { message }
     }
 
-    let baseURL: URL
+    private struct ConnectionState: Sendable {
+        var url: URL
+        var session: URLSession
+        var delegate: ServerTrustDelegate?
+    }
+    private let connection: OSAllocatedUnfairLock<ConnectionState>
+    var baseURL: URL { connection.withLock { $0.url } }
     var token: String?
-    var session: URLSession = .shared
+    let trust: ServerTrust
+    var session: URLSession { connection.withLock { $0.session } }
+    var delegate: ServerTrustDelegate? { connection.withLock { $0.delegate } }
+    let reconnect: (@Sendable (URL, String?) async -> ServerClient?)?
     var timeout: TimeInterval = 60
     static let chunkSize = 8 << 20
 
-    private func request(_ path: String, method: String = "GET") -> URLRequest {
+    init(baseURL: URL, token: String? = nil, trust: ServerTrust, session: URLSession? = nil,
+         delegate: ServerTrustDelegate? = nil,
+         reconnect: (@Sendable (URL, String?) async -> ServerClient?)? = nil) {
+        self.token = token
+        self.trust = trust
+        self.reconnect = reconnect
+        let state: ConnectionState
+        if trust == .demo {
+            state = ConnectionState(url: baseURL, session: session ?? DemoServer.session, delegate: nil)
+        } else if let session {
+            state = ConnectionState(url: baseURL, session: session, delegate: delegate ?? session.delegate as? ServerTrustDelegate)
+        } else {
+            let pair = ServerSessions.shared.session(for: baseURL, trust: trust)
+            state = ConnectionState(url: baseURL, session: pair.0, delegate: pair.1)
+        }
+        connection = OSAllocatedUnfairLock(initialState: state)
+    }
+
+    struct IdentityMismatch: LocalizedError {
+        var observed: ServerKeyFingerprint?
+        var errorDescription: String? { "This server answered with a different security key." }
+    }
+
+    private func request(_ path: String, method: String = "GET") throws -> URLRequest {
+        if case .blocked(let reason) = trust { throw Failure(status: 0, message: reason, code: "tls_blocked") }
+        guard baseURL.scheme == "https" else {
+            throw Failure(status: 0, message: "Homespun only connects with encryption.", code: "insecure")
+        }
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/" + path))
         request.httpMethod = method
         request.timeoutInterval = timeout
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         return request
+    }
+
+    static func isConnectionFailure(_ error: any Error) -> Bool {
+        guard let error = error as? URLError else { return false }
+        return [.timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost, .dnsLookupFailed,
+                .secureConnectionFailed].contains(error.code)
+    }
+
+    private func retarget(_ request: URLRequest, to url: URL) throws -> URLRequest {
+        guard let original = request.url, var components = URLComponents(url: original, resolvingAgainstBaseURL: false),
+              let destination = URLComponents(url: url, resolvingAgainstBaseURL: false), destination.scheme == "https" else {
+            throw Failure(status: 0, message: "Homespun only connects with encryption.", code: "insecure")
+        }
+        components.scheme = destination.scheme
+        components.host = destination.host
+        components.port = destination.port
+        guard let target = components.url else { throw URLError(.badURL) }
+        var request = request
+        request.url = target
+        return request
+    }
+
+    private func run<Value>(_ request: URLRequest, retrying: Bool = false,
+                            _ operation: (URLSession, URLRequest) async throws -> Value) async throws -> Value {
+        let current = connection.withLock { $0 }
+        var request = try retarget(request, to: current.url)
+        let authorization = request.value(forHTTPHeaderField: "Authorization")
+        request.setValue(nil, forHTTPHeaderField: "Authorization")
+        let started = Date()
+        do {
+            if case .pinned(let pins) = trust, token != nil || authorization != nil {
+                guard let delegate = current.delegate else { throw ServerPairing.IdentityFailure() }
+                let timeout = timeout
+                try await delegate.pinGate.verify {
+                    var probe = URLRequest(url: current.url.appendingPathComponent("api/v1/health"))
+                    probe.timeoutInterval = timeout
+                    _ = try await current.session.data(for: probe)
+                    guard let observed = delegate.observed, pins.contains(observed) else {
+                        ServerSessions.shared.reset(current.url)
+                        current.session.invalidateAndCancel()
+                        throw URLError(.secureConnectionFailed)
+                    }
+                }
+            }
+            request.setValue(token.map { "Bearer \($0)" } ?? authorization, forHTTPHeaderField: "Authorization")
+            return try await operation(current.session, request)
+        } catch {
+            let mismatch = current.delegate?.mismatch(since: started) == true
+            if mismatch { ServerSessions.shared.markSuspect(current.url) }
+            let replacedSession = (error as? URLError)?.code == .cancelled && !Task.isCancelled
+            if !retrying, mismatch || Self.isConnectionFailure(error) || replacedSession, let reconnect,
+               let replacement = await reconnect(current.url, token),
+               replacement.trust == trust, replacement.token == token, replacement.baseURL != current.url {
+                let updated = replacement.connection.withLock { $0 }
+                connection.withLock { $0 = updated }
+                return try await run(request, retrying: true, operation)
+            }
+            if mismatch { throw IdentityMismatch(observed: current.delegate?.refused) }
+            throw error
+        }
+    }
+
+    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        try await run(request) { session, request in try await session.data(for: request) }
+    }
+
+    private func download(for request: URLRequest) async throws -> (URL, URLResponse) {
+        try await run(request) { session, request in try await session.download(for: request) }
     }
 
     private func check(_ data: Data, _ response: URLResponse, accepting: Set<Int> = [200, 201, 202]) throws -> Int {
@@ -38,18 +142,19 @@ struct ServerClient: Sendable {
 
     private func send<Response: Decodable>(_ path: String, method: String = "GET", json: (some Encodable)? = Optional<Int>.none,
                                            as type: Response.Type) async throws -> Response {
-        var request = request(path, method: method)
+        var request = try request(path, method: method)
         if let json {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try ServerAPI.encoder.encode(json)
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await data(for: request)
         _ = try check(data, response)
         return try ServerAPI.decoder.decode(Response.self, from: data)
     }
 
-    func pair(code: String, deviceName: String) async throws -> ServerAPI.PairResponse {
-        try await send("pair", method: "POST", json: ServerAPI.PairRequest(code: code, deviceName: deviceName),
+    func pair(code: String, deviceName: String, challenge: String, installID: String) async throws -> ServerAPI.PairResponse {
+        try await send("pair", method: "POST", json: ServerAPI.PairRequest(code: code, deviceName: deviceName,
+                                                                       challenge: challenge, installID: installID),
                        as: ServerAPI.PairResponse.self)
     }
 
@@ -58,19 +163,45 @@ struct ServerClient: Sendable {
     }
 
     /// Asks someone at the server to allow this device.
-    func requestApproval(deviceName: String) async throws -> ServerAPI.ApprovalTicket {
-        try await send("pair/requests", method: "POST", json: ServerAPI.ApprovalRequest(deviceName: deviceName),
+    func requestApproval(deviceName: String, commitment: String) async throws -> ServerAPI.ApprovalTicket {
+        try await send("pair/requests", method: "POST", json: ServerAPI.ApprovalRequest(deviceName: deviceName,
+                                                                                   commitment: commitment),
                        as: ServerAPI.ApprovalTicket.self)
     }
+
+    func pairingChallenge(nonce: String) async throws -> ServerAPI.CodeChallenge {
+        try await send("pair/challenge", method: "POST", json: ServerAPI.CodeChallengeRequest(nonce: nonce),
+                       as: ServerAPI.CodeChallenge.self)
+    }
+
+    func verifyIdentity(keyID: String, nonce: String) async throws -> ServerAPI.IdentityProof {
+        try await send("tls/verify", method: "POST", json: ServerAPI.IdentityRequest(keyID: keyID, nonce: nonce),
+                       as: ServerAPI.IdentityProof.self)
+    }
+
+    func revealApproval(_ id: String, nonce: String) async throws {
+        var request = try request("pair/requests/\(id)/reveal", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try ServerAPI.encoder.encode(ServerAPI.ApprovalReveal(nonce: nonce))
+        let (data, response) = try await data(for: request)
+        _ = try check(data, response)
+    }
+
+    func health() async throws -> ServerAPI.Health { try await send("health", as: ServerAPI.Health.self) }
 
     /// For a client whose token is the ticket's secret.
     func approvalStatus(_ id: String) async throws -> ServerAPI.ApprovalStatus {
         try await send("pair/requests/\(id)", as: ServerAPI.ApprovalStatus.self)
     }
 
+    func completeApproval(_ id: String, installID: String) async throws -> ServerAPI.PairResponse {
+        try await send("pair/requests/\(id)/complete", method: "POST",
+                       json: ServerAPI.ApprovalCompletion(installID: installID), as: ServerAPI.PairResponse.self)
+    }
+
     /// Withdraws the question (closing the dialog). For a client whose token is the ticket's secret.
     func cancelApproval(_ id: String) async {
-        _ = try? await session.data(for: request("pair/requests/\(id)", method: "DELETE"))
+        _ = try? await data(for: request("pair/requests/\(id)", method: "DELETE"))
     }
 
     /// A one-time code for pairing another device.
@@ -91,7 +222,7 @@ struct ServerClient: Sendable {
     }
 
     func removeConnector(_ id: String) async throws {
-        let (data, response) = try await session.data(for: request("connectors/\(id)", method: "DELETE"))
+        let (data, response) = try await data(for: request("connectors/\(id)", method: "DELETE"))
         _ = try check(data, response, accepting: [204])
     }
 
@@ -159,9 +290,9 @@ struct ServerClient: Sendable {
 
     /// Unpairs a device (this one too: it can't use the server afterwards).
     func removeDevice(_ id: String) async throws {
-        var request = request("devices/\(id)", method: "DELETE")
+        var request = try request("devices/\(id)", method: "DELETE")
         request.timeoutInterval = 15
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await data(for: request)
         _ = try check(data, response, accepting: [204])
     }
 
@@ -169,7 +300,7 @@ struct ServerClient: Sendable {
     /// (its own name, `IMG_1234.HEIC`; `fallback` from servers that don't send one). Restore Original.
     func downloadOriginalFile(assetID: String, role: ServerAPI.ResourceRole, to directory: URL,
                               fallback: String) async throws -> URL {
-        let (temporary, response) = try await session.download(for: request("assets/\(assetID)/original/\(role.rawValue)"))
+        let (temporary, response) = try await download(for: request("assets/\(assetID)/original/\(role.rawValue)"))
         let http = response as? HTTPURLResponse
         guard http?.statusCode == 200 else {
             let data = (try? Data(contentsOf: temporary)) ?? Data()
@@ -189,7 +320,7 @@ struct ServerClient: Sendable {
 
     /// Downloads an original from the server (for comparing it with its compact copy).
     func downloadOriginal(assetID: String, role: ServerAPI.ResourceRole, to directory: URL, name: String) async throws -> URL {
-        let (temporary, response) = try await session.download(for: request("assets/\(assetID)/original/\(role.rawValue)"))
+        let (temporary, response) = try await download(for: request("assets/\(assetID)/original/\(role.rawValue)"))
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else {
             let data = (try? Data(contentsOf: temporary)) ?? Data()
@@ -235,10 +366,10 @@ struct ServerClient: Sendable {
             try Task.checkCancellation()
             try handle.seek(toOffset: UInt64(min(offset, size)))
             let chunk = offset < size ? try handle.read(upToCount: Self.chunkSize) ?? Data() : Data()
-            var request = request("", method: "PUT")
+            var request = try request("", method: "PUT")
             request.url = URL(string: baseURL.absoluteString + "/api/v1/assets/\(assetID)/resources/\(role.rawValue)?offset=\(offset)")
             request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-            let (data, response) = try await session.upload(for: request, from: chunk)
+            let (data, response) = try await run(request) { session, request in try await session.upload(for: request, from: chunk) }
             let code = try check(data, response, accepting: [200, 409])
             if code == 409 {
                 conflicts += 1
@@ -263,7 +394,7 @@ struct ServerClient: Sendable {
 
     /// Downloads a compact file and checks its size and SHA-256.
     func download(_ compact: ServerAPI.CompactResource, assetID: String, to directory: URL) async throws -> URL {
-        let (temporary, response) = try await session.download(for: request("assets/\(assetID)/compact/\(compact.role.rawValue)"))
+        let (temporary, response) = try await download(for: request("assets/\(assetID)/compact/\(compact.role.rawValue)"))
         _ = try check(Data(), response)
         let destination = directory.appendingPathComponent(compact.filename.split(separator: "/").last.map(String.init) ?? "compact")
         try? FileManager.default.removeItem(at: destination)

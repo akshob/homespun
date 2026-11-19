@@ -27,6 +27,7 @@ final class SetupFlow {
     struct PairTarget: Hashable, Identifiable {
         var url: URL
         var name: String?
+        var serviceName: String?
         /// Found on this Wi‑Fi.
         var discovered = false
         /// The new server the Waiting page was looking for (Ready then says "Paired with …", 3.5).
@@ -69,7 +70,7 @@ final class SetupFlow {
     private var lookingTask: Task<Void, Never>?
 
     /// A Keychain token from an earlier install that still works (01·6.9).
-    private(set) var returning: (url: URL, token: String, server: ServerAPI.ServerInfo)?
+    private(set) var returning: (url: URL, token: String, server: ServerAPI.ServerInfo, pins: ServerPins)?
     /// Set Up Something Else was chosen: Welcome stays.
     private var declinedReturning = false
 
@@ -214,7 +215,7 @@ final class SetupFlow {
 
     func target(for id: String) -> PairTarget? {
         guard let found = discovery.found(id), let url = found.url else { return nil }
-        return PairTarget(url: url, name: found.options?.serverName ?? found.name, discovered: true)
+        return PairTarget(url: url, name: found.options?.serverName ?? found.name, serviceName: found.name, discovered: true)
     }
 
     func options(for target: PairTarget) -> ServerAPI.PairingOptions? {
@@ -253,13 +254,25 @@ final class SetupFlow {
         guard !settings.isPaired, !settings.isDemo, returning == nil, !declinedReturning, root == .welcome else { return }
         for account in Self.keychainServers() {
             guard let url = URL(string: account), let token = Keychain.token(for: account) else { continue }
-            var client = ServerClient(baseURL: url, token: token)
-            client.timeout = 3
-            if let info = try? await client.info() {
-                returning = (url, token, info)
+            do {
+                let newURL: URL
+                let pins: ServerPins
+                if url.scheme == "https", let saved = Keychain.pins(for: account), saved.pins.isEmpty {
+                    newURL = url
+                    pins = saved
+                } else {
+                    let verified = try await ServerPairing.verify(url: url, token: token,
+                        allowSystemTrust: !Keychain.hasPinRecord(for: account) && url.scheme == "https")
+                    newURL = verified.url
+                    pins = ServerPins(pins: verified.systemTrusted ? [] : [verified.fingerprint], source: "upgrade")
+                }
+                var client = ServerClient(baseURL: newURL, token: token, trust: pins.trust)
+                client.timeout = 3
+                let info = try await client.info()
+                returning = (newURL, token, info, pins)
                 withAnimation { root = .welcomeBack }
                 return
-            }
+            } catch { continue }
         }
     }
 
@@ -268,7 +281,7 @@ final class SetupFlow {
     func reconnect() throws {
         guard let returning else { return }
         try settings.finishPairing(serverURL: returning.url, response: .init(deviceID: "", token: returning.token,
-                                                                            server: returning.server))
+                                                                            server: returning.server), pins: returning.pins)
         paired(.returning)
     }
 
@@ -280,12 +293,7 @@ final class SetupFlow {
 
     /// Servers with a token in the Keychain (the same items `Keychain` keeps).
     private static func keychainServers() -> [String] {
-        let query: [CFString: Any] = [kSecClass: kSecClassGenericPassword, kSecAttrService: "photos.homespun.server-token",
-                                      kSecReturnAttributes: true, kSecMatchLimit: kSecMatchLimitAll]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let items = result as? [[String: Any]] else { return [] }
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }
+        Keychain.accounts()
     }
 
     // MARK: After pairing

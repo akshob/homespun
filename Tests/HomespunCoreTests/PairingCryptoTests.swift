@@ -31,6 +31,8 @@ private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0)
     let proxy = PairingLink(serverURL: URL(string: "https://photos.example.com")!, code: "K7Q4-M9XT")
     #expect(PairingLink(proxy.url) == proxy)
     #expect(!proxy.url.absoluteString.contains("fp="))
+    let ipv6 = PairingLink(serverURL: URL(string: "https://[::1]:8787")!, code: "K7Q4-M9XT", fingerprint: fingerprint)
+    #expect(PairingLink(ipv6.url) == ipv6)
     #expect(PairingLink(URL(string: "homespun://pair?server=nas.local&code=X")!)?.fingerprint == nil)
 }
 

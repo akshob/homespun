@@ -19,6 +19,7 @@ final class ServerDiscovery {
         var unreachable = false
         /// This iPhone has a token for it (paired before).
         var pairedBefore = false
+        var fingerprintHint: ServerKeyFingerprint?
 
         /// Known well enough to recommend or pair with.
         var isReady: Bool { url != nil && (options != nil || needsUpdate) }
@@ -42,10 +43,12 @@ final class ServerDiscovery {
     private var patience: Task<Void, Never>?
     /// Servers that answer without looking on the network (the demo's pretend server); nil: Bonjour.
     private let pretend: [(name: String, url: URL)]?
+    private let describeOptions: Bool
     private var pretending: Task<Void, Never>?
 
-    init(pretend: [(name: String, url: URL)]? = nil) {
+    init(pretend: [(name: String, url: URL)]? = nil, describeOptions: Bool = true) {
         self.pretend = pretend
+        self.describeOptions = describeOptions
     }
 
     /// Servers that can be recommended, as the advisor sees them.
@@ -70,11 +73,17 @@ final class ServerDiscovery {
             return
         }
         guard browser == nil else { return }
-        let browser = NWBrowser(for: .bonjour(type: "_homespun._tcp", domain: nil), using: .tcp)
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_homespun._tcp", domain: nil), using: .tcp)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
-            let endpoints = results.compactMap { result -> (String, NWEndpoint)? in
-                if case .service(let name, _, _, _) = result.endpoint { return (name, result.endpoint) }
-                return nil
+            let endpoints = results.compactMap { result -> (String, NWEndpoint, ServerKeyFingerprint?)? in
+                guard case .service(let name, _, _, _) = result.endpoint else { return nil }
+                let fingerprint: ServerKeyFingerprint?
+                if case .bonjour(let record) = result.metadata {
+                    fingerprint = record["fp"].flatMap(ServerKeyFingerprint.init(base64url:))
+                } else {
+                    fingerprint = nil
+                }
+                return (name, result.endpoint, fingerprint)
             }
             Task { @MainActor in self?.update(endpoints) }
         }
@@ -135,14 +144,20 @@ final class ServerDiscovery {
         #endif
     }()
 
-    private func update(_ endpoints: [(String, NWEndpoint)]) {
+    private func update(_ endpoints: [(String, NWEndpoint, ServerKeyFingerprint?)]) {
         let endpoints = endpoints.filter { Self.only?.contains($0.0) ?? true }
         let names = Set(endpoints.map(\.0))
         servers.removeAll { !names.contains($0.name) }
-        for (name, endpoint) in endpoints where !servers.contains(where: { $0.name == name }) {
-            servers.append(Found(name: name, url: nil))
-            lastChange = Date()
-            Task { await describe(name, endpoint) }
+        for (name, endpoint, fingerprint) in endpoints {
+            if let index = servers.firstIndex(where: { $0.name == name }) {
+                servers[index].fingerprintHint = fingerprint
+                if let fingerprint, Keychain.recognises(fingerprint) { servers[index].pairedBefore = true }
+            } else {
+                servers.append(Found(name: name, url: nil,
+                                     pairedBefore: fingerprint.map(Keychain.recognises) ?? false, fingerprintHint: fingerprint))
+                lastChange = Date()
+                Task { await describe(name, endpoint) }
+            }
         }
     }
 
@@ -153,19 +168,23 @@ final class ServerDiscovery {
         }
         set(name) {
             $0.url = url
-            $0.pairedBefore = Keychain.token(for: url.absoluteString) != nil
+            $0.pairedBefore = $0.pairedBefore || Keychain.token(for: url.absoluteString) != nil
+                || Keychain.token(for: url.absoluteString.replacingOccurrences(of: "https://", with: "http://")) != nil
         }
-        await ask(name, url)
+        if describeOptions { await ask(name, url) }
     }
 
     /// Asks a server found at `url` what it runs on.
     private func ask(_ name: String, _ url: URL) async {
-        var client = ServerClient(baseURL: url)
+        var client = ServerClient(baseURL: url, trust: url.host == DemoServer.host ? .demo : .capture(expected: nil))
+        defer { if client.trust != .demo { client.session.finishTasksAndInvalidate() } }
         client.timeout = 6
         do {
             let options = try await client.pairingOptions()
-            set(name) { $0.options = options }
+            set(name) { $0.options = options; $0.needsUpdate = (options.pairingVersion ?? 0) < 2 }
         } catch let failure as ServerClient.Failure where failure.status == 404 {
+            set(name) { $0.needsUpdate = true }
+        } catch let error as URLError where error.code == .secureConnectionFailed {
             set(name) { $0.needsUpdate = true }
         } catch {
             set(name) { $0.unreachable = true }
@@ -192,7 +211,7 @@ final class ServerDiscovery {
                     if case .hostPort(let host, let port) = connection.currentPath?.remoteEndpoint {
                         var address = "\(host)"
                         if let percent = address.firstIndex(of: "%") { address = String(address[..<percent]) }
-                        box.finish(URL(string: "http://\(address):\(port.rawValue)"))
+                        box.finish(URL(string: "https://\(address):\(port.rawValue)"))
                     } else {
                         box.finish(nil)
                     }

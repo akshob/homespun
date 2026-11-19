@@ -15,6 +15,8 @@ and may not exist in other checkouts.
   - `HomespunServerKit` (AGPL, library) and `homespun-server` (thin CLI): Hummingbird 2,
     system SQLite through `CSQLite`, AsyncHTTPClient for Immich. API types shared with the
     app live in `HomespunCore/ServerAPI.swift` (snake_case JSON; use `ServerAPI.encoder`).
+    Server identities and HTTPS live in `TLSIdentity`, `Transport`, and `TLSMaintenance`;
+    app pin checks and authenticated pairing live in `Services/ServerTrust` and `ServerPairing`.
     Coding keys with acronyms must survive snake_case both ways (`videoCrf`, `assetId`).
 - iOS app: `Apps/Homespun`, generated with XcodeGen (`project.yml`). Do not commit
   the generated `.xcodeproj` or signing settings. Bundle ID: `photos.homespun.app`
@@ -103,6 +105,10 @@ and may not exist in other checkouts.
 
 ## Safety invariants (never weaken)
 
+- The app talks to Homespun Server only over TLS: a pinned SPKI on the home network, or system
+  trust for an HTTPS name with a public certificate. Never send a token or pairing code before
+  authenticating the server's key (link fingerprint, SAS, code proof, or token proof). No plaintext
+  fallback; never weaken pin checks. The server's private key stays in its data folder.
 - An original's SHA-256 is its identity.
 - The app may ask iOS to delete an original only if the server's stored copy
   matches its size and SHA-256 and the compact copy was imported and verified
@@ -135,6 +141,7 @@ and may not exist in other checkouts.
 - Everything runs on GitHub's machines (the repository is public). Never attach a self-hosted
   runner to this repository; performance budgets run from a separate private repository. Test
   servers use their own data and ports, never a real server's (port 8787).
+  They use HTTPS; readiness probes use `curl -k --pinnedpubkey` with the test server's key.
 - A new UI test class goes into a run in `ci/lane.sh` (with a free port); a new run also goes into
   `FULL` in `ci/plan.py` (after merge) and the nightly list in `.github/workflows/nightly.yml`; only
   short, critical-path tests belong in `quick`/`quick-duo`. New test media goes into `ci/`.

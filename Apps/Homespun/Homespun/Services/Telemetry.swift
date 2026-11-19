@@ -395,6 +395,8 @@ extension Telemetry {
         /// "domain:code" for an error, without its message (messages can hold names).
         static func code(_ error: Error) -> String {
             switch error {
+            case is ServerClient.IdentityMismatch, is ServerPairing.IdentityFailure:
+                return "tls_identity"
             case let failure as ServerClient.Failure:
                 return "server:" + (failure.code ?? (failure.status == 0 ? "none" : String(failure.status)))
             case let failure as PhotoLibrary.Failure:

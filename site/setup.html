@@ -41,7 +41,8 @@ cd ~/homespun &amp;&amp; swift build -c release --product homespun-server</code>
         <code>~/.local/bin/homespun-server</code>, and it starts again whenever you log in:
         <pre><code>~/homespun/.build/release/homespun-server install-service --data ~/Pictures/Homespun</code></pre></li>
       <li><strong>Pair the app.</strong> Open Homespun on your iPhone, tap <strong>Find My Home Computer</strong>, choose
-        your Mac, and click <strong>Allow</strong> on the Mac. Both screens show the same number.</li>
+        your Mac, compare the same six-digit number on both screens, and click <strong>Allow</strong> on the Mac
+        only if the numbers match. Then tap <strong>The Numbers Matched</strong> on the iPhone.</li>
     </ol>
 
     <h2 id="linux">On Linux</h2>
@@ -87,7 +88,8 @@ cd ~/homespun &amp;&amp; swift build -c release --product homespun-server</code>
         <pre><code>docker exec homespun homespun-server pair</code></pre>
         In Container Manager, open the container's Terminal tab and run <code>homespun-server pair</code>.</li>
     </ol>
-    <p>Back up both folders. To update, pull the new image and start it again; your data stays in the folders:</p>
+    <p>Back up both folders. The <code>data/tls</code> folder holds the server's private encryption key; keep its
+      backup private. To update, pull the new image and start it again; your data stays in the folders:</p>
     <pre><code>docker compose pull &amp;&amp; docker compose up -d</code></pre>
 
     <h2 id="immich">Using Immich</h2>
@@ -98,8 +100,12 @@ cd ~/homespun &amp;&amp; swift build -c release --product homespun-server</code>
     <p>In the Immich app, exclude the <strong>Homespun</strong> album from backup so compact copies are not uploaded.</p>
 
     <h2 id="network">Your network</h2>
-    <p>For now the app reaches the server on your home network only. Keep the iPhone on the same Wi-Fi while
-      Homespun works.</p>
+    <p>The app and server talk over an encrypted connection; the app checks the server's key every time.
+      Keep the iPhone on the same Wi-Fi while Homespun works. Plain HTTP is not accepted. Codes work once,
+      for 10 minutes after you run <code>pair</code>, or 2 minutes after the first pairing check.</p>
+    <p>Server Check shows the server key. Compare it with <code>homespun-server certificate</code> on the server,
+      especially once after upgrading an existing pairing. See <a href="/support#server-identity">server identity help</a>
+      and <a href="/support#proxy">proxy and Tailscale setup</a>.</p>
   </main>
   <footer>
     <a href="/">Home</a><a href="/privacy">Privacy policy</a><a href="/support">Support</a><a href="https://github.com/akshob/homespun">Source code</a>

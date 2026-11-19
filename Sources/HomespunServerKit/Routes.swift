@@ -50,27 +50,56 @@ struct Routes: Sendable {
     let immichState: ImmichState
     let approvals: PairingApprovals
     let connectors: ConnectorHub
+    let identity: TLSIdentityBox
+    let codeChallenges: CodeChallenges
+    let identityLimit = IdentityProofLimit()
     let locks = UploadLocks()
     var trash: Trash { Trash(catalog: catalog, originals: originals, storage: storage) }
 
-    func info() async -> ServerAPI.ServerInfo {
-        .init(name: configuration.name, version: ServerConfiguration.version, mode: await immichState.mode,
+    func info(deviceID: String? = nil) async -> ServerAPI.ServerInfo {
+        let deviceName = try? await catalog.devices().first { $0.id == deviceID }?.name
+        return .init(name: configuration.name, version: ServerConfiguration.version, mode: await immichState.mode,
               profile: configuration.profile, platform: HostPlatform.current(), hardware: HostPlatform.hardware,
-              freeBytes: OriginalsStore.space(at: await originals.root.path).free)
+              freeBytes: OriginalsStore.space(at: await originals.root.path).free,
+              tls: .init(fingerprint: identity.current.fingerprint, notAfter: identity.current.notAfter), deviceName: deviceName)
     }
 
     func add(to router: Router<HomespunRequestContext>) {
         let api = router.group("api/v1")
-        api.get("health") { _, _ in try json(ServerAPI.Health()) }
+        api.get("health") { _, _ in try json(ServerAPI.Health(tls: true)) }
+        api.post("tls/verify") { request, context in try await verifyIdentity(request, context) }
+        api.post("pair/challenge") { request, context in
+            let body = try await request.decode(as: ServerAPI.CodeChallengeRequest.self, context: context)
+            guard let nonce = PairingCrypto.decode(body.nonce, count: 32) else { throw HTTPError(.badRequest) }
+            do {
+                return try json(try await codeChallenges.challenge(nonce: nonce, fingerprint: identity.current.fingerprint))
+            } catch CodeChallenges.Failure.rateLimited {
+                return try json(ServerAPI.ErrorBody(error: .init(message: "Wait a moment before checking another pairing code.",
+                    code: ServerAPI.ErrorCode.tooManyChallenges)), status: .tooManyRequests)
+            }
+        }
         api.post("pair") { request, context in try await pair(request, context) }
         api.get("pair/options") { _, _ in
             try json(ServerAPI.PairingOptions(serverName: configuration.name, canApprove: approvals.canApprove,
                                               pairCommand: HostPlatform.serverCommand + " pair",
                                               platform: HostPlatform.current(), hardware: HostPlatform.hardware,
-                                              freeBytes: OriginalsStore.space(at: await originals.root.path).free))
+                                              freeBytes: OriginalsStore.space(at: await originals.root.path).free,
+                                              pairingVersion: 2, encrypted: true))
         }
         api.post("pair/requests") { request, context in try await requestApproval(request, context) }
+        api.post("pair/requests/:id/reveal") { request, context in
+            let body = try await request.decode(as: ServerAPI.ApprovalReveal.self, context: context)
+            guard let nonce = PairingCrypto.decode(body.nonce, count: 32) else { throw HTTPError(.badRequest) }
+            do {
+                try await approvals.reveal(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "",
+                                           nonce: nonce, fingerprint: identity.current.fingerprint)
+            } catch {
+                throw HTTPError(.badRequest, message: "That pairing request couldn't be confirmed. Ask again.")
+            }
+            return Response(status: .accepted)
+        }
         api.get("pair/requests/:id") { request, context in try await approvalStatus(request, context) }
+        api.post("pair/requests/:id/complete") { request, context in try await completeApproval(request, context) }
         api.delete("pair/requests/:id") { request, context in
             guard await approvals.cancel(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") else {
                 throw HTTPError(.notFound)
@@ -79,7 +108,7 @@ struct Routes: Sendable {
         }
 
         let authenticated = api.group().add(middleware: DeviceAuthentication(catalog: catalog))
-        authenticated.get("info") { _, _ in try json(await info()) }
+        authenticated.get("info") { _, context in try json(await info(deviceID: context.deviceID)) }
         authenticated.post("pairing-codes") { _, _ in
             let code = Pairing.newCode(), lifetime = 600
             try await catalog.addPairingCode(hash: Pairing.hash(Pairing.normalized(code)),
@@ -88,7 +117,7 @@ struct Routes: Sendable {
         }
         authenticated.get("setup") { _, _ in
             try json(await SetupChecks(configuration: configuration, storage: storage, immichState: immichState,
-                                       catalog: catalog, originalsFolder: await originals.root).report())
+                                       catalog: catalog, originalsFolder: await originals.root, identity: identity).report())
         }
         authenticated.get("storage") { _, context in try json(try await storageInfo(context)) }
         authenticated.get("storage/locations") { _, _ in
@@ -183,8 +212,16 @@ struct Routes: Sendable {
 
     func requestApproval(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
         let body = try await request.decode(as: ServerAPI.ApprovalRequest.self, context: context)
+        guard body.installID == nil else {
+            throw HTTPError(.badRequest, message: "Send the installation identifier only after approval.")
+        }
+        guard let text = body.commitment, let commitment = PairingCrypto.decode(text, count: 32) else {
+            return try json(ServerAPI.ErrorBody(error: .init(message: "A pairing commitment is required.",
+                                                             code: ServerAPI.ErrorCode.commitmentRequired)), status: .badRequest)
+        }
         do {
-            return try json(try await approvals.start(device: body.deviceName), status: .accepted)
+            return try json(try await approvals.start(device: body.deviceName, commitment: commitment),
+                            status: .accepted)
         } catch PairingApprovals.Failure.unavailable {
             throw HTTPError(.conflict, message: "\(configuration.name) can't ask for approval. Run "
                             + "`\(HostPlatform.serverCommand) pair` on it for a pairing code.")
@@ -195,27 +232,72 @@ struct Routes: Sendable {
     }
 
     func approvalStatus(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
-        let status = try await approvals.status(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") { name in
+        guard let status = await approvals.status(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") else {
+            throw HTTPError(.notFound, message: "No such pairing request. Ask again.")
+        }
+        return try json(status)
+    }
+
+    func completeApproval(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
+        let body = try await request.decode(as: ServerAPI.ApprovalCompletion.self, context: context)
+        guard let installation = try installHash(body.installID) else { throw HTTPError(.badRequest) }
+        let pairing = try await approvals.complete(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "",
+                                                   installHash: installation) { name, installation in
             let token = Pairing.newToken()
             let device = DeviceRecord(id: UUID().uuidString, name: name, createdAt: "", lastSeenAt: nil, revokedAt: nil)
-            try await catalog.addApprovedDevice(device, tokenHash: Pairing.hash(token))
-            return ServerAPI.PairResponse(deviceID: device.id, token: token, server: await info())
+            let claimed = try await catalog.claimApprovedDevice(device, tokenHash: Pairing.hash(token), installHash: installation)
+            return ServerAPI.PairResponse(deviceID: claimed.id, token: token, server: await info(deviceID: claimed.id))
         }
-        guard let status else { throw HTTPError(.notFound, message: "No such pairing request. Ask again.") }
-        return try json(status)
+        guard let pairing else { throw HTTPError(.notFound, message: "No approved pairing request. Ask again.") }
+        return try json(pairing, status: .created)
     }
 
     func pair(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
         let body = try await request.decode(as: ServerAPI.PairRequest.self, context: context)
+        let installation = try installHash(body.installID)
+        guard let challenge = body.challenge else {
+            return try json(ServerAPI.ErrorBody(error: .init(message: "Check the server's pairing challenge first.",
+                                                             code: ServerAPI.ErrorCode.challengeRequired)), status: .badRequest)
+        }
         let name = String(body.deviceName.prefix(100)).trimmingCharacters(in: .whitespacesAndNewlines)
         let code = Pairing.normalized(body.code)
         guard code.count == 8, !name.isEmpty else { throw HTTPError(.badRequest, message: "Enter the 8-character code.") }
+        guard await codeChallenges.redeemable(id: challenge, codeHash: Pairing.hash(code)) else {
+            try await catalog.recordPairingFailure()
+            throw HTTPError(.forbidden, message: "That pairing challenge is wrong, used, or expired. Check the code again.")
+        }
         let token = Pairing.newToken()
         let device = DeviceRecord(id: UUID().uuidString, name: name, createdAt: "", lastSeenAt: nil, revokedAt: nil)
-        guard try await catalog.redeemPairingCode(hash: Pairing.hash(code), device: device, tokenHash: Pairing.hash(token)) else {
+        guard let claimed = try await catalog.claimPairingCode(hash: Pairing.hash(code), device: device,
+                                                               tokenHash: Pairing.hash(token), installHash: installation) else {
             throw HTTPError(.forbidden, message: "That code is wrong, used, or expired. Run `\(HostPlatform.serverCommand) pair` for a new one.")
         }
-        return try json(ServerAPI.PairResponse(deviceID: device.id, token: token, server: await info()), status: .created)
+        return try json(ServerAPI.PairResponse(deviceID: claimed.id, token: token, server: await info(deviceID: claimed.id)), status: .created)
+    }
+
+    private func installHash(_ id: String?) throws -> String? {
+        guard let id else { return nil }
+        guard let value = UUID(uuidString: id) else { throw HTTPError(.badRequest, message: "Invalid installation identifier.") }
+        return Pairing.hash(value.uuidString.lowercased())
+    }
+
+    func verifyIdentity(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
+        guard await identityLimit.allow() else { throw HTTPError(.tooManyRequests) }
+        let body = try await request.decode(as: ServerAPI.IdentityRequest.self, context: context)
+        guard let nonce = PairingCrypto.decode(body.nonce, count: 32),
+              PairingCrypto.decode(body.keyID, count: 16) != nil else { throw HTTPError(.badRequest) }
+        let current = identity.current
+        var found: Data?
+        for hex in try await catalog.activeTokenHashes() {
+            let hash = try PairingCrypto.tokenHash(hex: hex)
+            if PairingCrypto.equal(Data(PairingCrypto.keyID(tokenHash: hash).utf8), Data(body.keyID.utf8)) { found = hash }
+        }
+        let proof = PairingCrypto.verifyProof(tokenHash: found ?? Data(count: 32), nonce: nonce, fingerprint: current.fingerprint)
+        guard found != nil else {
+            return try json(ServerAPI.ErrorBody(error: .init(message: "Pair this device with the server again.")), status: .notFound)
+        }
+        return try json(ServerAPI.IdentityProof(fingerprint: current.fingerprint, proof: PairingCrypto.encode(proof),
+                                                notAfter: current.notAfter))
     }
 
     // MARK: Settings

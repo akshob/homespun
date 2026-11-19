@@ -40,6 +40,36 @@
     <h3>How do I set up a server?</h3>
     <p>See <a href="/setup">Set up a server</a>, or tap <strong>Find My Home Computer</strong> in the app. A Mac, a Linux computer, or a NAS with Docker works.</p>
 
+    <h3 id="server-identity">Can't confirm this is your server</h3>
+    <p>Homespun has stopped sending anything because the server's security key changed and it could not prove
+      it still has this iPhone's pairing. This can happen after reinstalling without the data folder, restoring
+      an incomplete backup, or if another device is pretending to be your server. Run
+      <code>homespun-server certificate</code> on your server and compare its key with Server Check.
+      Restore the complete data folder, or choose <strong>Pair Again</strong> and use a new QR code or pairing code.
+      Never approve a Mac's request unless its six-digit number matches the iPhone, then confirm that match
+      on the iPhone before pairing completes.</p>
+    <p>A replacement key that passes the pairing proof is confirmed automatically, with a notice. Certificates
+      renew with the same key. Keep <code>tls/</code> in your server backup. After upgrading an old pairing,
+      compare the key once: a pairing token exposed before encryption was added could still impersonate it.</p>
+    <p>If your router gives the server a new address, Homespun looks for it with Bonjour and checks the same
+      pinned key before following it. Server Check shows its current address and says when it found the server
+      at a new one. Keep Bonjour enabled and allow Local Network access. Another server with the same name but
+      a different key is not enough to move the pairing.</p>
+
+    <h3>Update Homespun Server</h3>
+    <p>The app needs Homespun Server 0.2 or later for encrypted connections. Rebuild and run
+      <code>install-service</code> again, or pull and recreate the Docker container as in
+      <a href="/setup">Set up a server</a>. Update the app too: older builds cannot reach an HTTPS-only server.
+      Existing pairings upgrade securely without pairing again.</p>
+
+    <h3 id="proxy">Using a proxy or Tailscale</h3>
+    <p>Use an HTTPS proxy with a publicly trusted certificate, and set <code>HOMESPUN_PUBLIC_URL</code> to its
+      full HTTPS address. Its backend must also use HTTPS. For Tailscale, run
+      <code>tailscale serve --bg https+insecure://127.0.0.1:8787</code>. Unverified proxy-to-server TLS must stay
+      on loopback or a trusted private path. Direct IP addresses and <code>.local</code> names use key pinning.
+      A qualified name pointing straight at the self-signed server is blocked by iOS's transport rules;
+      use the IP address, a <code>.local</code> name, or a proxy with a trusted certificate instead.</p>
+
     <h3>Can I get an original back on my iPhone?</h3>
     <p>Yes. Open the item and choose <strong>Restore Original</strong>, or select several. Homespun downloads each
       original from your server, checks it, adds it to Photos with its favorite and albums, and only then removes the

@@ -268,6 +268,23 @@ struct DemoTokens: TokenStore, @unchecked Sendable {
         tokens[server] = nil
         defaults.set(tokens, forKey: "demo.tokens")
     }
+
+    func pins(for server: String) -> ServerPins? {
+        guard let data = (defaults.dictionary(forKey: "demo.pins") as? [String: Data])?[server] else { return nil }
+        return try? JSONDecoder().decode(ServerPins.self, from: data)
+    }
+
+    func setPins(_ pins: ServerPins, for server: String) throws {
+        var saved = (defaults.dictionary(forKey: "demo.pins") as? [String: Data]) ?? [:]
+        saved[server] = try JSONEncoder().encode(pins)
+        defaults.set(saved, forKey: "demo.pins")
+    }
+
+    func removePins(for server: String) {
+        var saved = (defaults.dictionary(forKey: "demo.pins") as? [String: Data]) ?? [:]
+        saved[server] = nil
+        defaults.set(saved, forKey: "demo.pins")
+    }
 }
 
 /// The demo's stand-in for the question iOS asks before deleting: its own words (so it never passes
