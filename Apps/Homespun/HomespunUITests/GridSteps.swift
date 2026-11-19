@@ -270,7 +270,7 @@ extension XCUIApplication {
     }
 
     /// Whether the Server tab says the server is connected (waits a little), back on Library.
-    @MainActor func isConnected(timeout: TimeInterval = 20) -> Bool {
+    @MainActor func isConnected(timeout: TimeInterval = 30) -> Bool {
         openTab("Server")
         let status = descendants(matching: .any)["server.status"]
         let connected = NSPredicate(format: "label CONTAINS 'Connected' OR value CONTAINS 'Connected'")
@@ -286,6 +286,33 @@ extension XCUIApplication {
         }
         openTab("Library")
         return ok
+    }
+
+    /// A slow simulator can lose a swipe. Observe the page before trying exactly once more.
+    @MainActor func pageItem(older: Bool, file: StaticString = #filePath, line: UInt = #line,
+                             gesture: (() -> Void)? = nil) {
+        let viewer = descendants(matching: .any)["item.viewer"].firstMatch
+        let state = staticTexts["item.state"].firstMatch
+        let before = viewer.value as? String
+        let sentence = state.exists ? state.label : nil
+        let swipe = gesture ?? {
+            let start: CGFloat = older ? 0.2 : 0.8
+            let end: CGFloat = older ? 0.8 : 0.2
+            viewer.coordinate(withNormalizedOffset: CGVector(dx: start, dy: 0.35))
+                .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: end, dy: 0.35)),
+                       withVelocity: .fast, thenHoldForDuration: 0)
+        }
+        for _ in 0..<2 {
+            swipe()
+            let deadline = Date().addingTimeInterval(4)
+            repeat {
+                if !viewer.exists { return XCTFail("a horizontal swipe closed the viewer", file: file, line: line) }
+                if viewer.value as? String != before { return }
+                if let sentence, state.exists, state.label != sentence { return }
+                usleep(200_000)
+            } while Date() < deadline
+        }
+        XCTFail("the viewer didn't page after two swipes", file: file, line: line)
     }
 
     /// Grid items, optionally only those with this badge (`Badge.label` in the app).

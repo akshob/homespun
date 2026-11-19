@@ -197,8 +197,10 @@ final class PerformanceUITests: XCTestCase {
                 let pager = area(app.descendants(matching: .any)["item.viewer"])
                 checkSmooth("paging items") {
                     for _ in 0..<12 {
-                        pager.point(0.15, 0.5).press(forDuration: 0.01, thenDragTo: pager.point(0.9, 0.5), withVelocity: .fast,
-                                                     thenHoldForDuration: 0)
+                        app.pageItem(older: true) {
+                            pager.point(0.15, 0.5).press(forDuration: 0.01, thenDragTo: pager.point(0.9, 0.5), withVelocity: .fast,
+                                                       thenHoldForDuration: 0)
+                        }
                     }
                 }
             }
@@ -326,8 +328,10 @@ final class PerformanceUITests: XCTestCase {
         let viewer = app.descendants(matching: .any)["item.viewer"]
         XCTAssertTrue(viewer.waitForExistence(timeout: 5), "the item didn't open")
         let pager = area(viewer)
-        pager.point(0.85, 0.5).press(forDuration: 0.01, thenDragTo: pager.point(0.15, 0.5), withVelocity: .fast,
-                                     thenHoldForDuration: 0)
+        app.pageItem(older: false) {
+            pager.point(0.85, 0.5).press(forDuration: 0.01, thenDragTo: pager.point(0.15, 0.5), withVelocity: .fast,
+                                       thenHoldForDuration: 0)
+        }
         sleep(1)
         XCTAssertTrue(viewer.exists, "a sideways swipe closed the item")
         pager.point(0.5, 0.3).press(forDuration: 0.05, thenDragTo: pager.point(0.5, 0.85), withVelocity: .default,

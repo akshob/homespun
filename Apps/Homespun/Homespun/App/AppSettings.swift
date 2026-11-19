@@ -138,9 +138,18 @@ final class AppSettings {
         let before = serverStatus
         // A retry keeps the last result on screen until it learns something new.
         if serverStatus == .unknown { serverStatus = .checking }
-        client.timeout = 6
+        client.timeout = 12
         do {
-            let info = try await client.info()
+            let info: ServerAPI.ServerInfo
+            do {
+                info = try await client.info()
+            } catch {
+                if Self.isCancellation(error) { throw error }
+                if let failure = error as? ServerClient.Failure, failure.status == 401 { throw error }
+                guard before == .reachable else { throw error }
+                // Confirm a transient failure before replacing a known-good result.
+                info = try await client.info()
+            }
             store(info)
             serverStatus = .reachable
             Telemetry.shared.recordServerInfoDaily(info)

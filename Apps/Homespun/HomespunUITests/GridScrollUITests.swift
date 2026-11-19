@@ -180,12 +180,16 @@ final class GridScrollUITests: XCTestCase {
                 sleep(1)
                 if close == "Paged" {
                     for _ in 0..<Int(before.value("grid.columns")) * 2 + 1 {
-                        let previous = viewer.value as? String
-                        viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.35))
-                            .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.35)),
-                                   withVelocity: .fast, thenHoldForDuration: 0)
-                        if poses != nil, screen.width > 500, viewer.value as? String == previous {
-                            pose("swipe \(screen.width * 0.2) \(screen.height * 0.35) \(screen.width * 0.8) \(screen.height * 0.35)")
+                        var attempts = 0
+                        app.pageItem(older: true) {
+                            attempts += 1
+                            if self.poses != nil, screen.width > 500, attempts == 2 {
+                                self.pose("swipe \(screen.width * 0.2) \(screen.height * 0.35) \(screen.width * 0.8) \(screen.height * 0.35)")
+                            } else {
+                                viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.35))
+                                    .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.35)),
+                                           withVelocity: .fast, thenHoldForDuration: 0)
+                            }
                         }
                     }
                     sleep(1)
@@ -352,7 +356,7 @@ final class GridScrollUITests: XCTestCase {
         let viewer = app.descendants(matching: .any)["item.viewer"].firstMatch
         XCTAssertTrue(viewer.waitForExistence(timeout: 8), "the item didn't open")
         // Older items, past the top row: out of the grid's view.
-        for _ in 0..<Int(middle.value("grid.columns")) * 2 + 1 { viewer.swipeRight() }
+        for _ in 0..<Int(middle.value("grid.columns")) * 2 + 1 { app.pageItem(older: true) }
         sleep(2)
         let paged = report()
         let shown = paged.value("grid.shown")

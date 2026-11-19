@@ -20,6 +20,9 @@ import Testing
         try await pendingRequest()
         #expect(settings.serverStatus == .reachable)
         ServerCheckProtocol.fail()
+        try await pendingRequest()
+        #expect(settings.serverStatus == .reachable, "one failed check must not replace a known-good result")
+        ServerCheckProtocol.fail()
         await first.value
         guard case .unreachable = settings.serverStatus else {
             Issue.record("the failed check wasn't reported")
@@ -34,6 +37,29 @@ import Testing
         ServerCheckProtocol.fail()
         await retry.value
         #expect(settings.serverStatus == unreachable)
+    }
+
+    @Test func aSuccessfulConfirmationKeepsTheServerReachable() async throws {
+        let name = "server-retry-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ServerCheckProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let settings = AppSettings(defaults: defaults, tokens: DemoTokens(defaults: defaults), session: session)
+        try settings.finishPairing(serverURL: URL(string: "https://server.invalid")!,
+                                   response: .init(deviceID: "test-device", token: "test-token", server: DemoServer.info))
+        for _ in 0..<2 {
+            let check = Task { await settings.refreshServerInfo() }
+            try await pendingRequest()
+            ServerCheckProtocol.fail()
+            try await pendingRequest()
+            #expect(settings.serverStatus == .reachable)
+            try ServerCheckProtocol.succeed()
+            await check.value
+            #expect(settings.serverStatus == .reachable)
+        }
     }
 
     private func pendingRequest() async throws {
@@ -58,6 +84,15 @@ private final class ServerCheckProtocol: URLProtocol, @unchecked Sendable {
     static func fail() {
         let request = pending.take()
         if let request { request.client?.urlProtocol(request, didFailWithError: URLError(.cannotConnectToHost)) }
+    }
+
+    static func succeed() throws {
+        guard let request = pending.take(), let url = request.request.url else { return }
+        let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                                       headerFields: ["Content-Type": "application/json"])!
+        request.client?.urlProtocol(request, didReceive: response, cacheStoragePolicy: .notAllowed)
+        request.client?.urlProtocol(request, didLoad: try ServerAPI.encoder.encode(DemoServer.info))
+        request.client?.urlProtocolDidFinishLoading(request)
     }
 
     final class Requests: @unchecked Sendable {

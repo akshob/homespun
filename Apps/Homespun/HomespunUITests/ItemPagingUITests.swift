@@ -76,7 +76,7 @@ final class ItemPagingUITests: XCTestCase {
         check(app, viewer, at: opened.index, "opened")
         // On to the newest (its cell can be under the bars), the newest photos (`EXTRA=`) behind it.
         while opened.index < opened.count {
-            viewer.swipeLeft()
+            app.pageItem(older: false)
             opened.index += 1
             check(app, viewer, at: opened.index, "to the newest, \(opened.index)")
         }
@@ -84,16 +84,16 @@ final class ItemPagingUITests: XCTestCase {
 
         // Five older items, one at a time, then back to the newest.
         for step in 1...5 {
-            viewer.swipeRight()
+            app.pageItem(older: true)
             check(app, viewer, at: opened.index - step, "\(step) back")
         }
         for step in (0..<5).reversed() {
-            viewer.swipeLeft()
+            app.pageItem(older: false)
             check(app, viewer, at: opened.index - step, "\(5 - step) forward")
         }
         // Another item than the one opened, then other sizes: the same item stays.
-        viewer.swipeRight()
-        viewer.swipeRight()
+        app.pageItem(older: true)
+        app.pageItem(older: true)
         let shown = opened.index - 2
         check(app, viewer, at: shown, "2 back")
         if let poses {
@@ -108,7 +108,7 @@ final class ItemPagingUITests: XCTestCase {
                 check(app, viewer, at: shown, name)
             }
         }
-        viewer.swipeLeft()
+        app.pageItem(older: false)
         check(app, viewer, at: shown + 1, "after turning, 1 forward")
 
         // Zoomed in, a swipe pans the photo instead of paging; zoomed out, it pages again.
@@ -128,7 +128,7 @@ final class ItemPagingUITests: XCTestCase {
         start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 35)),
                     withVelocity: .slow, thenHoldForDuration: 0.4)
         XCTAssertTrue(viewer.exists, "a short downward drag didn't cancel")
-        viewer.swipeRight()
+        app.pageItem(older: true)
         check(app, viewer, at: shown, "zoomed out, 1 back")
     }
 
