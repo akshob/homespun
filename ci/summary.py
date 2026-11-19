@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Turns a run's result bundles into a short Markdown report (the job summary): counts per bundle,
 each failing test with its message, and performance lines. CI tooling only.
 
     summary.py <results folder> [title]
 """
 import glob, json, os, subprocess, sys
+from timing import timing_summary
 
 results, title = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "Tests")
 lines = [f"### {title}", "", "| Run | Passed | Failed | Skipped |", "|---|---|---|---|"]
@@ -65,6 +67,7 @@ if quarantined:
               *[f"- `{parts[0]}` {parts[1] if len(parts) > 1 else ''}" for parts in quarantined]]
 if perf:
     lines += ["", "#### Performance", "```", *perf, "```"]
+lines += timing_summary(results)
 report = "\n".join(lines) + "\n"
 print(report)
 path = os.environ.get("GITHUB_STEP_SUMMARY")

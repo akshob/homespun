@@ -156,6 +156,16 @@ jobs:
       - name: Summary
         if: always()
         run: python3 ci/summary.py ci-results "App unit tests"
+      - name: Collect timing metadata
+        if: always()
+        run: python3 ci/timing.py ci-results ci-timing
+      - name: Keep timing metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-unit-${{ github.run_id }}
+          path: ci-timing
+          retention-days: 7
       - name: Keep the results of a failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -195,6 +205,16 @@ jobs:
       - name: Summary
         if: always()
         run: python3 ci/summary.py ci-results "UI (${{ matrix.run }})"
+      - name: Collect timing metadata
+        if: always()
+        run: python3 ci/timing.py ci-results ci-timing
+      - name: Keep timing metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timing-${{ matrix.run }}-${{ github.run_id }}
+          path: ci-timing
+          retention-days: 7
       - name: Keep the results of a failure
         if: failure()
         uses: actions/upload-artifact@v4
