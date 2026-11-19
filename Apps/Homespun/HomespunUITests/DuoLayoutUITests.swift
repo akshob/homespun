@@ -25,6 +25,7 @@ final class DuoLayoutUITests: XCTestCase {
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         pose("landscape", file: poses)
         app.launch()
+        checkLibrarySpan(app, pose: "launched open, landscape")
         app.pair(address: address, code: code)
         app.openTab("Library")
         if app.gridItems("Ready to free up").count < 2 { _ = app.compactOldestOnScreen(2) }
@@ -130,6 +131,7 @@ final class DuoLayoutUITests: XCTestCase {
                     if play.waitForExistence(timeout: 3) { break }
                 }
             }
+
             XCTAssertTrue(play.waitForExistence(timeout: 10), "no Side by Side for the video")
             let original = app.descendants(matching: .any)["compare.image.original"]
             let compact = app.descendants(matching: .any)["compare.image.compact"]
@@ -174,7 +176,46 @@ final class DuoLayoutUITests: XCTestCase {
         app.choose("grid.filter", "Photos and Videos")
     }
 
+    @MainActor func testLibraryFillsTheOpenDisplayOnLaunchAndUnfold() throws {
+        guard let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"] else {
+            throw XCTSkip("Needs the iPhone Duo pose driver.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        for name in ["landscape", "portrait"] {
+            pose(name, file: poses)
+            app.launch()
+            checkLibrarySpan(app, pose: "launched open, \(name)")
+            pose("folded", file: poses)
+            XCTAssertTrue(app.wait(width: 0..<500))
+            pose(name, file: poses)
+            XCTAssertTrue(app.wait(wide: name == "landscape"))
+            checkLibrarySpan(app, pose: "unfolded, \(name)")
+            app.terminate()
+        }
+    }
+
     // MARK: - Checks
+
+    @MainActor private func checkLibrarySpan(_ app: XCUIApplication, pose: String,
+                                             file: StaticString = #filePath, line: UInt = #line) {
+        let grid = app.descendants(matching: .any)["grid"].firstMatch
+        XCTAssertTrue(grid.waitForExistence(timeout: 20), file: file, line: line)
+        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 10), file: file, line: line)
+        let screen = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(screen.width, 500, "\(pose): not open", file: file, line: line)
+        XCTAssertEqual(grid.frame.minX, screen.minX, accuracy: 1, "\(pose): grid shifted", file: file, line: line)
+        XCTAssertEqual(grid.frame.maxX, screen.maxX, accuracy: 1, "\(pose): grid container is narrow", file: file, line: line)
+        let row = app.gridRow().map(\.frame)
+        guard let first = row.first, let last = row.last else {
+            return XCTFail("\(pose): no full row", file: file, line: line)
+        }
+        let tab = app.tab("Library")
+        let strip = tab.exists && tab.frame.midX > screen.minX + screen.width * 0.8
+        XCTAssertEqual(first.minX, screen.minX, accuracy: 1, "\(pose): empty leading space", file: file, line: line)
+        XCTAssertLessThanOrEqual(screen.maxX - last.maxX, strip ? 100 : 4,
+                                 "\(pose): visible rows don't span the display", file: file, line: line)
+    }
 
     /// A full row of cells runs edge to edge with only the hairline spacing between them.
     @MainActor private func checkGrid(_ app: XCUIApplication, columns: Int, pose: String,
@@ -182,6 +223,7 @@ final class DuoLayoutUITests: XCTestCase {
         app.openTab("Library")
         let grid = app.descendants(matching: .any)["grid"]
         XCTAssertTrue(grid.waitForExistence(timeout: 10), file: file, line: line)
+        checkLibrarySpan(app, pose: pose, file: file, line: line)
         sleep(1)
         XCTAssertGreaterThan(app.gridItems().allElementsBoundByIndex.filter { app.isOnScreen($0) }.count, 0,
                              "\(pose): the grid is blank", file: file, line: line)
