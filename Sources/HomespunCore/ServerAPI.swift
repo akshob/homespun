@@ -75,10 +75,11 @@ public enum ServerAPI {
         /// Free space where originals go.
         public var freeBytes: Int64?
         public var tls: TLSInfo?
+        public var deviceName: String?
 
         public init(name: String, version: String, apiVersion: Int = ServerAPI.version, mode: StorageMode,
                     profile: CompressionProfile, platform: ServerSetup.Platform? = nil, hardware: Hardware? = nil,
-                    freeBytes: Int64? = nil, tls: TLSInfo? = nil) {
+                    freeBytes: Int64? = nil, tls: TLSInfo? = nil, deviceName: String? = nil) {
             self.name = name
             self.version = version
             self.apiVersion = apiVersion
@@ -88,6 +89,7 @@ public enum ServerAPI {
             self.hardware = hardware
             self.freeBytes = freeBytes
             self.tls = tls
+            self.deviceName = deviceName
         }
     }
 
@@ -103,11 +105,14 @@ public enum ServerAPI {
         public var code: String
         public var deviceName: String
         public var challenge: String?
-        public init(code: String, deviceName: String, challenge: String? = nil) {
+        public var installID: String?
+        public init(code: String, deviceName: String, challenge: String? = nil, installID: String? = nil) {
             self.code = code
             self.deviceName = deviceName
             self.challenge = challenge
+            self.installID = installID
         }
+        enum CodingKeys: String, CodingKey { case code, deviceName, challenge, installID = "installId" }
     }
 
     public struct PairResponse: Codable, Equatable, Sendable {
@@ -197,10 +202,13 @@ public enum ServerAPI {
     public struct ApprovalRequest: Codable, Equatable, Sendable {
         public var deviceName: String
         public var commitment: String?
-        public init(deviceName: String, commitment: String? = nil) {
+        public var installID: String?
+        public init(deviceName: String, commitment: String? = nil, installID: String? = nil) {
             self.deviceName = deviceName
             self.commitment = commitment
+            self.installID = installID
         }
+        enum CodingKeys: String, CodingKey { case deviceName, commitment, installID = "installId" }
     }
 
     /// The pending request. Poll `GET /api/v1/pair/requests/{id}` with `secret` as the bearer token.
@@ -208,10 +216,10 @@ public enum ServerAPI {
         public var id: String
         public var secret: String
         /// Shown on both screens, so the person at the server allows the right device.
-        public var match: String
+        public var match: String?
         public var expiresIn: Int
         public var serverNonce: String?
-        public init(id: String, secret: String, match: String, expiresIn: Int, serverNonce: String? = nil) {
+        public init(id: String, secret: String, match: String? = nil, expiresIn: Int, serverNonce: String? = nil) {
             self.id = id
             self.secret = secret
             self.match = match

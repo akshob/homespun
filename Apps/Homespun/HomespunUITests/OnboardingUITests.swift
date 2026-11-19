@@ -212,6 +212,11 @@ final class OnboardingUITests: XCTestCase {
 
         let ready = app.buttons["ready.continue"]
         XCTAssertTrue(ready.waitForExistence(timeout: 60), "no Ready page after pairing")
+        app.buttons["ready.fullCheck"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["check.connection.encrypted"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["check.connection.key"].exists)
+        app.buttons["Done"].tap()
+        XCTAssertTrue(ready.waitForExistence(timeout: 10))
         attach("1.7 Ready")
         ready.tap()
         // Asked once, before Photos access; Share is the prominent choice, Don't Share sits right under it.

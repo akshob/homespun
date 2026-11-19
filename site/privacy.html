@@ -32,8 +32,16 @@
     <h2>Your own server</h2>
     <p>If you connect Homespun to a server you run, such as Homespun Server or an Immich server, the app sends
       your originals to that server (or lets it find them in your Immich library) and downloads compact copies from it.
-      The server's address and the pairing token it issues are stored on your iPhone (the token in the Keychain) and
-      used only to talk to your server. An Immich API key, if you use one, stays on your server. The developer of
+      The app connects to Homespun Server over an encrypted connection and keeps its key fingerprint with the
+      pairing token in the Keychain, used only to talk to your server. The server's address and Bonjour service
+      name stay on your iPhone. If its address changes, the app checks the pinned key before sending its token
+      to the new address.
+      A random installation ID and the last device name your server confirmed are also kept in the device-only,
+      non-synced Keychain. They survive unpairing or reinstalling the app, but not erasing the phone. Pairing
+      sends them to your server so an active device record can be reclaimed after your approval; the server
+      stores only a hash of the ID. This ID is never included in analytics or problem reports and is separate
+      from the optional analytics identifier.
+      An Immich API key, if you use one, stays on your server. The developer of
       Homespun has no access to your server or its contents.</p>
     <p>Local Network access finds Homespun Server using Bonjour (<code>_homespun._tcp</code> only) and connects
       to it. Camera access is used only to scan a pairing QR code; camera images are not stored or sent.</p>

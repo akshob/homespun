@@ -284,11 +284,13 @@ final class ServiceAdvertiser: Service, Sendable {
     let name: String
     let port: Int
     let logger: Logger
+    let identity: TLSIdentityBox?
 
-    init(name: String, port: Int, logger: Logger) {
+    init(name: String, port: Int, identity: TLSIdentityBox? = nil, logger: Logger) {
         self.name = name
         self.port = port
         self.logger = logger
+        self.identity = identity
     }
 
     static var tool: String? {
@@ -300,10 +302,12 @@ final class ServiceAdvertiser: Service, Sendable {
     }
 
     func arguments() -> [String] {
+        let txt = ["api=\(ServerAPI.version)", "tls=1"]
+            + (identity.map { ["fp=\($0.current.fingerprint.base64url)"] } ?? [])
         #if os(macOS)
-        ["-R", name, Self.type, "local", String(port), "api=\(ServerAPI.version)"]
+        return ["-R", name, Self.type, "local", String(port)] + txt
         #else
-        ["-s", name, Self.type, String(port), "api=\(ServerAPI.version)"]
+        return ["-s", name, Self.type, String(port)] + txt
         #endif
     }
 
@@ -326,6 +330,7 @@ final class ServiceAdvertiser: Service, Sendable {
                     missing = false
                 }
                 let process = Process()
+                let advertisedKey = self.identity?.current.fingerprint
                 process.executableURL = URL(fileURLWithPath: tool)
                 process.arguments = self.arguments()
                 process.standardOutput = FileHandle.nullDevice
@@ -339,7 +344,9 @@ final class ServiceAdvertiser: Service, Sendable {
                 // blocked, SIGTERM included. The Bonjour daemon withdraws the name when it goes.
                 let pid = process.processIdentifier
                 await withTaskCancellationHandler {
-                    while process.isRunning && !Task.isCancelled { try? await Task.sleep(for: .seconds(1)) }
+                    while process.isRunning && !Task.isCancelled && self.identity?.current.fingerprint == advertisedKey {
+                        try? await Task.sleep(for: .seconds(1))
+                    }
                 } onCancel: {
                     kill(pid, SIGKILL)
                 }
@@ -347,7 +354,7 @@ final class ServiceAdvertiser: Service, Sendable {
                     kill(pid, SIGKILL)
                     process.waitUntilExit()
                 }
-                if !Task.isCancelled {
+                if !Task.isCancelled, self.identity?.current.fingerprint == advertisedKey {
                     self.logger.warning("Bonjour advertising stopped (\(tool) exited with \(process.terminationStatus)); retrying")
                     try? await Task.sleep(for: .seconds(30))
                 }

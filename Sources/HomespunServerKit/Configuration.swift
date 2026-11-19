@@ -13,7 +13,7 @@ public struct ImmichConfiguration: Sendable {
 }
 
 public struct ServerConfiguration: Sendable {
-    public static let version = "0.1.0"
+    public static let version = "0.2.0"
 
     /// Holds the catalog, compact copies, and work files (and originals, unless `originalsDirectory` is set).
     public var dataDirectory: URL

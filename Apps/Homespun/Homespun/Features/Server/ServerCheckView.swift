@@ -196,6 +196,47 @@ struct ServerCheckView: View {
     var body: some View {
         List {
             Section {
+                if let url = settings.serverURL {
+                    LabeledContent("Current address", value: url.absoluteString)
+                        .accessibilityIdentifier("check.connection.address")
+                }
+                if let notice = settings.addressNotice {
+                    Text(notice).foregroundStyle(Theme.teal)
+                        .accessibilityIdentifier("check.connection.addressChanged")
+                }
+                if settings.findingAddress {
+                    HStack { ProgressView(); Text("Looking for the server’s new address…") }
+                        .accessibilityIdentifier("check.connection.findingAddress")
+                } else if settings.addressSearchFailed {
+                    Text("No server with the paired key was found at a new address.")
+                        .foregroundStyle(Theme.secondaryLabel)
+                        .accessibilityIdentifier("check.connection.addressNotFound")
+                }
+                if let problem = settings.connectionProblem {
+                    Label(problem, systemImage: "xmark.shield.fill").foregroundStyle(Theme.red)
+                } else if settings.pins != nil || settings.isDemo {
+                    Label("Encrypted connection", systemImage: "checkmark.shield.fill")
+                        .foregroundStyle(Theme.teal)
+                        .accessibilityIdentifier("check.connection.encrypted")
+                    Text(settings.pins?.pins.isEmpty == true
+                         ? "\(settings.tlsVersion) with a certificate for \(settings.serverURL?.host ?? "your server")."
+                         : "\(settings.tlsVersion). This iPhone checks the server's key on every connection.")
+                        .font(.callout).foregroundStyle(Theme.secondaryLabel)
+                    if let key = settings.pins?.pins.first {
+                        LabeledContent("Server key") {
+                            Button(key.display) { UIPasteboard.general.string = key.base64url }
+                                .font(.callout.monospaced())
+                        }
+                        .accessibilityIdentifier("check.connection.key")
+                    }
+                }
+            } header: {
+                Text("Connection")
+            } footer: {
+                Text("Matches homespun-server certificate on the server."
+                     + (settings.pins?.changedAt.map { " Changed on \($0.formatted(date: .abbreviated, time: .omitted)); this iPhone checked it with its pairing." } ?? ""))
+            }
+            Section {
                 if let server = settings.server {
                     LabeledContent(server.name, value: report?.platform.name ?? server.platform?.name ?? "")
                         .accessibilityIdentifier("check.server")
@@ -275,9 +316,10 @@ struct ServerCheckView: View {
     }
 
     private func load() async {
-        guard let client = settings.client else { return }
         loading = true
         defer { loading = false }
+        await settings.refreshServerInfo()
+        guard settings.connectionProblem == nil, let client = settings.client else { return }
         do {
             report = try await client.setup()
             error = nil

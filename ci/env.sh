@@ -97,7 +97,7 @@ new_simulator() {
 # Waits until nothing answers on this port (a server from an earlier try may still be stopping).
 wait_port_free() {
     local tries=0
-    while curl -fs -o /dev/null --max-time 2 http://127.0.0.1:$1/api/v1/health; do
+    while curl -fsk -o /dev/null --max-time 2 https://127.0.0.1:$1/api/v1/health; do
         (( ++tries > 30 )) && { echo "port $1 is still in use"; return 1; }
         sleep 1
     done
@@ -125,8 +125,11 @@ test_retries() { [[ -n ${RETRY_UI:-} ]] && print -r -- "-retry-tests-on-failure 
 
 # Waits until the temporary server on this port answers.
 wait_for_server() {
-    local tries=0
-    until curl -fs -o /dev/null http://127.0.0.1:$1/api/v1/health; do
+    local tries=0 pin
+    until pin=$(openssl x509 -in "$HOMESPUN_DATA/tls/certificate.pem" -pubkey -noout 2>/dev/null \
+          | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 -binary | openssl base64 -A) \
+          && [[ -n $pin ]] \
+          && curl -fsk --pinnedpubkey "sha256//$pin" -o /dev/null --max-time 2 https://127.0.0.1:$1/api/v1/health; do
         (( ++tries > 90 )) && { echo "the test server on port $1 didn't start"; return 1; }
         sleep 1
     done

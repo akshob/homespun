@@ -84,7 +84,15 @@ extension TestClientProtocol {
         var buffer: ByteBuffer?
         if let json {
             headers[.contentType] = "application/json"
-            buffer = ByteBuffer(bytes: try ServerAPI.encoder.encode(json))
+            if var pair = json as? ServerAPI.PairRequest, pair.challenge == nil {
+                let challenge = try await call("/api/v1/pair/challenge", .post,
+                                               json: ServerAPI.CodeChallengeRequest(nonce: PairingCrypto.encode(PairingCrypto.nonce())))
+                    .decode(ServerAPI.CodeChallenge.self)
+                pair.challenge = challenge.id
+                buffer = ByteBuffer(bytes: try ServerAPI.encoder.encode(pair))
+            } else {
+                buffer = ByteBuffer(bytes: try ServerAPI.encoder.encode(json))
+            }
         } else if let body {
             buffer = ByteBuffer(bytes: body)
         }
@@ -114,7 +122,7 @@ struct Fixture {
         configuration.maximumChunkBytes = 1 << 20
         server = try await HomespunServer(configuration: configuration, connectors: connectors, approver: approver,
                                           // Long enough for a slow machine's requests to fit inside it.
-                                          approvalPause: 2, builtIn: [])
+                                          approvalPause: 2, builtIn: [], codeRounds: 1_000, challengeInterval: 0)
     }
 
     func pair(_ client: some TestClientProtocol) async throws -> String {
@@ -127,7 +135,7 @@ struct Fixture {
 
     func test(_ body: @escaping @Sendable (any TestClientProtocol, String) async throws -> Void) async throws {
         defer { try? FileManager.default.removeItem(at: directory) }
-        let app = Application(router: server.router())
+        let app = Application(router: server.testRouter())
         try await app.test(.router) { client in try await body(client, try await pair(client)) }
     }
 
@@ -738,7 +746,15 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
         #expect(options.canApprove && options.serverName == "test" && options.pairCommand.hasSuffix(" pair"))
 
         func ask(_ name: String) async throws -> TestResponse {
-            try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(deviceName: name))
+            let response = try await client.call("/api/v1/pair/requests", .post,
+                json: ServerAPI.ApprovalRequest(deviceName: name, commitment: PairingCrypto.encode(
+                    PairingCrypto.commitment(nonce: Data(repeating: 1, count: 32)))))
+            if response.status == .accepted {
+                let ticket = try response.decode(ServerAPI.ApprovalTicket.self)
+                _ = try await client.call("/api/v1/pair/requests/\(ticket.id)/reveal", .post, token: ticket.secret,
+                                          json: ServerAPI.ApprovalReveal(nonce: PairingCrypto.encode(Data(repeating: 1, count: 32))))
+            }
+            return response
         }
         func status(_ ticket: ServerAPI.ApprovalTicket, secret: String? = nil) async throws -> TestResponse {
             try await client.call("/api/v1/pair/requests/\(ticket.id)", token: secret ?? ticket.secret)
@@ -754,7 +770,7 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
 
         // Allowed: the device gets a token once, and the dialog named it (on one line) with the shown number.
         let allowed = try await ask("Alex\u{0}'s\u{2028}iPad").decode(ServerAPI.ApprovalTicket.self)
-        #expect(allowed.match.count == 4)
+        #expect(allowed.match == nil && allowed.serverNonce != nil)
         #expect(try await status(allowed, secret: "wrong").status == .notFound)
         // Until the device collects its token, no one else can take the approval's place.
         try await Task.sleep(for: .milliseconds(100))
@@ -762,7 +778,9 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
         let approved = try await answer(allowed)
         let pairing = try #require(approved.pairing)
         #expect(approved.state == .approved && approver.lock.withLock { approver.asked.last?.device } == "Alex's iPad")
-        #expect(approver.lock.withLock { approver.asked.last?.match } == allowed.match)
+        let nonce = try #require(allowed.serverNonce.flatMap { PairingCrypto.decode($0, count: 32) })
+        let sas = PairingCrypto.sas(fingerprint: fixture.server.fingerprint, appNonce: Data(repeating: 1, count: 32), serverNonce: nonce)
+        #expect(approver.lock.withLock { approver.asked.last?.match } == String(sas.prefix(3)) + " " + sas.suffix(3))
         #expect(try await client.call("/api/v1/info", token: pairing.token).status == .ok)
         #expect(try await status(allowed).status == .notFound)
 
@@ -781,8 +799,12 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
     holding.hold = true
     let second = try await Fixture(approver: holding)
     try await second.test { client, token in
-        let request = ServerAPI.ApprovalRequest(deviceName: "iPhone")
+        let nonce = PairingCrypto.nonce()
+        let request = ServerAPI.ApprovalRequest(deviceName: "iPhone",
+                                                commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: nonce)))
         let ticket = try await client.call("/api/v1/pair/requests", .post, json: request).decode(ServerAPI.ApprovalTicket.self)
+        _ = try await client.call("/api/v1/pair/requests/\(ticket.id)/reveal", .post, token: ticket.secret,
+                                  json: ServerAPI.ApprovalReveal(nonce: PairingCrypto.encode(nonce)))
         #expect(try await client.call("/api/v1/pair/requests", .post, json: request).status == .tooManyRequests)
         #expect(try await client.call("/api/v1/pair/requests/\(ticket.id)", .delete, token: "wrong").status == .notFound)
         #expect(try await client.call("/api/v1/pair/requests/\(ticket.id)", .delete, token: ticket.secret).status == .noContent)
@@ -802,7 +824,8 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
     let headless = try await Fixture()
     try await headless.test { client, _ in
         #expect(try await !client.call("/api/v1/pair/options").decode(ServerAPI.PairingOptions.self).canApprove)
-        let refused = try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(deviceName: "iPhone"))
+        let refused = try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(
+            deviceName: "iPhone", commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: PairingCrypto.nonce()))))
         #expect(refused.status == .conflict && String(decoding: refused.data, as: UTF8.self).contains(" pair` on it"))
     }
 }
@@ -856,7 +879,9 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
         let text = fixture.server.pairingInstructions(code: "K7Q4-M9XT")
         #expect(text.contains("homespun://pair?server=") && text.contains("K7Q4-M9XT") && text.contains("only on this computer"))
         let report = try await client.call("/api/v1/setup", token: token).decode(ServerSetup.Report.self)
-        #expect(Set(report.checks.map(\.id)) == ["photos", "videos", "live_photos", "discovery", "storage", "service", "immich"])
+        #expect(Set(report.checks.map(\.id)) == ["encryption", "photos", "videos", "live_photos", "discovery", "storage", "service", "immich"])
+        #expect(report.checks.first?.id == "encryption" && report.checks.first?.status == .ok)
+        #expect(text.contains("fp=") && text.contains("Server key: "))
         #expect(report.checks.first { $0.id == "photos" }?.status == .ok)
         #expect(report.checks.first { $0.id == "immich" }?.status == .info)
         #expect(report.checks.first { $0.id == "service" }?.fix.first?.contains("install-service --data") == true)
@@ -865,7 +890,7 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
 
         var configuration = fixture.server.configuration
         configuration.publicURL = "photos.example.lan:9000"
-        #expect(Network.publicURL(configuration: configuration)?.absoluteString == "http://photos.example.lan:9000")
+        #expect(Network.publicURL(configuration: configuration)?.absoluteString == "https://photos.example.lan:9000")
         // The catalog holds secrets, so only the server's user can read it.
         let catalog = fixture.server.storage.catalog.path
         for file in [catalog, catalog + "-wal"] {
@@ -930,7 +955,7 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
     // when the tools are missing.
     let configuration = ServerConfiguration(dataDirectory: directory, host: "0.0.0.0", port: 0, name: "test")
     let server = try await HomespunServer(configuration: configuration)
-    try await server.application().test(.live) { client in
+    try await server.application().test(.ahc(.https)) { client in
         try await Task.sleep(for: .seconds(2))
         #expect(try await client.call("/api/v1/health").status == .ok)
     }

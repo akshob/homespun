@@ -13,7 +13,9 @@ import UniformTypeIdentifiers
 actor DemoServer {
     static let name = "Homespun Demo"
     static let host = "homespun-demo.local"
-    static let baseURL = URL(string: "http://\(host):8787")!
+    static let baseURL = URL(string: "https://\(host):8787")!
+    static let fingerprint = ServerKeyFingerprint(spki: Data("homespun demo key".utf8))
+    static let notAfter = Date(timeIntervalSince1970: 2_000_000_000)
     /// The server the demo's requests reach while the demo is on.
     static let running = Mutex<DemoServer?>(nil)
 
@@ -41,6 +43,7 @@ actor DemoServer {
         var lastSeenAt: Date?
         /// This iPhone's token (the other, pretend devices have none).
         var token: String?
+        var installID: String?
     }
 
     struct Resource: Codable, Equatable {
@@ -76,9 +79,15 @@ actor DemoServer {
     private struct Approval {
         var ticket: ServerAPI.ApprovalTicket
         var deviceName: String
+        var installID: String?
         var asked: Date
         var closed = false
+        var commitment: Data
+        var serverNonce: Data
+        var revealed = false
     }
+
+    private var challenges: [String: Date] = [:]
 
     struct Place: Sendable {
         var path: String
@@ -99,7 +108,8 @@ actor DemoServer {
 
     static var info: ServerAPI.ServerInfo {
         ServerAPI.ServerInfo(name: name, version: "1.0.0 (demo)", mode: .files, profile: .standard, platform: platform,
-                             hardware: hardware, freeBytes: folders[0].free)
+                             hardware: hardware, freeBytes: folders[0].free,
+                             tls: .init(fingerprint: fingerprint, notAfter: notAfter))
     }
 
     let folder: URL
@@ -172,31 +182,83 @@ actor DemoServer {
         func decode<Value: Decodable>(_ type: Value.Type) throws -> Value { try ServerAPI.decoder.decode(type, from: body) }
 
         // Before pairing.
-        if on("GET", "health") != nil { return try Self.json(ServerAPI.Health()) }
+        if on("GET", "health") != nil { return try Self.json(ServerAPI.Health(tls: true)) }
         if on("GET", "pair/options") != nil {
             return try Self.json(ServerAPI.PairingOptions(serverName: Self.name, canApprove: true, pairCommand: "homespun-server pair",
                                                           platform: Self.platform, hardware: Self.hardware,
-                                                          freeBytes: Self.folders[0].free))
+                                                          freeBytes: Self.folders[0].free, pairingVersion: 2, encrypted: true))
         }
-        if on("POST", "pair") != nil { return try Self.json(pair(deviceName: try decode(ServerAPI.PairRequest.self).deviceName)) }
+        if on("POST", "tls/verify") != nil {
+            let request = try decode(ServerAPI.IdentityRequest.self)
+            guard let nonce = PairingCrypto.decode(request.nonce, count: 32),
+                  let token = state.devices.compactMap(\.token).first(where: {
+                      PairingCrypto.keyID(tokenHash: PairingCrypto.tokenHash($0)) == request.keyID
+                  }) else { throw Failure(status: 404, message: "Pair this device again.") }
+            return try Self.json(ServerAPI.IdentityProof(fingerprint: Self.fingerprint,
+                proof: PairingCrypto.encode(PairingCrypto.verifyProof(tokenHash: PairingCrypto.tokenHash(token),
+                                                                      nonce: nonce, fingerprint: Self.fingerprint)),
+                notAfter: Self.notAfter))
+        }
+        if on("POST", "pair/challenge") != nil {
+            let request = try decode(ServerAPI.CodeChallengeRequest.self)
+            guard let nonce = PairingCrypto.decode(request.nonce, count: 32) else { throw Failure(status: 400, message: "Invalid nonce.") }
+            let id = UUID().uuidString, salt = PairingCrypto.nonce(count: 16)
+            let key = try PairingCrypto.codeKey(codeHash: PairingCrypto.codeHash("DEMO-2468"), salt: salt)
+            challenges[id] = Date().addingTimeInterval(60)
+            return try Self.json(ServerAPI.CodeChallenge(id: id, rounds: PairingCrypto.codeRounds, proofs: [
+                .init(salt: PairingCrypto.encode(salt),
+                      check: PairingCrypto.encode(PairingCrypto.codeCheck(key: key, nonce: nonce, salt: salt, id: id)),
+                      proof: PairingCrypto.encode(PairingCrypto.codeProof(key: key, fingerprint: Self.fingerprint,
+                                                                         nonce: nonce, salt: salt, id: id)))
+            ], expiresIn: 60))
+        }
+        if on("POST", "pair") != nil {
+            let request = try decode(ServerAPI.PairRequest.self)
+            guard PairingCrypto.codeHash(request.code) == PairingCrypto.codeHash("DEMO-2468"),
+                  let id = request.challenge, let expires = challenges.removeValue(forKey: id), expires > Date() else {
+                throw Failure(status: 403, message: "Try DEMO-2468.")
+            }
+            return try Self.json(pair(deviceName: request.deviceName, installID: request.installID))
+        }
         if on("POST", "pair/requests") != nil {
             let request = try decode(ServerAPI.ApprovalRequest.self)
+            guard let text = request.commitment, let commitment = PairingCrypto.decode(text, count: 32) else {
+                throw Failure(status: 400, message: "A commitment is required.")
+            }
             let id = UUID().uuidString.lowercased()
-            let ticket = ServerAPI.ApprovalTicket(id: id, secret: UUID().uuidString, match: "4271", expiresIn: 120)
-            approvals[id] = Approval(ticket: ticket, deviceName: request.deviceName, asked: Date())
+            let nonce = PairingCrypto.nonce()
+            let ticket = ServerAPI.ApprovalTicket(id: id, secret: UUID().uuidString, expiresIn: 120,
+                                                  serverNonce: PairingCrypto.encode(nonce))
+            approvals[id] = Approval(ticket: ticket, deviceName: request.deviceName, installID: request.installID, asked: Date(),
+                                     commitment: commitment, serverNonce: nonce)
             return try Self.json(ticket, status: 201)
+        }
+        if let id = on("POST", "pair/requests/*/reveal")?.first {
+            let reveal = try decode(ServerAPI.ApprovalReveal.self)
+            guard var approval = approvals[id], approval.ticket.secret == token,
+                  !approval.closed, !approval.revealed, Date().timeIntervalSince(approval.asked) < 30,
+                  let nonce = PairingCrypto.decode(reveal.nonce, count: 32),
+                  PairingCrypto.equal(approval.commitment, PairingCrypto.commitment(nonce: nonce)) else {
+                throw Failure(status: 400, message: "The pairing couldn't be confirmed.")
+            }
+            approval.revealed = true
+            approval.ticket.match = PairingCrypto.sas(fingerprint: Self.fingerprint, appNonce: nonce, serverNonce: approval.serverNonce)
+            approval.asked = Date()
+            approvals[id] = approval
+            return Response(status: 202)
         }
         if let id = on("GET", "pair/requests/*")?.first {
             guard var approval = approvals[id], approval.ticket.secret == token, !approval.closed else {
                 throw Failure(status: 404, message: "No such request.")
             }
             // Someone at the pretend Mac clicks Allow after a moment.
-            guard Date().timeIntervalSince(approval.asked) >= Self.approvalSeconds * min(pace, 1) else {
+            guard approval.revealed, Date().timeIntervalSince(approval.asked) >= Self.approvalSeconds * min(pace, 1) else {
                 return try Self.json(ServerAPI.ApprovalStatus(state: .waiting))
             }
             approval.closed = true
             approvals[id] = approval
-            return try Self.json(ServerAPI.ApprovalStatus(state: .approved, pairing: pair(deviceName: approval.deviceName)))
+            return try Self.json(ServerAPI.ApprovalStatus(state: .approved,
+                pairing: pair(deviceName: approval.deviceName, installID: approval.installID)))
         }
         if let id = on("DELETE", "pair/requests/*")?.first {
             approvals[id]?.closed = true
@@ -206,7 +268,11 @@ actor DemoServer {
         guard let device = state.devices.first(where: { $0.token != nil && $0.token == token }) else {
             throw Failure(status: 401, message: "This device isn't paired.")
         }
-        if on("GET", "info") != nil { return try Self.json(Self.info) }
+        if on("GET", "info") != nil {
+            var info = Self.info
+            info.deviceName = device.name
+            return try Self.json(info)
+        }
         if on("POST", "pairing-codes") != nil {
             return try Self.json(ServerAPI.PairingCode(code: "DEMO-2468", expiresIn: 600), status: 201)
         }
@@ -300,18 +366,23 @@ actor DemoServer {
     // MARK: Pairing
 
     /// Pairs this iPhone (again: its record keeps its name and originals, with a new token).
-    private func pair(deviceName: String) -> ServerAPI.PairResponse {
+    private func pair(deviceName: String, installID: String?) -> ServerAPI.PairResponse {
         let token = UUID().uuidString
-        if let index = state.devices.firstIndex(where: { $0.token != nil }) {
+        if let installID, let index = state.devices.firstIndex(where: { $0.token != nil && $0.installID == installID }) {
             state.devices[index].token = token
             state.devices[index].lastSeenAt = Date()
             save()
-            return ServerAPI.PairResponse(deviceID: state.devices[index].id, token: token, server: Self.info)
+            var info = Self.info
+            info.deviceName = state.devices[index].name
+            return ServerAPI.PairResponse(deviceID: state.devices[index].id, token: token, server: info)
         }
-        let device = Device(id: "demo-iphone", name: deviceName, pairedAt: Date(), lastSeenAt: Date(), token: token)
+        let device = Device(id: UUID().uuidString, name: deviceName, pairedAt: Date(), lastSeenAt: Date(),
+                            token: token, installID: installID)
         state.devices.insert(device, at: 0)
         save()
-        return ServerAPI.PairResponse(deviceID: device.id, token: token, server: Self.info)
+        var info = Self.info
+        info.deviceName = device.name
+        return ServerAPI.PairResponse(deviceID: device.id, token: token, server: info)
     }
 
     private func setupReport() -> ServerSetup.Report {

@@ -63,13 +63,16 @@ struct DialogApprover: PairingApprover {
 /// one until its device collects the token), so a device on the network can't stack up or
 /// slip in dialogs, with a pause after each one and a longer one after "Deny".
 actor PairingApprovals {
-    enum Failure: Error { case unavailable, busy }
+    enum Failure: Error { case unavailable, busy, invalidReveal }
 
     private struct Pending {
         var id: String
         var secretHash: String
         var device: String
-        var match: String
+        var commitment: Data
+        var serverNonce: Data
+        var installHash: String?
+        var revealed = false
         var expires: Date
         var state: ServerAPI.ApprovalState = .waiting
         var task: Task<Void, Never>?
@@ -96,8 +99,8 @@ actor PairingApprovals {
 
     nonisolated var canApprove: Bool { approver != nil }
 
-    func start(device rawName: String) throws -> ServerAPI.ApprovalTicket {
-        guard let approver else { throw Failure.unavailable }
+    func start(device rawName: String, commitment: Data, installHash: String? = nil, now: Date = Date()) throws -> ServerAPI.ApprovalTicket {
+        guard approver != nil else { throw Failure.unavailable }
         expireIfDue()
         if let pending, pending.state == .waiting || pending.state == .approved { throw Failure.busy }
         guard Date() >= pausedUntil else { throw Failure.busy }
@@ -108,18 +111,35 @@ actor PairingApprovals {
             .map { CharacterSet.whitespacesAndNewlines.contains($0) ? " " : $0 }
             .prefix(40).map(Character.init)).trimmingCharacters(in: .whitespaces)
         let secret = Pairing.newToken()
-        var request = Pending(id: UUID().uuidString, secretHash: Pairing.hash(secret),
+        let request = Pending(id: UUID().uuidString, secretHash: Pairing.hash(secret),
                               device: device.isEmpty ? "A device" : device,
-                              match: String(Int.random(in: 1000...9999)),
-                              expires: Date().addingTimeInterval(TimeInterval(seconds + 10)))
-        let id = request.id, match = request.match, name = request.device
+                              commitment: commitment, serverNonce: PairingCrypto.nonce(),
+                              installHash: installHash,
+                              expires: now.addingTimeInterval(30))
+        pending = request
+        return .init(id: request.id, secret: secret, expiresIn: seconds,
+                     serverNonce: PairingCrypto.encode(request.serverNonce))
+    }
+
+    func reveal(id: String, secret: String, nonce: Data, fingerprint: ServerKeyFingerprint, now: Date = Date()) throws {
+        expireIfDue(now: now)
+        guard var request = pending, request.id == id, request.secretHash == Pairing.hash(secret),
+              request.state == .waiting, !request.revealed, let approver else { throw Failure.invalidReveal }
+        guard PairingCrypto.equal(request.commitment, PairingCrypto.commitment(nonce: nonce)) else {
+            pending = nil
+            throw Failure.invalidReveal
+        }
+        let number = PairingCrypto.sas(fingerprint: fingerprint, appNonce: nonce, serverNonce: request.serverNonce)
+        let match = String(number.prefix(3)) + " " + number.suffix(3)
+        let name = request.device
         let server = serverName, seconds = seconds
+        request.revealed = true
+        request.expires = now.addingTimeInterval(TimeInterval(seconds + 10))
         request.task = Task {
             let answer = await approver.ask(device: name, match: match, server: server, seconds: seconds)
             self.finish(id: id, answer: answer)
         }
         pending = request
-        return .init(id: id, secret: secret, match: match, expiresIn: seconds)
     }
 
     private func finish(id: String, answer: Bool?) {
@@ -137,8 +157,8 @@ actor PairingApprovals {
         }
     }
 
-    private func expireIfDue() {
-        guard let request = pending, Date() > request.expires else { return }
+    private func expireIfDue(now: Date = Date()) {
+        guard let request = pending, now > request.expires else { return }
         request.task?.cancel()
         if request.state == .waiting { pending?.state = .expired }
         if request.state == .approved { pending = nil }
@@ -148,14 +168,14 @@ actor PairingApprovals {
     /// The request's state, or `nil` if unknown or the secret is wrong. An answer is given
     /// once; `register` turns an approval into a paired device.
     func status(id: String, secret: String,
-                register: @Sendable (String) async throws -> ServerAPI.PairResponse) async throws -> ServerAPI.ApprovalStatus? {
+                register: @Sendable (String, String?) async throws -> ServerAPI.PairResponse) async throws -> ServerAPI.ApprovalStatus? {
         expireIfDue()
         guard let request = pending, request.id == id, request.secretHash == Pairing.hash(secret) else { return nil }
         guard request.state != .waiting else { return .init(state: .waiting) }
         pending = nil
         pausedUntil = max(pausedUntil, Date().addingTimeInterval(pause))
         guard request.state == .approved else { return .init(state: request.state) }
-        return .init(state: .approved, pairing: try await register(request.device))
+        return .init(state: .approved, pairing: try await register(request.device, request.installHash))
     }
 
     func cancel(id: String, secret: String) -> Bool {
