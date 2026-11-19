@@ -49,6 +49,7 @@ final class GridThumbnails {
     /// may come before this returns), and whether it's the last. Nil: the item is gone.
     func request(_ id: String, pixels: CGFloat,
                  handler: @escaping @MainActor (UIImage, _ final: Bool) -> Void) -> Request? {
+        RenderProbe.count("grid.thumbRequests")
         if let catalog {
             return .catalog(Task {
                 guard let image = await catalog.thumbnail(id, side: pixels), !Task.isCancelled else { return }

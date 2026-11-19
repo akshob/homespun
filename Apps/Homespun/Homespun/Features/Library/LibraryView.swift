@@ -62,6 +62,7 @@ struct LibraryView: View {
     private var settings: AppSettings { model.settings }
 
     var body: some View {
+        let _ = RenderProbe.count("render.library")
         NavigationStack {
             content
                 .background(Theme.background)

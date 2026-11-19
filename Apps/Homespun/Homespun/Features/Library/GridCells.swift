@@ -58,6 +58,7 @@ final class GridCell: UICollectionViewCell {
         self.info = info
         if item != self.item || pixels != self.pixels || request == nil && !sharp {
             if item != self.item {
+                if imageView.image != nil { RenderProbe.count("grid.imageClears") }
                 // Another item's picture never stays on: blank until this one's arrives (a new size
                 // keeps the old picture meanwhile).
                 imageView.image = nil

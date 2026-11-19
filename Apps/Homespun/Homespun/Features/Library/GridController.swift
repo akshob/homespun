@@ -270,6 +270,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         presentedViewer?.state.ids = new.ids
         dataVersion = version
         layout.geometry = GridGeometry(metrics: layout.geometry.metrics, months: new.sections.map(\.range.count))
+        RenderProbe.count("grid.reloads")
         collectionView.reloadData()
         thumbnails.reset(order: new.ids, pixels: pixels)
         lastPreheat = nil
@@ -300,6 +301,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     override func viewWillLayoutSubviews() {
+        RenderProbe.count("grid.layouts")
         super.viewWillLayoutSubviews()
         relayout()
         let notice = CGRect(x: 0, y: 0, width: layout.geometry.metrics.width, height: noticeHeight)
@@ -481,12 +483,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     private func configure(_ cell: GridCell?, at indexPath: IndexPath?) {
         guard let cell, let indexPath, let position = position(indexPath) else { return }
+        RenderProbe.count("grid.configs")
         let id = data.cells[position].id
         cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
         update(cell, position: position)
     }
 
     private func update(_ cell: GridCell, position: Int) {
+        RenderProbe.count("grid.configs")
         let initial = data.cells[position]
         let state = library.state.cell(initial.id) ?? initial
         cell.update(state: state, selecting: selection.active, selected: selection.active && selection.ids.contains(initial.id),

@@ -14,6 +14,7 @@ struct RootView: View {
     @State private var linkInDemo = false
 
     var body: some View {
+        let _ = RenderProbe.count("render.root")
         @Bindable var settings = model.settings
         Group {
             if settings.onboardingComplete {
@@ -136,6 +137,7 @@ struct MainTabView: View {
     }
 
     var body: some View {
+        let _ = RenderProbe.count("render.mainTab")
         @Bindable var settings = model.settings
         // The tab span starts as the selection changes (a tab's onAppear runs before onChange).
         TabView(selection: Binding(get: { tab }, set: { new in

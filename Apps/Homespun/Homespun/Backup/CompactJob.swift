@@ -121,6 +121,7 @@ final class CompactJob {
         items[index].state = state
         states[items[index].assetIdentifier] = state
         if old.isOpen, !state.isOpen {
+            RenderProbe.count("job.finished")
             runProgress.done += 1
             if case .saved(let original, let compact) = state {
                 runProgress.originalBytes += original

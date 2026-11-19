@@ -5,6 +5,27 @@ import QuartzCore
 import SwiftUI
 import UIKit
 
+/// App-side counters, published independently of the views being measured.
+@MainActor
+enum RenderProbe {
+    private static var counters: [String: Double] = [:]
+    private static var pending: DispatchWorkItem?
+
+    static func count(_ name: String, by amount: Int = 1) {
+        guard PerfMonitor.shared.enabled else { return }
+        counters[name, default: 0] += Double(amount)
+        guard pending == nil else { return }
+        let work = DispatchWorkItem {
+            MainActor.assumeIsolated {
+                pending = nil
+                PerfMonitor.shared.note(counters)
+            }
+        }
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+    }
+}
+
 /// Measures smoothness for the performance tests (launch argument `-perfMonitor YES`; off otherwise):
 /// frames that took longer than one refresh while something scrolls, and how long interactions take
 /// from the touch to the result (opening an item, switching a filter, Select All, a tab). The UI

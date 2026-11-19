@@ -14,6 +14,7 @@ struct StatusAccessoryModifier: ViewModifier {
     @State private var height: CGFloat = 0
 
     func body(content: Content) -> some View {
+        let _ = RenderProbe.count("render.accessory")
         let status = AccessoryLadder.pick(model.library.accessoryInputs)
         let visible = status != nil && !model.library.isSelecting
         content
