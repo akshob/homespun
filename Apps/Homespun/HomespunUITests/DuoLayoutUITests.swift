@@ -203,7 +203,9 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(grid.waitForExistence(timeout: 20), file: file, line: line)
         XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 10), file: file, line: line)
         let screen = app.windows.firstMatch.frame
-        XCTAssertGreaterThan(screen.width, 500, "\(pose): not open", file: file, line: line)
+        if pose != "folded" {
+            XCTAssertGreaterThan(screen.width, 500, "\(pose): not open", file: file, line: line)
+        }
         XCTAssertEqual(grid.frame.minX, screen.minX, accuracy: 1, "\(pose): grid shifted", file: file, line: line)
         XCTAssertEqual(grid.frame.maxX, screen.maxX, accuracy: 1, "\(pose): grid container is narrow", file: file, line: line)
         let row = app.gridRow().map(\.frame)
