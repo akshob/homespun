@@ -319,7 +319,11 @@ import Testing
         defer { withExtendedLifetime(fixture) {} }
         var number: String?
         let paired = try await ServerPairing.approve(url: DemoServer.baseURL, deviceName: "Test iPhone",
-            installID: try DefaultsInstallation(defaults: fixture.session.defaults).load().id) { value, _ in number = value }
+            installID: try DefaultsInstallation(defaults: fixture.session.defaults).load().id,
+            onNumber: { value, _ in number = value }, confirmNumber: { _ in
+                #expect(await fixture.session.server.snapshot.devices.allSatisfy { $0.installID == nil })
+                return true
+            })
         #expect(number?.count == 6 && paired.pins.pins == [DemoServer.fingerprint])
         let verified = try await ServerPairing.verify(url: DemoServer.baseURL, token: paired.response.token)
         #expect(verified.fingerprint == DemoServer.fingerprint && verified.url.scheme == "https")
@@ -336,6 +340,16 @@ import Testing
         let file = try await CompareModel.fetch(client, assetID: asset, role: .photo,
                                                 to: fixture.folder.appendingPathComponent("compare"), name: "original.jpg") { _, _ in }
         #expect(try Fingerprint.sha256(of: file) == asset)
+    }
+
+    @Test func rejectingTheNumberNeverDisclosesTheInstallationOrCreatesADevice() async throws {
+        let fixture = try await Fixture.make()
+        do {
+            _ = try await ServerPairing.approve(url: DemoServer.baseURL, deviceName: "Test iPhone",
+                installID: UUID().uuidString, onNumber: { _, _ in }, confirmNumber: { _ in false })
+            Issue.record("An unconfirmed server received an installation identity")
+        } catch is ServerPairing.IdentityFailure {}
+        #expect(await fixture.session.server.snapshot.devices.allSatisfy { $0.installID == nil && $0.token == nil })
     }
 
     @Test func rePairSendsThePersistentInstallIDAndConfirmedName() async throws {

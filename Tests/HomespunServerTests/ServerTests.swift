@@ -776,7 +776,9 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
         try await Task.sleep(for: .milliseconds(100))
         #expect(try await ask("Imposter").status == .tooManyRequests)
         let approved = try await answer(allowed)
-        let pairing = try #require(approved.pairing)
+        #expect(approved.pairing == nil)
+        let pairing = try await client.call("/api/v1/pair/requests/\(allowed.id)/complete", .post, token: allowed.secret,
+            json: ServerAPI.ApprovalCompletion(installID: UUID().uuidString)).decode(ServerAPI.PairResponse.self)
         #expect(approved.state == .approved && approver.lock.withLock { approver.asked.last?.device } == "Alex's iPad")
         let nonce = try #require(allowed.serverNonce.flatMap { PairingCrypto.decode($0, count: 32) })
         let sas = PairingCrypto.sas(fingerprint: fixture.server.fingerprint, appNonce: Data(repeating: 1, count: 32), serverNonce: nonce)
@@ -803,6 +805,8 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
         let request = ServerAPI.ApprovalRequest(deviceName: "iPhone",
                                                 commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: nonce)))
         let ticket = try await client.call("/api/v1/pair/requests", .post, json: request).decode(ServerAPI.ApprovalTicket.self)
+        #expect(try await client.call("/api/v1/pair/requests/\(ticket.id)/complete", .post, token: ticket.secret,
+            json: ServerAPI.ApprovalCompletion(installID: UUID().uuidString)).status == .notFound)
         _ = try await client.call("/api/v1/pair/requests/\(ticket.id)/reveal", .post, token: ticket.secret,
                                   json: ServerAPI.ApprovalReveal(nonce: PairingCrypto.encode(nonce)))
         #expect(try await client.call("/api/v1/pair/requests", .post, json: request).status == .tooManyRequests)

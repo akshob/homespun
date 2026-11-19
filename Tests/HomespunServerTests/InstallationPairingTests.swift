@@ -67,16 +67,24 @@ extension Catalog {
         tokenHash: Pairing.hash("first approved token"), installHash: hash)
     try await Application(router: fixture.server.testRouter()).test(.router) { client in
         let nonce = PairingCrypto.nonce()
-        let ticket = try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(
+        #expect(try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(
             deviceName: "iPhone", commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: nonce)),
-            installID: installation)).decode(ServerAPI.ApprovalTicket.self)
+            installID: installation)).status == .badRequest)
+        let ticket = try await client.call("/api/v1/pair/requests", .post, json: ServerAPI.ApprovalRequest(
+            deviceName: "iPhone", commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: nonce))))
+            .decode(ServerAPI.ApprovalTicket.self)
         _ = try await client.call("/api/v1/pair/requests/\(ticket.id)/reveal", .post, token: ticket.secret,
                                   json: ServerAPI.ApprovalReveal(nonce: PairingCrypto.encode(nonce)))
         var paired: ServerAPI.PairResponse?
         for _ in 0..<100 {
             let status = try await client.call("/api/v1/pair/requests/\(ticket.id)", token: ticket.secret)
                 .decode(ServerAPI.ApprovalStatus.self)
-            if let value = status.pairing { paired = value; break }
+            #expect(status.pairing == nil)
+            if status.state == .approved {
+                paired = try await client.call("/api/v1/pair/requests/\(ticket.id)/complete", .post, token: ticket.secret,
+                    json: ServerAPI.ApprovalCompletion(installID: installation)).decode(ServerAPI.PairResponse.self)
+                break
+            }
             try await Task.sleep(for: .milliseconds(20))
         }
         let again = try #require(paired)

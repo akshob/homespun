@@ -332,8 +332,8 @@ your originals. Keep those backups private: the identity contains the server's p
 The server advertises itself with Bonjour (`_homespun._tcp`, via `dns-sd` on macOS or
 `avahi-publish` on Linux, from avahi-utils; a running server notices it within seconds of being
 installed), so the app lists it. Tapping a Mac server asks the person at its screen to click
-Allow (a dialog from the LaunchAgent; compare the same 6-digit number on the Mac and the iPhone, and
-the server asks about one device at a time). Linux servers, or a Mac server started over SSH,
+Allow (a dialog from the LaunchAgent; compare the same 6-digit number on the Mac and the iPhone,
+then confirm the match on the iPhone; the server asks about one device at a time). Linux servers, or a Mac server started over SSH,
 need the one-time code from `pair` instead: scan its QR code with the iPhone's Camera app,
 paste the `homespun://pair?…` link (handy on the simulator), or type the code. Codes work once,
 for 10 minutes after `pair`, or 2 minutes after their first pairing check.
@@ -362,14 +362,18 @@ TLS upgrade with the permanent token proof, without sending the token to candida
 Certificates renew automatically with the same key. `homespun-server certificate --renew` renews
 one by hand; `certificate --new-key` keeps a private backup of the previous identity and replaces
 the key. The running server reloads it within 10 seconds. Paired iPhones confirm the replacement
-with their pairing and show a notice; a failed proof blocks backups and Free Up Space. A corrupt
+with their pairing and show a notice; a changed key with a failed proof blocks backups and Free Up Space.
+Transient check failures keep the existing pin and retry automatically after 60 seconds, backing off
+to at most 15 minutes; activation and background preparation also retry. A corrupt
 identity stops the server rather than silently replacing the key.
 
 The server checks each upload's SHA-256 before accepting it,
 stores originals read-only, and lets the app remove an original only after checking its copy
 again at that moment (`POST /api/v1/assets/{id}/verify`). All API routes are HTTPS-only. Pairing uses
 `POST /api/v1/pair/challenge`, then `/pair` with the challenge ID, or commitment/reveal approval at
-`/pair/requests` and `/pair/requests/{id}/reveal`. `POST /api/v1/tls/verify` permanently supports
+`/pair/requests` and `/pair/requests/{id}/reveal`, followed by `/pair/requests/{id}/complete`
+only after owner approval and the iPhone's confirmation. The installation ID is withheld until
+that pinned completion request. `POST /api/v1/tls/verify` permanently supports
 verified upgrades and replacement keys without rotating an existing pairing token. Installation-aware
 re-pairing adds the catalog migration described below.
 If processing fails in files mode, "Try Again" re-registers the item and retries processing

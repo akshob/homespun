@@ -39,7 +39,7 @@ struct ServerClient: Sendable {
         if trust == .demo {
             state = ConnectionState(url: baseURL, session: session ?? DemoServer.session, delegate: nil)
         } else if let session {
-            state = ConnectionState(url: baseURL, session: session, delegate: delegate)
+            state = ConnectionState(url: baseURL, session: session, delegate: delegate ?? session.delegate as? ServerTrustDelegate)
         } else {
             let pair = ServerSessions.shared.session(for: baseURL, trust: trust)
             state = ConnectionState(url: baseURL, session: pair.0, delegate: pair.1)
@@ -60,7 +60,6 @@ struct ServerClient: Sendable {
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/" + path))
         request.httpMethod = method
         request.timeoutInterval = timeout
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         return request
     }
 
@@ -87,18 +86,26 @@ struct ServerClient: Sendable {
     private func run<Value>(_ request: URLRequest, retrying: Bool = false,
                             _ operation: (URLSession, URLRequest) async throws -> Value) async throws -> Value {
         let current = connection.withLock { $0 }
-        let request = try retarget(request, to: current.url)
+        var request = try retarget(request, to: current.url)
+        let authorization = request.value(forHTTPHeaderField: "Authorization")
+        request.setValue(nil, forHTTPHeaderField: "Authorization")
         let started = Date()
         do {
-            if case .pinned = trust, ServerSessions.shared.isSuspect(current.url), current.delegate?.observed == nil {
-                var probe = URLRequest(url: current.url.appendingPathComponent("api/v1/health"))
-                probe.timeoutInterval = timeout
-                _ = try await current.session.data(for: probe)
-                guard current.delegate?.observed != nil else {
-                    current.session.invalidateAndCancel()
-                    throw ServerPairing.IdentityFailure()
+            if case .pinned(let pins) = trust, token != nil || authorization != nil {
+                guard let delegate = current.delegate else { throw ServerPairing.IdentityFailure() }
+                let timeout = timeout
+                try await delegate.pinGate.verify {
+                    var probe = URLRequest(url: current.url.appendingPathComponent("api/v1/health"))
+                    probe.timeoutInterval = timeout
+                    _ = try await current.session.data(for: probe)
+                    guard let observed = delegate.observed, pins.contains(observed) else {
+                        ServerSessions.shared.reset(current.url)
+                        current.session.invalidateAndCancel()
+                        throw URLError(.secureConnectionFailed)
+                    }
                 }
             }
+            request.setValue(token.map { "Bearer \($0)" } ?? authorization, forHTTPHeaderField: "Authorization")
             return try await operation(current.session, request)
         } catch {
             let mismatch = current.delegate?.mismatch(since: started) == true
@@ -156,9 +163,9 @@ struct ServerClient: Sendable {
     }
 
     /// Asks someone at the server to allow this device.
-    func requestApproval(deviceName: String, commitment: String, installID: String) async throws -> ServerAPI.ApprovalTicket {
+    func requestApproval(deviceName: String, commitment: String) async throws -> ServerAPI.ApprovalTicket {
         try await send("pair/requests", method: "POST", json: ServerAPI.ApprovalRequest(deviceName: deviceName,
-                                                                                   commitment: commitment, installID: installID),
+                                                                                   commitment: commitment),
                        as: ServerAPI.ApprovalTicket.self)
     }
 
@@ -185,6 +192,11 @@ struct ServerClient: Sendable {
     /// For a client whose token is the ticket's secret.
     func approvalStatus(_ id: String) async throws -> ServerAPI.ApprovalStatus {
         try await send("pair/requests/\(id)", as: ServerAPI.ApprovalStatus.self)
+    }
+
+    func completeApproval(_ id: String, installID: String) async throws -> ServerAPI.PairResponse {
+        try await send("pair/requests/\(id)/complete", method: "POST",
+                       json: ServerAPI.ApprovalCompletion(installID: installID), as: ServerAPI.PairResponse.self)
     }
 
     /// Withdraws the question (closing the dialog). For a client whose token is the ticket's secret.

@@ -5,12 +5,18 @@ import Security
 import Testing
 @testable import Homespun
 
-@Test func fingerprintOfFixtureCertificateMatchesTheServer() throws {
+func serverTrustFixture() throws -> SecTrust {
     let bytes = Data(base64Encoded: """
         MIIBpjCCAUugAwIBAgIUbiMnX4ZhPz9mj7u4KdIJPiuw3UEwCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwPSG9tZXNwdW4gU2VydmVyMB4XDTI2MTExODE3MjYxN1oXDTI5MDIyMDE3MjYxN1owGjEYMBYGA1UEAwwPSG9tZXNwdW4gU2VydmVyMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFzpgvUqCIGzM0ofHMz7//5xDTR27yZg7m1aEXyNs7y9f3BxneuJr2j3ggBPzPtw5TI17dhyg6OlXgkRuIVm2yqNvMG0wHQYDVR0OBBYEFB1PUhJ9H/TN71UckiRJ3nk0gU8mMB8GA1UdIwQYMBaAFB1PUhJ9H/TN71UckiRJ3nk0gU8mMA8GA1UdEwEB/wQFMAMBAf8wGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0kAMEYCIQDBjU4YMPr/j8goHVKxv0R3r9FlbuGmxp9/TWZ2RB0CggIhAMf9aUieCOqjtvud/ZSy5zSmMpb+3Jb5KHWTeplJ35Ab
         """)!
     let certificate = try #require(SecCertificateCreateWithData(nil, bytes as CFData))
-    #expect(ServerKey.fingerprint(of: certificate)?.base64url == "IlypPJ-wE200U-L1DoKMtMQyrDczNQMel-ae_YH5OgU")
+    var trust: SecTrust?
+    #expect(SecTrustCreateWithCertificates(certificate, SecPolicyCreateSSL(true, nil), &trust) == errSecSuccess)
+    return try #require(trust)
+}
+
+@Test func fingerprintOfFixtureCertificateMatchesTheServer() throws {
+    #expect(ServerKey.fingerprint(of: try serverTrustFixture())?.base64url == "IlypPJ-wE200U-L1DoKMtMQyrDczNQMel-ae_YH5OgU")
 }
 
 @Test func serverTrustDecisionsFailClosed() {
@@ -105,6 +111,13 @@ import Testing
 }
 
 @MainActor @Suite struct LegacyPairingUpgradeTests {
+    private final class Clock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = Date(timeIntervalSince1970: 1_000_000)
+        var now: Date { lock.withLock { value } }
+        func advance(_ seconds: TimeInterval) { lock.withLock { value += seconds } }
+    }
+
     final class Tokens: TokenStore, @unchecked Sendable {
         private let lock = NSLock()
         private var values: [String: String] = [:]
@@ -154,7 +167,8 @@ import Testing
         })
         await settings.reverifyIdentity()
         #expect(settings.pins?.pins == [fingerprint])
-        guard case .identityProblem = settings.serverStatus else { Issue.record("An existing pin was weakened"); return }
+        #expect(settings.client?.trust == .pinned([fingerprint]))
+        #expect(settings.nextIdentityRetry != nil)
     }
 
     @Test func anUnreadablePinRecordIsNotAnUnpinnedLegacyPairing() async throws {
@@ -253,7 +267,10 @@ import Testing
         defer { UserDefaults.standard.removePersistentDomain(forName: name) }
         defaults.set(old, forKey: "serverURL")
         try tokens.setToken("pairing token", for: old.absoluteString)
-        let settings = AppSettings(defaults: defaults, tokens: tokens, verifyIdentity: { _, _ in throw ServerPairing.IdentityFailure() })
+        let fingerprint = fingerprint
+        let settings = AppSettings(defaults: defaults, tokens: tokens, verifyIdentity: { _, _ in
+            throw ServerPairing.IdentityFailure(observed: fingerprint)
+        })
         await settings.secureLegacyPairing()
         guard case .identityProblem = settings.serverStatus else { Issue.record("A bad proof didn't block the pairing"); return }
         #expect(tokens.token(for: old.absoluteString) == "pairing token" && tokens.pins(for: secure.absoluteString) == nil)
@@ -261,5 +278,89 @@ import Testing
             _ = try await settings.client?.info()
             Issue.record("The blocked client sent a request")
         } catch let failure as ServerClient.Failure { #expect(failure.code == "tls_blocked") }
+    }
+
+    @Test(arguments: [0, 1, 2, 3, 4])
+    func transientReverificationKeepsThePinnedPairingUsableAndRetriesAutomatically(_ failure: Int) async throws {
+        actor Attempts {
+            var count = 0
+            func next() -> Int { count += 1; return count }
+        }
+        let name = "tls-transient-\(UUID().uuidString)", defaults = UserDefaults(suiteName: name)!, tokens = Tokens()
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        defaults.set(secure, forKey: "serverURL")
+        defaults.set(try ServerAPI.encoder.encode(ServerAPI.ServerInfo(name: "Home Server", version: "0.2",
+            mode: .files, profile: .standard)), forKey: "serverInfo")
+        try tokens.setToken("pairing token", for: secure.absoluteString)
+        try tokens.setPins(ServerPins(pins: [fingerprint], source: "link"), for: secure.absoluteString)
+        let attempts = Attempts(), secure = secure, updated = ServerKeyFingerprint(spki: Data("updated key".utf8))
+        let settings = AppSettings(defaults: defaults, tokens: tokens, verifyIdentity: { _, _ in
+            if await attempts.next() == 1 {
+                switch failure {
+                case 0: throw URLError(.timedOut)
+                case 1: throw ServerClient.Failure(status: 429, message: "Try later")
+                case 2: throw ServerClient.Failure(status: 503, message: "Try later")
+                case 3: throw URLError(.secureConnectionFailed)
+                default: throw ServerPairing.UnrecognisedIdentity(observed: updated)
+                }
+            }
+            return .init(url: secure, fingerprint: updated)
+        }, identityRetryBaseDelay: 0.03)
+        await settings.reverifyIdentity()
+        guard case .unreachable = settings.serverStatus else { Issue.record("A transient check blocked the pairing"); return }
+        #expect(settings.canCompact && settings.connectionProblem == nil && settings.pins?.pins == [fingerprint])
+        #expect(settings.nextIdentityRetry != nil)
+        let deadline = Date().addingTimeInterval(5)
+        while settings.serverStatus != .reachable, Date() < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(settings.serverStatus == .reachable && settings.pins?.pins == [updated])
+        #expect(await attempts.count == 2 && settings.nextIdentityRetry == nil)
+        #expect(tokens.token(for: secure.absoluteString) == "pairing token")
+    }
+
+    @Test func activationAndBackgroundPreparationRetryWithCappedBackoff() async throws {
+        actor Attempts {
+            var count = 0
+            func next() -> Int { count += 1; return count }
+        }
+        let name = "tls-backoff-\(UUID().uuidString)", defaults = UserDefaults(suiteName: name)!, tokens = Tokens()
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        defaults.set(secure, forKey: "serverURL")
+        try tokens.setToken("pairing token", for: secure.absoluteString)
+        try tokens.setPins(ServerPins(pins: [fingerprint], source: "link"), for: secure.absoluteString)
+        let attempts = Attempts(), clock = Clock(), secure = secure, fingerprint = fingerprint
+        let settings = AppSettings(defaults: defaults, tokens: tokens, verifyIdentity: { _, _ in
+            if await attempts.next() <= 6 { throw ServerClient.Failure(status: 429, message: "Try later") }
+            return .init(url: secure, fingerprint: fingerprint)
+        }, identityNow: { clock.now })
+        await settings.reverifyIdentity()
+        #expect(settings.nextIdentityRetry?.timeIntervalSince(clock.now) == 60)
+        clock.advance(61)
+        await settings.secureLegacyPairing()
+        #expect(settings.nextIdentityRetry?.timeIntervalSince(clock.now) == 120)
+        clock.advance(61)
+        await settings.secureLegacyPairing()
+        #expect(await attempts.count == 3 && settings.nextIdentityRetry?.timeIntervalSince(clock.now) == 240)
+        for expected in [480.0, 900, 900] {
+            clock.advance(901)
+            await settings.reverifyIdentity()
+            #expect(settings.nextIdentityRetry?.timeIntervalSince(clock.now) == expected)
+        }
+        clock.advance(901)
+        await settings.secureLegacyPairing()
+        #expect(settings.serverStatus == .reachable && settings.nextIdentityRetry == nil)
+    }
+
+    @Test func aChangedKeyWithAnInvalidProofBlocksWithoutAutomaticTrustOrRetry() async throws {
+        let name = "tls-real-proof-\(UUID().uuidString)", defaults = UserDefaults(suiteName: name)!, tokens = Tokens()
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        defaults.set(secure, forKey: "serverURL")
+        try tokens.setToken("pairing token", for: secure.absoluteString)
+        try tokens.setPins(ServerPins(pins: [fingerprint], source: "link"), for: secure.absoluteString)
+        let settings = AppSettings(defaults: defaults, tokens: tokens, verifyIdentity: { _, _ in
+            throw ServerPairing.IdentityFailure(observed: ServerKeyFingerprint(spki: Data("unverified key".utf8)))
+        }, identityRetryBaseDelay: 0.01)
+        await settings.reverifyIdentity()
+        guard case .identityProblem = settings.serverStatus else { Issue.record("A bad proof was trusted"); return }
+        #expect(settings.pins?.pins == [fingerprint] && settings.nextIdentityRetry == nil && !settings.canCompact)
     }
 }

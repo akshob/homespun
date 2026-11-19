@@ -140,7 +140,7 @@ public struct HomespunServer: Sendable {
         guard let url = Network.publicURL(configuration: configuration) else {
             return "Pairing code: \(code)\nSet HOMESPUN_PUBLIC_URL to the address your iPhone uses to reach this server."
         }
-        let proxy = configuration.publicURL?.lowercased().hasPrefix("https://") == true
+        let proxy = Network.usesTLSProxy(url, configuration: configuration)
         let link = PairingLink(serverURL: url, code: code, name: configuration.name,
                                fingerprint: proxy ? nil : fingerprint).url.absoluteString
         let address = url.port != nil && url.host?.contains(":") != true

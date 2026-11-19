@@ -9,6 +9,11 @@ import NIOSSL
 import NIOPosix
 import Testing
 import X509
+#if os(Linux)
+import Glibc
+#else
+import Darwin
+#endif
 @testable import HomespunServerKit
 
 @Test func tlsIdentityIsCreatedOnceAndKeptPrivate() async throws {
@@ -48,6 +53,35 @@ import X509
         .first { $0.lastPathComponent.hasPrefix("previous-") })
     #expect(try Data(contentsOf: backup) == oldPEM)
     #expect(try FileManager.default.attributesOfItem(atPath: backup.path)[.posixPermissions] as? Int == 0o600)
+}
+
+@Test func unsupportedDirectorySyncDoesNotDiscardDurableKeyFiles() throws {
+    let data = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: data) }
+    let identity = try TLSStore.loadOrCreate(data: data).0
+    for code in [EINVAL, ENOTSUP, EROFS] {
+        try TLSStore.syncDirectory(data) { _ in errno = code; return -1 }
+        #expect(try TLSStore.load(data: data).fingerprint == identity.fingerprint)
+    }
+    #expect(throws: (any Error).self) {
+        try TLSStore.syncDirectory(data) { _ in errno = EIO; return -1 }
+    }
+}
+
+@Test func explicitHTTPSLANAddressesKeepTheirPairingFingerprint() async throws {
+    let data = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: data) }
+    for address in ["https://192.168.1.20:8787", "https://[::1]:8787", "https://server.local:8787"] {
+        var configuration = ServerConfiguration(dataDirectory: data, host: "0.0.0.0", port: 8787)
+        configuration.publicURL = address
+        let server = try await HomespunServer(configuration: configuration)
+        #expect(server.pairingInstructions(code: "K7Q4-M9XT").contains("fp="))
+    }
+    var configuration = ServerConfiguration(dataDirectory: data, port: 8787)
+    configuration.publicURL = "https://photos.example.com"
+    #expect(Network.usesTLSProxy(URL(string: configuration.publicURL!)!, configuration: configuration))
+    configuration.publicURL = "https://127.0.0.1:9443"
+    #expect(Network.usesTLSProxy(URL(string: configuration.publicURL!)!, configuration: configuration))
 }
 
 @Test func unreadableIdentityStopsTheServerWithAHint() async throws {

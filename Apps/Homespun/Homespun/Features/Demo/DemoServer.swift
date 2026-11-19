@@ -79,7 +79,6 @@ actor DemoServer {
     private struct Approval {
         var ticket: ServerAPI.ApprovalTicket
         var deviceName: String
-        var installID: String?
         var asked: Date
         var closed = false
         var commitment: Data
@@ -222,6 +221,7 @@ actor DemoServer {
         }
         if on("POST", "pair/requests") != nil {
             let request = try decode(ServerAPI.ApprovalRequest.self)
+            guard request.installID == nil else { throw Failure(status: 400, message: "Wait for approval.") }
             guard let text = request.commitment, let commitment = PairingCrypto.decode(text, count: 32) else {
                 throw Failure(status: 400, message: "A commitment is required.")
             }
@@ -229,7 +229,7 @@ actor DemoServer {
             let nonce = PairingCrypto.nonce()
             let ticket = ServerAPI.ApprovalTicket(id: id, secret: UUID().uuidString, expiresIn: 120,
                                                   serverNonce: PairingCrypto.encode(nonce))
-            approvals[id] = Approval(ticket: ticket, deviceName: request.deviceName, installID: request.installID, asked: Date(),
+            approvals[id] = Approval(ticket: ticket, deviceName: request.deviceName, asked: Date(),
                                      commitment: commitment, serverNonce: nonce)
             return try Self.json(ticket, status: 201)
         }
@@ -248,17 +248,24 @@ actor DemoServer {
             return Response(status: 202)
         }
         if let id = on("GET", "pair/requests/*")?.first {
-            guard var approval = approvals[id], approval.ticket.secret == token, !approval.closed else {
+            guard let approval = approvals[id], approval.ticket.secret == token, !approval.closed else {
                 throw Failure(status: 404, message: "No such request.")
             }
             // Someone at the pretend Mac clicks Allow after a moment.
             guard approval.revealed, Date().timeIntervalSince(approval.asked) >= Self.approvalSeconds * min(pace, 1) else {
                 return try Self.json(ServerAPI.ApprovalStatus(state: .waiting))
             }
+            return try Self.json(ServerAPI.ApprovalStatus(state: .approved))
+        }
+        if let id = on("POST", "pair/requests/*/complete")?.first {
+            let body = try decode(ServerAPI.ApprovalCompletion.self)
+            guard var approval = approvals[id], approval.ticket.secret == token, !approval.closed, approval.revealed,
+                  Date().timeIntervalSince(approval.asked) >= Self.approvalSeconds * min(pace, 1) else {
+                throw Failure(status: 404, message: "No approved request.")
+            }
             approval.closed = true
             approvals[id] = approval
-            return try Self.json(ServerAPI.ApprovalStatus(state: .approved,
-                pairing: pair(deviceName: approval.deviceName, installID: approval.installID)))
+            return try Self.json(pair(deviceName: approval.deviceName, installID: body.installID), status: 201)
         }
         if let id = on("DELETE", "pair/requests/*")?.first {
             approvals[id]?.closed = true

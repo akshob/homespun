@@ -202,6 +202,7 @@ public enum ServerAPI {
     public struct ApprovalRequest: Codable, Equatable, Sendable {
         public var deviceName: String
         public var commitment: String?
+        /// Reserved for source compatibility; send the ID in ApprovalCompletion, never before verification.
         public var installID: String?
         public init(deviceName: String, commitment: String? = nil, installID: String? = nil) {
             self.deviceName = deviceName
@@ -209,6 +210,13 @@ public enum ServerAPI {
             self.installID = installID
         }
         enum CodingKeys: String, CodingKey { case deviceName, commitment, installID = "installId" }
+    }
+
+    /// Sent only after the person confirms the key comparison and the server approves.
+    public struct ApprovalCompletion: Codable, Equatable, Sendable {
+        public var installID: String
+        public init(installID: String) { self.installID = installID }
+        enum CodingKeys: String, CodingKey { case installID = "installId" }
     }
 
     /// The pending request. Poll `GET /api/v1/pair/requests/{id}` with `secret` as the bearer token.

@@ -18,12 +18,17 @@ to once a minute; ordinary HTTP errors never trigger it.
 Before sending a pairing code or bearer token, the app authenticates the connection using
 the fingerprint in a pairing link, a commit-then-reveal six-digit comparison on both
 screens, a PBKDF2-HMAC-SHA256 code proof, or a proof of an existing pairing. Compare the
-numbers before clicking Allow. Codes expire two minutes after their first challenge and
+numbers before clicking Allow, then confirm the match on the iPhone. The installation ID
+is sent only in the final, pinned completion request after both approvals; an advertiser
+cannot obtain it by claiming approval on its own. Codes expire two minutes after their first challenge and
 permit at most three challenges; challenges also expire and are rate limited.
 
 Existing pairings upgrade over TLS without transmitting their token until the key is
 verified. A replacement key must prove it holds the pairing; success updates the pin and
-shows a notice, while failure blocks transfers and Free Up Space. Certificate renewal
+shows a notice. A changed key with an invalid pairing proof blocks transfers and Free Up Space.
+Network failures, timeouts, rate limits and temporary server failures retain the old pin,
+do not block Automatic Mode, and retry after 60 seconds with exponential backoff capped at
+15 minutes. App activation and background preparation also retry when due. Certificate renewal
 keeps the key. An unreadable identity stops the server instead of silently replacing it.
 The permanent verification endpoint does not rotate tokens.
 An existing HTTPS proxy pairing without pins retains system trust only after the proxy's
@@ -50,12 +55,20 @@ legacy records without an install ID are not silently reclaimed.
   current fingerprint-bearing QR code avoids that guessing risk.
 - A six-digit approval has a one-in-a-million impersonation chance per human-approved
   attempt. Clicking Allow without comparing the numbers defeats that protection.
-- Failed identity checks mark the endpoint suspect for the process. Before a suspect
-  pinned session can send a token, a tokenless probe must observe a fresh trust challenge;
-  otherwise it fails closed, including if TLS session resumption bypasses the challenge.
+- Every pinned URLSession must complete a tokenless probe on that same session and observe a
+  matching server-trust challenge before its first token-bearing request. Authorization is
+  attached only after that session's delegate gate succeeds, including on retries. Concurrent requests
+  share the probe; success is cached only for that session's lifetime. A resumed connection
+  that skips the initial challenge fails closed without sending the token. All later trust
+  challenges still enforce the pin. URLSession has no supported public switch for disabling
+  TLS resumption or pausing a request to add a header during its handshake, so the delegate's
+  per-session gate is used instead of relying on a physical-device cache-isolation assumption.
 - TLS cannot protect a compromised phone or server account, someone who reads the data
   folder, network denial of service, or traffic sizes and timing. Back up `homespun.db*`,
   settings and `tls/` privately, with the originals. The private key is in
   `<data>/tls/identity.pem` (0600 inside a 0700 directory).
+  File fsync and atomic publication remain mandatory. If a network filesystem rejects directory
+  fsync with EINVAL, ENOTSUP or EROFS, the server logs a warning and continues: file contents have
+  been synced, but crash durability of the directory entry depends on that filesystem.
 - A proxy terminating TLS is trusted with the data. Keep any unverified HTTPS backend hop
   on loopback or another trusted private path, not across an untrusted network.

@@ -2,6 +2,7 @@
 import Crypto
 import Foundation
 import HomespunCore
+import Logging
 import NIOConcurrencyHelpers
 import NIOSSL
 import SwiftASN1
@@ -153,11 +154,16 @@ enum TLSStore {
         guard rename(staging.path, destination.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
     }
 
-    private static func syncDirectory(_ folder: URL) throws {
+    static func syncDirectory(_ folder: URL, synchronise: (Int32) -> Int32 = fsync) throws {
         let descriptor = open(folder.path, O_RDONLY)
         guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
         defer { close(descriptor) }
-        guard fsync(descriptor) == 0 else { throw CocoaError(.fileWriteUnknown) }
+        guard synchronise(descriptor) == 0 else {
+            let code = errno
+            guard [EINVAL, ENOTSUP, EROFS].contains(code) else { throw CocoaError(.fileWriteUnknown) }
+            Logger(label: "homespun.tls").warning("The filesystem cannot sync a TLS directory (errno \(code)); file contents were synced. Keep tls/ backed up.")
+            return
+        }
     }
 }
 

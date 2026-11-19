@@ -12,6 +12,7 @@ struct PairPage: View {
     enum Approval: Equatable {
         case asking
         case waiting(match: String, deadline: Date)
+        case confirming(match: String, deadline: Date)
         /// Deny was clicked; the server waits before it can ask again.
         case denied(until: Date)
         case expired
@@ -24,6 +25,7 @@ struct PairPage: View {
     @State private var useCode = false
     @State private var approval: Approval = .asking
     @State private var approvalTask: Task<Void, Never>?
+    @State private var confirmedNumber: Bool?
     @State private var attempt = 0
     @State private var code = ""
     @State private var pairing = false
@@ -67,7 +69,7 @@ struct PairPage: View {
 
     @ViewBuilder private var approvalPage: some View {
         switch approval {
-        case .asking, .waiting:
+        case .asking, .waiting, .confirming:
             allow
         case .denied(let until):
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -101,11 +103,15 @@ struct PairPage: View {
     }
 
     private var allow: some View {
-        SetupScaffold(art: AnyView(MacDialogArt(match: formattedMatch, server: name)), title: "Click Allow on \(name)") {
+        SetupScaffold(art: AnyView(MacDialogArt(match: formattedMatch, server: name)),
+                      title: confirming ? "Did the numbers match?" : "Click Allow on \(name)") {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let left = secondsLeft(at: context.date)
                 VStack(alignment: .leading, spacing: 20) {
-                    if let left, left <= 15 {
+                    if confirming {
+                        Text("The server approved this iPhone. Check the number you saw on its screen.")
+                            .font(.body).foregroundStyle(Theme.secondaryLabel)
+                    } else if let left, left <= 15 {
                         Text("The window on \(name) closes in \(SetupAdvisor.clock(left)). Is someone at the Mac?")
                             .font(.body).foregroundStyle(Theme.amber)
                             .accessibilityIdentifier("pair.closingSoon")
@@ -127,7 +133,10 @@ struct PairPage: View {
                             .accessibilityLabel(match.map(String.init).joined(separator: ", "))
                             .accessibilityIdentifier("pair.match")
                     }
-                    HStack(spacing: 8) {
+                    if confirming {
+                        Text("Confirm only if this number matched the window you allowed on \(name). Your device identity hasn't been sent yet.")
+                            .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                    } else { HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         if let left, left > 15 {
                             Text("Waiting for \(name) · closes in \(SetupAdvisor.clock(left))").monospacedDigit()
@@ -139,29 +148,40 @@ struct PairPage: View {
                     .frame(maxWidth: .infinity)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(match == nil ? "Asking \(name)" : "Waiting for \(name)")
+                    }
                 }
                 .onChange(of: left.map { $0 <= 15 }) { _, soon in
                     // Announced at the start (below) and once at 15 s left, never every second (L12).
-                    if soon == true, !warnedSoon {
+                    if soon == true, !warnedSoon, !confirming {
                         warnedSoon = true
                         Announce.say("The window on \(name) closes in 15 seconds.")
                     }
                 }
             }
         } actions: {
+            if confirming {
+                PrimaryButton(title: "The Numbers Matched", id: "pair.confirmNumber") { confirmedNumber = true }
+                SecondaryButton(title: "They Didn't Match", id: "pair.rejectNumber") { confirmedNumber = false }
+            }
             useCodeButton
         }
     }
 
     private var match: String? {
         if case .waiting(let match, _) = approval { return match }
+        if case .confirming(let match, _) = approval { return match }
         return nil
     }
+    private var confirming: Bool { if case .confirming = approval { return true }; return false }
 
     private var formattedMatch: String? { match.map { String($0.prefix(3)) + " " + $0.suffix(3) } }
 
     private func secondsLeft(at date: Date) -> Int? {
-        guard case .waiting(_, let deadline) = approval else { return nil }
+        let deadline: Date
+        switch approval {
+        case .waiting(_, let value), .confirming(_, let value): deadline = value
+        default: return nil
+        }
         return max(0, Int(deadline.timeIntervalSince(date).rounded(.up)))
     }
 
@@ -297,13 +317,24 @@ struct PairPage: View {
     private func askForApproval() async {
         withdraw()
         approval = .asking
+        confirmedNumber = nil
         warnedSoon = false
         let task = Task {
             do {
-                let paired = try await flow.settings.approvePairing(url: target.url) { number, deadline in
+                let paired = try await flow.settings.approvePairing(url: target.url, onNumber: { number, deadline in
                     approval = .waiting(match: number, deadline: deadline)
                     Announce.say("Click Allow on \(name). The number is \(number.map(String.init).joined(separator: " ")).")
-                }
+                }, confirmNumber: { number in
+                    if flow.settings.isDemo { return true }
+                    let deadline = Date().addingTimeInterval(30)
+                    approval = .confirming(match: number, deadline: deadline)
+                    Announce.say("Did the numbers match on \(name)? Confirm before pairing.")
+                    while Date() < deadline, !Task.isCancelled {
+                        if let confirmedNumber { return confirmedNumber }
+                        try? await Task.sleep(for: .milliseconds(100))
+                    }
+                    return false
+                })
                 try Task.checkCancellation()
                 try flow.settings.finishPairing(paired, serviceName: target.serviceName ?? target.name)
                 Announce.say("Paired with \(name).")
@@ -321,6 +352,7 @@ struct PairPage: View {
 
     /// Closes the window on the server if it is still asking.
     private func withdraw() {
+        confirmedNumber = false
         approvalTask?.cancel()
         approvalTask = nil
     }

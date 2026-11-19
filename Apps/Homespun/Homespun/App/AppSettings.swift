@@ -40,6 +40,11 @@ final class AppSettings {
     }
     private var securityWork: VerificationWork?
     private var lastIdentityAttempt = Date.distantPast
+    private let identityRetryBaseDelay: TimeInterval
+    private let identityNow: @Sendable () -> Date
+    private var identityRetryTask: Task<Void, Never>?
+    private var identityRetryCount = 0
+    private(set) var nextIdentityRetry: Date?
     var identityNotice: Date?
     private(set) var identityObserved: ServerKeyFingerprint?
     private(set) var serverURL: URL?
@@ -71,7 +76,8 @@ final class AppSettings {
          session: URLSession? = nil, isDemo: Bool = false,
          verifyIdentity: (@Sendable (URL, String) async throws -> ServerPairing.Verified)? = nil,
          locateServer: @escaping ServerLocation.Finder = { try await ServerLocation.locate(name: $0, pins: $1, excluding: $2) },
-         installationStore: (any InstallationStore)? = nil) {
+         installationStore: (any InstallationStore)? = nil, identityRetryBaseDelay: TimeInterval = 60,
+         identityNow: @escaping @Sendable () -> Date = { Date() }) {
         self.defaults = defaults
         self.photos = photos
         self.tokens = tokens
@@ -82,6 +88,8 @@ final class AppSettings {
         self.isDemo = isDemo
         self.verifyIdentity = verifyIdentity
         self.locateServer = locateServer
+        self.identityRetryBaseDelay = max(0.001, identityRetryBaseDelay)
+        self.identityNow = identityNow
         serverURL = defaults.url(forKey: "serverURL")
         server = defaults.data(forKey: "serverInfo").flatMap { try? ServerAPI.decoder.decode(ServerAPI.ServerInfo.self, from: $0) }
         // Homespun always works through the paired server; the old mode choice (server or
@@ -180,10 +188,11 @@ final class AppSettings {
                                                       installID: installation.id), serviceName: link.name)
     }
 
-    func approvePairing(url: URL, onNumber: (String, Date) -> Void) async throws -> ServerPairing.Paired {
+    func approvePairing(url: URL, onNumber: (String, Date) -> Void,
+                        confirmNumber: (String) async -> Bool) async throws -> ServerPairing.Paired {
         let installation = try pairingIdentity()
         return try await ServerPairing.approve(url: url, deviceName: installation.name ?? UIDevice.current.name,
-                                               installID: installation.id, onNumber: onNumber)
+                                               installID: installation.id, onNumber: onNumber, confirmNumber: confirmNumber)
     }
 
     func finishPairing(_ paired: ServerPairing.Paired, serviceName: String? = nil) throws {
@@ -214,6 +223,7 @@ final class AppSettings {
         identityNotice = nil
         identityObserved = nil
         lastIdentityAttempt = .distantPast
+        clearIdentityRetry()
         securityWork?.task.cancel()
         securityWork = nil
         locationWork?.task.cancel()
@@ -239,6 +249,7 @@ final class AppSettings {
         identityNotice = nil
         identityObserved = nil
         lastIdentityAttempt = .distantPast
+        clearIdentityRetry()
         securityWork?.task.cancel()
         securityWork = nil
         locationWork?.task.cancel()
@@ -333,6 +344,8 @@ final class AppSettings {
             tokens.removePins(for: oldURL.absoluteString)
             ServerSessions.shared.reset(oldURL)
             ServerSessions.shared.reset(url)
+            clearIdentityRetry()
+            identityObserved = nil
             serverStatus = .unknown
             AppLog.server.notice("Found the paired server at its new address: \(url.absoluteString, privacy: .private)")
             return true
@@ -344,6 +357,10 @@ final class AppSettings {
     /// Checks the server answers and picks up changes (for example Immich being connected).
     func refreshServerInfo() async {
         await secureLegacyPairing()
+        if nextIdentityRetry != nil, pins != nil,
+           identityNow().timeIntervalSince(lastIdentityAttempt) >= identityRetryBaseDelay {
+            await reverifyIdentity()
+        }
         if case .identityProblem = serverStatus, identityObserved != nil, let url = serverURL,
            let token = tokens.token(for: url.absoluteString) {
             // The old address may now belong to another server; its identity failure must not block finding our pinned key.
@@ -383,11 +400,38 @@ final class AppSettings {
     }
 
     func secureLegacyPairing() async {
-        guard let url = serverURL, !isDemo, url.scheme != "https" || pins == nil else { return }
+        guard let url = serverURL, !isDemo else { return }
+        if url.scheme == "https", pins != nil {
+            if nextIdentityRetry != nil, identityNow().timeIntervalSince(lastIdentityAttempt) >= identityRetryBaseDelay {
+                await verifyPairing(reverify: true)
+            }
+            return
+        }
         await verifyPairing(reverify: false)
     }
 
     func reverifyIdentity() async { await verifyPairing(reverify: true) }
+
+    private func clearIdentityRetry() {
+        identityRetryTask?.cancel()
+        identityRetryTask = nil
+        identityRetryCount = 0
+        nextIdentityRetry = nil
+    }
+
+    private func scheduleIdentityRetry() {
+        identityRetryCount += 1
+        let delay = min(900, identityRetryBaseDelay * pow(2, Double(min(identityRetryCount - 1, 10))))
+        nextIdentityRetry = identityNow().addingTimeInterval(delay)
+        identityRetryTask?.cancel()
+        identityRetryTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self else { return }
+            self.nextIdentityRetry = nil
+            self.identityRetryTask = nil
+            await self.verifyPairing(reverify: self.pins != nil)
+        }
+    }
 
     private func verifyPairing(reverify: Bool) async {
         if let securityWork { await securityWork.task.value; return }
@@ -400,14 +444,20 @@ final class AppSettings {
 
     private func securePairing(reverify: Bool) async {
         guard let oldURL = serverURL, let token = tokens.token(for: oldURL.absoluteString) else { return }
-        if Date().timeIntervalSince(lastIdentityAttempt) < 60 {
-            if reverify, connectionProblem == nil { serverStatus = .identityProblem("Can't confirm this is your server. Check again in a minute.") }
+        if identityNow().timeIntervalSince(lastIdentityAttempt) < identityRetryBaseDelay {
+            if reverify, connectionProblem == nil {
+                serverStatus = .unreachable("Checking the server's key again automatically.")
+            }
+            if nextIdentityRetry == nil {
+                if case .identityProblem = serverStatus {} else { scheduleIdentityRetry() }
+            }
             return
         }
-        lastIdentityAttempt = Date()
+        lastIdentityAttempt = identityNow()
         let previous = pins
         let allowSystemTrust = oldURL.scheme == "https"
             && (previous?.pins.isEmpty == true || (!reverify && !tokens.hasPinRecord(for: oldURL.absoluteString)))
+        let before = serverStatus
         serverStatus = .securing
         do {
             let url = try ServerPairing.secureURL(oldURL)
@@ -454,6 +504,7 @@ final class AppSettings {
                 tokens.removePins(for: oldURL.absoluteString)
             }
             ServerSessions.shared.reset()
+            clearIdentityRetry()
             identityObserved = nil
             serverStatus = .reachable
             Telemetry.shared.record(.featureUsed(reverify ? "tls_reverified" : "tls_upgrade"))
@@ -464,20 +515,33 @@ final class AppSettings {
             switch error {
             case let failure as ServerPairing.IdentityFailure:
                 identityObserved = failure.observed ?? identityObserved
-                serverStatus = .identityProblem("Can't confirm this is your server. Its security key couldn't be checked with this iPhone's pairing.")
+                if let observed = failure.observed, previous?.pins.contains(observed) != true {
+                    clearIdentityRetry()
+                    serverStatus = .identityProblem("Can't confirm this is your server. Its changed security key failed the pairing proof.")
+                } else {
+                    serverStatus = .unreachable("The server's key check was interrupted. Checking again automatically.")
+                    scheduleIdentityRetry()
+                }
+            case let failure as ServerPairing.UnrecognisedIdentity:
+                identityObserved = failure.observed ?? identityObserved
+                serverStatus = .unreachable("Looking for your paired server. This address couldn't confirm it.")
+                scheduleIdentityRetry()
             case let failure as ServerClient.Failure where failure.status == 404:
-                serverStatus = .identityProblem("The server no longer recognises this iPhone. Pair it again.")
+                serverStatus = .unreachable("Looking for your paired server. This address couldn't confirm it.")
+                scheduleIdentityRetry()
             case let failure as URLError where [.secureConnectionFailed, .serverCertificateUntrusted,
                                                  .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot].contains(failure.code):
-                serverStatus = .needsServerUpdate("Update Homespun Server. This iPhone needs version 0.2 or later for encrypted connections.")
-            case _ where Self.isCancellation(error):
-                serverStatus = .unknown
-            default:
-                if reverify {
-                    serverStatus = .identityProblem("Can't confirm this is your server. Check the server and try again.")
+                if previous != nil {
+                    serverStatus = .unreachable("The encrypted connection was interrupted. Checking again automatically.")
                 } else {
-                    serverStatus = .unreachable("Can't secure the connection. Check your network and update Homespun Server to 0.2 or later.")
+                    serverStatus = .needsServerUpdate("Update Homespun Server. This iPhone needs version 0.2 or later for encrypted connections.")
                 }
+                scheduleIdentityRetry()
+            case _ where Self.isCancellation(error):
+                serverStatus = before
+            default:
+                serverStatus = .unreachable("Can't reach the server for its key check. Checking again automatically.")
+                scheduleIdentityRetry()
             }
         }
     }

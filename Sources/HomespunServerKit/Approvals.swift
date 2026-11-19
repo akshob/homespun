@@ -71,7 +71,6 @@ actor PairingApprovals {
         var device: String
         var commitment: Data
         var serverNonce: Data
-        var installHash: String?
         var revealed = false
         var expires: Date
         var state: ServerAPI.ApprovalState = .waiting
@@ -99,7 +98,7 @@ actor PairingApprovals {
 
     nonisolated var canApprove: Bool { approver != nil }
 
-    func start(device rawName: String, commitment: Data, installHash: String? = nil, now: Date = Date()) throws -> ServerAPI.ApprovalTicket {
+    func start(device rawName: String, commitment: Data, now: Date = Date()) throws -> ServerAPI.ApprovalTicket {
         guard approver != nil else { throw Failure.unavailable }
         expireIfDue()
         if let pending, pending.state == .waiting || pending.state == .approved { throw Failure.busy }
@@ -114,7 +113,6 @@ actor PairingApprovals {
         let request = Pending(id: UUID().uuidString, secretHash: Pairing.hash(secret),
                               device: device.isEmpty ? "A device" : device,
                               commitment: commitment, serverNonce: PairingCrypto.nonce(),
-                              installHash: installHash,
                               expires: now.addingTimeInterval(30))
         pending = request
         return .init(id: request.id, secret: secret, expiresIn: seconds,
@@ -165,17 +163,23 @@ actor PairingApprovals {
         pausedUntil = max(pausedUntil, Date().addingTimeInterval(pause))
     }
 
-    /// The request's state, or `nil` if unknown or the secret is wrong. An answer is given
-    /// once; `register` turns an approval into a paired device.
-    func status(id: String, secret: String,
-                register: @Sendable (String, String?) async throws -> ServerAPI.PairResponse) async throws -> ServerAPI.ApprovalStatus? {
+    func status(id: String, secret: String) -> ServerAPI.ApprovalStatus? {
         expireIfDue()
         guard let request = pending, request.id == id, request.secretHash == Pairing.hash(secret) else { return nil }
-        guard request.state != .waiting else { return .init(state: .waiting) }
+        if request.state == .waiting || request.state == .approved { return .init(state: request.state) }
         pending = nil
         pausedUntil = max(pausedUntil, Date().addingTimeInterval(pause))
-        guard request.state == .approved else { return .init(state: request.state) }
-        return .init(state: .approved, pairing: try await register(request.device, request.installHash))
+        return .init(state: request.state)
+    }
+
+    func complete(id: String, secret: String, installHash: String,
+                  register: @Sendable (String, String) async throws -> ServerAPI.PairResponse) async throws -> ServerAPI.PairResponse? {
+        expireIfDue()
+        guard let request = pending, request.id == id, request.secretHash == Pairing.hash(secret),
+              request.revealed, request.state == .approved else { return nil }
+        pending = nil
+        pausedUntil = max(pausedUntil, Date().addingTimeInterval(pause))
+        return try await register(request.device, installHash)
     }
 
     func cancel(id: String, secret: String) -> Bool {

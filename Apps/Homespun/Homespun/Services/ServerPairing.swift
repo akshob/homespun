@@ -19,12 +19,15 @@ struct ServerPairing {
         var errorDescription: String? { "Can't confirm this is your server. Nothing else was sent. Check the server's key or pair again." }
     }
     struct ApprovalFailure: Error { var state: ServerAPI.ApprovalState }
+    struct UnrecognisedIdentity: LocalizedError {
+        var observed: ServerKeyFingerprint?
+        var errorDescription: String? { "This address couldn't confirm the pairing." }
+    }
 
     private static func capture(url: URL, expected: ServerKeyFingerprint? = nil) -> ServerClient {
+        if url.host == DemoServer.host { return ServerClient(baseURL: url, trust: .demo) }
         let pair = ServerSessions.shared.captureSession(expected: expected)
-        return ServerClient(baseURL: url, trust: url.host == DemoServer.host ? .demo : .capture(expected: expected),
-                            session: url.host == DemoServer.host ? DemoServer.session : pair.0,
-                            delegate: pair.1)
+        return ServerClient(baseURL: url, trust: .capture(expected: expected), session: pair.0, delegate: pair.1)
     }
 
     private static func observed(_ client: ServerClient) throws -> ServerKeyFingerprint {
@@ -84,14 +87,15 @@ struct ServerPairing {
     }
 
     @MainActor static func approve(url: URL, deviceName: String, installID: String,
-                                   onNumber: (String, Date) -> Void) async throws -> Paired {
+                                   onNumber: (String, Date) -> Void,
+                                   confirmNumber: (String) async -> Bool) async throws -> Paired {
         let url = try secureURL(url)
         var client = capture(url: url)
         client.timeout = 6
         defer { if client.trust != .demo { client.session.invalidateAndCancel() } }
         let nonce = PairingCrypto.nonce()
         let ticket = try await client.requestApproval(deviceName: deviceName,
-            commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: nonce)), installID: installID)
+            commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: nonce)))
         let fingerprint = try observed(client)
         guard let text = ticket.serverNonce, let serverNonce = PairingCrypto.decode(text, count: 32) else { throw IdentityFailure() }
         var poller = client
@@ -112,7 +116,15 @@ struct ServerPairing {
                     continue
                 }
                 if status.state == .waiting { continue }
-                guard status.state == .approved, let response = status.pairing else { throw ApprovalFailure(state: status.state) }
+                guard status.state == .approved else { throw ApprovalFailure(state: status.state) }
+                let confirmed = await confirmNumber(number)
+                try Task.checkCancellation()
+                guard confirmed else { throw IdentityFailure(observed: fingerprint) }
+                let trust: ServerTrust = client.trust == .demo ? .demo : .pinned([fingerprint])
+                let (session, delegate) = ServerSessions.shared.freshSession(trust: trust)
+                defer { session.invalidateAndCancel() }
+                let verified = ServerClient(baseURL: url, token: ticket.secret, trust: trust, session: session, delegate: delegate)
+                let response = try await verified.completeApproval(ticket.id, installID: installID)
                 return Paired(url: url, response: response, pins: ServerPins(pins: [fingerprint], source: "approval"))
             }
             throw ApprovalFailure(state: .expired)
@@ -149,6 +161,8 @@ struct ServerPairing {
                     throw IdentityFailure(observed: fingerprint)
                 }
                 return Verified(url: url, fingerprint: system ? proof.fingerprint : fingerprint ?? proof.fingerprint, systemTrusted: system)
+            } catch let failure as ServerClient.Failure where failure.status == 404 {
+                throw UnrecognisedIdentity(observed: client.delegate?.observed)
             } catch is IdentityFailure where attempt == 0 && client.delegate?.observed == nil && client.delegate?.systemTrusted != true {
                 continue
             } catch {

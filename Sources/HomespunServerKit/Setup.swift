@@ -154,6 +154,18 @@ enum Network {
         let host = ["0.0.0.0", "::", ""].contains(configuration.host) ? preferredAddress(interfaces()) : configuration.host
         return host.flatMap { PairingLink.serverURL(from: "\($0):\(configuration.port)") }
     }
+
+    static func usesTLSProxy(_ url: URL, configuration: ServerConfiguration) -> Bool {
+        guard configuration.publicURL?.lowercased().hasPrefix("https://") == true,
+              let host = url.host?.lowercased() else { return false }
+        if (url.port ?? 443) != configuration.port { return true }
+        let address = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        var ipv4 = in_addr(), ipv6 = in6_addr()
+        let literal = inet_pton(AF_INET, address, &ipv4) == 1 || inet_pton(AF_INET6, address, &ipv6) == 1
+        let direct = literal || host == configuration.host.lowercased() || host == "localhost"
+            || host.hasSuffix(".local") || !host.contains(".")
+        return !direct
+    }
 }
 
 enum TerminalQR {

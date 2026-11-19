@@ -99,6 +99,7 @@ struct Routes: Sendable {
             return Response(status: .accepted)
         }
         api.get("pair/requests/:id") { request, context in try await approvalStatus(request, context) }
+        api.post("pair/requests/:id/complete") { request, context in try await completeApproval(request, context) }
         api.delete("pair/requests/:id") { request, context in
             guard await approvals.cancel(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") else {
                 throw HTTPError(.notFound)
@@ -211,13 +212,15 @@ struct Routes: Sendable {
 
     func requestApproval(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
         let body = try await request.decode(as: ServerAPI.ApprovalRequest.self, context: context)
-        let installation = try installHash(body.installID)
+        guard body.installID == nil else {
+            throw HTTPError(.badRequest, message: "Send the installation identifier only after approval.")
+        }
         guard let text = body.commitment, let commitment = PairingCrypto.decode(text, count: 32) else {
             return try json(ServerAPI.ErrorBody(error: .init(message: "A pairing commitment is required.",
                                                              code: ServerAPI.ErrorCode.commitmentRequired)), status: .badRequest)
         }
         do {
-            return try json(try await approvals.start(device: body.deviceName, commitment: commitment, installHash: installation),
+            return try json(try await approvals.start(device: body.deviceName, commitment: commitment),
                             status: .accepted)
         } catch PairingApprovals.Failure.unavailable {
             throw HTTPError(.conflict, message: "\(configuration.name) can't ask for approval. Run "
@@ -229,14 +232,24 @@ struct Routes: Sendable {
     }
 
     func approvalStatus(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
-        let status = try await approvals.status(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") { name, installation in
+        guard let status = await approvals.status(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "") else {
+            throw HTTPError(.notFound, message: "No such pairing request. Ask again.")
+        }
+        return try json(status)
+    }
+
+    func completeApproval(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
+        let body = try await request.decode(as: ServerAPI.ApprovalCompletion.self, context: context)
+        guard let installation = try installHash(body.installID) else { throw HTTPError(.badRequest) }
+        let pairing = try await approvals.complete(id: context.parameters.get("id") ?? "", secret: bearer(request) ?? "",
+                                                   installHash: installation) { name, installation in
             let token = Pairing.newToken()
             let device = DeviceRecord(id: UUID().uuidString, name: name, createdAt: "", lastSeenAt: nil, revokedAt: nil)
             let claimed = try await catalog.claimApprovedDevice(device, tokenHash: Pairing.hash(token), installHash: installation)
             return ServerAPI.PairResponse(deviceID: claimed.id, token: token, server: await info(deviceID: claimed.id))
         }
-        guard let status else { throw HTTPError(.notFound, message: "No such pairing request. Ask again.") }
-        return try json(status)
+        guard let pairing else { throw HTTPError(.notFound, message: "No approved pairing request. Ask again.") }
+        return try json(pairing, status: .created)
     }
 
     func pair(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {

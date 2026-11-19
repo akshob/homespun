@@ -14,6 +14,8 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
         var earlyToken = false
         var oldStatus: Int?
         var oldFailure = URLError.Code.cannotConnectToHost
+        var delegate: ServerTrustDelegate?
+        var observePin = true
         var requests: [(URL, String?)] = []
     }
     static let state = OSAllocatedUnfairLock<State?>(initialState: nil)
@@ -38,7 +40,12 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
             return
         }
         let status = url.port == value.oldURL.port ? value.oldStatus! : 200
-        let data = status == 200 ? try! ServerAPI.encoder.encode(value.info)
+        let health = url.path.hasSuffix("/health")
+        if health, value.observePin, value.delegate?.evaluate(try! serverTrustFixture()) == true {
+            Self.state.withLock { $0?.verified = true }
+        }
+        let data = health ? try! ServerAPI.encoder.encode(ServerAPI.Health(tls: true))
+            : status == 200 ? try! ServerAPI.encoder.encode(value.info)
             : try! ServerAPI.encoder.encode(ServerAPI.ErrorBody(error: .init(message: "Try later")))
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil,
                                        headerFields: ["Content-Type": "application/json"])!
@@ -51,7 +58,15 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
 @MainActor @Suite(.serialized) struct ServerLocationTests {
     private let old = URL(string: "https://address-fixture.local:19001")!
     private let moved = URL(string: "https://address-fixture.local:19002")!
-    private let key = ServerKeyFingerprint(spki: Data("paired server".utf8))
+    private let key = ServerKeyFingerprint(base64url: "IlypPJ-wE200U-L1DoKMtMQyrDczNQMel-ae_YH5OgU")!
+
+    private func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LocationProtocol.self]
+        let delegate = ServerTrustDelegate(policy: .pinned([key]))
+        LocationProtocol.state.withLock { $0?.delegate = delegate }
+        return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    }
 
     private func info() -> ServerAPI.ServerInfo {
         .init(name: "Home Server", version: "0.2.0", mode: .files, profile: .standard,
@@ -77,9 +92,7 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
         let serverInfo = info()
         LocationProtocol.state.withLock { $0 = .init(oldURL: old, newURL: moved, info: serverInfo, oldFailure: failure) }
         defer { LocationProtocol.state.withLock { $0 = nil } }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LocationProtocol.self]
-        let session = URLSession(configuration: configuration)
+        let session = session()
         defer { session.invalidateAndCancel() }
         let moved = moved, key = key
         let settings = AppSettings(defaults: defaults, tokens: tokens, session: session, locateServer: { service, pins, _ in
@@ -97,7 +110,8 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
         _ = try await client.info()
         let recorded = try #require(LocationProtocol.state.withLock { $0 })
         #expect(!recorded.earlyToken && recorded.requests.filter { $0.0.port == old.port }.count == 1)
-        #expect(recorded.requests.filter { $0.0.port == moved.port }.allSatisfy { $0.1 == "Bearer paired token" })
+        #expect(recorded.requests.filter { $0.0.port == moved.port && !$0.0.path.hasSuffix("/health") }
+            .allSatisfy { $0.1 == "Bearer paired token" })
     }
 
     @Test func anUnmatchedPinCannotMoveOrReceiveTheToken() async throws {
@@ -129,9 +143,7 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
         let serverInfo = info(), moved = moved, key = key
         LocationProtocol.state.withLock { $0 = .init(oldURL: old, newURL: moved, info: serverInfo) }
         defer { LocationProtocol.state.withLock { $0 = nil } }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LocationProtocol.self]
-        let session = URLSession(configuration: configuration)
+        let session = session()
         defer { session.invalidateAndCancel() }
         let settings = AppSettings(defaults: defaults, tokens: tokens, session: session, verifyIdentity: { _, _ in
             throw ServerPairing.IdentityFailure(observed: ServerKeyFingerprint(spki: Data("other server".utf8)))
@@ -161,9 +173,7 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
         let serverInfo = info()
         LocationProtocol.state.withLock { $0 = .init(oldURL: old, newURL: moved, info: serverInfo, oldStatus: 503) }
         defer { LocationProtocol.state.withLock { $0 = nil } }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [LocationProtocol.self]
-        let session = URLSession(configuration: configuration)
+        let session = session()
         defer { session.invalidateAndCancel() }
         let settings = AppSettings(defaults: defaults, tokens: tokens, session: session, locateServer: { _, _, _ in
             await calls.record()
@@ -206,5 +216,47 @@ private final class LocationProtocol: URLProtocol, @unchecked Sendable {
             url == preferred.url ? ServerKeyFingerprint(spki: Data("imposter".utf8)) : key
         }
         #expect(found?.candidate == genuine)
+    }
+
+    @Test func aResumedSessionWithoutAPinObservationNeverSendsTheToken() async throws {
+        let serverInfo = info()
+        LocationProtocol.state.withLock {
+            $0 = .init(oldURL: moved, newURL: moved, info: serverInfo, oldStatus: 200, observePin: false)
+        }
+        defer { LocationProtocol.state.withLock { $0 = nil } }
+        let session = session()
+        defer { session.invalidateAndCancel() }
+        let client = ServerClient(baseURL: moved, token: "paired token", trust: .pinned([key]), session: session)
+        do {
+            _ = try await client.info()
+            Issue.record("A session without a pinned challenge sent a token")
+        } catch let error as URLError { #expect(error.code == .secureConnectionFailed) }
+        let requests = try #require(LocationProtocol.state.withLock { $0?.requests })
+        #expect(requests.count == 1 && requests[0].0.path.hasSuffix("/health") && requests[0].1 == nil)
+    }
+
+    @Test func concurrentTokenRequestsShareOnePinProbeForTheSessionLifetime() async throws {
+        let serverInfo = info()
+        LocationProtocol.state.withLock { $0 = .init(oldURL: moved, newURL: moved, info: serverInfo, oldStatus: 200) }
+        defer { LocationProtocol.state.withLock { $0 = nil } }
+        let session = session()
+        defer { session.invalidateAndCancel() }
+        let client = ServerClient(baseURL: moved, token: "paired token", trust: .pinned([key]), session: session)
+        async let first = client.info()
+        async let second = client.info()
+        _ = try await (first, second)
+        _ = try await client.info()
+        let state = try #require(LocationProtocol.state.withLock { $0 })
+        #expect(!state.earlyToken && state.requests.filter { $0.0.path.hasSuffix("/health") }.count == 1)
+        #expect(state.requests.filter { $0.1 != nil }.count == 3)
+    }
+
+    @Test func identityEventsDoNotDisableSessionCaching() {
+        let url = URL(string: "https://session-fixture.local:19005")!
+        defer { ServerSessions.shared.reset(url) }
+        ServerSessions.shared.markSuspect(url)
+        let first = ServerSessions.shared.session(for: url, trust: .pinned([key]))
+        let second = ServerSessions.shared.session(for: url, trust: .pinned([key]))
+        #expect(first.0 === second.0 && first.1 === second.1)
     }
 }

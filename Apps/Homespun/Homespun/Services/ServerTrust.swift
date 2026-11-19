@@ -34,6 +34,26 @@ enum ServerKey {
     }
 }
 
+actor SessionPinGate {
+    private var verified = false
+    private var pending: Task<Void, any Error>?
+
+    func verify(_ probe: @escaping @Sendable () async throws -> Void) async throws {
+        if verified { return }
+        if let pending { try await pending.value; return }
+        let task = Task { try await probe() }
+        pending = task
+        do {
+            try await task.value
+            verified = true
+            pending = nil
+        } catch {
+            pending = nil
+            throw error
+        }
+    }
+}
+
 final class ServerTrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, Sendable {
     struct State: Sendable {
         var observed: ServerKeyFingerprint?
@@ -45,6 +65,7 @@ final class ServerTrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDel
         var version: UInt16?
     }
     let policy: ServerTrust
+    let pinGate = SessionPinGate()
     private let state = OSAllocatedUnfairLock(initialState: State())
     var observed: ServerKeyFingerprint? { state.withLock { $0.observed } }
     var systemTrusted: Bool { state.withLock { $0.systemTrusted } }
@@ -77,6 +98,14 @@ final class ServerTrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDel
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let trust = challenge.protectionSpace.serverTrust else { return (.performDefaultHandling, nil) }
         if policy == .system { return (.performDefaultHandling, nil) }
+        guard evaluate(trust) else { return (.cancelAuthenticationChallenge, nil) }
+        #if DEBUG
+        AppLog.server.debug("ServerTrust challenge \(challenge.protectionSpace.host, privacy: .private):\(challenge.protectionSpace.port)")
+        #endif
+        return (.useCredential, URLCredential(trust: trust))
+    }
+
+    func evaluate(_ trust: SecTrust) -> Bool {
         let systemTrusted: Bool
         if case .capture = policy { systemTrusted = SecTrustEvaluateWithError(trust, nil) } else { systemTrusted = false }
         let fingerprint = ServerKey.fingerprint(of: trust)
@@ -94,11 +123,7 @@ final class ServerTrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDel
             state.systemTrusted = systemTrusted
             return true
         }
-        guard accepted else { return (.cancelAuthenticationChallenge, nil) }
-        #if DEBUG
-        AppLog.server.debug("ServerTrust challenge \(challenge.protectionSpace.host, privacy: .private):\(challenge.protectionSpace.port)")
-        #endif
-        return (.useCredential, URLCredential(trust: trust))
+        return accepted
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
@@ -119,19 +144,16 @@ final class ServerSessions: Sendable {
     private struct Key: Hashable { var url: URL; var trust: ServerTrust }
     private struct State {
         var sessions: [Key: (URLSession, ServerTrustDelegate)] = [:]
-        var suspect: Set<String> = []
     }
     private let state = OSAllocatedUnfairLock(initialState: State())
-
-    private static func host(_ url: URL) -> String { "\(url.host ?? ""):\(url.port ?? 443)" }
 
     func session(for url: URL, trust: ServerTrust) -> (URLSession, ServerTrustDelegate) {
         if case .capture = trust { return Self.make(trust) }
         return state.withLock { state in
             let key = Key(url: url, trust: trust)
-            if !state.suspect.contains(Self.host(url)), let cached = state.sessions[key] { return cached }
+            if let cached = state.sessions[key] { return cached }
             let pair = Self.make(trust)
-            if !state.suspect.contains(Self.host(url)) { state.sessions[key] = pair }
+            state.sessions[key] = pair
             return pair
         }
     }
@@ -152,11 +174,8 @@ final class ServerSessions: Sendable {
     }
 
     func markSuspect(_ url: URL) {
-        state.withLock { $0.suspect.insert(Self.host(url)) }
         reset(url)
     }
-
-    func isSuspect(_ url: URL) -> Bool { state.withLock { $0.suspect.contains(Self.host(url)) } }
 
     func reset(_ url: URL? = nil) {
         state.withLock { state in
