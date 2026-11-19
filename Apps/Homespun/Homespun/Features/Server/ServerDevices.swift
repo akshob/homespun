@@ -47,6 +47,9 @@ struct DevicesView: View {
                             }
                             .accessibilityAction(named: "Remove") { if !device.isThisDevice { removing = device } }
                     }
+                } header: {
+                    Text(devices.count == 1 ? "1 paired device" : "\(devices.count) paired devices")
+                        .accessibilityIdentifier("devices.count")
                 } footer: {
                     Text("Tap this iPhone to rename it. Swipe to remove another device; it can pair again with a new code.")
                 }
@@ -97,6 +100,7 @@ struct DevicesView: View {
         guard let client = settings.client else { return }
         do {
             devices = try await client.devices()
+            if let device = devices?.first(where: \.isThisDevice) { settings.confirmDeviceName(device.name) }
             error = nil
         } catch {
             self.error = error.localizedDescription
@@ -250,7 +254,8 @@ struct AddDeviceView: View {
         defer { loading = false }
         do {
             let code = try await client.newPairingCode()
-            link = PairingLink(serverURL: url, code: code.code, name: settings.server?.name)
+            link = PairingLink(serverURL: url, code: code.code, name: settings.server?.name,
+                               fingerprint: settings.pins?.pins.first)
             expires = Date().addingTimeInterval(TimeInterval(code.expiresIn))
             announced = false
             error = nil
@@ -357,6 +362,7 @@ struct DeviceNameView: View {
         defer { working = false }
         do {
             let updated = try await client.renameDevice(device.id, to: trimmed)
+            settings.confirmDeviceName(updated.name)
             renamed(updated)
             Announce.say("Renamed to \(updated.name).")
             dismiss()

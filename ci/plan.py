@@ -52,6 +52,9 @@ def plan(env, files):
     mode = env["MODE"]
     if mode == "manual":
         choice = env.get("UI_INPUT") or "quick"
+        if choice == "package":
+            return {"server": False, "telemetry": False, "site": False, "app": False, "package": True,
+                    "ui": [], "why": f"Run workflow on {env.get('REF_NAME', '?')} (macOS package only)"}
         if choice in ("watch", "duo-open"):
             return {"server": False, "telemetry": False, "site": False, "app": True, "package": False,
                     "ui": [choice], "why": f"Run workflow on {env.get('REF_NAME', '?')} ({choice} only)"}

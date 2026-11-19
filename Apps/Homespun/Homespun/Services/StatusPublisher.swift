@@ -222,8 +222,8 @@ final class StatusPublisher {
         if let name = inputs.serverName {
             let reachable: Bool = switch inputs.status {
             case .reachable: true
-            case .unreachable: false
-            case .checking, .unknown: previous?.server?.reachable ?? true
+            case .unreachable, .identityProblem, .needsServerUpdate: false
+            case .checking, .unknown, .securing: previous?.server?.reachable ?? true
             }
             server = StatusSnapshot.Server(name: name, reachable: reachable, checkedAt: inputs.checkedAt ?? previous?.server?.checkedAt)
         }

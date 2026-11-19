@@ -76,6 +76,30 @@ jobs:
           cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=${{ env.PLATFORM_PAIR }},mode=max
 
+      - name: Check HTTPS and container health
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          image="$IMAGE@$DIGEST"
+          docker pull "$image"
+          container=$(docker run --detach --publish 127.0.0.1::8787 "$image")
+          trap 'docker rm --force --volumes "$container"' EXIT
+          for attempt in $(seq 1 60); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' "$container")
+            [ "$state" != healthy ] || break
+            if [ "$state" = unhealthy ]; then docker logs "$container"; exit 1; fi
+            sleep 2
+          done
+          [ "$state" = healthy ] || { docker logs "$container"; exit 1; }
+          port=$(docker port "$container" 8787/tcp | cut -d: -f2)
+          pin=$(docker exec "$container" homespun-server certificate | sed -n 's/^curl: --pinnedpubkey //p')
+          test -n "$pin"
+          curl --fail --silent --show-error --insecure --pinnedpubkey "$pin" "https://127.0.0.1:$port/api/v1/health"
+          if curl --fail --silent --max-time 2 "http://127.0.0.1:$port/api/v1/health"; then
+            echo "The listener accepted plaintext."
+            exit 1
+          fi
+
       - name: Export the digest
         run: |
           mkdir -p "${{ runner.temp }}/digests"

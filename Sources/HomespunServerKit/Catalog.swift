@@ -220,6 +220,10 @@ public actor Catalog {
         ALTER TABLE assets ADD COLUMN hold_compact INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE assets ADD COLUMN trashed_at TEXT;
         """,
+        """
+        ALTER TABLE devices ADD COLUMN install_id TEXT;
+        CREATE INDEX devices_install_id ON devices (install_id);
+        """,
     ]
 
     static func migrate(_ database: SQLiteDatabase) throws {
@@ -272,11 +276,43 @@ public actor Catalog {
         log("pairing_code_created")
     }
 
+    func openPairingCodes(now: Date) throws -> [String] {
+        try database.query("""
+            SELECT code_hash FROM pairing_codes WHERE used_at IS NULL AND expires_at > ?
+            ORDER BY created_at DESC, rowid DESC LIMIT 4
+            """, [.text(Timestamp.string(now))]).compactMap { $0["code_hash"]?.string }
+    }
+
+    func shortenPairingCode(hash: String, until: Date) throws {
+        try database.execute("""
+            UPDATE pairing_codes SET expires_at = min(expires_at, ?) WHERE code_hash = ? AND used_at IS NULL
+            """, [.text(Timestamp.string(until)), .text(hash)])
+    }
+
+    func recordPairingFailure() throws {
+        let now = Timestamp.string()
+        try database.transaction {
+            try database.execute("INSERT INTO pairing_failures (created_at) VALUES (?)", [.text(now)])
+            let count = try database.query("SELECT count(*) AS n FROM pairing_failures").first?["n"]?.int ?? 0
+            if count >= Self.pairingFailureLimit {
+                try database.execute("UPDATE pairing_codes SET expires_at = ? WHERE used_at IS NULL", [.text(now)])
+            }
+        }
+    }
+
+    func activeTokenHashes() throws -> [String] {
+        try database.query("SELECT token_hash FROM devices WHERE revoked_at IS NULL").compactMap { $0["token_hash"]?.string }
+    }
+
     /// Spends an unexpired, unused code and registers the device. Too many wrong codes
     /// invalidate every outstanding code.
     func redeemPairingCode(hash: String, device: DeviceRecord, tokenHash: String) throws -> Bool {
+        try claimPairingCode(hash: hash, device: device, tokenHash: tokenHash) != nil
+    }
+
+    func claimPairingCode(hash: String, device: DeviceRecord, tokenHash: String, installHash: String? = nil) throws -> DeviceRecord? {
         let now = Timestamp.string()
-        let redeemed: Bool = try database.transaction {
+        let redeemed: DeviceRecord? = try database.transaction {
             let rows = try database.query(
                 "SELECT code_hash FROM pairing_codes WHERE code_hash = ? AND used_at IS NULL AND expires_at > ?",
                 [.text(hash), .text(now)])
@@ -286,28 +322,52 @@ public actor Catalog {
                 if failures >= Self.pairingFailureLimit {
                     try database.execute("UPDATE pairing_codes SET expires_at = ? WHERE used_at IS NULL", [.text(now)])
                 }
-                return false
+                return nil
             }
-            try insertDevice(device, tokenHash: tokenHash, at: now)
+            let claimed = try claimDevice(device, tokenHash: tokenHash, installHash: installHash, at: now)
             try database.execute("UPDATE pairing_codes SET used_at = ?, device_id = ? WHERE code_hash = ?",
-                                 [.text(now), .text(device.id), .text(hash)])
-            return true
+                                 [.text(now), .text(claimed.id), .text(hash)])
+            return claimed
         }
-        log(redeemed ? "device_paired" : "pairing_failed", device: redeemed ? device.id : nil,
-            detail: redeemed ? device.name : nil)
+        log(redeemed == nil ? "pairing_failed" : redeemed?.id == device.id ? "device_paired" : "device_paired_again",
+            device: redeemed?.id, detail: redeemed.map { $0.id == device.id ? $0.name : "\($0.name) (paired again)" })
         return redeemed
     }
 
     /// Registers a device someone at the server allowed.
     func addApprovedDevice(_ device: DeviceRecord, tokenHash: String) throws {
-        try database.transaction { try insertDevice(device, tokenHash: tokenHash, at: Timestamp.string()) }
-        log("device_paired", device: device.id, detail: "\(device.name) (allowed on the server)")
+        _ = try claimApprovedDevice(device, tokenHash: tokenHash)
     }
 
-    private func insertDevice(_ device: DeviceRecord, tokenHash: String, at now: String) throws {
-        try database.execute("INSERT INTO devices (id, name, token_hash, created_at, folder) VALUES (?, ?, ?, ?, ?)",
+    func claimApprovedDevice(_ device: DeviceRecord, tokenHash: String, installHash: String? = nil) throws -> DeviceRecord {
+        let claimed = try database.transaction {
+            try claimDevice(device, tokenHash: tokenHash, installHash: installHash, at: Timestamp.string())
+        }
+        log(claimed.id == device.id ? "device_paired" : "device_paired_again", device: claimed.id,
+            detail: claimed.id == device.id ? "\(claimed.name) (allowed on the server)" : "\(claimed.name) (paired again)")
+        return claimed
+    }
+
+    private func claimDevice(_ proposed: DeviceRecord, tokenHash: String, installHash: String?, at now: String) throws -> DeviceRecord {
+        if let installHash, let row = try database.query("""
+            SELECT * FROM devices WHERE install_id = ? AND revoked_at IS NULL ORDER BY created_at LIMIT 1
+            """, [.text(installHash)]).first, let stored = row["install_id"]?.string,
+           PairingCrypto.equal(Data(stored.utf8), Data(installHash.utf8)) {
+            var existing = Self.device(row)
+            try database.execute("UPDATE devices SET token_hash = ?, last_seen_at = ? WHERE id = ?",
+                                 [.text(tokenHash), .text(now), .text(existing.id)])
+            existing.lastSeenAt = now
+            return existing
+        }
+        try insertDevice(proposed, tokenHash: tokenHash, installHash: installHash, at: now)
+        let row = try database.query("SELECT * FROM devices WHERE id = ?", [.text(proposed.id)]).first!
+        return Self.device(row)
+    }
+
+    private func insertDevice(_ device: DeviceRecord, tokenHash: String, installHash: String? = nil, at now: String) throws {
+        try database.execute("INSERT INTO devices (id, name, token_hash, created_at, folder, install_id) VALUES (?, ?, ?, ?, ?, ?)",
                              [.text(device.id), .text(device.name), .text(tokenHash), .text(now),
-                              .text(try uniqueFolder(for: device.name))])
+                              .text(try uniqueFolder(for: device.name)), installHash.sqlValue])
     }
 
     /// A folder name for a new phone: its name, made safe, and not one another phone has.

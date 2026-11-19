@@ -67,6 +67,9 @@ final class ServerTabUITests: XCTestCase {
             app.buttons[row].tap()
             // Case-insensitive: Server Check's page belongs to setup.
             XCTAssertTrue(app.hasScreen(title), "no \(title) page")
+            if row == "settings.check" {
+                XCTAssertTrue(app.descendants(matching: .any)["check.connection.encrypted"].waitForExistence(timeout: 10))
+            }
             sleep(2)
             attach(app, title)
             if row == "settings.originals", app.buttons["originals.change"].waitForExistence(timeout: 10) {
@@ -213,6 +216,132 @@ final class ServerTabUITests: XCTestCase {
 }
 
 extension ServerTabUITests {
+    @MainActor func test7RePairKeepsTheConfirmedNameAndOneActiveDevice() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"],
+              let action = environment["HOMESPUN_HOST_ACTION_FILE"],
+              let output = environment["HOMESPUN_PAIRING_OUTPUT_FILE"] else { throw XCTSkip("Needs temporary pairing-code action.") }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        app.pair(address: address, code: code)
+        app.showTab("Server")
+        let row = app.buttons["settings.deviceName"]
+        XCTAssertTrue(app.reveal(row))
+        row.tap()
+        let field = app.textFields["device.name"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue(waitFor { (field.value as? String)?.isEmpty == false })
+        let current = field.value as? String ?? ""
+        field.tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: current.count) + "Family Phone")
+        app.buttons["device.name.save"].tap()
+        XCTAssertTrue(app.reveal(row))
+        XCTAssertTrue(waitFor { row.label.contains("Family Phone") })
+        try Data("pairing-code".utf8).write(to: URL(fileURLWithPath: action), options: .atomic)
+        let deadline = Date().addingTimeInterval(30)
+        while !FileManager.default.fileExists(atPath: output), Date() < deadline { usleep(250_000) }
+        let text = try String(contentsOfFile: output, encoding: .utf8)
+        let line = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix("Pairing code: ") })
+        let newCode = try XCTUnwrap(line.split(separator: " ").dropFirst(2).first).description
+        XCTAssertTrue(app.reveal(app.buttons["server.unpair"]))
+        app.buttons["server.unpair"].tap()
+        let confirm = app.alerts.firstMatch.buttons["server.unpair.confirm"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        app.showTab("Library")
+        app.pair(address: address, code: newCode)
+        app.showTab("Server")
+        XCTAssertTrue(app.reveal(row))
+        XCTAssertTrue(waitFor { row.label.contains("Family Phone") })
+        let devices = app.buttons["settings.devices"]
+        XCTAssertTrue(app.reveal(devices))
+        devices.tap()
+        let count = app.staticTexts["devices.count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 15))
+        XCTAssertEqual(count.label.lowercased(), "1 paired device")
+        XCTAssertTrue(app.descendants(matching: .any)["devices.this"].label.contains("Family Phone"))
+        app.goBack(from: "Devices")
+    }
+
+    @MainActor func test8ServerFollowsItsPinnedKeyToANewAddress() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["HOMESPUN_SERVER"], let moved = environment["HOMESPUN_MOVED_SERVER"],
+              let code = environment["HOMESPUN_PAIRING_CODE"], let action = environment["HOMESPUN_HOST_ACTION_FILE"],
+              let rogueLog = environment["HOMESPUN_ROGUE_LOG"] else { throw XCTSkip("Needs temporary server address actions.") }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        let candidates = try JSONSerialization.data(withJSONObject: [
+            ["url": "https://\(moved)", "serviceName": "Home Mac (test)"]
+        ])
+        app.launchEnvironment["HOMESPUN_SERVER_CANDIDATES"] = String(decoding: candidates, as: UTF8.self)
+        app.launch()
+        app.pair(address: address, code: code)
+        app.showTab("Server")
+        app.buttons["settings.check"].tap()
+        let current = app.descendants(matching: .any)["check.connection.address"]
+        XCTAssertTrue(current.waitForExistence(timeout: 15))
+
+        func command(_ value: String) throws {
+            try Data(value.utf8).write(to: URL(fileURLWithPath: action), options: .atomic)
+            let deadline = Date().addingTimeInterval(30)
+            while FileManager.default.fileExists(atPath: action), Date() < deadline { usleep(250_000) }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: action), "host action didn't finish")
+        }
+        func currentAddress() -> String { current.label + " " + (current.value as? String ?? "") }
+        func checkAgain() {
+            let again = app.buttons["check.again"]
+            XCTAssertTrue(app.reveal(again))
+            again.tap()
+            XCTAssertTrue(app.reveal(current))
+        }
+
+        try command("wrong-key-port")
+        checkAgain()
+        let refused = app.descendants(matching: .any)["check.connection.addressNotFound"]
+        XCTAssertTrue(refused.waitForExistence(timeout: 40))
+        XCTAssertTrue(app.reveal(current))
+        XCTAssertTrue(currentAddress().contains(address), currentAddress())
+        let log = try String(contentsOfFile: rogueLog, encoding: .utf8)
+        XCTAssertFalse(log.contains("/api/v1/info"), "the different-key candidate received an authenticated request")
+
+        try command("move-port")
+        sleep(65) // Rediscovery is deliberately limited to once a minute.
+        checkAgain()
+        let found = app.descendants(matching: .any)["check.connection.addressChanged"]
+        XCTAssertTrue(found.waitForExistence(timeout: 40))
+        XCTAssertTrue(app.reveal(current))
+        XCTAssertTrue(currentAddress().contains(moved), currentAddress())
+        XCTAssertTrue(found.label.contains("at its new address"), found.label)
+        XCTAssertTrue(app.descendants(matching: .any)["check.connection.encrypted"].exists)
+        XCTAssertFalse(app.buttons["connect.open"].exists, "following the pinned key required pairing again")
+        app.goBack(from: "Server Check")
+    }
+
+    @MainActor func test9ServerKeyChangeIsConfirmed() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"],
+              let action = environment["HOMESPUN_HOST_ACTION_FILE"] else { throw XCTSkip("Needs the temporary server's host-action watcher.") }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        app.launch()
+        app.pair(address: address, code: code)
+        app.showTab("Server")
+        app.buttons["settings.check"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["check.connection.encrypted"].waitForExistence(timeout: 15))
+        try Data("rotate-key".utf8).write(to: URL(fileURLWithPath: action), options: .atomic)
+        sleep(15)
+        let again = app.buttons["check.again"]
+        XCTAssertTrue(app.reveal(again))
+        again.tap()
+        app.goBack(from: "Server Check")
+        let notice = app.descendants(matching: .any)["server.keyChanged.confirmed"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 20) || app.reveal(notice), "the new key wasn't confirmed with the pairing")
+        app.buttons["settings.check"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["check.connection.encrypted"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["check.connection.key"].exists)
+    }
+
     /// Server › This iPhone › Name renames this iPhone and its originals folder on the server.
     @MainActor func testRenameThisIPhone() throws {
         let environment = ProcessInfo.processInfo.environment

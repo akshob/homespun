@@ -14,6 +14,7 @@ on:
       package: {type: boolean, default: false, description: The package's tests on macOS}
       ui: {type: string, default: "[]", description: UI runs (ci/lane.sh) as a JSON list}
       retry: {type: boolean, default: true, description: A failed UI run gets one more try}
+      performance: {type: boolean, default: false, description: Opt-in nightly TLS upload regression}
 
 permissions:
   contents: read
@@ -55,6 +56,11 @@ jobs:
           echo "### Server (Linux)" >> $GITHUB_STEP_SUMMARY
           grep -E "Test run with|✘" test.log | tail -20 | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
           ! grep -q "✘" test.log
+      - name: TLS upload performance
+        if: inputs.performance
+        env:
+          HOMESPUN_PERF: "1"
+        run: swift test -c release --filter tlsUploadThroughput
 
   telemetry:
     name: Telemetry Worker
@@ -136,6 +142,13 @@ jobs:
       - name: Package tests
         run: swift test 2>&1 | tee package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
         shell: zsh {0}
+      - name: Keep the complete package failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-results-${{ github.run_id }}
+          path: package.log
+          retention-days: 5
 
   unit:
     name: App unit tests

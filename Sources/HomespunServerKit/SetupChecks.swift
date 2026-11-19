@@ -14,6 +14,7 @@ struct SetupChecks {
     let catalog: Catalog
     /// Where originals go (it may be on another disk than the data folder).
     var originalsFolder: URL? = nil
+    var identity: TLSIdentityBox? = nil
     var environment = ProcessInfo.processInfo.environment
     var platform = HostPlatform.current()
     /// Linux control group of this process; a systemd service runs in `.../homespun.service`.
@@ -24,11 +25,24 @@ struct SetupChecks {
     static var executable: String { HostPlatform.serverCommand }
 
     func report() async -> ServerSetup.Report {
-        var checks = [photos(), videos(), livePhotos(), discovery(), storageSpace(), service()]
+        var checks = [encryption(), photos(), videos(), livePhotos(), discovery(), storageSpace(), service()]
         let (immich, connected) = await self.immich()
         checks.append(immich)
         if connected, let copies = await immichCopies() { checks.append(copies) }
         return ServerSetup.Report(platform: platform, checks: checks)
+    }
+
+    func encryption() -> Check {
+        guard let current = identity?.current ?? (try? TLSStore.load(data: configuration.dataDirectory)) else {
+            return Check(id: "encryption", title: "Encryption", status: .problem, detail: "Can't read the server's encryption key.")
+        }
+        if current.notAfter.timeIntervalSinceNow < 30 * 86400, let error = identity?.renewalError {
+            return Check(id: "encryption", title: "Encryption", status: .problem,
+                         detail: "The certificate couldn't be renewed: \(error)")
+        }
+        return Check(id: "encryption", title: "Encryption", status: .ok,
+                     detail: "Connections are encrypted. Server key \(current.fingerprint.display); certificate renews itself "
+                        + "(valid until \(current.notAfter.formatted(date: .abbreviated, time: .omitted))).")
     }
 
     private func install(_ packages: [String]) -> [String] {

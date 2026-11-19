@@ -12,6 +12,7 @@ struct PairPage: View {
     enum Approval: Equatable {
         case asking
         case waiting(match: String, deadline: Date)
+        case confirming(match: String, deadline: Date)
         /// Deny was clicked; the server waits before it can ask again.
         case denied(until: Date)
         case expired
@@ -23,7 +24,8 @@ struct PairPage: View {
     @State private var needsUpdate = false
     @State private var useCode = false
     @State private var approval: Approval = .asking
-    @State private var ticket: ServerAPI.ApprovalTicket?
+    @State private var approvalTask: Task<Void, Never>?
+    @State private var confirmedNumber: Bool?
     @State private var attempt = 0
     @State private var code = ""
     @State private var pairing = false
@@ -67,7 +69,7 @@ struct PairPage: View {
 
     @ViewBuilder private var approvalPage: some View {
         switch approval {
-        case .asking, .waiting:
+        case .asking, .waiting, .confirming:
             allow
         case .denied(let until):
             TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -101,11 +103,15 @@ struct PairPage: View {
     }
 
     private var allow: some View {
-        SetupScaffold(art: AnyView(MacDialogArt(match: match, server: name)), title: "Click Allow on \(name)") {
+        SetupScaffold(art: AnyView(MacDialogArt(match: formattedMatch, server: name)),
+                      title: confirming ? "Did the numbers match?" : "Click Allow on \(name)") {
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let left = secondsLeft(at: context.date)
                 VStack(alignment: .leading, spacing: 20) {
-                    if let left, left <= 15 {
+                    if confirming {
+                        Text("The server approved this iPhone. Check the number you saw on its screen.")
+                            .font(.body).foregroundStyle(Theme.secondaryLabel)
+                    } else if let left, left <= 15 {
                         Text("The window on \(name) closes in \(SetupAdvisor.clock(left)). Is someone at the Mac?")
                             .font(.body).foregroundStyle(Theme.amber)
                             .accessibilityIdentifier("pair.closingSoon")
@@ -119,14 +125,18 @@ struct PairPage: View {
                             .accessibilityIdentifier("pair.demo")
                     }
                     if let match {
-                        Text(match.map(String.init).joined(separator: " "))
+                        Text(formattedMatch ?? match)
                             .font(.system(size: 56, weight: .medium, design: .rounded)).monospacedDigit()
+                            .lineLimit(1).minimumScaleFactor(0.7)
                             .foregroundStyle(Theme.label)
                             .frame(maxWidth: .infinity)
                             .accessibilityLabel(match.map(String.init).joined(separator: ", "))
                             .accessibilityIdentifier("pair.match")
                     }
-                    HStack(spacing: 8) {
+                    if confirming {
+                        Text("Confirm only if this number matched the window you allowed on \(name). Your device identity hasn't been sent yet.")
+                            .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                    } else { HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
                         if let left, left > 15 {
                             Text("Waiting for \(name) · closes in \(SetupAdvisor.clock(left))").monospacedDigit()
@@ -138,27 +148,40 @@ struct PairPage: View {
                     .frame(maxWidth: .infinity)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(match == nil ? "Asking \(name)" : "Waiting for \(name)")
+                    }
                 }
                 .onChange(of: left.map { $0 <= 15 }) { _, soon in
                     // Announced at the start (below) and once at 15 s left, never every second (L12).
-                    if soon == true, !warnedSoon {
+                    if soon == true, !warnedSoon, !confirming {
                         warnedSoon = true
                         Announce.say("The window on \(name) closes in 15 seconds.")
                     }
                 }
             }
         } actions: {
+            if confirming {
+                PrimaryButton(title: "The Numbers Matched", id: "pair.confirmNumber") { confirmedNumber = true }
+                SecondaryButton(title: "They Didn't Match", id: "pair.rejectNumber") { confirmedNumber = false }
+            }
             useCodeButton
         }
     }
 
     private var match: String? {
         if case .waiting(let match, _) = approval { return match }
+        if case .confirming(let match, _) = approval { return match }
         return nil
     }
+    private var confirming: Bool { if case .confirming = approval { return true }; return false }
+
+    private var formattedMatch: String? { match.map { String($0.prefix(3)) + " " + $0.suffix(3) } }
 
     private func secondsLeft(at date: Date) -> Int? {
-        guard case .waiting(_, let deadline) = approval else { return nil }
+        let deadline: Date
+        switch approval {
+        case .waiting(_, let value), .confirming(_, let value): deadline = value
+        default: return nil
+        }
         return max(0, Int(deadline.timeIntervalSince(date).rounded(.up)))
     }
 
@@ -208,10 +231,10 @@ struct PairPage: View {
                 }
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
             } else if flow.settings.isDemo {
-                Text("In the demo, any code works: try DEMO-2468.")
+                Text("In the demo, use DEMO-2468.")
                     .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
             } else {
-                Text("Codes work once, for 10 minutes after you run the command.")
+                Text("Codes work once, for 10 minutes after you run the command, or 2 minutes after the first check.")
                     .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
             }
             if PairingScanner.isSupported {
@@ -270,11 +293,15 @@ struct PairPage: View {
             if let known = flow.options(for: target) {
                 options = known
             } else {
-                var client = ServerClient(baseURL: target.url)
+                var client = ServerClient(baseURL: target.url, trust: flow.settings.isDemo ? .demo : .capture(expected: nil))
+                defer { if client.trust != .demo { client.session.finishTasksAndInvalidate() } }
                 client.timeout = 8
                 do {
                     options = try await client.pairingOptions()
                 } catch let failure as ServerClient.Failure where failure.status == 404 {
+                    needsUpdate = true
+                    return
+                } catch let error as URLError where error.code == .secureConnectionFailed {
                     needsUpdate = true
                     return
                 } catch {
@@ -283,75 +310,51 @@ struct PairPage: View {
                 }
             }
         }
+        guard (options?.pairingVersion ?? 0) >= 2 else { needsUpdate = true; return }
         if options?.canApprove == true, !useCode { await askForApproval() }
     }
 
     private func askForApproval() async {
         withdraw()
         approval = .asking
+        confirmedNumber = nil
         warnedSoon = false
-        let ticket: ServerAPI.ApprovalTicket
-        do {
-            ticket = try await ServerClient(baseURL: target.url).requestApproval(deviceName: UIDevice.current.name)
-        } catch {
-            approval = .failed(error.localizedDescription)
-            return
-        }
-        self.ticket = ticket
-        approval = .waiting(match: ticket.match, deadline: Date().addingTimeInterval(TimeInterval(ticket.expiresIn)))
-        Announce.say("Click Allow on \(name). The number is \(ticket.match.map(String.init).joined(separator: " ")). "
-                     + "The window closes in \(SetupAdvisor.spokenClock(ticket.expiresIn)).")
-        let poller = ServerClient(baseURL: target.url, token: ticket.secret)
-        let deadline = Date().addingTimeInterval(TimeInterval(ticket.expiresIn) + 15)
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled, self.ticket == ticket else { return }
-            if Date() > deadline {
-                // The server stopped answering (asleep, off the Wi‑Fi): the window has closed by now.
-                withdraw()
-                approval = .expired
-                Announce.say("No one answered on \(name).")
-                return
-            }
-            let status: ServerAPI.ApprovalStatus
+        let task = Task {
             do {
-                status = try await poller.approvalStatus(ticket.id)
-            } catch let failure as ServerClient.Failure where failure.status == 404 {
-                self.ticket = nil
-                approval = .expired
-                return
+                let paired = try await flow.settings.approvePairing(url: target.url, onNumber: { number, deadline in
+                    approval = .waiting(match: number, deadline: deadline)
+                    Announce.say("Click Allow on \(name). The number is \(number.map(String.init).joined(separator: " ")).")
+                }, confirmNumber: { number in
+                    if flow.settings.isDemo { return true }
+                    let deadline = Date().addingTimeInterval(30)
+                    approval = .confirming(match: number, deadline: deadline)
+                    Announce.say("Did the numbers match on \(name)? Confirm before pairing.")
+                    while Date() < deadline, !Task.isCancelled {
+                        if let confirmedNumber { return confirmedNumber }
+                        try? await Task.sleep(for: .milliseconds(100))
+                    }
+                    return false
+                })
+                try Task.checkCancellation()
+                try flow.settings.finishPairing(paired, serviceName: target.serviceName ?? target.name)
+                Announce.say("Paired with \(name).")
+                flow.paired(how)
+            } catch let failure as ServerPairing.ApprovalFailure {
+                approval = failure.state == .denied ? .denied(until: Date().addingTimeInterval(20)) : .expired
+            } catch where AppSettings.isCancellation(error) {
             } catch {
-                continue // A dropped poll (Wi-Fi blip) is retried.
+                approval = .failed(error.localizedDescription)
             }
-            guard status.state != .waiting else { continue }
-            self.ticket = nil
-            switch status.state {
-            case .approved:
-                guard let pairing = status.pairing else { return }
-                do {
-                    try flow.settings.finishPairing(serverURL: target.url, response: pairing)
-                    Announce.say("Paired with \(name).")
-                    flow.paired(how)
-                } catch {
-                    approval = .failed(error.localizedDescription)
-                }
-            case .denied:
-                approval = .denied(until: Date().addingTimeInterval(20))
-                Announce.say("\(name) didn't allow this iPhone. Ask Again is available in 20 seconds.")
-            case .expired, .waiting:
-                approval = .expired
-                Announce.say("No one answered on \(name).")
-            }
-            return
         }
+        approvalTask = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
     }
 
     /// Closes the window on the server if it is still asking.
     private func withdraw() {
-        guard let ticket else { return }
-        self.ticket = nil
-        let client = ServerClient(baseURL: target.url, token: ticket.secret)
-        Task { await client.cancelApproval(ticket.id) }
+        confirmedNumber = false
+        approvalTask?.cancel()
+        approvalTask = nil
     }
 
     private func pairWithCode() async {
@@ -359,7 +362,7 @@ struct PairPage: View {
         pairing = true
         defer { pairing = false }
         do {
-            try await flow.settings.pair(PairingLink(serverURL: target.url, code: code))
+            try await flow.settings.pair(PairingLink(serverURL: target.url, code: code, name: target.serviceName ?? target.name))
             withdraw()
             Announce.say("Paired with \(name).")
             flow.paired(how)
@@ -388,8 +391,8 @@ private struct MacDialogArt: View {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "server.rack").font(.title2).foregroundStyle(Theme.accent)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Allow “\(UIDevice.current.name)” to use Homespun Server?").font(.footnote)
-                    Text(match ?? "····").font(.title2.monospacedDigit())
+                    Text("Allow this iPhone to use Homespun Server?").font(.footnote)
+                    Text(match ?? "··· ···").font(.title2.monospacedDigit())
                     HStack {
                         Spacer()
                         Text("Deny").font(.footnote).padding(.horizontal, 14).padding(.vertical, 5)
@@ -413,7 +416,8 @@ private struct MacDialogArt: View {
 
 /// What a failed pairing means, in words that say how to fix it (PC-E1, PC-E2).
 enum PairingErrors {
-    static let wrongCode = "That code didn't work. Codes work once, for 10 minutes after you run the command. "
+    static let wrongCode = "That code didn't work. Codes work once, for 10 minutes after you run the command "
+        + "or 2 minutes after the first check. "
         + "Run it again for a new one."
 
     static func isUnreachable(_ error: Error) -> Bool {
@@ -421,6 +425,22 @@ enum PairingErrors {
     }
 
     static func describe(_ error: Error, address: String) -> String {
+        if error is ServerClient.IdentityMismatch {
+            return "This link is for a different server key. Run pair again on the server and scan the new code."
+        }
+        if let failure = error as? ServerClient.Failure, failure.status == 404 {
+            return "Update Homespun Server to 0.2 or later for encrypted pairing."
+        }
+        if let urlError = error as? URLError {
+            if urlError.code == .appTransportSecurityRequiresSecureConnection {
+                return "Use the server's IP address, a .local name, or an HTTPS proxy with a publicly trusted certificate."
+            }
+            if [.secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasUnknownRoot,
+                .serverCertificateHasBadDate].contains(urlError.code) {
+                return "Update Homespun Server to 0.2 or later for encrypted connections. If it is already updated, "
+                    + "use its IP address or .local name, or a proxy with a publicly trusted certificate."
+            }
+        }
         if isUnreachable(error) { return "Can't reach \(address). Is this iPhone on the same network?" }
         if let failure = error as? ServerClient.Failure, [400, 401, 403, 410].contains(failure.status) { return wrongCode }
         return error.localizedDescription

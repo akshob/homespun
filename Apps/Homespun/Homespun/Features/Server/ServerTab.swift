@@ -24,6 +24,7 @@ struct ServerTab: View {
     @State private var settingUp = false
     @State private var confirmingUnpair = false
     @State private var confirmingSwitch = false
+    @State private var showingIdentity = false
     /// When the server last answered, for "Last seen" while it can't be reached.
     @AppStorage("serverLastSeen") private var lastSeen: Double = 0
 
@@ -60,6 +61,24 @@ struct ServerTab: View {
         let unreachable: String? = if case .unreachable(let reason) = settings.serverStatus { reason } else { nil }
         return List(selection: selection) {
             if settings.isDemo { DemoCard() }
+            if let problem = settings.connectionProblem {
+                Section {
+                    Button { showingIdentity = true } label: {
+                        Label(problem, systemImage: "lock.trianglebadge.exclamationmark")
+                            .foregroundStyle(Theme.red)
+                    }
+                    .accessibilityIdentifier("server.identityProblem")
+                }
+            }
+            if let date = settings.identityNotice {
+                Section {
+                    Text("\(server.name)'s security key changed on \(date.formatted(date: .abbreviated, time: .omitted)). "
+                         + "This iPhone checked it with its pairing, so it's still your server.")
+                        .accessibilityIdentifier("server.keyChanged.confirmed")
+                    Link("Learn more", destination: URL(string: "https://homespun.photos/support#server-identity")!)
+                    Button("Dismiss") { settings.identityNotice = nil }
+                }
+            }
             Section {
                 ServerStatusCard(server: server, status: settings.serverStatus, storage: storage,
                                  lastSeen: lastSeen > 0 ? Date(timeIntervalSince1970: lastSeen) : nil)
@@ -138,6 +157,9 @@ struct ServerTab: View {
         }
         .homespunList()
         .navigationTitle(server.name)
+        .sheet(isPresented: $showingIdentity) {
+            IdentityProblemView(settings: settings) { settingUp = true }
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -244,7 +266,7 @@ struct ServerTab: View {
             // Its name on the server, which names its originals folder there too.
             if model.settings.isPaired {
                 NavigationLink(value: Route.deviceName) {
-                    ServerRow(title: "Name", symbol: "iphone", value: thisDevice?.name)
+                    ServerRow(title: "Name", symbol: "iphone", value: model.settings.pairingName)
                 }
                 .accessibilityIdentifier("settings.deviceName")
                 .sidebarRow(Route.deviceName)
@@ -358,6 +380,7 @@ struct ServerTab: View {
         checks = newReport?.checks ?? checks
         self.devices = newDevices ?? self.devices
         thisDevice = newDevices?.first(where: \.isThisDevice) ?? thisDevice
+        if let device = thisDevice { model.settings.confirmDeviceName(device.name) }
         self.cloud = newCloud ?? self.cloud
         await notifications
     }
@@ -384,6 +407,7 @@ struct ServerTab: View {
         storage = nil
         checks = nil
         devices = nil
+        thisDevice = nil
         cloud = nil
         path = []
         Announce.say("Unpaired.")
@@ -486,6 +510,8 @@ struct ServerStatusCard: View {
         switch status {
         case .reachable: "Connected"
         case .unreachable: "Can't reach it"
+        case .identityProblem, .needsServerUpdate: "Needs attention"
+        case .securing: "Securing…"
         case .checking, .unknown: "Checking…"
         }
     }
@@ -493,8 +519,8 @@ struct ServerStatusCard: View {
     private var statusTint: Color {
         switch status {
         case .reachable: Theme.teal
-        case .unreachable: Theme.amber
-        case .checking, .unknown: Theme.secondaryLabel
+        case .unreachable, .identityProblem, .needsServerUpdate: Theme.amber
+        case .checking, .unknown, .securing: Theme.secondaryLabel
         }
     }
 
