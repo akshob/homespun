@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import BackgroundTasks
 import Foundation
-import UserNotifications
 import XCTest
 @testable import Homespun
 
@@ -41,9 +40,9 @@ final class ReleaseScopeTests: XCTestCase {
             }
         }
         XCTAssertFalse(requests.contains(AutomaticMode.taskID))
-        await AutomaticMode.notify(.init(removable: 10, newlyRemovable: 10))
-        let notifications = await UNUserNotificationCenter.current().pendingNotificationRequests()
-        XCTAssertFalse(notifications.contains { $0.identifier == "homespun.removable" })
+        await AutomaticMode.notify(.init(removable: 10, newlyRemovable: 10)) { _ in
+            XCTFail("Delivered an automatic-run notification")
+        }
         let model = AppModel.shared
         _ = await automatic.run(settings: model.settings, job: model.job, premium: premium, notify: true)
         XCTAssertNil(automatic.state.lastRun)

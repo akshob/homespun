@@ -380,7 +380,10 @@ final class AutomaticMode {
         return "On · ran \(when)"
     }
 
-    static func notify(_ summary: Summary) async {
+    static func notify(_ summary: Summary,
+                       deliver: @MainActor (UNNotificationRequest) async throws -> Void = {
+                           try await UNUserNotificationCenter.current().add($0)
+                       }) async {
         guard ReleaseFeatures.automaticMode else { return }
         let content = UNMutableNotificationContent()
         content.title = "Ready to free up space"
@@ -389,6 +392,6 @@ final class AutomaticMode {
             + "Open Homespun to remove \(count == 1 ? "it" : "them") from this iPhone."
         content.sound = .default
         let request = UNNotificationRequest(identifier: "homespun.removable", content: content, trigger: nil)
-        try? await UNUserNotificationCenter.current().add(request)
+        try? await deliver(request)
     }
 }
