@@ -79,6 +79,10 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `quarantine.txt` | known UI test failures, each with its issue, skipped until fixed |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
+The app build also archives a `HomespunReleaseScope` test manifest. `unit.sh` runs it with features
+off after the normal feature-enabled units, without resolving packages again. The quick iPhone lane
+includes the release-scope UI regression; the full iPhone lane keeps all purchase/deep-link tests.
+`WidgetGalleryUITests` remains opt-in for screenshots, using the `--testing` project and Debug opt-in.
 Test servers accept only HTTPS. Readiness probes derive an SPKI pin from that test server's
 `tls/certificate.pem` and use `curl -k --pinnedpubkey`; port-occupancy checks are tokenless HTTPS
 probes. Pairing links carry `fp=`, and address-and-code runs authenticate the server's code proof.

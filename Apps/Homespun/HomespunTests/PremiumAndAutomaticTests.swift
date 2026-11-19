@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import BackgroundTasks
 import Testing
+import UserNotifications
 @testable import Homespun
 
 @Test func premiumRowsAndPurchaseCopyExcludeUnavailableFeatures() {
@@ -35,9 +37,24 @@ func releaseScopeDisablesRuntimeEntryPoints() async throws {
     await #expect(throws: Premium.PurchaseError.self) { try await premium.restore() }
     let folder = URL.applicationSupportDirectory.appendingPathComponent("ReleaseScope-\(UUID())")
     defer { try? FileManager.default.removeItem(at: folder) }
-    let automatic = AutomaticMode(url: folder.appendingPathComponent("automatic.json"), system: false)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    var previous = AutomaticMode.State()
+    previous.enabled = true
+    let stateURL = folder.appendingPathComponent("automatic.json")
+    try JSONEncoder().encode(previous).write(to: stateURL)
+    let automatic = AutomaticMode(url: stateURL)
     await automatic.enable(existing: true)
-    #expect(!automatic.enabled && !automatic.state.enabled)
+    #expect(!automatic.enabled && automatic.state.enabled)
+    automatic.schedule()
+    let requests = await withCheckedContinuation { continuation in
+        BGTaskScheduler.shared.getPendingTaskRequests { requests in
+            continuation.resume(returning: requests.map(\.identifier))
+        }
+    }
+    #expect(!requests.contains(AutomaticMode.taskID))
+    await AutomaticMode.notify(.init(removable: 10, newlyRemovable: 10))
+    let notifications = await UNUserNotificationCenter.current().pendingNotificationRequests()
+    #expect(!notifications.contains { $0.identifier == "homespun.removable" })
     #expect(automatic.state.lastRun == nil)
     #expect(AppModel.shared.status == nil)
     #expect(PremiumFeature.available.isEmpty && PremiumFeature.backupFeatures.isEmpty)
@@ -48,6 +65,15 @@ func releaseScopeDisablesRuntimeEntryPoints() async throws {
     for link in [AppLink.freeUp, .activity, .server, .automatic, .unlock(feature: "widgets")] {
         #expect(!link.isAvailable)
     }
+    let defaults = try #require(UserDefaults(suiteName: "release-scope-\(UUID())"))
+    defaults.set("sharing", forKey: "telemetry.consent")
+    let queueURL = folder.appendingPathComponent("telemetry.json")
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    try encoder.encode([Telemetry.Event.premium("purchase"), .featureUsed("compare")]).write(to: queueURL)
+    let telemetry = Telemetry(defaults: defaults, queueURL: queueURL, endpoint: nil)
+    telemetry.record(.premium("shown"))
+    #expect(telemetry.queued.map(\.name) == ["feature.used"])
 }
 
 @Test func automaticModePicksNewItemsNotYetBackedUp() {

@@ -10,7 +10,9 @@ class WatchPlanTests(unittest.TestCase):
                      "Apps/Homespun/HomespunWatchUITests/WatchStatusUITests.swift",
                      "Apps/Homespun/Widgets/WidgetStyle.swift",
                      "Apps/Homespun/Shared/StatusSnapshot.swift",
-                     "Apps/Homespun/project.yml", "ci/watch.sh"):
+                     "Apps/Homespun/project.yml", "Apps/Homespun/project-features.yml",
+                     "Apps/Homespun/ReleaseFeatures.xcconfig", "Apps/Homespun/scripts/generate-project.sh",
+                     "ci/watch.sh"):
             with self.subTest(path=path):
                 result = plan({"MODE": "pr"}, [path])
                 self.assertEqual(result["ui"], ["quick", "quick-duo", "watch"])

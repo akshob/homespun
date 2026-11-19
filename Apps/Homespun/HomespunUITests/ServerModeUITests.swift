@@ -191,7 +191,7 @@ final class ServerModeUITests: XCTestCase {
         }
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         XCTAssertTrue(app.isConnected(), "not paired with the server")
         let remaining = app.gridItems("Not backed up")
         XCTAssertTrue(remaining.firstMatch.waitForExistence(timeout: 20), "nothing left to compact")
