@@ -22,6 +22,7 @@ struct StatusAccessoryModifier: ViewModifier {
             .overlay {
                 GeometryReader { proxy in
                     let bounds = CGRect(origin: .zero, size: proxy.size).inset(by: layout.insets)
+                    let width = min(640, max(0, bounds.width - 24))
                     ZStack(alignment: .topLeading) {
                         if visible {
                             AccessoryInsets { layout = $0 }.allowsHitTesting(false)
@@ -30,9 +31,9 @@ struct StatusAccessoryModifier: ViewModifier {
                             VStack(spacing: 0) {
                                 Spacer(minLength: 0)
                                 StatusAccessory(status: status, serverName: model.library.serverName,
-                                                width: min(640, max(0, bounds.width - 24)), open: open)
-                                    // The combined accessibility and hit region must use the folded width too.
-                                    .id([proxy.size.width, proxy.size.height])
+                                                width: width, open: open)
+                                    // A sidebar changes the available width without resizing the window.
+                                    .id([proxy.size.width, proxy.size.height, width])
                                     .glassEffect(.regular, in: .rect(cornerRadius: 24))
                                     .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                             }
