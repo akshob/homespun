@@ -89,7 +89,8 @@ struct GridView: UIViewControllerRepresentable {
     var actions: GridActions
 
     func makeUIViewController(context: Context) -> GridController {
-        GridController(library: library, selection: selection, counts: counts, zoom: zoom, input: input, actions: actions)
+        GridController(library: library, selection: selection, counts: counts, zoom: zoom, input: input, actions: actions,
+                       clock: context.environment.appClock)
     }
 
     func updateUIViewController(_ controller: GridController, context: Context) {
@@ -108,6 +109,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private let zoom: GridZoom
     private var input: GridInput
     private var actions: GridActions
+    private let clock: AppClock
     private var data = GridData()
     private var dataVersion = -1
     private let layout = GridLayout()
@@ -139,14 +141,16 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var tracking = false
 
     init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, zoom: GridZoom, input: GridInput,
-         actions: GridActions) {
+         actions: GridActions, clock: AppClock = .live) {
         self.library = library
         self.selection = selection
         self.counts = counts
         self.zoom = zoom
         self.input = input
         self.actions = actions
-        thumbnails = GridThumbnails(manager: library.thumbnails, source: { [unowned library] in library.source },
+        self.clock = clock
+        thumbnails = GridThumbnails(manager: library.catalog == nil ? library.thumbnails : nil,
+                                    source: { [unowned library] in library.source },
                                     catalog: library.catalog)
         super.init(nibName: nil, bundle: nil)
     }
@@ -535,7 +539,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             let selectable = selectable(in: section)
             if !selectable.isEmpty { button = selectable.allSatisfy { selection.ids.contains($0) } ? "Deselect" : "Select All" }
         }
-        header.show(.init(title: Self.title(section.month), count: showsCount ? "\(open) not backed up" : nil, button: button) {
+        header.show(.init(title: Self.title(section.month, clock: clock), count: showsCount ? "\(open) not backed up" : nil, button: button) {
             [weak self] in self?.selectMonth(section)
         })
     }
@@ -555,15 +559,21 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         }
     }
 
-    private static var titles: [Int: String] = [:]
-    private static let titleStyle = Date.FormatStyle.dateTime.month(.wide).year()
+    private static var titles: [String: String] = [:]
 
-    static func title(_ month: Int) -> String {
+    static func title(_ month: Int, clock: AppClock = .live) -> String {
         guard month > 0 else { return "Undated" }
-        if let title = titles[month] { return title }
-        let date = Calendar.current.date(from: DateComponents(year: month / 12, month: month % 12 + 1)) ?? .now
-        let title = titleStyle.format(date)
-        titles[month] = title
+        let key = "\(month)|\(clock.locale.identifier)|\(clock.calendar.identifier)|\(clock.timeZone.identifier)"
+        if let title = titles[key] { return title }
+        var calendar = clock.calendar
+        calendar.timeZone = clock.timeZone
+        let date = calendar.date(from: DateComponents(year: month / 12, month: month % 12 + 1)) ?? clock.now()
+        var style = Date.FormatStyle.dateTime.month(.wide).year()
+        style.locale = clock.locale
+        style.calendar = calendar
+        style.timeZone = clock.timeZone
+        let title = style.format(date)
+        titles[key] = title
         return title
     }
 

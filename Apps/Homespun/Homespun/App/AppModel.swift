@@ -42,20 +42,41 @@ final class AppModel {
         Task { await history.load() }
     }
 
-    /// The demo's: everything kept in its folder and settings (`DemoSession`).
-    init(demo: DemoSession, premium: Premium, status: StatusPublisher? = nil) {
-        settings = AppSettings(defaults: demo.defaults, photos: demo.library, tokens: demo.tokens, session: DemoServer.session,
-                               isDemo: true)
-        job = CompactJob(settings: settings, ledger: CompactLedger(url: demo.folder.appendingPathComponent("ledger.json")))
-        self.premium = premium
-        automatic = AutomaticMode(url: demo.folder.appendingPathComponent("automatic.json"), photos: demo.library, system: false)
-        copyFinder = CopyFinder(url: demo.folder.appendingPathComponent("copy-finder.json"), photos: demo.library)
-        history = RunHistory(url: demo.folder.appendingPathComponent("history.json"), load: false)
+    struct Parts {
+        let settings: AppSettings
+        let job: CompactJob
+        let premium: Premium
+        let automatic: AutomaticMode
+        let copyFinder: CopyFinder
+        let history: RunHistory
+        let library: LibraryController
+        var status: StatusPublisher? = nil
+    }
+
+    init(parts: Parts) {
+        settings = parts.settings
+        job = parts.job
+        premium = parts.premium
+        automatic = parts.automatic
+        copyFinder = parts.copyFinder
+        history = parts.history
+        library = parts.library
+        status = parts.status
         job.history = history
-        library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
-                                    copyFinder: copyFinder)
-        self.status = status
-        let history = history
+    }
+
+    /// The demo's: everything kept in its folder and settings (`DemoSession`).
+    convenience init(demo: DemoSession, premium: Premium, status: StatusPublisher? = nil) {
+        let settings = AppSettings(defaults: demo.defaults, photos: demo.library, tokens: demo.tokens, session: DemoServer.session,
+                                   isDemo: true)
+        let job = CompactJob(settings: settings, ledger: CompactLedger(url: demo.folder.appendingPathComponent("ledger.json")))
+        let automatic = AutomaticMode(url: demo.folder.appendingPathComponent("automatic.json"), photos: demo.library, system: false)
+        let copyFinder = CopyFinder(url: demo.folder.appendingPathComponent("copy-finder.json"), photos: demo.library)
+        let history = RunHistory(url: demo.folder.appendingPathComponent("history.json"), load: false)
+        let library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
+                                        copyFinder: copyFinder)
+        self.init(parts: Parts(settings: settings, job: job, premium: premium, automatic: automatic,
+                               copyFinder: copyFinder, history: history, library: library, status: status))
         Task { await history.load() }
     }
 

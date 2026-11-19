@@ -137,6 +137,49 @@ Custom runs accept validated segment names separated by spaces; empty or unknown
 before any macOS work. A probe-only dispatch omits unrelated jobs, including the unit job.
 Nightly adds the same probe to the existing `iphone` and `duo-open` invocations (no extra
 simulators or macOS jobs) and warns when measurements differ from `__Snapshots__/TRAITS.json`.
+The label reads live window traits, rather than a value cached during layout. The manual
+probe starts the Duo folded and relaunches the probe after each pose so the next measurement
+does not inherit a previous window's transitional insets.
+
+### Deterministic snapshots
+
+Appearance and layout tests belong in `HomespunTests/Snapshots`; XCUI remains for real flows,
+performance, transitions, hit-testing and system UI. This infrastructure does not remove any
+existing end-to-end coverage. `SnapshotWorld` composes the real app models with an in-memory
+catalog, isolated defaults/ledger, memory-only tokens and installation identity, and a
+fail-closed `URLProtocol` server. It is not demo mode or a ready-made-state launch argument.
+Media is synthetic; videos use poster frames rather than offscreen player layers.
+
+The renderer attaches a window to the hosted app's foreground scene, applies measured
+`__Snapshots__/TRAITS.json` traits/insets at layout scale 3, and waits for identical pixels and
+settled geometry (at most two seconds). References are opaque sRGB PNGs rasterised at 2x.
+Grid edges/columns, Details placement and Compare placement also have numeric assertions.
+The fixed clock is 2026-06-15 10:00 UTC, with `en_US`, Gregorian and UTC formatting.
+System glass, keyboards and sheet detents are deliberately outside snapshot coverage.
+
+The perceptual diff rejects a size change, more than 0.05% of pixels with ΔE > 2.3, or any
+pixel with ΔE > 15. A complete suite has a 180-second budget including fixture setup,
+rendering and comparison; the job summary reports it and warns for references above 300 KB.
+On failure, `snapshots-failed-<run>` contains reference/actual/magenta-diff PNGs and JSON
+metrics, linked from the summary. Fixture files live under `ci-results/snapshot-state` and
+are removed by their tests.
+
+Record application references **only on the pinned CI simulator**:
+
+```sh
+gh workflow run ci.yml --ref <branch> -f ui=none -f snapshots=record
+gh run download <run> -n snapshots-recorded-<run> \
+  -D Apps/Homespun/HomespunTests/__Snapshots__
+```
+
+Review the changed PNGs, then commit the intended images, `TRAITS.json` and `ENVIRONMENT.txt`
+(no LFS). `record-missing` records new names but verifies, and never overwrites, existing
+ones; it requires a matching environment pin from an earlier recording. Normal unit jobs use
+`verify` and cannot change references. The pin includes renderer version, Xcode build,
+runtime build, host model/device and process locale: a CI mismatch fails with a re-record
+instruction; a different local environment skips the reference suites, not the renderer's
+contract tests. `TEST_RUNNER_HOMESPUN_SNAPSHOT_DIR`, `..._RESULTS`, `..._SNAPSHOTS` and
+`..._SNAPSHOT_CI` are forwarded by `ci/unit.sh` through the archived runner manifest.
 
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).

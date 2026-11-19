@@ -47,6 +47,7 @@ final class SetupFlow {
     let isSheet: Bool
     /// Ends once paired and checked (the Server tab's Connect); no first task.
     let pairOnly: Bool
+    let autofocusFields: Bool
     var path: [Page] = []
     private(set) var root: Page
     let discovery: ServerDiscovery
@@ -70,7 +71,8 @@ final class SetupFlow {
     private var lookingTask: Task<Void, Never>?
 
     /// A Keychain token from an earlier install that still works (01·6.9).
-    private(set) var returning: (url: URL, token: String, server: ServerAPI.ServerInfo, pins: ServerPins)?
+    typealias Returning = (url: URL, token: String, server: ServerAPI.ServerInfo, pins: ServerPins)
+    private(set) var returning: Returning?
     /// Set Up Something Else was chosen: Welcome stays.
     private var declinedReturning = false
 
@@ -89,14 +91,18 @@ final class SetupFlow {
         set { settings.defaults.set(newValue, forKey: "setup.localNetworkExplained") }
     }
 
-    init(settings: AppSettings, library: LibraryController?, start: Page? = nil, pairOnly: Bool = false) {
+    init(settings: AppSettings, library: LibraryController?, start: Page? = nil, pairOnly: Bool = false,
+         discovery: ServerDiscovery? = nil, returning: Returning? = nil, autofocusFields: Bool = true) {
         self.settings = settings
         self.library = library
         self.pairOnly = pairOnly
+        self.autofocusFields = autofocusFields
+        self.returning = returning
         isSheet = settings.onboardingComplete || pairOnly
         // The demo's pretend server is found without looking on the network: no Local Network
         // promises, and it starts looking (Try the Demo was the welcome's choice).
-        discovery = settings.isDemo ? ServerDiscovery(pretend: [(DemoServer.name, DemoServer.baseURL)]) : ServerDiscovery()
+        self.discovery = discovery
+            ?? (settings.isDemo ? ServerDiscovery(pretend: [(DemoServer.name, DemoServer.baseURL)]) : ServerDiscovery())
         root = start ?? (settings.isDemo ? .looking : settings.onboardingComplete ? .localNetwork : .welcome)
         if root == .localNetwork, localNetworkExplained || settings.isDemo { root = .looking }
     }

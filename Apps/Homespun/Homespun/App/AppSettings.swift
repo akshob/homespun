@@ -21,6 +21,7 @@ final class AppSettings {
     let photos: any PhotoSource
     /// The demo (Try the Demo): sample photos and a pretend server, kept apart from everything else.
     let isDemo: Bool
+    private let clock: AppClock
     private let tokens: any TokenStore
     private let installationStore: any InstallationStore
     /// How the server is reached (the demo's answers in the app itself).
@@ -50,7 +51,7 @@ final class AppSettings {
     private(set) var serverURL: URL?
     private(set) var server: ServerAPI.ServerInfo?
     private(set) var serverStatus: ServerStatus = .unknown {
-        didSet { if serverStatus != .checking, serverStatus != .unknown { serverCheckedAt = Date() } }
+        didSet { if serverStatus != .checking, serverStatus != .unknown { serverCheckedAt = clock.now() } }
     }
     /// When the server last answered, or didn't (for the widgets).
     private(set) var serverCheckedAt: Date?
@@ -67,7 +68,7 @@ final class AppSettings {
     var freedBytes: Int {
         didSet {
             defaults.set(freedBytes, forKey: "freedBytes")
-            if freedSince == nil, freedBytes > 0 { freedSince = Date() }
+            if freedSince == nil, freedBytes > 0 { freedSince = clock.now() }
         }
     }
     var freedSince: Date? { didSet { defaults.set(freedSince, forKey: "freedSince") } }
@@ -77,8 +78,10 @@ final class AppSettings {
          verifyIdentity: (@Sendable (URL, String) async throws -> ServerPairing.Verified)? = nil,
          locateServer: @escaping ServerLocation.Finder = { try await ServerLocation.locate(name: $0, pins: $1, excluding: $2) },
          installationStore: (any InstallationStore)? = nil, identityRetryBaseDelay: TimeInterval = 60,
-         identityNow: @escaping @Sendable () -> Date = { Date() }) {
+         identityNow: @escaping @Sendable () -> Date = { Date() }, clock: AppClock = .live,
+         initialServerStatus: ServerStatus = .unknown) {
         self.defaults = defaults
+        self.clock = clock
         self.photos = photos
         self.tokens = tokens
         if let installationStore { self.installationStore = installationStore }
@@ -110,6 +113,10 @@ final class AppSettings {
             defaults.set(url, forKey: "serverURL")
             tokens.removeToken(for: old.absoluteString)
             tokens.removePins(for: old.absoluteString)
+        }
+        if initialServerStatus != .unknown {
+            serverStatus = initialServerStatus
+            if initialServerStatus != .checking { serverCheckedAt = clock.now() }
         }
     }
 

@@ -142,6 +142,12 @@ and may not exist in other checkouts.
   runner to this repository; performance budgets run from a separate private repository. Test
   servers use their own data and ports, never a real server's (port 8787).
   They use HTTPS; readiness probes use `curl -k --pinnedpubkey` with the test server's key.
+- Appearance/layout belongs in `HomespunTests/Snapshots`, using the real component and pure
+  `SnapshotWorld` data. XCUI is for flows, performance, transitions/glitches, hit-testing and
+  system UI. Keep numeric geometry checks alongside image comparisons. Record references only
+  with pinned CI `snapshots=record` (or `record-missing`), review and commit the synthetic 2x
+  PNGs plus environment pin; never re-record to hide an unexplained difference. See
+  `ci/README.md` for the workflow, environment guard, diff artifacts and three-minute budget.
 - A new UI test class goes into a run in `ci/lane.sh` (with a free port); a new run also goes into
   `FULL` in `ci/plan.py` (after merge) and the nightly list in `.github/workflows/nightly.yml`; only
   short, critical-path tests belong in `quick`/`quick-duo`. New test media goes into `ci/`.

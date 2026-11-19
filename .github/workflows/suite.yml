@@ -183,8 +183,25 @@ jobs:
         env:
           HOMESPUN_SNAPSHOTS: ${{ inputs.snapshots }}
         run: zsh ci/unit.sh
+      - name: Keep snapshot differences
+        id: snapshot-diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-failed-${{ github.run_id }}
+          path: ci-results/snapshots
+          retention-days: 7
+      - name: Keep recorded snapshots
+        if: always() && inputs.snapshots != 'verify'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-recorded-${{ github.run_id }}
+          path: Apps/Homespun/HomespunTests/__Snapshots__
+          retention-days: 7
       - name: Summary
         if: always()
+        env:
+          HOMESPUN_SNAPSHOT_ARTIFACT_URL: ${{ steps.snapshot-diffs.outputs.artifact-url }}
         run: python3 ci/summary.py ci-results "App unit tests"
       - name: Collect timing metadata
         if: always()

@@ -5,16 +5,6 @@ import Security
 import Testing
 @testable import Homespun
 
-func serverTrustFixture() throws -> SecTrust {
-    let bytes = Data(base64Encoded: """
-        MIIBpjCCAUugAwIBAgIUbiMnX4ZhPz9mj7u4KdIJPiuw3UEwCgYIKoZIzj0EAwIwGjEYMBYGA1UEAwwPSG9tZXNwdW4gU2VydmVyMB4XDTI2MTExODE3MjYxN1oXDTI5MDIyMDE3MjYxN1owGjEYMBYGA1UEAwwPSG9tZXNwdW4gU2VydmVyMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEFzpgvUqCIGzM0ofHMz7//5xDTR27yZg7m1aEXyNs7y9f3BxneuJr2j3ggBPzPtw5TI17dhyg6OlXgkRuIVm2yqNvMG0wHQYDVR0OBBYEFB1PUhJ9H/TN71UckiRJ3nk0gU8mMB8GA1UdIwQYMBaAFB1PUhJ9H/TN71UckiRJ3nk0gU8mMA8GA1UdEwEB/wQFMAMBAf8wGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAoGCCqGSM49BAMCA0kAMEYCIQDBjU4YMPr/j8goHVKxv0R3r9FlbuGmxp9/TWZ2RB0CggIhAMf9aUieCOqjtvud/ZSy5zSmMpb+3Jb5KHWTeplJ35Ab
-        """)!
-    let certificate = try #require(SecCertificateCreateWithData(nil, bytes as CFData))
-    var trust: SecTrust?
-    #expect(SecTrustCreateWithCertificates(certificate, SecPolicyCreateSSL(true, nil), &trust) == errSecSuccess)
-    return try #require(trust)
-}
-
 @Test func fingerprintOfFixtureCertificateMatchesTheServer() throws {
     #expect(ServerKey.fingerprint(of: try serverTrustFixture())?.base64url == "IlypPJ-wE200U-L1DoKMtMQyrDczNQMel-ae_YH5OgU")
 }

@@ -1,0 +1,122 @@
+{
+  "duoCover": {
+    "contentSizeCategory": "UICTContentSizeCategoryL",
+    "displayScale": 3,
+    "horizontalSizeClass": "compact",
+    "model": "iPhone19,4",
+    "nativePixels": [
+      1398,
+      2034
+    ],
+    "nativeScale": 3,
+    "runtimeBuild": "24B91016s",
+    "safeArea": {
+      "bottom": 34,
+      "left": 0,
+      "right": 84,
+      "top": 0
+    },
+    "sizePoints": [
+      466,
+      678
+    ],
+    "verticalSizeClass": "regular",
+    "xcodeBuild": "27B52"
+  },
+  "duoInnerLandscape": {
+    "contentSizeCategory": "UICTContentSizeCategoryL",
+    "displayScale": 3,
+    "horizontalSizeClass": "regular",
+    "model": "iPhone19,4",
+    "nativePixels": [
+      2007,
+      2853
+    ],
+    "nativeScale": 3,
+    "runtimeBuild": "24B91016s",
+    "safeArea": {
+      "bottom": 34,
+      "left": 0,
+      "right": 84,
+      "top": 0
+    },
+    "sizePoints": [
+      951,
+      669
+    ],
+    "verticalSizeClass": "regular",
+    "xcodeBuild": "27B52"
+  },
+  "duoInnerPortrait": {
+    "contentSizeCategory": "UICTContentSizeCategoryL",
+    "displayScale": 3,
+    "horizontalSizeClass": "regular",
+    "model": "iPhone19,4",
+    "nativePixels": [
+      2007,
+      2853
+    ],
+    "nativeScale": 3,
+    "runtimeBuild": "24B91016s",
+    "safeArea": {
+      "bottom": 34,
+      "left": 0,
+      "right": 0,
+      "top": 82
+    },
+    "sizePoints": [
+      669,
+      951
+    ],
+    "verticalSizeClass": "regular",
+    "xcodeBuild": "27B52"
+  },
+  "iphone": {
+    "contentSizeCategory": "UICTContentSizeCategoryL",
+    "displayScale": 3,
+    "horizontalSizeClass": "compact",
+    "model": "iPhone19,2",
+    "nativePixels": [
+      1206,
+      2622
+    ],
+    "nativeScale": 3,
+    "runtimeBuild": "24B8117",
+    "safeArea": {
+      "bottom": 34,
+      "left": 0,
+      "right": 0,
+      "top": 62
+    },
+    "sizePoints": [
+      402,
+      874
+    ],
+    "verticalSizeClass": "regular",
+    "xcodeBuild": "27B52"
+  },
+  "iphoneLandscape": {
+    "contentSizeCategory": "UICTContentSizeCategoryL",
+    "displayScale": 3,
+    "horizontalSizeClass": "compact",
+    "model": "iPhone19,2",
+    "nativePixels": [
+      1206,
+      2622
+    ],
+    "nativeScale": 3,
+    "runtimeBuild": "24B8117",
+    "safeArea": {
+      "bottom": 20,
+      "left": 62,
+      "right": 62,
+      "top": 0
+    },
+    "sizePoints": [
+      874,
+      402
+    ],
+    "verticalSizeClass": "compact",
+    "xcodeBuild": "27B52"
+  }
+}

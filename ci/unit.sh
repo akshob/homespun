@@ -12,9 +12,16 @@ trap 'stamp cleanup.start; remove_simulator $SIM; stamp cleanup.end; stamp segme
 timed simulator.privacy xcrun simctl privacy $SIM grant photos photos.homespun.app.dev
 rm -rf $RESULTS/unit.xcresult
 stamp xcodebuild.start
+TEST_RUNNER_HOMESPUN_SNAPSHOT_DIR=$ROOT/Apps/Homespun/HomespunTests/__Snapshots__ \
+TEST_RUNNER_HOMESPUN_SNAPSHOT_RESULTS=$RESULTS/snapshots \
+TEST_RUNNER_HOMESPUN_SNAPSHOT_CI=${GITHUB_ACTIONS:-false} \
+TEST_RUNNER_HOMESPUN_SNAPSHOT_HOST=iPhone-18-Pro \
+TEST_RUNNER_HOMESPUN_XCODE_BUILD=$(xcodebuild -version | awk '/Build version/ {print $3}') \
+TEST_RUNNER_HOMESPUN_SNAPSHOTS=${HOMESPUN_SNAPSHOTS:-verify} \
 test_without_building $RESULTS/unit.xcresult -only-testing:HomespunTests -only-testing:HomespunWidgetTests \
   -skip-testing:HomespunTests/PerformanceTests 2>&1 \
   | tee $RESULTS/unit.log | filter
 STATUS=$?
 stamp xcodebuild.end
+python3 $ROOT/ci/snapshot_report.py $RESULTS || STATUS=1
 exit $STATUS

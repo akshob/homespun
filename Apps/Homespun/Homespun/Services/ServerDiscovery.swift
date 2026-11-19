@@ -44,11 +44,14 @@ final class ServerDiscovery {
     /// Servers that answer without looking on the network (the demo's pretend server); nil: Bonjour.
     private let pretend: [(name: String, url: URL)]?
     private let describeOptions: Bool
+    private let fixed: Bool
     private var pretending: Task<Void, Never>?
 
-    init(pretend: [(name: String, url: URL)]? = nil, describeOptions: Bool = true) {
+    init(pretend: [(name: String, url: URL)]? = nil, describeOptions: Bool = true, known: [Found]? = nil) {
         self.pretend = pretend
         self.describeOptions = describeOptions
+        fixed = known != nil
+        servers = known ?? []
     }
 
     /// Servers that can be recommended, as the advisor sees them.
@@ -57,6 +60,7 @@ final class ServerDiscovery {
     func found(_ id: String) -> Found? { servers.first { $0.name == id } }
 
     func start() {
+        guard !fixed else { return }
         if let pretend {
             guard pretending == nil else { return }
             isSearching = true
@@ -121,6 +125,7 @@ final class ServerDiscovery {
 
     /// Looks again from scratch (Look Again, or back from Settings).
     func restart() {
+        guard !fixed else { return }
         stop()
         servers = []
         blocked = false

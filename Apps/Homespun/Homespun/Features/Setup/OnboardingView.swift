@@ -21,6 +21,18 @@ struct OnboardingView: View {
     @State private var flow: SetupFlow?
     @Environment(\.dismiss) private var dismiss
 
+    init(settings: AppSettings, library: LibraryController? = nil, start: SetupFlow.Page? = nil,
+         pairOnly: Bool = false, onCompare: ((String) -> Void)? = nil, onPaired: (() -> Void)? = nil,
+         flow: SetupFlow? = nil) {
+        self.settings = settings
+        self.library = library
+        self.start = start
+        self.pairOnly = pairOnly
+        self.onCompare = onCompare
+        self.onPaired = onPaired
+        _flow = State(initialValue: flow)
+    }
+
     var body: some View {
         Group {
             if let flow {

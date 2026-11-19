@@ -16,6 +16,22 @@ struct DemoPreparingView: View {
     }
 
     var body: some View {
+        DemoPreparationContent(failure: failure, progress: progress,
+                               cancelTitle: demo.origin == .launch ? "Leave the Demo" : "Cancel",
+                               retry: { demo.retry() },
+                               cancel: { if demo.origin == .launch { leaving = true } else { demo.cancel() } })
+            .leaveDemoAlert(isPresented: $leaving)
+    }
+}
+
+struct DemoPreparationContent: View {
+    let failure: DemoMediaStore.Failure?
+    let progress: DemoMediaStore.Progress?
+    var cancelTitle: String
+    var retry: () -> Void
+    var cancel: () -> Void
+
+    var body: some View {
         NavigationStack {
             SetupScaffold(symbol: "paintbrush.pointed", title: failure?.title ?? "Preparing the Demo",
                           subtitle: failure == nil
@@ -39,15 +55,12 @@ struct DemoPreparingView: View {
                 }
             } actions: {
                 if failure != nil {
-                    PrimaryButton(title: "Try Again", systemImage: "arrow.clockwise", id: "demo.prepare.retry") { demo.retry() }
+                    PrimaryButton(title: "Try Again", systemImage: "arrow.clockwise", id: "demo.prepare.retry", action: retry)
                 }
-                SecondaryButton(title: demo.origin == .launch ? "Leave the Demo" : "Cancel", id: "demo.prepare.cancel") {
-                    if demo.origin == .launch { leaving = true } else { demo.cancel() }
-                }
+                SecondaryButton(title: cancelTitle, id: "demo.prepare.cancel", action: cancel)
             }
         }
         .tint(Theme.accent)
-        .leaveDemoAlert(isPresented: $leaving)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityIdentifier("demo.prepare")

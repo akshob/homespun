@@ -37,6 +37,7 @@ actor CompactLedger {
     }
 
     private let url: URL
+    private let now: @Sendable () -> Date
     /// Read on first use, on the ledger's own executor: a library's worth of entries (tens of
     /// thousands) takes too long to decode on the main thread while the app launches.
     private lazy var entries: [String: Entry] = loadWithJournal()
@@ -65,8 +66,9 @@ actor CompactLedger {
         URL.applicationSupportDirectory.appendingPathComponent("Homespun/ledger.json")
     }
 
-    init(url: URL = CompactLedger.defaultURL) {
+    init(url: URL = CompactLedger.defaultURL, now: @escaping @Sendable () -> Date = { Date() }) {
         self.url = url
+        self.now = now
     }
 
     /// Reads the ledger. A file that can't be read is set aside, never overwritten: it's the only
@@ -108,7 +110,7 @@ actor CompactLedger {
     func record(original: String, compact: String, originalBytes: Int, compactBytes: Int,
                 serverAssetID: String? = nil) throws {
         let entry = Entry(compactIdentifier: compact, originalBytes: originalBytes, compactBytes: compactBytes,
-                          savedAt: Date(), serverAssetID: serverAssetID)
+                          savedAt: now(), serverAssetID: serverAssetID)
         entries[original] = entry
         try append(Change(set: [original: entry]))
         if backedUp.removeValue(forKey: original) != nil { try saveBackedUp() }
@@ -121,7 +123,7 @@ actor CompactLedger {
     /// The original is safe on the server; its compact copy comes when the item is old enough.
     func recordBackedUp(original: String, serverAssetID: String, originalBytes: Int) throws {
         guard entries[original]?.serverAssetID == nil else { return }
-        backedUp[original] = BackedUp(serverAssetID: serverAssetID, originalBytes: originalBytes, backedUpAt: Date())
+        backedUp[original] = BackedUp(serverAssetID: serverAssetID, originalBytes: originalBytes, backedUpAt: now())
         try saveBackedUp()
     }
 
@@ -131,7 +133,7 @@ actor CompactLedger {
         guard !items.isEmpty else { return }
         for item in items {
             backedUp[item.original] = BackedUp(serverAssetID: item.serverAssetID, originalBytes: item.originalBytes,
-                                               backedUpAt: Date(), kept: true)
+                                               backedUpAt: now(), kept: true)
         }
         try saveBackedUp()
         try record([:], removing: items.map(\.original))
@@ -145,7 +147,7 @@ actor CompactLedger {
         if copiesDeleted {
             for item in items {
                 backedUp[item.restored] = BackedUp(serverAssetID: item.entry.serverAssetID ?? "", originalBytes: item.entry.originalBytes,
-                                                   backedUpAt: Date(), kept: true)
+                                                   backedUpAt: now(), kept: true)
             }
             try saveBackedUp()
             try record([:], removing: items.map(\.key))
@@ -153,7 +155,7 @@ actor CompactLedger {
             var pairs: [String: Entry] = [:]
             for item in items {
                 var entry = item.entry
-                entry.savedAt = Date()
+                entry.savedAt = now()
                 pairs[item.restored] = entry
             }
             try record(pairs, removing: items.map(\.key))
