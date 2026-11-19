@@ -9,7 +9,7 @@ source ${0:A:h}/env.sh
 NAME=$1 PORT=$2
 stamp segment.start
 timed simulator.slot take_sim_slot
-SIM=$(new_simulator iPhone-18-Pro "HS CI $NAME $PORT")
+SIM=$(new_simulator iPhone-18-Pro "HS CI $NAME $PORT") || exit 1
 DATA=$CI_STATE/servers/$NAME-$PORT ORIG=$CI_STATE/servers/$NAME-$PORT-originals
 rm -rf $DATA $ORIG; mkdir -p $DATA/originals $ORIG
 SERVER=""
@@ -37,11 +37,11 @@ kill -0 $SERVER 2>/dev/null || { echo "the test server didn't start"; cat $DATA.
 CODE=$(timed server.pair pairing_output | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
 [[ -n $CODE ]] || { echo "no pairing code"; exit 1; }
 RESULT=$RESULTS/$NAME.xcresult; rm -rf $RESULT
-cd $APP
 stamp xcodebuild.start
 TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_COPIES=3 \
-  xcodebuild test-without-building -project Homespun.xcodeproj -scheme Homespun -destination id=$SIM -derivedDataPath $DD \
-  -resultBundlePath $RESULT -only-testing:HomespunUITests/CopyFinderUITests $(test_retries) 2>&1 | tee $RESULTS/$NAME.log | filter
+  test_without_building $RESULT -only-testing:HomespunUITests/CopyFinderUITests $(test_retries) \
+  2>&1 | tee $RESULTS/$NAME.log | filter
 STATUS=${pipestatus[1]}
 stamp xcodebuild.end
+require_test_environment $RESULTS/$NAME.log || STATUS=1
 exit $STATUS
