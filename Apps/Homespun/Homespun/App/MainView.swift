@@ -39,7 +39,10 @@ struct RootView: View {
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             // From the first moment on screen (onChange alone misses the launch).
-            if phase == .active { SessionMarker.shared.active() }
+            if phase == .active {
+                SessionMarker.shared.active()
+                Task { await settings.refreshServerInfo() }
+            }
         }
         .onOpenURL { url in
             ItemViewerPresence.shared.close(animated: false) {

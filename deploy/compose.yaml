@@ -19,9 +19,10 @@ services:
     environment:
       HOMESPUN_NAME: Homespun  # the name the app shows
       # HOMESPUN_PORT: 8787    # if another app already uses port 8787
-      # HOMESPUN_PUBLIC_URL: 192.168.1.20:8787  # only if the pairing link shows the wrong address
+      # HOMESPUN_PUBLIC_URL: 192.168.1.20:8787  # the app connects with HTTPS
     volumes:
-      # The catalog and compact copies. Docker stops with an error if a folder is missing,
+      # The catalog, compact copies and server encryption key (data/tls). Back up ./data.
+      # Docker stops with an error if a folder is missing,
       # instead of making an empty one Homespun can't write to (or a share that isn't mounted).
       - type: bind
         source: ./data

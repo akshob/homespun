@@ -226,13 +226,11 @@ final class CompareModel {
     /// it runs. Cancelling the calling task cancels the download.
     nonisolated static func fetch(_ client: ServerClient, assetID: String, role: ServerAPI.ResourceRole, to folder: URL,
                                   name: String, progress: @escaping @Sendable (Int64, Int64) -> Void) async throws -> URL {
-        let configuration = URLSessionConfiguration.ephemeral
-        // A server that answers inside the app (the demo's) is reached through its own session's protocol.
-        if client.session !== URLSession.shared { configuration.protocolClasses = client.session.configuration.protocolClasses }
-        let session = URLSession(configuration: configuration)
+        let (session, delegate) = ServerSessions.shared.freshSession(trust: client.trust)
         defer { session.invalidateAndCancel() }
-        var client = client
-        client.session = session
+        var isolated = ServerClient(baseURL: client.baseURL, token: client.token, trust: client.trust,
+                                    session: session, delegate: delegate, reconnect: client.reconnect)
+        isolated.timeout = client.timeout
         let watcher = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(250))
@@ -242,7 +240,7 @@ final class CompareModel {
             }
         }
         defer { watcher.cancel() }
-        return try await client.downloadOriginal(assetID: assetID, role: role, to: folder, name: name)
+        return try await isolated.downloadOriginal(assetID: assetID, role: role, to: folder, name: name)
     }
 }
 

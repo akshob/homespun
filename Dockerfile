@@ -48,7 +48,7 @@ LABEL org.opencontainers.image.title="Homespun Server" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
 # Catalog and compact copies in /data, originals in /originals (a folder per phone). Listens on
-# every address, so the app can reach it on the home network.
+# every address with HTTPS; the server's encryption key lives in /data/tls. Back it up.
 ENV HOMESPUN_DATA=/data \
     HOMESPUN_ORIGINALS=/originals \
     HOMESPUN_HOST=0.0.0.0 \
@@ -60,6 +60,6 @@ EXPOSE 8787
 # Run as your own NAS user instead with `user: "UID:GID"` (compose) or `--user UID:GID`.
 USER homespun:homespun
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS -o /dev/null "http://127.0.0.1:${HOMESPUN_PORT}/api/v1/health" || exit 1
+    CMD curl -fsSk -o /dev/null "https://127.0.0.1:${HOMESPUN_PORT}/api/v1/health" || exit 1
 ENTRYPOINT ["homespun-server"]
 CMD ["serve"]

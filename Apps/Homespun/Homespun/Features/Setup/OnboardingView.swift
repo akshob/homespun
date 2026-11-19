@@ -304,6 +304,10 @@ struct PairConfirmView: View {
                         .accessibilityAddTraits(.isHeader)
                     Text(link.serverURL.host.map { "\($0):\(link.serverURL.port ?? 8787)" } ?? link.serverURL.absoluteString)
                         .font(.callout.monospaced()).foregroundStyle(Theme.secondaryLabel)
+                    if let fingerprint = link.fingerprint {
+                        Label("Encrypted · key \(fingerprint.display)", systemImage: "lock.fill")
+                            .font(.footnote).foregroundStyle(Theme.secondaryLabel)
+                    }
                     if let current = replacing {
                         InlineNotice(tone: .warning, title: "This iPhone is paired with \(current)",
                                      message: "Pairing replaces it: new items go to this server, and originals already on "
@@ -344,7 +348,8 @@ struct PairConfirmView: View {
         }
         .presentationDetents(replacing == nil ? [.medium, .large] : [.large])
         .task {
-            var client = ServerClient(baseURL: link.serverURL)
+            var client = ServerClient(baseURL: link.serverURL, trust: settings.isDemo ? .demo : .capture(expected: link.fingerprint))
+            defer { if client.trust != .demo { client.session.finishTasksAndInvalidate() } }
             client.timeout = 4
             if let options = try? await client.pairingOptions() {
                 let server = SetupAdvisor.Server(id: name, os: options.platform?.os, kind: options.hardware?.kind)

@@ -106,15 +106,19 @@ both videos side by side: they play, pause, seek and zoom together, with sound f
 at a time. Sound switches between the original and the compact copy.
 
 **Try the Demo** (on the first setup page, and in Server › Help and About) shows all of this without
-a server: about 30 sample photos and videos drawn for the purpose (`Resources/Demo`, made by
-`scripts/demo-media.swift`; a Live Photo, videos, a screenshot) and a pretend server, "Homespun Demo",
-that is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
+a server: about 30 sample photos and videos drawn for the purpose. The photos, a screenshot and the
+grid's pictures are drawn on the iPhone when the demo starts ("Preparing the Demo", a few seconds,
+once per launch; `Features/Demo/DemoArt.swift`). The videos and a Live Photo come with the app
+(`Resources/Demo`, about 3.4 MB, made by `scripts/demo-media.sh` from the same drawing code).
+The pretend server, "Homespun Demo",
+is found as if on the Wi‑Fi, pairs by itself, and answers the app's server calls inside the app.
 Backing up, compact copies, Compare, Free Up Space (with a question that says nothing is deleted),
 Keep Original, Restore Original, Activity and the Server tab all work on them. The demo never reads or
 changes Photos, asks iOS for nothing, records no analytics and sends no reports. Without a paired real
 server, its live status also appears in the widgets and on Apple Watch, without a purchase; leaving
 clears those demo facts. With a paired server, its real status is never replaced. The demo's settings
 and records are kept apart and deleted by Leave the Demo (the Server tab, or the Demo mark in setup).
+Leaving the demo deletes what it did; the drawn photos stay until Homespun next starts from scratch.
 Turning on Automatic Mode in the demo asks for the real one-time purchase.
 
 **Premium** (one-time In-App Purchase; everything above stays free):
@@ -317,6 +321,7 @@ cd ~/homespun && swift build -c release --product homespun-server
 .build/release/homespun-server install-service --data ~/Pictures/Homespun   # copies to ~/.local/bin, starts it
 ~/.local/bin/homespun-server pair                                   # QR code + homespun:// link, 10 minutes (--minutes N)
 ~/.local/bin/homespun-server devices                                # paired devices; `revoke <id>` removes one
+~/.local/bin/homespun-server certificate                            # server key and curl's public-key pin
 ```
 
 `install-service` copies the server to `~/.local/bin/homespun-server` (rerun it after
@@ -324,24 +329,62 @@ rebuilding to update), listens on the home network (`0.0.0.0:8787`, unless `HOME
 set), starts with the computer, and saves its settings to `~/.config/homespun/server.env` so later
 commands find the same data. If the pairing address is wrong (for example behind a proxy), set
 `HOMESPUN_PUBLIC_URL`. The catalog (`homespun.db`, with token hashes and any Immich key) is
-readable only by the server's user.
+readable only by the server's user. Connections use HTTPS on the same port, 8787; plain HTTP is not
+accepted. On first start the server creates its encryption identity in `<data>/tls/identity.pem`
+(owner-only). Back up the entire `tls` folder with `homespun.db*`, the saved server settings, and
+your originals. Keep those backups private: the identity contains the server's private key.
 The server advertises itself with Bonjour (`_homespun._tcp`, via `dns-sd` on macOS or
 `avahi-publish` on Linux, from avahi-utils; a running server notices it within seconds of being
 installed), so the app lists it. Tapping a Mac server asks the person at its screen to click
-Allow (a dialog from the LaunchAgent; the Mac and the iPhone show the same 4-digit number, and
-the server asks about one device at a time). Linux servers, or a Mac server started over SSH,
+Allow (a dialog from the LaunchAgent; compare the same 6-digit number on the Mac and the iPhone,
+then confirm the match on the iPhone; the server asks about one device at a time). Linux servers, or a Mac server started over SSH,
 need the one-time code from `pair` instead: scan its QR code with the iPhone's Camera app,
-paste the `homespun://pair?…` link (handy on the simulator), or type the code.
+paste the `homespun://pair?…` link (handy on the simulator), or type the code. Codes work once,
+for 10 minutes after `pair`, or 2 minutes after their first pairing check.
 
 After pairing, the app shows the server's self-check (`GET /api/v1/setup`): photo and video
 encoders, Live Photos, Bonjour, free space, whether it starts automatically, and Immich, each
 with the command that fixes it on that server's system. Install what it asks for, then tap
 "Check again".
 
-For now the app talks plain HTTP, and only to servers on the home network (IP addresses and
-`.local` names); HTTPS comes later. The server checks each upload's SHA-256 before accepting it,
+The app encrypts every server connection with TLS 1.2 or newer and checks the server's public-key
+fingerprint (SPKI). QR codes and links carry `fp`; Mac approval compares a number bound to the
+key both sides see; typed codes authenticate the server before the code is sent. Bonjour is a
+discovery hint, never a source of trust. Existing pairings upgrade automatically over TLS using a
+proof of the pairing token, without sending the token before the key is confirmed. Compare the
+key in Server Check with `homespun-server certificate` once after upgrading: a token intercepted
+before encryption was added could otherwise impersonate the old pairing.
+
+If DHCP changes the server's address, the app looks for it again with Bonjour, preferring its
+saved service name. Names and TXT fingerprints only order candidates: a tokenless HTTPS probe
+must observe the already-pinned key before the app moves its URL-keyed credentials and retries.
+Searches are limited to once a minute, including on activation. Server Check shows the current
+address and “Found … at its new address” after a move. Existing pairings learn their service name
+on their next successful contact; a legacy pairing at a stale address can first authenticate its
+TLS upgrade with the permanent token proof, without sending the token to candidates.
+
+Certificates renew automatically with the same key. `homespun-server certificate --renew` renews
+one by hand; `certificate --new-key` keeps a private backup of the previous identity and replaces
+the key. The running server reloads it within 10 seconds. Paired iPhones confirm the replacement
+with their pairing and show a notice; a changed key with a failed proof blocks backups and Free Up Space.
+Transient check failures keep the existing pin and retry automatically after 60 seconds, backing off
+to at most 15 minutes; activation and background preparation also retry. A corrupt
+identity stops the server rather than silently replacing the key.
+
+Foreground reachability checks share that HTTPS verification path. They keep the last status
+while checking; a known-good server gets a second 12-second attempt before a network failure
+shows “Can't reach”. Pin mismatches go straight to proof verification, never an ordinary network
+retry. Rechecking an existing pin keeps the last status visible until verification concludes.
+
+The server checks each upload's SHA-256 before accepting it,
 stores originals read-only, and lets the app remove an original only after checking its copy
-again at that moment (`POST /api/v1/assets/{id}/verify`).
+again at that moment (`POST /api/v1/assets/{id}/verify`). All API routes are HTTPS-only. Pairing uses
+`POST /api/v1/pair/challenge`, then `/pair` with the challenge ID, or commitment/reveal approval at
+`/pair/requests` and `/pair/requests/{id}/reveal`, followed by `/pair/requests/{id}/complete`
+only after owner approval and the iPhone's confirmation. The installation ID is withheld until
+that pinned completion request. `POST /api/v1/tls/verify` permanently supports
+verified upgrades and replacement keys without rotating an existing pairing token. Installation-aware
+re-pairing adds the catalog migration described below.
 If processing fails in files mode, "Try Again" re-registers the item and retries processing
 using originals the server already holds and has verified; they don't need to be uploaded again.
 
@@ -379,7 +422,7 @@ As with any Linux server, the iPhone compresses Live Photo motion.
    `docker exec homespun homespun-server devices`.
 
 Originals go in `/originals` in the container (a folder per phone, by month, as above); the
-catalog and compact copies go in `/data`. Back up both. The folders must exist before the
+catalog, compact copies and encryption key (`/data/tls`) go in `/data`. Back up both. The folders must exist before the
 container starts: with compose.yaml, Docker stops with an error instead of making an empty folder,
 so a share that isn't mounted is never silently replaced. To move originals later from the app, first add the new
 place to `volumes` under `/mnt` (for example `/volume2/photos:/mnt/photos`); the app then offers
@@ -399,7 +442,7 @@ and `HOMESPUN_HARDWARE_KIND=container`. Other settings go under `environment`: `
 `HOMESPUN_PORT`, `HOMESPUN_PUBLIC_URL`, `HOMESPUN_HARDWARE` (the model the app shows, for example
 `Synology DS923+`), and `HOMESPUN_COMMAND` if the container isn't named `homespun` (the app shows
 it in commands, `docker exec homespun homespun-server` by default). Docker checks
-`GET /api/v1/health` every 30 seconds.
+`GET /api/v1/health` over HTTPS every 30 seconds.
 
 To update, pull the new image and recreate the container; the data stays in the folders:
 
@@ -417,6 +460,55 @@ registry you can write to):
 docker build -t homespun-server .
 docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/<you>/homespun-server --push .
 ```
+
+### Reaching the server through a proxy or Tailscale
+
+For a proxy with a publicly trusted certificate, set `HOMESPUN_PUBLIC_URL=https://photos.example.com`.
+The app uses system trust for that name.
+When the proxy terminates TLS with a different key, pair using its address and a pairing code,
+not the backend's fingerprint link or six-digit key comparison.
+Homespun's backend still accepts only HTTPS:
+
+```caddyfile
+photos.example.com {
+    reverse_proxy https://127.0.0.1:8787 {
+        transport http {
+            tls_insecure_skip_verify
+        }
+    }
+}
+```
+
+For nginx, use `proxy_pass https://127.0.0.1:8787; proxy_ssl_verify off;` in the proxy location.
+Keep that unverified backend hop on loopback or another trusted private path, never across an
+untrusted network. With Tailscale: `tailscale serve --bg https+insecure://127.0.0.1:8787`.
+Direct LAN or Tailscale IPs and `.local` names use key pinning. For a qualified name pointing
+straight at the self-signed server, iOS's transport rules cannot be loosened by the pin check:
+use its IP address, `.local` name, or a proxy with a trusted certificate instead.
+
+Custom server binaries calling `ServerCommand.run(connectors:)` need only update their Homespun
+dependency. A custom `Application(router: server.router(), ...)` must switch to `server.application()`
+so it uses the TLS listener. Route-only tests can use `server.testRouter()` and the challenge/reveal
+protocols; scripts and health checks must use HTTPS.
+
+### Pairing the same iPhone again
+
+The app keeps a random installation ID and the last device name the server confirmed in the
+device-only, non-synced Keychain. They survive Unpair and reinstalling the app, but not erasing
+the phone. Pairing sends that ID and the remembered name over the authenticated TLS flow.
+After owner approval, an active record with the same hashed install ID is reused: its device
+ID, name, originals folder, assets and events stay put; a new token replaces the old token
+hash and an event records that it paired again. The install ID is only a matching key, never
+an authentication proof.
+
+Unpair attempts to revoke the device when the server is reachable. Explicitly revoked records
+are never reclaimed; a subsequent pairing creates a new active record with the remembered name.
+An offline Unpair leaves the old active record available to reclaim. Existing catalog rows
+without an install ID are not guessed by name and retain the old behavior.
+
+This adds a nullable, indexed `devices.install_id` column containing a hash. Back up `homespun.db*`
+before updating. Rolling back to a binary with the older schema requires restoring that catalog
+backup too; keep `tls/`, saved server settings and the originals backed up separately as usual.
 
 ### Cloud copies (connectors)
 
@@ -529,7 +621,7 @@ python3 ci/site-check.py site && npx wrangler@4 pages deploy site --project-name
 ## Roadmap
 
 1. Background uploads and downloads (URLSession background sessions), album membership.
-2. HTTPS for the server (certificate for a homespun.photos name).
+2. Done: HTTPS with a pinned server key, without a certificate service or a homespun.photos name.
 3. Demo mode, TestFlight, then the App Store.
 
 ## License

@@ -36,13 +36,14 @@ struct LibraryView: View {
     @Environment(\.statusAccessoryInset) private var accessoryInset
 
     enum Sheet: Identifiable {
-        case backUp([String]), legend, setup, restore([String])
+        case backUp([String]), legend, setup, identity, restore([String])
         var id: String {
             switch self {
             case .backUp: "backUp"
             case .restore: "restore"
             case .legend: "legend"
             case .setup: "setup"
+            case .identity: "identity"
             }
         }
     }
@@ -74,6 +75,7 @@ struct LibraryView: View {
                     case .backUp(let ids): BackUpSheet(controller: controller, identifiers: ids) { endSelecting() }
                     case .legend: BadgeLegendView(serverName: controller.serverName)
                     case .setup: OnboardingView(settings: model.settings, library: controller)
+                    case .identity: IdentityProblemView(settings: settings) { self.sheet = .setup }
                     case .restore(let ids): RestoreOriginalSheet(controller: controller, compacts: ids) { if $0 { endSelecting() } }
                     }
                 }
@@ -231,7 +233,12 @@ struct LibraryView: View {
     }
 
     @ViewBuilder private var notice: some View {
-        if controller.access == .limited {
+        if let problem = settings.connectionProblem {
+            InlineNotice(tone: .error, title: "Connection needs attention", message: problem) {
+                Button("Check Server") { sheet = .identity }.font(.subheadline.weight(.semibold))
+            }
+            .padding(.horizontal)
+        } else if controller.access == .limited {
             InlineNotice(tone: .warning, title: "Homespun sees only some photos",
                          message: "It can't back up or free up space for the rest. Allow Full Access in Settings.") {
                 Button("Open Settings") { openSettings() }.font(.subheadline.weight(.semibold))

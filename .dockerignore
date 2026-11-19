@@ -6,4 +6,5 @@
 !Tests/
 Tests/**/Fixtures/**
 !Tests/**/Fixtures/README.md
+!Tests/HomespunServerTests/Fixtures/tls-fixture.der
 **/.DS_Store

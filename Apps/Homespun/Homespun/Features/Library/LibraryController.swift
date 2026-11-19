@@ -88,6 +88,7 @@ final class LibraryController {
     /// Why Back Up can't start now, if it can't.
     var backUpBlockedReason: String? {
         guard settings.isPaired else { return "Set up your home computer first." }
+        if case .blocked(let reason) = settings.connectionTrust { return reason }
         if case .unreachable = settings.serverStatus { return "Can't reach \(serverName)." }
         return nil
     }

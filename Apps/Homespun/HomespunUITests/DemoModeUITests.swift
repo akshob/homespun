@@ -23,6 +23,7 @@ final class DemoModeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["setup.find"].exists, "no Find My Home Computer beside it")
         attach("Welcome")
         demo.tap()
+        waitForPreparing()
 
         // The pretend server appears as if found on the Wi‑Fi, and pairs by itself.
         pairWithDemo()
@@ -171,6 +172,7 @@ final class DemoModeUITests: XCTestCase {
         let again = app.buttons["setup.demo"]
         XCTAssertTrue(again.wait(for: \.isEnabled, toEqual: true, timeout: 15), "Try the Demo stays off after leaving")
         again.tap()
+        XCTAssertFalse(app.descendants(matching: .any)["demo.prepare"].waitForExistence(timeout: 2), "drawn again after leaving")
         XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30), "the demo didn't start afresh")
         let menu = app.buttons["demo.menu"].firstMatch
         XCTAssertTrue(menu.waitForExistence(timeout: 5), "no Demo mark in setup")
@@ -195,6 +197,7 @@ final class DemoModeUITests: XCTestCase {
         let demo = app.buttons["setup.demo"]
         XCTAssertTrue(demo.waitForExistence(timeout: 20), "no Try the Demo on Welcome")
         demo.tap()
+        waitForPreparing()
         pairWithDemo()
         let notNow = app.buttons["estimate.notNow"]
         XCTAssertTrue(notNow.waitForExistence(timeout: 30), "no estimate of the sample photos")
@@ -232,7 +235,75 @@ final class DemoModeUITests: XCTestCase {
         XCTAssertTrue(app.buttons["setup.demo"].waitForExistence(timeout: 20), "Leave the Demo didn't return to Welcome")
     }
 
+    @MainActor func testPreparingTheDemoKeepsItsPhotos() throws {
+        app = XCUIApplication()
+        app.launchArguments = ["-hideTips", "-resetDemo", "-demoPrepareMinimum", "3"]
+        app.launch()
+        let demo = app.buttons["setup.demo"], preparing = app.descendants(matching: .any)["demo.prepare"]
+        XCTAssertTrue(demo.waitForExistence(timeout: 20))
+        demo.tap()
+        XCTAssertTrue(preparing.waitForExistence(timeout: 5), "no loading screen")
+        let progress = app.progressIndicators["demo.prepare.progress"]
+        XCTAssertTrue(progress.exists)
+        XCTAssertNotNil(progress.value, "the progress bar has no accessible value")
+        XCTAssertEqual(app.buttons["demo.prepare.cancel"].label, "Cancel")
+        attach("Preparing")
+        app.buttons["demo.prepare.cancel"].tap()
+        XCTAssertTrue(preparing.waitForNonExistence(timeout: 10))
+        XCTAssertTrue(demo.exists && demo.isEnabled, "Cancel didn't return to Welcome")
+        XCTAssertFalse(app.buttons["demo.menu"].exists, "Cancel started the demo")
+
+        demo.tap()
+        waitForPreparing()
+        pairWithDemo()
+        let estimate = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "demo's 30 sample")).firstMatch
+        XCTAssertTrue(estimate.waitForExistence(timeout: 30), "the estimate isn't for 30 samples")
+        app.buttons["estimate.notNow"].tap()
+        app.openTab("Library")
+        let subtitle = app.staticTexts.matching(NSPredicate(format: "label CONTAINS '30 not backed up'")).firstMatch
+        XCTAssertTrue(subtitle.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 20))
+
+        XCUIDevice.shared.press(.home)
+        sleep(3)
+        app.activate()
+        XCTAssertFalse(preparing.waitForExistence(timeout: 3), "backgrounding discarded the media")
+        XCTAssertTrue(subtitle.exists && app.gridItems().firstMatch.exists, "backgrounding lost the sample library")
+        attach("Back from the background")
+
+        app.openTab("Server")
+        let leaveButton = app.buttons["demo.leave"].firstMatch
+        XCTAssertTrue(app.reveal(leaveButton))
+        leave(leaveButton)
+        XCTAssertTrue(demo.waitForExistence(timeout: 20))
+        XCTAssertTrue(demo.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        demo.tap()
+        XCTAssertFalse(preparing.waitForExistence(timeout: 2), "leaving discarded the media")
+        XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30))
+
+        app.terminate()
+        app.launchArguments = ["-hideTips", "-demoPrepareMinimum", "3"]
+        app.launch()
+        XCTAssertTrue(preparing.waitForExistence(timeout: 10), "a cold launch didn't draw the media again")
+        XCTAssertEqual(app.buttons["demo.prepare.cancel"].label, "Leave the Demo")
+        waitForPreparing()
+        XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30), "the resumed demo didn't reach Found")
+        let menu = app.buttons["demo.menu"].firstMatch
+        XCTAssertTrue(menu.waitForExistence(timeout: 30), "the demo didn't resume")
+        menu.tap()
+        leave(app.buttons["demo.leave"].firstMatch)
+        XCTAssertTrue(demo.waitForExistence(timeout: 20), "leaving the resumed demo didn't return to Welcome")
+    }
+
     // MARK: Steps
+
+    /// The launch's first demo draws its photos before setup continues.
+    @MainActor private func waitForPreparing(timeout: TimeInterval = 180) {
+        let preparing = app.descendants(matching: .any)["demo.prepare"]
+        if preparing.waitForExistence(timeout: 3) {
+            XCTAssertTrue(preparing.waitForNonExistence(timeout: timeout), "the demo's photos weren't drawn in \(Int(timeout)) s")
+        }
+    }
 
     /// The purchase sheet (the real StoreKit product): buy, restore, that one purchase unlocks both; then Close.
     @MainActor private func expectUnlockSheet(_ title: String, file: StaticString = #filePath, line: UInt = #line) {

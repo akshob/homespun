@@ -17,12 +17,23 @@ stamp segment.start
 timed simulator.slot take_sim_slot
 SIM=$(new_simulator $TYPE "HS CI $NAME $PORT")
 DATA=$CI_STATE/servers/$NAME-$PORT; rm -rf $DATA; mkdir -p $DATA/originals
+PIDFILE=$DATA/server.pid
+MOVEPORT=$(( PORT + 1000 ))
 SERVER="" STUB="" WATCH=""
 cleanup() {
     stamp cleanup.start
     [[ -n $WATCH ]] && kill $WATCH 2>/dev/null
+    [[ -n $SERVER ]] && kill $SERVER 2>/dev/null
     [[ -n $STUB ]] && kill $STUB 2>/dev/null
-    [[ -n $SERVER ]] && { kill $SERVER 2>/dev/null; wait $SERVER 2>/dev/null; }
+    if [[ -f $PIDFILE ]]; then
+        current=$(cat $PIDFILE 2>/dev/null)
+        if [[ -n $current ]]; then
+            kill $current 2>/dev/null
+            for attempt in {1..100}; do kill -0 $current 2>/dev/null || break; sleep 0.1; done
+            kill -0 $current 2>/dev/null && kill -KILL $current 2>/dev/null
+        fi
+    fi
+    [[ -n $SERVER ]] && wait $SERVER 2>/dev/null
     cp $DATA.log $RESULTS/$NAME-server.log 2>/dev/null
     remove_simulator $SIM
     rm -rf $DATA
@@ -59,24 +70,63 @@ fi
 CODE="" LINK=""
 if [[ -z ${SERVERLESS:-} ]]; then
     export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
-           HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=http://127.0.0.1:$PORT
+           HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=127.0.0.1:$PORT
     timed server.port wait_port_free $PORT || exit 1
     stamp server.start.start
     CONTROL=$DATA/server-control
+    ACTIONFILE=$DATA/host-action
     print online > $CONTROL
     (
-        child=""
-        trap '[[ -z $child ]] || { kill $child 2>/dev/null; wait $child 2>/dev/null; }' EXIT
+        child="" currentData=$DATA currentPort=$PORT currentLog=$DATA.log
+        stop_server() {
+            [[ -z $child ]] && return
+            kill $child 2>/dev/null
+            for attempt in {1..100}; do kill -0 $child 2>/dev/null || break; sleep 0.1; done
+            kill -0 $child 2>/dev/null && kill -KILL $child 2>/dev/null
+            wait $child 2>/dev/null
+            child=""
+            rm -f $PIDFILE
+        }
+        start_server() {
+            mkdir -p $currentData/originals
+            HOMESPUN_DATA=$currentData HOMESPUN_ORIGINALS=$currentData/originals \
+                HOMESPUN_PORT=$currentPort HOMESPUN_PUBLIC_URL=127.0.0.1:$currentPort \
+                $SERVER_BIN serve >> $currentLog 2>&1 & child=$!
+            print -r -- $child > $PIDFILE
+            HOMESPUN_DATA=$currentData wait_for_server $currentPort
+        }
+        trap stop_server EXIT
         trap 'exit 0' TERM INT
         while true; do
             wanted=$(cat $CONTROL)
-            if [[ $wanted == offline && -n $child ]]; then
-                kill $child 2>/dev/null; wait $child 2>/dev/null; child=""
+            if [[ $wanted == offline ]]; then
+                stop_server
                 print offline > $CONTROL.ack
-            elif [[ $wanted == online && -z $child ]]; then
-                $SERVER_BIN serve >> $DATA.log 2>&1 & child=$!
-                wait_for_server $PORT || exit 1
+            elif [[ $wanted == online ]]; then
+                [[ -n $child ]] || start_server || exit 1
                 print online > $CONTROL.ack
+                if [[ -f $ACTIONFILE ]]; then
+                    case $(cat $ACTIONFILE) in
+                        rotate-key)
+                            HOMESPUN_DATA=$currentData $SERVER_BIN certificate --new-key \
+                                >> $RESULTS/$NAME-host-actions.log 2>&1;;
+                        pairing-code)
+                            if HOMESPUN_DATA=$currentData $SERVER_BIN pair --minutes 180 > $DATA/pairing-again.next; then
+                                mv $DATA/pairing-again.next $DATA/pairing-again
+                            fi;;
+                        wrong-key-port)
+                            stop_server
+                            wait_port_free $MOVEPORT || exit 1
+                            currentData=$DATA/rogue currentPort=$MOVEPORT currentLog=$RESULTS/$NAME-rogue-server.log
+                            start_server || exit 1;;
+                        move-port)
+                            stop_server
+                            wait_port_free $MOVEPORT || exit 1
+                            currentData=$DATA currentPort=$MOVEPORT currentLog=$DATA.log
+                            start_server || exit 1;;
+                    esac
+                    rm -f $ACTIONFILE
+                fi
             fi
             sleep 0.2
         done
@@ -89,6 +139,10 @@ if [[ -z ${SERVERLESS:-} ]]; then
     kill -0 $SERVER 2>/dev/null || { echo "the test server didn't start"; cat $DATA.log; exit 1; }
     OUT=$(timed server.pair pairing_output) || { echo "no pairing code"; exit 1; }
     CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
+    export TEST_RUNNER_HOMESPUN_HOST_ACTION_FILE=$ACTIONFILE
+    export TEST_RUNNER_HOMESPUN_MOVED_SERVER=127.0.0.1:$MOVEPORT
+    export TEST_RUNNER_HOMESPUN_ROGUE_LOG=$RESULTS/$NAME-rogue-server.log
+    export TEST_RUNNER_HOMESPUN_PAIRING_OUTPUT_FILE=$DATA/pairing-again
 fi
 if [[ -n ${STUB_PORT:-} ]]; then
     stamp telemetry.start.start

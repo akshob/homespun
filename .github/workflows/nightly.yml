@@ -28,6 +28,7 @@ jobs:
       package: true
       ui: '["iphone","library","later","copies","onboarding","telemetry","duo-cover","duo-grid","duo-open","demo","watch","large"]'
       retry: true
+      performance: true
 
   report:
     name: Report

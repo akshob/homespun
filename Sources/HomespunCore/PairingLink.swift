@@ -20,13 +20,15 @@ public struct PairingLink: Equatable, Sendable {
         self.fingerprint = fingerprint
     }
 
-    /// Accepts "host", "host:port", or a full http(s) URL; plain addresses use http and port 8787.
+    /// Accepts "host", "host:port", or a full URL; Homespun always uses HTTPS.
     public static func serverURL(from text: String) -> URL? {
         var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !value.contains("://") { value = "http://" + value }
+        let bare = !value.contains("://")
+        if bare { value = "https://" + value }
         guard var components = URLComponents(string: value), let host = components.host, !host.isEmpty,
               ["http", "https"].contains(components.scheme ?? "") else { return nil }
-        if components.port == nil, components.scheme == "http" { components.port = 8787 }
+        if components.port == nil, bare || components.scheme == "http" { components.port = 8787 }
+        components.scheme = "https"
         components.path = ""
         components.query = nil
         components.fragment = nil
@@ -67,8 +69,10 @@ public struct PairingLink: Equatable, Sendable {
         components.scheme = Self.scheme
         components.host = "pair"
         // Plain http with a port is written as host:port, which keeps the QR code small.
+        let host = serverURL.host ?? ""
+        let address = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
         let server = (serverURL.scheme == "http" || fingerprint != nil) && serverURL.port != nil
-            ? "\(serverURL.host ?? ""):\(serverURL.port!)" : serverURL.absoluteString
+            ? "\(address):\(serverURL.port!)" : serverURL.absoluteString
         components.queryItems = [URLQueryItem(name: "server", value: server), URLQueryItem(name: "code", value: code)]
             + (fingerprint.map { [URLQueryItem(name: "fp", value: $0.base64url)] } ?? [])
             + (name.map { [URLQueryItem(name: "name", value: $0)] } ?? [])

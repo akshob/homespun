@@ -2,6 +2,7 @@
 import Foundation
 import HomespunCore
 import Hummingbird
+import HummingbirdCore
 import Logging
 import ServiceLifecycle
 
@@ -9,6 +10,9 @@ import ServiceLifecycle
 public struct HomespunServer: Sendable {
     public let configuration: ServerConfiguration
     public let catalog: Catalog
+    public let identity: TLSIdentityBox
+    public var fingerprint: ServerKeyFingerprint { identity.current.fingerprint }
+    let transport: HTTPServerBuilder
     let storage: Storage
     let runner: JobRunner
     let copier: JobRunner
@@ -27,11 +31,23 @@ public struct HomespunServer: Sendable {
     }
 
     init(configuration: ServerConfiguration, connectors: [any Connector] = [], logger: Logger = Logger(label: "homespun"),
-         approver: (any PairingApprover)?, approvalPause: TimeInterval = 5, builtIn: [any Connector]? = nil) async throws {
+         approver: (any PairingApprover)?, approvalPause: TimeInterval = 5, builtIn: [any Connector]? = nil,
+         codeRounds: Int = PairingCrypto.codeRounds, challengeInterval: TimeInterval = 1) async throws {
         self.configuration = configuration
         self.logger = logger
         storage = Storage(root: configuration.dataDirectory)
         try storage.prepare()
+        let (tls, created) = try TLSStore.loadOrCreate(data: configuration.dataDirectory)
+        identity = try TLSIdentityBox(tls)
+        if tls.notAfter.timeIntervalSinceNow < 90 * 86400 {
+            do { try identity.update(TLSStore.renew(data: configuration.dataDirectory)) }
+            catch { identity.record(error: String(describing: error)); logger.error("Can't renew the server certificate: \(error)") }
+        }
+        transport = try .homespun(identity: identity)
+        if created { logger.notice("Made a new encryption key; paired iPhones confirm it automatically.") }
+        if configuration.publicURL?.lowercased().hasPrefix("http://") == true {
+            logger.notice("HOMESPUN_PUBLIC_URL now uses HTTPS; the port is unchanged.")
+        }
         catalog = try Catalog(path: storage.catalog.path)
         try await catalog.assignMissingFolders()
         let root = try await Self.originalsRoot(catalog: catalog, configured: configuration.originalsDirectory,
@@ -54,7 +70,8 @@ public struct HomespunServer: Sendable {
         routes = Routes(configuration: configuration, catalog: catalog, storage: storage, originals: originals, mover: mover,
                         immichState: immichState,
                         approvals: PairingApprovals(approver: approver, serverName: configuration.name, pause: approvalPause),
-                        connectors: hub)
+                        connectors: hub, identity: identity,
+                        codeChallenges: CodeChallenges(catalog: catalog, rounds: codeRounds, minimumInterval: challengeInterval))
     }
 
     /// The originals folder, saved in the catalog because stored paths are relative to it: once
@@ -93,6 +110,9 @@ public struct HomespunServer: Sendable {
         return router
     }
 
+    /// For tests that call routes directly; never serve it without the TLS listener.
+    public func testRouter() -> Router<HomespunRequestContext> { router() }
+
     /// Serves until stopped. Other commands (pair, import, …) run beside a serving server, so
     /// only this releases job leases: nothing holds one before these runners start.
     public func run() async throws {
@@ -103,15 +123,16 @@ public struct HomespunServer: Sendable {
 
     public func application(logger: Logger = Logger(label: "homespun")) -> some ApplicationProtocol {
         // The idle timeout closes uploads that stall (a phone leaving Wi-Fi), releasing their lock.
-        Application(router: router(), server: .http1(configuration: .init(idleTimeout: .seconds(60))),
+        Application(router: router(), server: transport,
                     configuration: .init(address: .hostname(configuration.host, port: configuration.port),
                                          serverName: "homespun"),
-                    services: [runner, copier] + advertiser(), logger: logger)
+                    services: [runner, copier, TLSMaintenance(data: configuration.dataDirectory, identity: identity, logger: logger)]
+                        + advertiser(), logger: logger)
     }
 
     private func advertiser() -> [any Service] {
         guard !["127.0.0.1", "::1", "localhost"].contains(configuration.host) else { return [] }
-        return [ServiceAdvertiser(name: configuration.name, port: configuration.port, logger: logger)]
+        return [ServiceAdvertiser(name: configuration.name, port: configuration.port, identity: identity, logger: logger)]
     }
 
     /// The pairing link and QR code `homespun-server pair` prints.
@@ -119,13 +140,17 @@ public struct HomespunServer: Sendable {
         guard let url = Network.publicURL(configuration: configuration) else {
             return "Pairing code: \(code)\nSet HOMESPUN_PUBLIC_URL to the address your iPhone uses to reach this server."
         }
-        let link = PairingLink(serverURL: url, code: code, name: configuration.name).url.absoluteString
-        let address = url.scheme == "http" && url.port != nil ? "\(url.host ?? ""):\(url.port!)" : url.absoluteString
+        let proxy = Network.usesTLSProxy(url, configuration: configuration)
+        let link = PairingLink(serverURL: url, code: code, name: configuration.name,
+                               fingerprint: proxy ? nil : fingerprint).url.absoluteString
+        let address = url.port != nil && url.host?.contains(":") != true
+            ? "\(url.host ?? ""):\(url.port!)" : url.absoluteString
         var text = "Pair the Homespun app with this server. Scan the code with your iPhone's camera:\n\n"
         if let qr = try? TerminalQR.render(link) { text += qr + "\n\n" }
         text += "Or open this link on the iPhone (on a simulator, paste it in the app):\n  \(link)\n\n"
         text += "Or enter the address \(address) and the code \(code) in the app.\n"
         text += "Pairing code: \(code)  (works once, expires in \(minutes == 1 ? "1 minute" : "\(minutes) minutes"))\n"
+        text += "Server key: \(fingerprint.display)\n"
         if ["127.0.0.1", "::1", "localhost"].contains(configuration.host) {
             text += "\nNote: the server listens only on this computer. Set HOMESPUN_HOST=0.0.0.0 (install-service does).\n"
         }
@@ -174,6 +199,7 @@ public struct HomespunServer: Sendable {
             throw ServiceFailure(description: report.joined(separator: "\n"))
         }
         report.append("Homespun Server now starts automatically. Data: \(configuration.dataDirectory.path)")
+        report.append("Encrypted with the key in \(TLSStore.folder(configuration.dataDirectory).path) (back it up with the data folder).")
         return report.joined(separator: "\n")
     }
 
