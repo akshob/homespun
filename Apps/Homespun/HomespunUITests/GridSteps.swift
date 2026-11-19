@@ -307,8 +307,8 @@ extension XCUIApplication {
             let deadline = Date().addingTimeInterval(4)
             repeat {
                 if !viewer.exists { return XCTFail("a horizontal swipe closed the viewer", file: file, line: line) }
-                if viewer.value as? String != before { return }
-                if let sentence, state.exists, state.label != sentence { return }
+                if let before, let shown = viewer.value as? String, shown != before { return }
+                if before == nil, let sentence, state.exists, state.label != sentence { return }
                 usleep(200_000)
             } while Date() < deadline
         }
