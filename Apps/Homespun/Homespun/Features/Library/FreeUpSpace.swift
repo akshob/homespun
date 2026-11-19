@@ -15,8 +15,10 @@ struct FreeUpPair: Hashable, Identifiable, Sendable {
 /// Compare opens inside it; on the open iPhone Duo it's the whole screen: the review beside the item
 /// compared side by side.
 struct FreeUpSpaceScreen: View {
-    let controller: LibraryController
+    let model: AppModel
+    private var controller: LibraryController { model.library }
     let scope: Set<String>?
+    private let comparisonModel: CompareModel?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var path: [FreeUpPair] = []
@@ -24,10 +26,13 @@ struct FreeUpSpaceScreen: View {
     @State private var selected: FreeUpPair?
     @State private var detent: PresentationDetent
 
-    init(controller: LibraryController, scope: Set<String>?) {
-        self.controller = controller
+    init(model: AppModel, scope: Set<String>?, comparing: FreeUpPair? = nil, comparison: CompareModel? = nil) {
+        self.model = model
         self.scope = scope
-        _detent = State(initialValue: controller.settings.trialConfirmed ? .medium : .large)
+        comparisonModel = comparison
+        _detent = State(initialValue: model.settings.trialConfirmed ? .medium : .large)
+        _path = State(initialValue: comparing.map { [$0] } ?? [])
+        _selected = State(initialValue: comparing)
     }
 
     private var originals: [String] {
@@ -65,7 +70,7 @@ struct FreeUpSpaceScreen: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { closeButton }
                 .navigationDestination(for: FreeUpPair.self) { pair in
-                    CompareView(model: AppModel.current, compactIdentifier: pair.compact)
+                    CompareView(model: model, compactIdentifier: pair.compact, comparison: comparisonModel)
                         .safeAreaBar(edge: .bottom) {
                             KeepOriginalButton(controller: controller, pair: pair) { path.removeAll() }
                                 .padding(.horizontal, 24).padding(.bottom, 8)
@@ -106,7 +111,7 @@ struct FreeUpSpaceScreen: View {
 
     @ViewBuilder private var comparison: some View {
         if let selected {
-            CompareView(model: AppModel.current, compactIdentifier: selected.compact, standalone: false)
+            CompareView(model: model, compactIdentifier: selected.compact, standalone: false, comparison: comparisonModel)
                 .id(selected)
                 .safeAreaBar(edge: .bottom) {
                     KeepOriginalButton(controller: controller, pair: selected) { advance(from: selected) }

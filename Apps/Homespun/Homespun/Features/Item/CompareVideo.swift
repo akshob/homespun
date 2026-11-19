@@ -248,8 +248,10 @@ final class VideoPair {
 
 struct CompareTransport: View {
     let pair: VideoPair
+    var durationOverride: Double?
 
     var body: some View {
+        let duration = durationOverride ?? pair.duration
         HStack(spacing: 10) {
             Button(pair.isPlaying ? "Pause both" : "Play both", systemImage: pair.isPlaying ? "pause.fill" : "play.fill") {
                 pair.isPlaying ? pair.pause() : pair.play()
@@ -258,12 +260,12 @@ struct CompareTransport: View {
             .frame(minWidth: 44, minHeight: 44)
             .accessibilityIdentifier("compare.play")
             Text(VideoTime.text(pair.time)).accessibilityHidden(true)
-            Slider(value: Binding(get: { pair.time }, set: { pair.scrub(to: $0) }), in: 0...max(pair.duration, 0.1),
+            Slider(value: Binding(get: { pair.time }, set: { pair.scrub(to: $0) }), in: 0...max(duration, 0.1),
                    onEditingChanged: { $0 ? pair.beginScrub() : pair.endScrub() })
                 .accessibilityLabel("Position")
-                .accessibilityValue("\(VideoTime.text(pair.time)) of \(VideoTime.text(pair.duration))")
+                .accessibilityValue("\(VideoTime.text(pair.time)) of \(VideoTime.text(duration))")
                 .accessibilityIdentifier("compare.position")
-            Text(VideoTime.text(pair.duration)).accessibilityHidden(true)
+            Text(VideoTime.text(duration)).accessibilityHidden(true)
             Button("Sound", systemImage: "speaker.wave.2") {
                 pair.heard = pair.heard == .compact ? .original : .compact
             }

@@ -163,13 +163,13 @@ struct MainTabView: View {
         .modifier(StatusAccessoryModifier(model: model, open: openFromAccessory))
         .fullScreenCover(item: $cover, onDismiss: dismissed) { cover in
             switch cover {
-            case .freeUp(let scope): FreeUpSpaceScreen(controller: model.library, scope: scope)
+            case .freeUp(let scope): FreeUpSpaceScreen(model: model, scope: scope)
             }
         }
         .sheet(item: $sheet, onDismiss: dismissed) { sheet in
             switch sheet {
             case .freeUp(let scope):
-                FreeUpSpaceScreen(controller: model.library, scope: scope)
+                FreeUpSpaceScreen(model: model, scope: scope)
             case .backUp(let ids):
                 BackUpSheet(controller: model.library, identifiers: ids) {}
             case .pair(let link):

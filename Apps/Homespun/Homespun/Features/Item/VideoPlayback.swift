@@ -276,19 +276,21 @@ final class VideoPlayback {
 
 struct VideoScrubber: View {
     let playback: VideoPlayback
+    var durationOverride: Double?
 
     var body: some View {
+        let duration = durationOverride ?? playback.duration
         HStack(spacing: 10) {
             Text(VideoTime.text(playback.time)).accessibilityHidden(true)
             Slider(value: Binding(get: { playback.time }, set: { playback.scrub(to: $0) }),
-                   in: 0...max(playback.duration, 0.1), onEditingChanged: {
+                   in: 0...max(duration, 0.1), onEditingChanged: {
                 $0 ? playback.beginScrub() : playback.endScrub()
             })
-            .disabled(playback.status != .ready)
+            .disabled(durationOverride == nil && playback.status != .ready)
             .accessibilityLabel("Position")
-            .accessibilityValue("\(VideoTime.text(playback.time)) of \(VideoTime.text(playback.duration))")
+            .accessibilityValue("\(VideoTime.text(playback.time)) of \(VideoTime.text(duration))")
             .accessibilityIdentifier("item.position")
-            Text("−" + VideoTime.text(playback.duration - playback.time)).accessibilityHidden(true)
+            Text("−" + VideoTime.text(duration - playback.time)).accessibilityHidden(true)
         }
         .font(.footnote.monospacedDigit())
         .foregroundStyle(.white)

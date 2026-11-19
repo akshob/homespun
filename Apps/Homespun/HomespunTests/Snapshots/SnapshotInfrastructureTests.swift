@@ -39,20 +39,21 @@ struct SnapshotInfrastructureTests {
         let folder = try scratch()
         defer { try? FileManager.default.removeItem(at: folder) }
         var options = options(in: folder)
-        let white = try SnapshotImage.solid(width: 4, height: 4, color: CGColor(gray: 1, alpha: 1))
+        let colored = try SnapshotImage.solid(width: 4, height: 4,
+                                             color: CGColor(red: 0.8, green: 0.3, blue: 0.5, alpha: 1))
         let black = try SnapshotImage.solid(width: 4, height: 4, color: CGColor(gray: 0, alpha: 1))
         options.isCI = false
         #expect(throws: SnapshotFailure.self) {
-            try SnapshotReferences(options: options).check(white, suite: "Fixture", name: "sample", elapsed: 0)
+            try SnapshotReferences(options: options).check(colored, suite: "Fixture", name: "sample", elapsed: 0)
         }
         #expect(!FileManager.default.fileExists(atPath: options.references.path))
         options.isCI = true
-        try SnapshotReferences(options: options).check(white, suite: "Fixture", name: "sample", elapsed: 0)
+        try SnapshotReferences(options: options).check(colored, suite: "Fixture", name: "sample", elapsed: 0)
         let reference = options.references.appendingPathComponent("Fixture/sample.png")
         let original = try Data(contentsOf: reference)
         options.mode = "verify"
         let verifier = SnapshotReferences(options: options)
-        try verifier.check(white, suite: "Fixture", name: "sample", elapsed: 0)
+        try verifier.check(colored, suite: "Fixture", name: "sample", elapsed: 0)
         #expect(throws: SnapshotFailure.self) {
             try verifier.check(black, suite: "Fixture", name: "sample", elapsed: 0)
         }
@@ -64,10 +65,10 @@ struct SnapshotInfrastructureTests {
         let report = try JSONDecoder().decode([SnapshotMetric].self,
                                               from: Data(contentsOf: options.results.appendingPathComponent("report.json")))
         #expect(report.last?.result == "different")
-        #expect(try #require(report.last?.maximumDeltaE) > 90)
+        #expect(try #require(report.last?.maximumDeltaE) > 15)
         options.pin["runtimeBuild"] = "different"
         #expect(throws: SnapshotFailure.self) {
-            try SnapshotReferences(options: options).check(white, suite: "Fixture", name: "sample", elapsed: 0)
+            try SnapshotReferences(options: options).check(colored, suite: "Fixture", name: "sample", elapsed: 0)
         }
     }
 

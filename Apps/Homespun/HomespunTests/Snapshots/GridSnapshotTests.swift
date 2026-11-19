@@ -113,10 +113,3 @@ extension SnapshotTests {
         }
     }
 }
-
-extension UIView {
-    func descendant<T: UIView>(of type: T.Type) -> T? {
-        if let match = self as? T { return match }
-        return subviews.lazy.compactMap { $0.descendant(of: type) }.first
-    }
-}

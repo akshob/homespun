@@ -25,6 +25,8 @@ struct ItemViewer: View {
     @State private var drag: CGSize = .zero
     @Environment(\.dismiss) private var dismiss
     @Environment(\.showsTips) private var showsTips
+    @Environment(\.appClock) private var clock
+    @Environment(\.mediaPresentation) private var mediaPresentation
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
     init(model: AppModel, ids: [String], start: String, details: Binding<String?>,
@@ -54,12 +56,13 @@ struct ItemViewer: View {
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if asset?.itemKind == .video, !zoomed, drag == .zero {
-                VideoScrubber(playback: playback).padding(.horizontal, 20).padding(.bottom, 8)
+                VideoScrubber(playback: playback, durationOverride: mediaPresentation == .poster ? asset?.duration : nil)
+                    .padding(.horizontal, 20).padding(.bottom, 8)
             }
         }
-        .navigationTitle(ItemText.title(asset?.creationDate))
+        .navigationTitle(ItemText.title(asset?.creationDate, now: clock.now(), calendar: clock.calendar, locale: clock.locale))
         .navigationSubtitle(ItemText.subtitle(asset?.creationDate, kind: asset?.itemKind,
-                                              duration: asset?.duration ?? 0))
+                                              duration: asset?.duration ?? 0, calendar: clock.calendar, locale: clock.locale))
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
@@ -123,7 +126,9 @@ struct ItemViewer: View {
         case .video?: "Video"
         case nil: "Item"
         }
-        let date = info?.created?.formatted(date: .long, time: .shortened)
+        let style = Date.FormatStyle(date: .long, time: .shortened, locale: clock.locale,
+                                     calendar: clock.calendar, timeZone: clock.timeZone)
+        let date = info?.created?.formatted(style)
         let head = [kind, date].compactMap(\.self).joined(separator: ", ")
         guard let cell = cell(id) else { return head }
         return head + ". " + ItemText.spoken(ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell),
@@ -185,7 +190,7 @@ struct ItemViewer: View {
                     playback.toggle()
                 }
                 .tint(.white)
-                .disabled(playback.status != .ready)
+                .disabled(mediaPresentation == .interactive && playback.status != .ready)
                 .accessibilityIdentifier("item.play")
             }
         }

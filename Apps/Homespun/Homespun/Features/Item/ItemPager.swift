@@ -92,15 +92,16 @@ struct ItemPager: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> ItemPagerController {
         let controller = ItemPagerController(ids: ids, start: start)
-        update(controller)
+        update(controller, presentation: context.environment.mediaPresentation)
         return controller
     }
 
     func updateUIViewController(_ controller: ItemPagerController, context: Context) {
-        update(controller)
+        update(controller, presentation: context.environment.mediaPresentation)
     }
 
-    private func update(_ controller: ItemPagerController) {
+    private func update(_ controller: ItemPagerController, presentation: MediaPresentation) {
+        controller.posterOnly = presentation == .poster
         controller.item = item
         controller.playback = playback
         controller.label = label
@@ -123,6 +124,9 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     var item: (String) -> (any LibraryItem)? = { _ in nil }
     var label: (String) -> String = { _ in "" }
     var playback: VideoPlayback?
+    var posterOnly = false {
+        didSet { if oldValue != posterOnly, isViewLoaded { collectionView.reloadData() } }
+    }
     /// The page shown changed (its identifier).
     var shown: (String) -> Void = { _ in }
     /// The page shown zoomed in or back out.
@@ -268,7 +272,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let item = ids.indices.contains(indexPath.item) ? self.item(ids[indexPath.item]) : nil
-        let kind = item?.itemKind == .video ? VideoPageCell.reuse : PhotoPageCell.reuse
+        let kind = item?.itemKind == .video && !posterOnly ? VideoPageCell.reuse : PhotoPageCell.reuse
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: kind, for: indexPath)
         configure(cell, at: indexPath.item, item: item)
         return cell
@@ -387,7 +391,7 @@ final class ItemImages {
     var ready: (String) -> Void = { _ in }
     /// One for every viewer opened (setting one up is slow enough to delay opening).
     private static let shared = PHCachingImageManager()
-    private let manager = ItemImages.shared
+    private lazy var manager = ItemImages.shared
     private var pixels = CGSize.zero
     private var decoded: [String: UIImage] = [:]
     private var loading: [String: Task<Void, Never>] = [:]

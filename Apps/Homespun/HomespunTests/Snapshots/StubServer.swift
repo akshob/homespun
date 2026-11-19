@@ -55,10 +55,16 @@ final class StubServer: @unchecked Sendable {
         let hash = SHA256.hash(data: original).map { String(format: "%02x", $0) }.joined()
         for number in FixtureCatalog.ready + [FixtureCatalog.freed] {
             let asset = Self.asset(number)
-            let resource = ServerAPI.ResourceStatus(role: .photo, sha256: hash, size: original.count, state: .verified,
-                                                     receivedBytes: original.count, verifiedAt: now)
+            let kind: ServerAPI.AssetKind = number % 5 == 0 ? .video : number % 5 == 1 ? .livePhoto : .photo
+            var resources = [ServerAPI.ResourceStatus(
+                role: kind == .video ? .video : .photo, sha256: hash, size: 12_400_000, state: .verified,
+                receivedBytes: 12_400_000, verifiedAt: now)]
+            if kind == .livePhoto {
+                resources.append(.init(role: .pairedVideo, sha256: hash, size: 900_000, state: .verified,
+                                        receivedBytes: 900_000, verifiedAt: now))
+            }
             try json("/api/v1/assets/\(asset)", ServerAPI.AssetStatus(
-                assetID: asset, kind: .photo, state: .ready, message: nil, resources: [resource],
+                assetID: asset, kind: kind, state: .ready, message: nil, resources: resources,
                 compact: [], deviceCompresses: []))
             replies["/api/v1/assets/\(asset)/original/photo"] = Reply(data: original, type: "image/jpeg")
         }

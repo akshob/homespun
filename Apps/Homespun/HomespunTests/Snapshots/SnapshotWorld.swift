@@ -66,6 +66,8 @@ final class SnapshotWorld {
                                         phoneFreeSpace: { 48_000_000_000 })
         model = AppModel(parts: .init(settings: settings, job: job, premium: premium, automatic: automatic,
                                       copyFinder: copyFinder, history: history, library: library))
+        var finished = false
+        defer { if !finished { close() } }
         if count > 0 {
             var entries: [String: CompactLedger.Entry] = [:]
             for number in FixtureCatalog.ready + [FixtureCatalog.freed] where catalog.items[FixtureCatalog.compact(number)] != nil {
@@ -81,6 +83,10 @@ final class SnapshotWorld {
         await library.library.reload()
         await library.refreshGrid()
         await library.refreshReady()
+        guard let client = settings.client, try await client.info() == StubServer.info else {
+            throw SnapshotFailure("Snapshot server did not finish its pinned health check")
+        }
+        finished = true
     }
 
     func setup(_ page: SetupFlow.Page) -> SetupFlow {
