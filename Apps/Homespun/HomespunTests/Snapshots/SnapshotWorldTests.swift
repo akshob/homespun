@@ -8,12 +8,21 @@ struct SnapshotWorldTests {
     @Test func videoPostersLoadBothCopiesWithoutCreatingPlayers() async throws {
         let world = try await SnapshotWorld()
         defer { world.close() }
-        let compare = CompareModel()
+        let compare = try await world.comparison(FixtureCatalog.compact(75))
         defer { compare.close() }
-        await compare.load(model: world.model, compactIdentifier: FixtureCatalog.compact(75), presentation: .poster)
         #expect(compare.status == .ready)
         #expect(compare.isVideo && compare.original != nil && compare.compact != nil)
         #expect(compare.originalPlayer == nil && compare.compactPlayer == nil)
+    }
+
+    @Test func aFreedOriginalComesFromTheCannedServerIntoTheWorldsOwnFolder() async throws {
+        let world = try await SnapshotWorld()
+        defer { world.close() }
+        let compare = try await world.comparison(FixtureCatalog.compact(FixtureCatalog.freed))
+        defer { compare.close() }
+        #expect(compare.source == .server(assetID: StubServer.asset(FixtureCatalog.freed)))
+        #expect(compare.status == .ready && compare.original != nil && compare.compact != nil)
+        try world.stub.validate()
     }
 
     @Test func isolatedWorldsNeverFallThroughToTheNetwork() async throws {

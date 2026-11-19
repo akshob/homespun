@@ -25,6 +25,14 @@ enum CompareMode: String, CaseIterable, Identifiable {
 /// is deleted when Compare closes.
 @MainActor @Observable
 final class CompareModel {
+    struct Downloads: Sendable {
+        var directory: @Sendable () throws -> URL = { try PhotoLibrary.workDirectory() }
+        var fetch: @Sendable (ServerClient, String, ServerAPI.ResourceRole, URL, String,
+                             @escaping @Sendable (Int64, Int64) -> Void) async throws -> URL = {
+            try await CompareModel.fetch($0, assetID: $1, role: $2, to: $3, name: $4, progress: $5)
+        }
+    }
+
     enum Status: Equatable {
         case loading
         case downloading(received: Int64, expected: Int64)
@@ -52,6 +60,9 @@ final class CompareModel {
     @ObservationIgnored private var folder: URL?
     @ObservationIgnored let pair = VideoPair()
     @ObservationIgnored private var videoSwitch = 0
+    @ObservationIgnored private let downloads: Downloads
+
+    init(downloads: Downloads = Downloads()) { self.downloads = downloads }
 
     var isVideo: Bool { kind == .video }
     var hasOriginal: Bool { original != nil || originalPlayer != nil }
@@ -122,7 +133,7 @@ final class CompareModel {
         guard case .server(let assetID) = source, let client, download == nil else { return }
         let folder: URL
         do {
-            folder = try self.folder ?? PhotoLibrary.workDirectory()
+            folder = try self.folder ?? downloads.directory()
         } catch {
             status = .failed(error.localizedDescription)
             return
@@ -133,8 +144,8 @@ final class CompareModel {
         Announce.say("Getting the original from \(server).")
         download = Task {
             do {
-                let url = try await Self.fetch(client, assetID: assetID, role: OriginalSource.role(for: kind), to: folder,
-                                               name: OriginalSource.fileName(for: kind)) { received, expected in
+                let url = try await downloads.fetch(client, assetID, OriginalSource.role(for: kind), folder,
+                                                    OriginalSource.fileName(for: kind)) { received, expected in
                     Task { @MainActor in
                         guard case .downloading = self.status else { return }
                         self.status = .downloading(received: received, expected: expected)

@@ -64,7 +64,7 @@ def requested_checks(env, files):
             if not runs or any(run not in allowed for run in runs):
                 raise ValueError(f"Choose one or more valid custom runs: {', '.join(sorted(allowed))}")
             return {"server": False, "telemetry": False, "site": False, "app": True, "package": False,
-                    "unit": runs != ["probe"], "ui": runs,
+                    "unit": runs != ["probe"] or snapshots != "verify", "ui": runs,
                     "why": f"Custom runs on {env.get('REF_NAME', '?')}"}
         if choice == "package":
             return {"server": False, "telemetry": False, "site": False, "app": False, "package": True,

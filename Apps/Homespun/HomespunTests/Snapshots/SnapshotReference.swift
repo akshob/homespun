@@ -121,7 +121,7 @@ final class SnapshotReferences {
             try writeFailure(suite: suite, name: name, reference: placeholder, actual: actual, difference: actual)
             failure = "Missing reference \(suite)/\(name); record snapshots in CI"
         } else {
-            let reference = try SnapshotImage.read(referenceURL)
+            let reference = try SnapshotImage.sRGB(SnapshotImage.read(referenceURL))
             let diff = try SnapshotDiff.compare(actual, to: reference, tolerance: tolerance)
             metric.changedFraction = diff.changedFraction
             metric.maximumDeltaE = diff.maximumDeltaE

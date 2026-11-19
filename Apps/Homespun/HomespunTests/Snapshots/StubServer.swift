@@ -81,6 +81,15 @@ final class StubServer: @unchecked Sendable {
 
     static func asset(_ number: Int) -> String { String(format: "asset-%03d", number) }
 
+    func original(_ asset: String, role: ServerAPI.ResourceRole) async throws -> Data {
+        let url = Self.baseURL.appendingPathComponent("api/v1/assets/\(asset)/original/\(role.rawValue)")
+        let (data, response) = try await session.data(from: url)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            throw SnapshotFailure("Synthetic original is missing")
+        }
+        return data
+    }
+
     func validate() throws {
         let unexpected = Self.answers.withLock { $0[id]?.unexpected ?? [] }
         guard unexpected.isEmpty else { throw SnapshotFailure("Unstubbed snapshot requests: \(unexpected.joined(separator: ", "))") }

@@ -85,6 +85,15 @@ enum SnapshotDiff {
                           difference: try SnapshotImage.solid(width: actual.width, height: actual.height,
                                                               color: CGColor(red: 1, green: 0, blue: 1, alpha: 1)))
         }
+        if tolerance.deltaE >= 0, tolerance.fraction >= 0, tolerance.maximum >= 0,
+           actual.bitsPerComponent == reference.bitsPerComponent, actual.bitsPerPixel == reference.bitsPerPixel,
+           actual.bytesPerRow == reference.bytesPerRow, actual.bitmapInfo == reference.bitmapInfo,
+           let actualSpace = actual.colorSpace, let referenceSpace = reference.colorSpace,
+           CFEqual(actualSpace, referenceSpace),
+           let actualBytes = actual.dataProvider?.data, let referenceBytes = reference.dataProvider?.data,
+           CFEqual(actualBytes, referenceBytes) {
+            return Result(sizeMatches: true, changedFraction: 0, maximumDeltaE: 0, passed: true, difference: nil)
+        }
         let width = actual.width, height = actual.height
         let rect = CGRect(x: 0, y: 0, width: width, height: height)
         let filter = CIFilter.labDeltaE()

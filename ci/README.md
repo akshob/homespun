@@ -137,9 +137,8 @@ Custom runs accept validated segment names separated by spaces; empty or unknown
 before any macOS work. A probe-only dispatch omits unrelated jobs, including the unit job.
 Nightly adds the same probe to the existing `iphone` and `duo-open` invocations (no extra
 simulators or macOS jobs) and warns when measurements differ from `__Snapshots__/TRAITS.json`.
-The label reads live window traits, rather than a value cached during layout. The manual
-probe starts the Duo folded and relaunches the probe after each pose so the next measurement
-does not inherit a previous window's transitional insets.
+The label reads live window traits, rather than a value cached during layout. Pose changes
+keep the probe foregrounded, using the existing Duo driver's pre-warmed active display.
 
 ### Deterministic snapshots
 
@@ -149,6 +148,9 @@ existing end-to-end coverage. `SnapshotWorld` composes the real app models with 
 catalog, isolated defaults/ledger, memory-only tokens and installation identity, and a
 fail-closed `URLProtocol` server. It is not demo mode or a ready-made-state launch argument.
 Media is synthetic; videos use poster frames rather than offscreen player layers.
+Use `world.comparison(id)` for a preloaded Compare presentation: even a freed original comes
+from the protocol stub into the world's own folder, never a fresh live session. A supplied
+`CompareView` model is already loaded and is not reloaded while host traits settle.
 
 The renderer attaches a window to the hosted app's foreground scene, applies measured
 `__Snapshots__/TRAITS.json` traits/insets at layout scale 3, and waits for identical pixels and
@@ -180,6 +182,8 @@ runtime build, host model/device and process locale: a CI mismatch fails with a 
 instruction; a different local environment skips the reference suites, not the renderer's
 contract tests. `TEST_RUNNER_HOMESPUN_SNAPSHOT_DIR`, `..._RESULTS`, `..._SNAPSHOTS` and
 `..._SNAPSHOT_CI` are forwarded by `ci/unit.sh` through the archived runner manifest.
+To refresh measurements and record images using one build, use
+`-f ui=custom -f runs=probe -f snapshots=record`; it runs only the probe and unit jobs.
 
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).

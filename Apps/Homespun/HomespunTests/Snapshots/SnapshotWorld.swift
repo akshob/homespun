@@ -98,6 +98,34 @@ final class SnapshotWorld {
                          autofocusFields: false)
     }
 
+    func comparison(_ id: String) async throws -> CompareModel {
+        let directory = folder.appendingPathComponent("originals/\(UUID().uuidString)")
+        let stub = stub
+        let downloads = CompareModel.Downloads(directory: {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            return directory
+        }, fetch: { _, asset, role, folder, name, progress in
+            let data = try await stub.original(asset, role: role)
+            let url = folder.appendingPathComponent(name)
+            try data.write(to: url, options: .atomic)
+            progress(Int64(data.count), Int64(data.count))
+            return url
+        })
+        let comparison = CompareModel(downloads: downloads)
+        var ready = false
+        defer { if !ready { comparison.close() } }
+        await comparison.load(model: model, compactIdentifier: id, presentation: .poster)
+        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if comparison.status == .ready { ready = true; return comparison }
+            if case .failed(let reason) = comparison.status {
+                throw SnapshotFailure(reason)
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw SnapshotFailure("Fixture comparison did not finish loading")
+    }
+
     func close() {
         stub.close()
         defaults.removePersistentDomain(forName: suite)

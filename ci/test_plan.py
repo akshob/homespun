@@ -79,6 +79,15 @@ class TargetedUIPlanTests(unittest.TestCase):
                 for key in ("server", "telemetry", "site", "package"):
                     self.assertFalse(result[key], key)
 
+    def test_recording_can_share_the_probes_build(self):
+        result = plan({"MODE": "manual", "UI_INPUT": "custom", "RUNS_INPUT": "probe",
+                       "SNAPSHOTS_INPUT": "record"}, [])
+        self.assertTrue(result["app"])
+        self.assertTrue(result["unit"])
+        self.assertEqual(result["ui"], ["probe"])
+        for key in ("server", "telemetry", "site", "package"):
+            self.assertFalse(result[key], key)
+
 
 if __name__ == "__main__":
     unittest.main()
