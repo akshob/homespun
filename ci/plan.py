@@ -48,10 +48,24 @@ def touches(files, prefixes, exact=()):
     return any(f.startswith(prefixes) or f in exact for f in files if not ignored(f))
 
 
-def plan(env, files):
+def requested_checks(env, files):
     mode = env["MODE"]
     if mode == "manual":
         choice = env.get("UI_INPUT") or "quick"
+        snapshots = env.get("SNAPSHOTS_INPUT") or "verify"
+        if snapshots not in ("verify", "record", "record-missing"):
+            raise ValueError(f"Unknown snapshot mode: {snapshots}")
+        if choice == "none" and snapshots != "verify":
+            return {"server": False, "telemetry": False, "site": False, "app": True, "package": False,
+                    "ui": [], "why": f"Snapshot {snapshots} on {env.get('REF_NAME', '?')}"}
+        if choice == "custom":
+            runs = list(dict.fromkeys(env.get("RUNS_INPUT", "").split()))
+            allowed = set(FULL + QUICK + ["large", "probe"])
+            if not runs or any(run not in allowed for run in runs):
+                raise ValueError(f"Choose one or more valid custom runs: {', '.join(sorted(allowed))}")
+            return {"server": False, "telemetry": False, "site": False, "app": True, "package": False,
+                    "unit": runs != ["probe"], "ui": runs,
+                    "why": f"Custom runs on {env.get('REF_NAME', '?')}"}
         if choice == "package":
             return {"server": False, "telemetry": False, "site": False, "app": False, "package": True,
                     "ui": [], "why": f"Run workflow on {env.get('REF_NAME', '?')} (macOS package only)"}
@@ -77,6 +91,12 @@ def plan(env, files):
                 "why": why}
     return {"server": server, "telemetry": telemetry, "site": site, "app": app, "package": server,
             "ui": FULL if app else [], "why": f"merged to main: {len(files)} files changed"}
+
+
+def plan(env, files):
+    result = requested_checks(env, files)
+    result.setdefault("unit", result["app"])
+    return result
 
 
 def main():

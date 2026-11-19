@@ -125,6 +125,19 @@ GitHub's Re-run Job otherwise checks out the original, immutable commit. Package
 keep their complete log in the `package-results-<run>` artifact.
 After a lane-only fix, use its targeted input to validate it without repeating the full matrix.
 
+### Simulator trait probe
+
+`gh workflow run ci.yml --ref <branch> -f ui=custom -f runs=probe` builds once and probes a fresh
+iPhone and Duo sequentially, with no server, PhotoKit access or media imports. The DEBUG-only
+`-traitProbe` screen reports actual window bounds, safe areas, size classes and display/native
+scales. Download `traits-probe-<run>` for the five JSON records (iPhone portrait/landscape, Duo
+cover and inner portrait/landscape). References use those measurements, not estimated devices.
+
+Custom runs accept validated segment names separated by spaces; empty or unknown names fail
+before any macOS work. A probe-only dispatch omits unrelated jobs, including the unit job.
+Nightly adds the same probe to the existing `iphone` and `duo-open` invocations (no extra
+simulators or macOS jobs) and warns when measurements differ from `__Snapshots__/TRAITS.json`.
+
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).
 

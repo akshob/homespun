@@ -13,6 +13,9 @@
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 TYPE=$2 ONLY=$3 PORT=$4 POSE=${5:-}
+export TEST_RUNNER_HOMESPUN_DEVICE_TYPE=$TYPE
+export TEST_RUNNER_HOMESPUN_TRAIT_RESULTS=$RESULTS/traits
+export TEST_RUNNER_HOMESPUN_SNAPSHOT_DIR=$ROOT/Apps/Homespun/HomespunTests/__Snapshots__
 stamp segment.start
 timed simulator.slot take_sim_slot
 SIM=$(new_simulator $TYPE "HS CI $NAME $PORT") || exit 1
@@ -47,23 +50,25 @@ if [[ -n $POSE ]]; then
     stamp simulator.pose.end
     timed simulator.pose-wait sleep 15
 fi
-timed media.seed.add xcrun simctl addmedia $SIM $SEED/IMG_2001.HEIC $SEED/IMG_2001.MOV $SEED/IMG_2002.JPG $SEED/IMG_2003.MOV
-if [[ -n ${EXTRA:-} ]]; then
-    MEDIA=$CI_STATE/media/extra-3000
-    stamp media.extra.generate.start
-    if [[ ! -f $MEDIA/.done ]]; then
-        mkdir -p $MEDIA && ffmpeg -v error -f lavfi -i "testsrc2=size=320x240:rate=1" -frames:v 3000 -q:v 6 $MEDIA/IMG_%05d.JPG \
-          && touch $MEDIA/.done
+if [[ -z ${TRAIT_PROBE_ONLY:-} ]]; then
+    timed media.seed.add xcrun simctl addmedia $SIM $SEED/IMG_2001.HEIC $SEED/IMG_2001.MOV $SEED/IMG_2002.JPG $SEED/IMG_2003.MOV
+    if [[ -n ${EXTRA:-} ]]; then
+        MEDIA=$CI_STATE/media/extra-3000
+        stamp media.extra.generate.start
+        if [[ ! -f $MEDIA/.done ]]; then
+            mkdir -p $MEDIA && ffmpeg -v error -f lavfi -i "testsrc2=size=320x240:rate=1" -frames:v 3000 -q:v 6 $MEDIA/IMG_%05d.JPG \
+              && touch $MEDIA/.done
+        fi
+        stamp media.extra.generate.end
+        timed media.extra.add xcrun simctl addmedia $SIM $(ls $MEDIA/*.JPG | head -$EXTRA)
     fi
-    stamp media.extra.generate.end
-    timed media.extra.add xcrun simctl addmedia $SIM $(ls $MEDIA/*.JPG | head -$EXTRA)
-fi
-if [[ -n ${DATED:-} ]]; then
-    MEDIA=$CI_STATE/media/dated-$DATED
-    stamp media.dated.generate.start
-    [[ -f $MEDIA/.done ]] || { swift ${0:A:h}/dated-photos.swift $MEDIA $DATED && touch $MEDIA/.done; }
-    stamp media.dated.generate.end
-    timed media.dated.add xcrun simctl addmedia $SIM $MEDIA/*.JPG
+    if [[ -n ${DATED:-} ]]; then
+        MEDIA=$CI_STATE/media/dated-$DATED
+        stamp media.dated.generate.start
+        [[ -f $MEDIA/.done ]] || { swift ${0:A:h}/dated-photos.swift $MEDIA $DATED && touch $MEDIA/.done; }
+        stamp media.dated.generate.end
+        timed media.dated.add xcrun simctl addmedia $SIM $MEDIA/*.JPG
+    fi
 fi
 CODE="" LINK=""
 if [[ -z ${SERVERLESS:-} ]]; then

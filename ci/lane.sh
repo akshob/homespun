@@ -15,7 +15,7 @@ if [[ ${1:-} == --first-device ]]; then
     case ${2:-} in
       quick-duo|duo-cover|duo-grid|duo-open|duo-all) print -r -- iPhone-Duo ;;
       watch) print -r -- Apple-Watch-Series-12-46mm ;;
-      quick|iphone|library|later|copies|onboarding|telemetry|demo|large|pr|iphone-all|full)
+      quick|iphone|library|later|copies|onboarding|telemetry|demo|large|probe|pr|iphone-all|full)
         print -r -- iPhone-18-Pro ;;
       *) echo "unknown run: ${2:-}" >&2; exit 1 ;;
     esac
@@ -23,6 +23,8 @@ if [[ ${1:-} == --first-device ]]; then
 fi
 failed=()
 source $D/env.sh
+PROBE_TESTS=""
+[[ -n ${TRAIT_PROBE:-} ]] && PROBE_TESTS=,HomespunUITests/SnapshotProbeUITests
 run() {
     local name=$1; shift
     echo "::group::$name"
@@ -55,7 +57,7 @@ for one in $runs; do
       run large env EXTRA=3000 TEST_RUNNER_HOMESPUN_LIBRARY_SIZE=3003 zsh $D/ui.sh large iPhone-18-Pro HomespunUITests/LargeLibraryUITests 8783 ;;
     iphone)
       run iphone zsh $D/ui.sh iphone iPhone-18-Pro \
-        HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests,HomespunUITests/PremiumUITests 8794 ;;
+        HomespunUITests/ItemViewerUITests,HomespunUITests/ServerTabUITests,HomespunUITests/ServerModeUITests,HomespunUITests/PremiumUITests$PROBE_TESTS 8794 ;;
     library)
       # A bigger library (the newest cells far from the oldest; the filter crash needed it; paging
       # through items and turning the iPhone needs a few), over many months.
@@ -80,7 +82,12 @@ for one in $runs; do
       run duo-grid env DATED=240 DUO_POSES=1 zsh $D/ui.sh duo-grid iPhone-Duo HomespunUITests/GridScrollUITests 8791 ;;
     duo-open)
       run duo-open env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh duo-open iPhone-Duo \
-        HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests 8793 open ;;
+        HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests$PROBE_TESTS 8793 open ;;
+    probe)
+      run probe-iphone env SERVERLESS=1 TRAIT_PROBE_ONLY=1 zsh $D/ui.sh probe-iphone iPhone-18-Pro \
+        HomespunUITests/SnapshotProbeUITests 8803
+      run probe-duo env SERVERLESS=1 TRAIT_PROBE_ONLY=1 DUO_POSES=1 zsh $D/ui.sh probe-duo iPhone-Duo \
+        HomespunUITests/SnapshotProbeUITests 8804 open ;;
     demo)
       # Try the Demo needs no server and no Photos access: on an iPhone, then on iPhone Duo's cover.
       run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests 8800

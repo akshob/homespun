@@ -56,6 +56,29 @@ class TargetedUIPlanTests(unittest.TestCase):
         for key in ("server", "telemetry", "site", "package"):
             self.assertFalse(result[key], key)
 
+    def test_trait_probe_uses_only_build_and_probe_job(self):
+        result = plan({"MODE": "manual", "UI_INPUT": "custom", "RUNS_INPUT": "probe probe"}, [])
+        self.assertTrue(result["app"])
+        self.assertFalse(result["unit"])
+        self.assertEqual(result["ui"], ["probe"])
+        for key in ("server", "telemetry", "site", "package"):
+            self.assertFalse(result[key], key)
+
+    def test_custom_run_rejects_empty_unknown_and_shell_input(self):
+        for runs in ("", "unknown", "probe;echo", "probe $(command)"):
+            with self.subTest(runs=runs), self.assertRaises(ValueError):
+                plan({"MODE": "manual", "UI_INPUT": "custom", "RUNS_INPUT": runs}, [])
+
+    def test_recording_uses_unit_without_unrelated_jobs(self):
+        for mode in ("record", "record-missing"):
+            with self.subTest(mode=mode):
+                result = plan({"MODE": "manual", "UI_INPUT": "none", "SNAPSHOTS_INPUT": mode}, [])
+                self.assertTrue(result["app"])
+                self.assertTrue(result["unit"])
+                self.assertEqual(result["ui"], [])
+                for key in ("server", "telemetry", "site", "package"):
+                    self.assertFalse(result[key], key)
+
 
 if __name__ == "__main__":
     unittest.main()

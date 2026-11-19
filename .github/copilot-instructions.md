@@ -155,6 +155,10 @@ and may not exist in other checkouts.
   jobs (including watch) generate projects and use `$CI_STATE/spm`. A new run must also be
   mapped by `ci/lane.sh --first-device` so background boot prepares the right device; it
   never permits two booted simulators in one job or bypasses shared simulator slots.
+- Simulator sizes and safe areas for snapshot configurations come from `SnapshotProbeUITests`,
+  not guesses: dispatch `ci.yml` with `ui=custom runs=probe` on the pinned image and read its
+  `traits-probe-<run>` artifact. The DEBUG probe bypasses app services; nightly reuses the
+  existing iPhone/Duo segments to warn about trait changes without another simulator.
 
 ## Build and test
 
