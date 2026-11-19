@@ -111,7 +111,9 @@ final class DuoLayoutUITests: XCTestCase {
         let demo = app.buttons["help.demo"]
         XCTAssertTrue(demo.waitForExistence(timeout: 10))
         demo.tap()
-        app.buttons["help.demo.confirm"].tap()
+        let confirm = app.buttons["help.demo.confirm"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
         let preparing = app.descendants(matching: .any)["demo.prepare"]
         XCTAssertTrue(preparing.waitForExistence(timeout: 5))
         let title = app.staticTexts["setup.title"]
