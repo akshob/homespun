@@ -88,6 +88,7 @@ enum SnapshotDiff {
         if tolerance.deltaE >= 0, tolerance.fraction >= 0, tolerance.maximum >= 0,
            actual.bitsPerComponent == reference.bitsPerComponent, actual.bitsPerPixel == reference.bitsPerPixel,
            actual.bytesPerRow == reference.bytesPerRow, actual.bitmapInfo == reference.bitmapInfo,
+           actual.decode == nil, reference.decode == nil,
            let actualSpace = actual.colorSpace, let referenceSpace = reference.colorSpace,
            CFEqual(actualSpace, referenceSpace),
            let actualBytes = actual.dataProvider?.data, let referenceBytes = reference.dataProvider?.data,

@@ -100,7 +100,8 @@ struct SnapshotInfrastructureTests {
             let device = SnapshotDevice(size: size, safeArea: insets, horizontal: .regular, vertical: .regular,
                                         layoutScale: 3, nativeScale: 3)
             let geometry = Geometry()
-            let content = Color.green.onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: {
+            let content = ZStack { Color.green; ProgressView().tint(.black) }
+                .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: {
                 geometry.insets = $0
             }
             let controller = UIHostingController(rootView: content)
@@ -147,6 +148,24 @@ struct SnapshotInfrastructureTests {
         french.locale = Locale(identifier: "fr_FR")
         #expect(GridController.title(2026 * 12 + 5, clock: english) == "June 2026")
         #expect(GridController.title(2026 * 12 + 5, clock: french) == "juin 2026")
+    }
+
+    @Test func nestedSetupNavigationDrawsItsScrollContentRatherThanOnlyTheBottomBar() async throws {
+        let world = try await SnapshotWorld()
+        defer { world.close() }
+        let flow = world.setup(.address)
+        defer { flow.stop() }
+        let view = OnboardingView(settings: world.settings, library: world.library, flow: flow)
+            .environment(\.colorScheme, .light).environment(\.appClock, SnapshotWorld.clock)
+            .transaction { $0.disablesAnimations = true; $0.animation = nil }
+        let device = SnapshotDevice(size: CGSize(width: 320, height: 640),
+                                    safeArea: UIEdgeInsets(top: 20, left: 0, bottom: 20, right: 0),
+                                    horizontal: .compact, vertical: .regular, layoutScale: 3, nativeScale: 3)
+        let image = try await SnapshotCanvas.capture(UIHostingController(rootView: view), device: device)
+        let data = try #require(image.dataProvider?.data)
+        let pixels = try #require(CFDataGetBytePtr(data))
+        let offset = (200 * image.width + 10) * 4
+        #expect(pixels[offset] > 200 && pixels[offset + 1] > 200 && pixels[offset + 2] > 200)
     }
 
     private func scratch() throws -> URL {

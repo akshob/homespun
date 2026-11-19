@@ -3,6 +3,7 @@
     "contentSizeCategory": "UICTContentSizeCategoryL",
     "displayScale": 3,
     "horizontalSizeClass": "compact",
+    "interfaceOrientation": 1,
     "model": "iPhone19,4",
     "nativePixels": [
       1398,
@@ -27,6 +28,7 @@
     "contentSizeCategory": "UICTContentSizeCategoryL",
     "displayScale": 3,
     "horizontalSizeClass": "regular",
+    "interfaceOrientation": 4,
     "model": "iPhone19,4",
     "nativePixels": [
       2007,
@@ -51,6 +53,7 @@
     "contentSizeCategory": "UICTContentSizeCategoryL",
     "displayScale": 3,
     "horizontalSizeClass": "regular",
+    "interfaceOrientation": 1,
     "model": "iPhone19,4",
     "nativePixels": [
       2007,
@@ -75,6 +78,7 @@
     "contentSizeCategory": "UICTContentSizeCategoryL",
     "displayScale": 3,
     "horizontalSizeClass": "compact",
+    "interfaceOrientation": 1,
     "model": "iPhone19,2",
     "nativePixels": [
       1206,
@@ -99,6 +103,7 @@
     "contentSizeCategory": "UICTContentSizeCategoryL",
     "displayScale": 3,
     "horizontalSizeClass": "compact",
+    "interfaceOrientation": 3,
     "model": "iPhone19,2",
     "nativePixels": [
       1206,

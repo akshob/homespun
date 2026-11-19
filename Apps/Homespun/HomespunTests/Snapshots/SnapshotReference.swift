@@ -35,7 +35,7 @@ enum SnapshotEnvironment {
     static var pin: [String: String] {
         let environment = ProcessInfo.processInfo.environment
         return [
-            "renderer": "1",
+            "renderer": "2",
             "xcodeBuild": Bundle(for: BundleMarker.self).object(forInfoDictionaryKey: "DTXcodeBuild") as? String
                 ?? environment["HOMESPUN_XCODE_BUILD"]
                 ?? Bundle.main.object(forInfoDictionaryKey: "DTXcodeBuild") as? String ?? "unknown",

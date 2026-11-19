@@ -155,6 +155,8 @@ from the protocol stub into the world's own folder, never a fresh live session. 
 The renderer attaches a window to the hosted app's foreground scene, applies measured
 `__Snapshots__/TRAITS.json` traits/insets at layout scale 3, and waits for identical pixels and
 settled geometry (at most two seconds). References are opaque sRGB PNGs rasterised at 2x.
+Hierarchy drawing includes hosted SwiftUI navigation/scroll content that `layer.render` can
+omit; UIKit activity indicators are frozen at a fixed animation time before comparison.
 Grid edges/columns, Details placement and Compare placement also have numeric assertions.
 The fixed clock is 2026-06-15 10:00 UTC, with `en_US`, Gregorian and UTC formatting.
 System glass, keyboards and sheet detents are deliberately outside snapshot coverage.

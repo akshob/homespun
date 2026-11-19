@@ -45,7 +45,7 @@ extension SnapshotTests {
                                                        variant: sample.variant, clock: SnapshotWorld.clock,
                                                        defaults: world.defaults) { controller in
                     guard let grid = controller.view.descendant(of: UICollectionView.self),
-                          grid.numberOfSections == 0 else {
+                          (0..<grid.numberOfSections).allSatisfy({ grid.numberOfItems(inSection: $0) == 0 }) else {
                         throw SnapshotFailure("Empty Library did not finish loading")
                     }
                 }
