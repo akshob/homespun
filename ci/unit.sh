@@ -16,10 +16,6 @@ test_without_building $RESULTS/unit.xcresult -only-testing:HomespunTests -only-t
   -skip-testing:HomespunTests/PerformanceTests 2>&1 \
   | tee $RESULTS/unit.log | filter
 STATUS=$?
-if ! grep -Eq 'testReleaseDisablesEntryPoints.*passed' $RESULTS/release-scope.log; then
-    echo "error: release-scope regression did not execute and pass" >&2
-    STATUS=1
-fi
 stamp xcodebuild.end
 if (( STATUS == 0 )); then
     specs=($DD/Build/Products/HomespunReleaseScope_*iphonesimulator*.xctestrun(N))
@@ -28,10 +24,14 @@ if (( STATUS == 0 )); then
         exit 1
     fi
     rm -rf $RESULTS/release-scope.xcresult
-    stamp release-scope.start
+    stamp xcodebuild.start
     XCTESTRUN=$specs[1] test_without_building $RESULTS/release-scope.xcresult 2>&1 \
       | tee $RESULTS/release-scope.log | filter
     STATUS=$?
-    stamp release-scope.end
+    stamp xcodebuild.end
+    if ! grep -Eq 'testReleaseDisablesEntryPoints.*passed' $RESULTS/release-scope.log; then
+        echo "error: release-scope regression did not execute and pass" >&2
+        STATUS=1
+    fi
 fi
 exit $STATUS
