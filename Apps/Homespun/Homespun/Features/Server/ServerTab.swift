@@ -14,7 +14,7 @@ struct ServerTab: View {
 
         var isAvailable: Bool {
             switch self {
-            case .automatic: ReleaseFeatures.automaticMode
+            case .automatic, .notifications: ReleaseFeatures.automaticMode
             case .connectors: ReleaseFeatures.cloudCopies
             case .premium: ReleaseFeatures.premium
             default: true
@@ -280,11 +280,13 @@ struct ServerTab: View {
                 .accessibilityIdentifier("settings.deviceName")
                 .sidebarRow(Route.deviceName)
             }
-            NavigationLink(value: Route.notifications) {
-                ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
+            if ReleaseFeatures.automaticMode {
+                NavigationLink(value: Route.notifications) {
+                    ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
+                }
+                .accessibilityIdentifier("settings.notifications")
+                .sidebarRow(Route.notifications)
             }
-            .accessibilityIdentifier("settings.notifications")
-            .sidebarRow(Route.notifications)
             NavigationLink(value: Route.analytics) {
                 ServerRow(title: "Share Analytics", symbol: "chart.bar",
                           value: model.settings.isDemo ? "Off in the demo" : Telemetry.shared.isSharing ? "On" : "Off")
@@ -404,6 +406,7 @@ struct ServerTab: View {
     }
 
     private func loadNotifications() async {
+        guard ReleaseFeatures.automaticMode else { return }
         // Off the main thread: the first call sets up the notification framework.
         notifications = await Task.detached(priority: .userInitiated) {
             await UNUserNotificationCenter.current().notificationSettings().authorizationStatus

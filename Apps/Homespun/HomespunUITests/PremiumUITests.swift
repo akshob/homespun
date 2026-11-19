@@ -32,18 +32,10 @@ final class PremiumUITests: XCTestCase {
 
         app.openTab("Server")
         app.swipeUpInContent()
-        for id in ["settings.premium", "settings.automatic", "settings.connectors"] {
+        for id in ["settings.premium", "settings.automatic", "settings.connectors", "settings.notifications"] {
             XCTAssertFalse(app.buttons[id].exists, id)
         }
         assertReleaseCopy(app)
-        let notifications = app.buttons["settings.notifications"]
-        XCTAssertTrue(app.reveal(notifications))
-        notifications.tap()
-        XCTAssertTrue(app.staticTexts["Backup results are in Activity. Homespun doesn't send notifications in this version."]
-            .waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["notifications.continue"].exists)
-        assertReleaseCopy(app)
-        app.goBack(from: "Notifications")
         let help = app.buttons["settings.help"]
         XCTAssertTrue(app.reveal(help))
         help.tap()
