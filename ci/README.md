@@ -44,8 +44,7 @@ passing without coverage.
 
 Only the app build and `watch` jobs need XcodeGen. They share the Xcode package checkout cache
 (`$CI_STATE/spm`, `xcode-spm-<Package.resolved hash>` with a prefix restore). Homebrew uses its
-normal install path: a download-cache trial increased Tools from the 21–38 s baseline to
-197–361 s despite a cache hit, so that optional cache is deferred. The watch job still builds
+normal install path; the optional download cache is deferred. The watch job still builds
 its own watchOS test bundle, then runs its own `.xctestrun` without resolving the graph a
 second time.
 
@@ -64,7 +63,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `build.sh` | typechecks `scripts/demo-media.swift` with `DemoArt.swift`, then release server + `build-for-testing` into `~/ci/dd/<commit>` (once per commit; later jobs reuse it); the app embeds its widgets and the Apple Watch app, so this also builds for the watchOS simulator (Xcode's watchOS SDK; no watch simulator runs) |
 | `unit.sh` | app unit tests on a fresh iPhone simulator with Photos access, and the widgets' (`HomespunWidgetTests`, every size drawn) |
 | `watch.sh` | separate watchOS build and timed Crown/swipe regression on a fresh Apple Watch simulator (fresh, stale and arriving status, each crossing a minute boundary); no server or paired iPhone; downloads the watchOS runtime if missing |
-| `presim.sh <device type>` | queue the first simulator's boot in the background, overlapping tool/cache/artifact setup; disabled when `SIM_SLOTS_DIR` is set |
+| `presim.sh <device type>` | queue the first simulator's boot in the background, overlapping cache/artifact setup; disabled when `SIM_SLOTS_DIR` is set |
 | `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DATED=`, `DUO_POSES=1`, `STUB_PORT=`; `SERVERLESS=1`: no server and no Photos access, for the demo) |
 | `dated-photos.swift` | small synthetic photos taken over the past months (EXIF dates) for `DATED=`: month headers, scrolling across months |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
@@ -104,8 +103,11 @@ After a lane-only fix, use its targeted input to validate it without repeating t
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).
 
-On CI, the first step after checkout reserves `$CI_STATE/presim/<device>.pending`, then
-starts `presim.sh`. It publishes the created, boot-requested UDID atomically; `new_simulator`
+After tool installation, CI reserves `$CI_STATE/presim/<device>.pending`, then starts
+`presim.sh`. Boot deliberately does not overlap brew: trials took **197–361 s** with a
+download-cache hit and **459 s** without it, versus **31 s** in the contemporaneous build
+job (no simulator). It overlaps the remaining package-cache/artifact setup instead.
+It publishes the created, boot-requested UDID atomically; `new_simulator`
 waits for publication, claims it once, renames it and waits on `bootstatus`. Later segments
 still create and delete their own simulator. A failed preparation deletes its simulator
 before allowing fresh creation; a stalled producer fails the segment instead of booting a

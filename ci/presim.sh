@@ -1,6 +1,6 @@
 #!/bin/zsh
 # SPDX-License-Identifier: Apache-2.0
-# Queue the first simulator's boot while the job installs tools and unpacks the build.
+# Queue the first simulator's boot during cache restore and build-artifact setup.
 set -euo pipefail
 source ${0:A:h}/env.sh
 TYPE=$1 NAME=presim
