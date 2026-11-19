@@ -29,6 +29,11 @@ final class DemoMode {
     private var preparationID: UUID?
     private var background: UIBackgroundTaskIdentifier = .invalid
     private var memoryWarning: NSObjectProtocol?
+    #if DEBUG
+    private var holdNextPreparation = ProcessInfo.processInfo.arguments.contains("-holdDemoPreparation")
+    private var heldPreparationID: UUID?
+    private var heldCompletion: CheckedContinuation<Void, Never>?
+    #endif
 
     nonisolated static let settingsName = "photos.homespun.demo"
     nonisolated static var folder: URL {
@@ -75,6 +80,12 @@ final class DemoMode {
         self.origin = origin
         if origin == .launch { Telemetry.shared.paused = true }
         let id = UUID(), previous = work
+        #if DEBUG
+        if holdNextPreparation {
+            holdNextPreparation = false
+            heldPreparationID = id
+        }
+        #endif
         preparationID = id
         work = Task(priority: .userInitiated) {
             guard !Task.isCancelled, preparationID == id else { return }
@@ -118,6 +129,11 @@ final class DemoMode {
 
     private func finish(_ folder: URL, origin: Origin, id: UUID, drawnSince: ContinuousClock.Instant?) async throws {
         #if DEBUG
+        if heldPreparationID == id, drawnSince != nil {
+            heldPreparationID = nil
+            // A cancellation test must not race media completion while XCTest takes a snapshot.
+            await withCheckedContinuation { heldCompletion = $0 }
+        }
         if let drawnSince {
             let minimum = UserDefaults.standard.double(forKey: "demoPrepareMinimum")
             if minimum > 0 { try await Task.sleep(until: drawnSince.advanced(by: .seconds(minimum)), clock: .continuous) }
@@ -149,6 +165,10 @@ final class DemoMode {
         guard origin != nil, model == nil else { return }
         let wasLaunch = origin == .launch
         work?.cancel()
+        #if DEBUG
+        heldCompletion?.resume()
+        heldCompletion = nil
+        #endif
         preparationID = nil
         preparation = nil
         origin = nil

@@ -107,7 +107,7 @@ final class DuoLayoutUITests: XCTestCase {
             throw XCTSkip("Run on the open iPhone Duo with DUO_POSES=1 and a test server.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "-resetDemo", "-demoPrepareMinimum", "3"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "-resetDemo", "-holdDemoPreparation"]
         pose("landscape", file: poses)
         app.launch()
         app.pair(address: address, code: code)

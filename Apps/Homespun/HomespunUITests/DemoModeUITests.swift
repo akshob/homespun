@@ -237,7 +237,7 @@ final class DemoModeUITests: XCTestCase {
 
     @MainActor func testPreparingTheDemoKeepsItsPhotos() throws {
         app = XCUIApplication()
-        app.launchArguments = ["-hideTips", "-resetDemo", "-demoPrepareMinimum", "3"]
+        app.launchArguments = ["-hideTips", "-resetDemo", "-holdDemoPreparation"]
         app.launch()
         let demo = app.buttons["setup.demo"], preparing = app.descendants(matching: .any)["demo.prepare"]
         XCTAssertTrue(demo.waitForExistence(timeout: 20))

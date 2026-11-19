@@ -84,6 +84,9 @@ stops or restarts that test server; the matching `.ack` file confirms completion
 status-layout regression uses it at the newest end and mid-scroll, on iPhone and in the Duo poses.
 Its Debug-only `-probeServerStatus` launch argument checks the real server every five seconds without
 leaving the Library, so foregrounding or changing tabs cannot hide an inset jump.
+Demo cancellation checks use Debug-only `-holdDemoPreparation`: the first preparation stays on its
+loading page until cancelled, even if media finishes during an accessibility snapshot. A retry in
+the same process runs normally, so these checks still verify media reuse and successful entry.
 
 Test servers accept only HTTPS. Readiness probes derive an SPKI pin from that test server's
 `tls/certificate.pem` and use `curl -k --pinnedpubkey`; port-occupancy checks are tokenless HTTPS
