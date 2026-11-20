@@ -288,6 +288,55 @@ npx wrangler d1 execute homespun-telemetry --remote --command "SELECT * FROM usa
 
 ## Develop and test
 
+## Private reviewer demo
+
+The existing Worker also gates a **second, private R2 bucket**, `homespun-demo`. Sharing the Worker
+reuses its first-party TLS endpoint, D1 budget accounting and rate-limit infrastructure; demo routes
+never require or accept the public telemetry key as authorization.
+
+- `POST /v1/demo/session {"code":"…"}` checks the normalized code's SHA-256 against the
+  `DEMO_CODE_SHA256` secret with the runtime's constant-time comparison.
+  `DEMO_LIMITER` allows 10 attempts/minute/IP, failing closed. Five bad codes lock out that address
+  until the end of the current 15-minute window. D1 stores only an HMAC-keyed, window-specific counter,
+  never a raw IP, code or session token. Expired counters are removed by daily retention.
+- Success returns `{manifest, token, expiresAt}`. The manifest contains exactly 16 entries with
+  `file, sha256, size, kind, width, height, date, category`, with synthetic dates and no source paths.
+  The HMAC token is valid for at most 900 seconds and binds the manifest and current code hash.
+  Rotating either `DEMO_CODE_SHA256` or `DEMO_SIGNING_KEY` invalidates existing tokens.
+- `GET /v1/demo/files/:name` requires `Authorization: Bearer <token>` and streams only a named
+  manifest object. Responses are `private, no-store`; no public bucket or unsigned URL is used.
+  Bad codes, lockouts, missing/expired credentials and unauthorized objects return the same 403.
+- No request/invocation logs, code/token/body logging, analytics IDs or cookies. Only aggregate usage
+  and rate-limit counters persist. IP processing is only for serving and limiting these requests:
+  no additional App Privacy collection category is introduced (no retained identifiable download log).
+
+### Setup and upload (owner only)
+
+Follow the manual owner deployment process below; the telemetry Worker is **not deployed by Actions**.
+Create `homespun-demo` with `wrangler r2 bucket create homespun-demo`. Leave managed `r2.dev` access
+disabled and attach no custom domains. Never enable public access. Apply D1 migrations before deploy.
+Set `DEMO_CODE_SHA256` (lowercase hex SHA-256 of uppercase alphanumerics, removing hyphens/whitespace)
+and a separate strong random `DEMO_SIGNING_KEY` with `wrangler secret put`; never commit either or
+print the code. Give the plain code only to App Review through private review notes.
+
+Run `bash scripts/demo-upload.sh LOCAL_FOLDER` from this directory, with `wrangler` on PATH and owner
+credentials in the environment. The folder must contain `manifest.json` and the 16 processed photos.
+The script validates every size/hash before uploading, publishes the manifest last, and never enables
+public access. Use a private staging folder outside git and delete local media copies after upload.
+The media remain all rights reserved, usable only by Homespun's demo and App Store pages.
+
+### Budget
+
+The 64 MiB demo-set cap is reserved from the existing 8 GB R2 storage allowance by lowering
+`R2_MAX_BYTES` to 7,932,891,136. Uploads are owner-only (17 Class A operations per set, outside
+the Worker's upload accounting). Demo requests have their own atomic allowances in `usage`:
+200 session attempts/day, 1,000 R2 reads/day and 20,000/month, plus 1 GB streamed/day.
+A session costs one manifest read; a file request reserves two reads (manifest and object).
+They also charge the shared D1 write budget and stop at 90%, leaving telemetry reports headroom.
+Failed reservations may over-count, never under-count. No unbounded R2 list, write or public reads
+exist. Daily/monthly aggregate counters follow the existing retention. A flood can still consume
+the Workers Free request allowance, as documented below.
+
 Requires Node.js 22.12 or later (Wrangler 4, Vitest 5). Everything runs locally with Miniflare (D1, R2, rate limits and
 a simulated `send_email`); no Cloudflare account is needed.
 

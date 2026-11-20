@@ -12,6 +12,57 @@ final class DemoModeUITests: XCTestCase {
     private var app: XCUIApplication!
     @MainActor private var springboard: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.springboard") }
 
+    @MainActor func testReviewCodeDownloadsFromLocalStubAndRedownloadsAfterColdLaunch() async throws {
+        guard let endpoint = ProcessInfo.processInfo.environment["HOMESPUN_DEMO_MEDIA"],
+              let base = URL(string: endpoint), ["127.0.0.1", "localhost"].contains(base.host ?? "")
+        else { throw XCTSkip("Needs the loopback demo-media stub") }
+        func counts() async throws -> [String: Int] {
+            let url = base.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("stats")
+            let (data, _) = try await URLSession.shared.data(from: url)
+            return try JSONDecoder().decode([String: Int].self, from: data)
+        }
+        let before = try await counts()
+        app = XCUIApplication()
+        app.launchArguments = ["-hideTips", "-resetDemo", "-demoMediaBase", endpoint, "-demoPrepareMinimum", "5"]
+        app.launchWithFeatures()
+        let entry = app.buttons["demo.review"].firstMatch
+        XCTAssertTrue(entry.waitForExistence(timeout: 20))
+        entry.tap()
+        let field = app.secureTextFields["demo.review.code"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.tap()
+        field.typeText("TEST-TEST-TEST-TEST")
+        app.buttons["demo.review.save"].tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10))
+        app.buttons["setup.demo"].tap()
+        let phase = app.staticTexts["demo.prepare.phase"]
+        XCTAssertTrue(phase.waitForExistence(timeout: 10))
+        XCTAssertEqual(phase.value as? String, "downloading")
+        waitForPreparing()
+        XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30))
+        let first = try await counts()
+        XCTAssertEqual(first["sessions", default: 0] - before["sessions", default: 0], 1)
+        XCTAssertEqual(first["files", default: 0] - before["files", default: 0], 16)
+        pairWithDemo()
+        let estimate = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "demo's 21 sample")).firstMatch
+        XCTAssertTrue(estimate.waitForExistence(timeout: 30), "review set was not used")
+        nothingAsked("review download")
+
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        let backgrounded = try await counts()
+        XCTAssertEqual(backgrounded, first, "backgrounding downloaded again")
+        app.terminate()
+        app.launchArguments = ["-hideTips", "-demoMediaBase", endpoint, "-demoPrepareMinimum", "5"]
+        app.launchWithFeatures()
+        XCTAssertTrue(phase.waitForExistence(timeout: 10), "cold launch didn't prepare again")
+        waitForPreparing()
+        XCTAssertTrue(app.buttons["estimate.choose"].waitForExistence(timeout: 30), "cold launch lost the paired demo")
+        let second = try await counts()
+        XCTAssertEqual(second["sessions", default: 0] - first["sessions", default: 0], 1)
+        XCTAssertEqual(second["files", default: 0] - first["files", default: 0], 16)
+    }
+
     @MainActor func testDemoFromWelcomeToLeaving() throws {
         app = XCUIApplication()
         app.launchArguments += ["-hideTips", "-resetDemo"]

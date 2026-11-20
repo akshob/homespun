@@ -19,12 +19,14 @@ SIM=$(new_simulator $TYPE "HS CI $NAME $PORT") || exit 1
 DATA=$CI_STATE/servers/$NAME-$PORT; rm -rf $DATA; mkdir -p $DATA/originals
 PIDFILE=$DATA/server.pid
 MOVEPORT=$(( PORT + 1000 ))
-SERVER="" STUB="" WATCH=""
+SERVER="" STUB="" WATCH="" MEDIA_STUB=""
 cleanup() {
     stamp cleanup.start
     [[ -n $WATCH ]] && kill $WATCH 2>/dev/null
     [[ -n $SERVER ]] && kill $SERVER 2>/dev/null
     [[ -n $STUB ]] && kill $STUB 2>/dev/null
+    [[ -n $MEDIA_STUB ]] && kill $MEDIA_STUB 2>/dev/null
+    [[ -n $MEDIA_STUB ]] && wait $MEDIA_STUB 2>/dev/null
     if [[ -f $PIDFILE ]]; then
         current=$(cat $PIDFILE 2>/dev/null)
         if [[ -n $current ]]; then
@@ -150,6 +152,20 @@ if [[ -n ${STUB_PORT:-} ]]; then
     python3 ${0:A:h}/telemetry-stub.py $STUB_PORT $STUBLOG & STUB=$!; sleep 1
     export TEST_RUNNER_TELEMETRY_STUB=http://127.0.0.1:$STUB_PORT
     stamp telemetry.start.end
+fi
+if [[ -n ${MEDIA_PORT:-} ]]; then
+    stamp demo-media.start.start
+    timed demo-media.port wait_port_free $MEDIA_PORT || exit 1
+    python3 ${0:A:h}/demo-media-stub.py $MEDIA_PORT & MEDIA_STUB=$!
+    media_ready=0
+    for attempt in {1..50}; do
+        if curl -fsS http://127.0.0.1:$MEDIA_PORT/health >/dev/null; then media_ready=1; break; fi
+        kill -0 $MEDIA_STUB 2>/dev/null || break
+        sleep 0.1
+    done
+    (( media_ready )) || { echo "demo media stub did not start"; exit 1; }
+    export TEST_RUNNER_HOMESPUN_DEMO_MEDIA=http://127.0.0.1:$MEDIA_PORT/v1/demo/
+    stamp demo-media.start.end
 fi
 if [[ -n ${DUO_POSES:-} ]]; then
     POSEFILE=$DATA/pose-request; SHOTS=$RESULTS/$NAME-shots; rm -rf $SHOTS; mkdir -p $SHOTS

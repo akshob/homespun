@@ -19,7 +19,9 @@ struct DemoPreparingView: View {
         NavigationStack {
             SetupScaffold(symbol: "paintbrush.pointed", title: failure?.title ?? "Preparing the Demo",
                           subtitle: failure == nil
-                              ? "Homespun is drawing the demo's sample photos on this iPhone. This takes a few seconds." : nil,
+                              ? (progress?.phase == .downloading || progress?.phase == .assembling
+                                 ? "Homespun is downloading the review photos from its own server and getting them ready."
+                                 : "Homespun is drawing the demo's sample photos on this iPhone. This takes a few seconds.") : nil,
                           centered: true) {
                 if let failure {
                     InlineNotice(tone: .error, title: failure.title, message: failure.message)
@@ -31,9 +33,18 @@ struct DemoPreparingView: View {
                             .accessibilityLabel("Preparing the demo")
                             .accessibilityValue("\(Int(((progress?.fraction ?? 0) * 100).rounded())) percent")
                             .accessibilityIdentifier("demo.prepare.progress")
-                        Text(progress.map { "\($0.done) of \($0.total) photos" } ?? "Getting ready…")
+                        Text(detail)
                             .font(.footnote).foregroundStyle(Theme.secondaryLabel).monospacedDigit()
-                            .accessibilityHidden(true)
+                            .accessibilityIdentifier("demo.prepare.detail")
+                        Text(progress?.phase.rawValue ?? "drawing")
+                            .font(.caption2).foregroundStyle(Theme.secondaryLabel)
+                            .accessibilityLabel("Preparation phase")
+                            .accessibilityValue(progress?.phase.rawValue ?? "drawing")
+                            .accessibilityIdentifier("demo.prepare.phase")
+                        if let fallback = progress?.fallback {
+                            InlineNotice(tone: .info, title: "Using drawn photos", message: fallback)
+                                .accessibilityIdentifier("demo.prepare.fallback")
+                        }
                     }
                     .frame(maxWidth: 360)
                 }
@@ -51,5 +62,15 @@ struct DemoPreparingView: View {
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityIdentifier("demo.prepare")
+    }
+
+    private var detail: String {
+        guard let progress else { return "Getting ready…" }
+        if progress.phase == .downloading {
+            return "\(ByteCountFormatter.string(fromByteCount: Int64(progress.done), countStyle: .file)) of "
+                + ByteCountFormatter.string(fromByteCount: Int64(progress.total), countStyle: .file)
+        }
+        if progress.phase == .assembling { return "Getting the photos ready…" }
+        return "\(progress.done) of \(progress.total) photos"
     }
 }

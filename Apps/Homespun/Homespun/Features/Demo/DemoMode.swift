@@ -52,7 +52,10 @@ final class DemoMode {
         }
         #if DEBUG
         // UI tests start without a demo left by an earlier test.
-        if ProcessInfo.processInfo.arguments.contains("-resetDemo") { Self.wipe() }
+        if ProcessInfo.processInfo.arguments.contains("-resetDemo") {
+            Self.wipe()
+            try? DemoReviewCodeStore().remove()
+        }
         #endif
         // On when the app last closed: it carries on where it was. (Without its marker, the folder is
         // what a demo left was still writing as it ended.)
@@ -149,7 +152,7 @@ final class DemoMode {
         preparationID = nil
         endBackgroundTask()
         Announce.say(restarted
-                     ? "The demo started again because its sample photos were drawn again. The demo is ready. Nothing on this iPhone is changed."
+                     ? "The demo started again because its sample photos were prepared again. The demo is ready. Nothing on this iPhone is changed."
                      : "The demo is ready. Nothing on this iPhone is changed.")
     }
 
@@ -158,7 +161,7 @@ final class DemoMode {
         guard let old = try? decoder.decode(DemoMediaManifest.self, from: Data(contentsOf: state.appendingPathComponent("media.json"))),
               let new = try? decoder.decode(DemoMediaManifest.self, from: Data(contentsOf: media.appendingPathComponent("manifest.json")))
         else { return false }
-        return old.files == new.files
+        return old.files.filter { !$0.key.hasPrefix("thumbs/") } == new.files.filter { !$0.key.hasPrefix("thumbs/") }
     }
 
     func cancel() {
