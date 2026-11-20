@@ -76,6 +76,15 @@ struct ItemDetailsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.appClock) private var clock
 
+    init(model: AppModel, cell: LibraryState.Cell, job: CompactJob.State? = nil,
+         close: (() -> Void)? = nil, details: ItemDetails? = nil) {
+        self.model = model
+        self.cell = cell
+        self.job = job
+        self.close = close
+        _details = State(initialValue: details)
+    }
+
     private func done() {
         if let close { close() } else { dismiss() }
     }
@@ -113,7 +122,7 @@ struct ItemDetailsSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .task { details = await ItemDetails.load(model: model, cell: cell) }
+        .task { if details == nil { details = await ItemDetails.load(model: model, cell: cell) } }
     }
 
     // MARK: Where it is, and sizes

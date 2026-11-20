@@ -21,8 +21,8 @@ enum SnapshotHost {
         if let defaults { root = AnyView(root.defaultAppStorage(defaults)) }
         let controller = UIHostingController(rootView: root)
         controller.view.backgroundColor = .clear
-        return try await capture(controller, device: device,
-                                 appearance: variant.userInterfaceStyle, category: variant.category, inspect: inspect)
+        return try await capture(controller, device: device, appearance: variant.userInterfaceStyle,
+                                 category: variant.category, inspect: inspect)
     }
 
     static func capture(_ controller: UIViewController, device: SnapshotDevice, appearance: UIUserInterfaceStyle = .light,

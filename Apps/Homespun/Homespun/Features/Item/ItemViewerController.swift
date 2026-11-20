@@ -111,6 +111,8 @@ struct ItemViewerScreen: View {
     let model: AppModel
     let state: ItemViewerState
     let showsTips: Bool
+    var mediaPresentation = MediaPresentation.interactive
+    var clock = AppClock.live
     @State private var freeUp: FreeUpRequest?
     @Environment(\.horizontalSizeClass) private var sizeClass
 
@@ -128,6 +130,10 @@ struct ItemViewerScreen: View {
         }
         .modifier(FreeUpPresentation(model: model, request: $freeUp))
         .environment(\.showsTips, showsTips)
+        .environment(\.mediaPresentation, mediaPresentation)
+        .environment(\.appClock, clock)
+        .environment(\.locale, clock.locale).environment(\.calendar, clock.calendar).environment(\.timeZone, clock.timeZone)
+        .transaction { if mediaPresentation == .poster { $0.disablesAnimations = true; $0.animation = nil } }
         .defaultAppStorage(model.settings.defaults)
         .tint(Theme.accent)
         // The performance report must remain reachable while the app behind is covered.

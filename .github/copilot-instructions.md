@@ -148,6 +148,8 @@ and may not exist in other checkouts.
   with pinned CI `snapshots=record` (or `record-missing`), review and commit the synthetic 2x
   PNGs plus environment pin; never re-record to hide an unexplained difference. See
   `ci/README.md` for the workflow, environment guard, diff artifacts and three-minute budget.
+  Supply preloaded models for async presentation content (Compare and Details). Snapshot
+  app-owned Details panes; keep native inspector adaptation and transitions in XCUI.
 - A new UI test class goes into a run in `ci/lane.sh` (with a free port); a new run also goes into
   `FULL` in `ci/plan.py` (after merge) and the nightly list in `.github/workflows/nightly.yml`; only
   short, critical-path tests belong in `quick`/`quick-duo`. New test media goes into `ci/`.

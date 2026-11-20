@@ -166,12 +166,20 @@ from the protocol stub into the world's own folder, never a fresh live session. 
 
 The renderer attaches a window to the hosted app's foreground scene, applies measured
 `__Snapshots__/TRAITS.json` traits/insets at layout scale 3, and waits for identical pixels and
-settled geometry (at most two seconds). References are opaque sRGB PNGs rasterised at 2x.
+settled geometry. App-content readiness has a five-second bound; frame settling has a
+two-second bound once content is ready.
+Consecutive frames must be byte-identical or have no pixel above the ΔE 2.3 JND; this
+excludes sub-JND compositor dithering, not changing app content. References are opaque
+sRGB PNGs rasterised at 2x.
 Hierarchy drawing includes hosted SwiftUI navigation/scroll content that `layer.render` can
 omit; UIKit activity indicators are frozen at a fixed animation time before comparison.
 Grid edges/columns, Details placement and Compare placement also have numeric assertions.
 The fixed clock is 2026-06-15 10:00 UTC, with `en_US`, Gregorian and UTC formatting.
 System glass, keyboards and sheet detents are deliberately outside snapshot coverage.
+Details references draw the real viewer and `ItemDetailsPanel` content in a 400-point column
+on regular layouts, or the real panel alone on compact layouts. The host phone's system
+inspector adaptation is not a virtual Duo: actual inspector presentation/resize transitions
+remain in XCUI. Numeric checks measure the rendered app-content pane frames.
 
 The perceptual diff rejects a size change, more than 0.05% of pixels with ΔE > 2.3, or any
 pixel with ΔE > 15. A complete suite has a 180-second budget including fixture setup,

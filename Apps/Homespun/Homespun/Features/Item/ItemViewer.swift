@@ -258,10 +258,12 @@ struct ItemDetailsPanel: View {
     let model: AppModel
     let id: String
     var close: () -> Void
+    var details: ItemDetails?
 
     var body: some View {
         if let cell = ItemViewer.cell(id, model: model) {
-            ItemDetailsSheet(model: model, cell: cell, job: ItemViewer.jobState(cell, model: model), close: close)
+            ItemDetailsSheet(model: model, cell: cell, job: ItemViewer.jobState(cell, model: model), close: close,
+                             details: details)
         }
     }
 }

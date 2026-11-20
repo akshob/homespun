@@ -76,7 +76,7 @@ enum SnapshotCanvas {
                 }
                 for child in view.subviews { pauseIndicators(child) }
             }
-            pauseIndicators(container.view)
+            pauseIndicators(window)
             let format = UIGraphicsImageRendererFormat()
             format.scale = 2
             format.preferredRange = .standard
@@ -94,15 +94,34 @@ enum SnapshotCanvas {
         window.makeKeyAndVisible()
         let initial = try render()
         var bytes = initial.dataProvider?.data
-        let deadline = ProcessInfo.processInfo.systemUptime + 2
+        let preparationDeadline = ProcessInfo.processInfo.systemUptime + 5
+        var readyAt: Double?
         var layoutFailure: Error?
         var frames = 1
-        while ProcessInfo.processInfo.systemUptime < deadline {
+        var oldImage = initial, lastImage = initial
+        while ProcessInfo.processInfo.systemUptime < (readyAt.map { $0 + 2 } ?? preparationDeadline) {
             try await Task.sleep(for: .milliseconds(50))
             let next = try render()
             frames += 1
+            oldImage = lastImage; lastImage = next
             let nextBytes = next.dataProvider?.data
-            if let bytes, let nextBytes, CFEqual(bytes, nextBytes) {
+            var ready = true
+            do {
+                try inspect?(controller)
+                layoutFailure = nil
+                if readyAt == nil { readyAt = ProcessInfo.processInfo.systemUptime }
+            } catch {
+                layoutFailure = error
+                ready = false
+            }
+            let identical = bytes != nil && nextBytes != nil && CFEqual(bytes, nextBytes)
+            var stable = identical
+            if !stable, ready {
+                // Hierarchy snapshots may differ only by sub-JND compositor dithering.
+                stable = try SnapshotDiff.compare(next, to: oldImage,
+                    tolerance: .init(deltaE: 2.3, fraction: 0, maximum: 2.3)).passed
+            }
+            if ready, stable {
                 let actual = controller.view.safeAreaInsets
                 do {
                     guard abs(actual.top - device.safeArea.top) < 0.01,
@@ -111,7 +130,6 @@ enum SnapshotCanvas {
                           abs(actual.right - device.safeArea.right) < 0.01 else {
                         throw SnapshotFailure("Snapshot safe areas differ: wanted \(device.safeArea), got \(actual)")
                     }
-                    try inspect?(controller)
                     return next
                 } catch {
                     layoutFailure = error
