@@ -18,6 +18,14 @@ struct ServerClient: Sendable {
         var url: URL
         var session: URLSession
         var delegate: ServerTrustDelegate?
+        let lifetime: ServerSessionLifetime
+
+        init(url: URL, session: URLSession, delegate: ServerTrustDelegate?) {
+            self.url = url
+            self.session = session
+            self.delegate = delegate
+            lifetime = delegate?.lifetime ?? ServerSessionLifetime()
+        }
     }
     private let connection: OSAllocatedUnfairLock<ConnectionState>
     var baseURL: URL { connection.withLock { $0.url } }
@@ -50,6 +58,12 @@ struct ServerClient: Sendable {
     struct IdentityMismatch: LocalizedError {
         var observed: ServerKeyFingerprint?
         var errorDescription: String? { "This server answered with a different security key." }
+    }
+
+    func retireSession() {
+        guard trust != .demo else { return }
+        let current = connection.withLock { $0 }
+        current.lifetime.retire(session: current.session)
     }
 
     private func request(_ path: String, method: String = "GET") throws -> URLRequest {
@@ -91,22 +105,25 @@ struct ServerClient: Sendable {
         request.setValue(nil, forHTTPHeaderField: "Authorization")
         let started = Date()
         do {
-            if case .pinned(let pins) = trust, token != nil || authorization != nil {
-                guard let delegate = current.delegate else { throw ServerPairing.IdentityFailure() }
-                let timeout = timeout
-                try await delegate.pinGate.verify {
-                    var probe = URLRequest(url: current.url.appendingPathComponent("api/v1/health"))
-                    probe.timeoutInterval = timeout
-                    _ = try await current.session.data(for: probe)
-                    guard let observed = delegate.observed, pins.contains(observed) else {
-                        ServerSessions.shared.reset(current.url)
-                        current.session.invalidateAndCancel()
-                        throw URLError(.secureConnectionFailed)
+            return try await current.lifetime.withOperation(session: current.session) {
+                if case .pinned(let pins) = trust, token != nil || authorization != nil {
+                    guard let delegate = current.delegate else { throw ServerPairing.IdentityFailure() }
+                    let timeout = timeout
+                    try await delegate.pinGate.verify {
+                        var probe = URLRequest(url: current.url.appendingPathComponent("api/v1/health"))
+                        probe.timeoutInterval = timeout
+                        _ = try await current.session.data(for: probe)
+                        guard let observed = delegate.observed, pins.contains(observed) else {
+                            ServerSessions.shared.reset(current.url)
+                            current.lifetime.retire(session: current.session)
+                            throw URLError(.secureConnectionFailed)
+                        }
                     }
                 }
+                try current.lifetime.checkUsable()
+                request.setValue(token.map { "Bearer \($0)" } ?? authorization, forHTTPHeaderField: "Authorization")
+                return try await operation(current.session, request)
             }
-            request.setValue(token.map { "Bearer \($0)" } ?? authorization, forHTTPHeaderField: "Authorization")
-            return try await operation(current.session, request)
         } catch {
             let mismatch = current.delegate?.mismatch(since: started) == true
             if mismatch { ServerSessions.shared.markSuspect(current.url) }

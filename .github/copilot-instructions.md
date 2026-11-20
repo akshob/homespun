@@ -112,6 +112,9 @@ and may not exist in other checkouts.
   trust for an HTTPS name with a public certificate. Never send a token or pairing code before
   authenticating the server's key (link fingerprint, SAS, code proof, or token proof). No plaintext
   fallback; never weaken pin checks. The server's private key stays in its data folder.
+- Retire server sessions through their shared lifetime, never by directly invalidating a session
+  that a client may still use. Cache reset rejects new requests, while admitted pin probes and
+  requests keep the session alive until they exit; URLSession traps on post-invalidation task creation.
 - An original's SHA-256 is its identity.
 - The app may ask iOS to delete an original only if the server's stored copy
   matches its size and SHA-256 and the compact copy was imported and verified

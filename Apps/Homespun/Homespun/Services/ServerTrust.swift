@@ -54,6 +54,51 @@ actor SessionPinGate {
     }
 }
 
+final class ServerSessionLifetime: Sendable {
+    private struct State {
+        var active = 0
+        var retired = false
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+    private let invalidate: @Sendable (URLSession) -> Void
+
+    init(invalidate: @escaping @Sendable (URLSession) -> Void = { $0.invalidateAndCancel() }) {
+        self.invalidate = invalidate
+    }
+
+    func withOperation<Value>(session: URLSession, _ operation: () async throws -> Value) async throws -> Value {
+        try state.withLock { state in
+            guard !state.retired else { throw URLError(.cancelled) }
+            state.active += 1
+        }
+        defer {
+            let finished = state.withLock { state in
+                state.active -= 1
+                return state.retired && state.active == 0
+            }
+            if finished { invalidate(session) }
+        }
+        return try await operation()
+    }
+
+    func checkUsable() throws {
+        try state.withLock { state in
+            guard !state.retired else { throw URLError(.cancelled) }
+        }
+    }
+
+    func retire(session: URLSession) {
+        let finished = state.withLock { state in
+            guard !state.retired else { return false }
+            state.retired = true
+            return state.active == 0
+        }
+        // URLSession traps when a task is created after invalidation. An admitted operation may
+        // still be resuming from its pin probe, so invalidate only after all such operations exit.
+        if finished { invalidate(session) }
+    }
+}
+
 final class ServerTrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate, Sendable {
     struct State: Sendable {
         var observed: ServerKeyFingerprint?
@@ -66,6 +111,7 @@ final class ServerTrustDelegate: NSObject, URLSessionDelegate, URLSessionTaskDel
     }
     let policy: ServerTrust
     let pinGate = SessionPinGate()
+    let lifetime = ServerSessionLifetime()
     private let state = OSAllocatedUnfairLock(initialState: State())
     var observed: ServerKeyFingerprint? { state.withLock { $0.observed } }
     var systemTrusted: Bool { state.withLock { $0.systemTrusted } }
@@ -180,7 +226,9 @@ final class ServerSessions: Sendable {
     func reset(_ url: URL? = nil) {
         state.withLock { state in
             for key in Array(state.sessions.keys) where url == nil || key.url == url {
-                state.sessions.removeValue(forKey: key)?.0.invalidateAndCancel()
+                if let pair = state.sessions.removeValue(forKey: key) {
+                    pair.1.lifetime.retire(session: pair.0)
+                }
             }
         }
     }

@@ -51,7 +51,7 @@ enum ServerLocation {
     static func probe(_ url: URL, pins: Set<ServerKeyFingerprint>) async throws -> ServerKeyFingerprint? {
         for _ in 0..<2 {
             let (session, delegate) = ServerSessions.shared.freshSession(trust: .pinned(pins))
-            defer { session.invalidateAndCancel() }
+            defer { delegate.lifetime.retire(session: session) }
             var client = ServerClient(baseURL: url, trust: .pinned(pins), session: session, delegate: delegate)
             client.timeout = 4
             // This client has no token. A fresh, matching TLS observation is required before credentials move.
