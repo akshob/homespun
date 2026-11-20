@@ -19,8 +19,11 @@ enum SnapshotHost {
             .environment(\.verticalSizeClass, device.vertical == .regular ? .regular : .compact)
             .transaction { $0.disablesAnimations = true; $0.animation = nil })
         if let defaults { root = AnyView(root.defaultAppStorage(defaults)) }
-        let controller = UIHostingController(rootView: root)
-        controller.view.backgroundColor = .clear
+        let controller = autoreleasepool {
+            let controller = UIHostingController(rootView: root)
+            controller.view.backgroundColor = .clear
+            return controller
+        }
         return try await capture(controller, device: device, appearance: variant.userInterfaceStyle,
                                  category: variant.category, inspect: inspect)
     }

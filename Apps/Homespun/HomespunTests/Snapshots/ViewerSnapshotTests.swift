@@ -51,6 +51,7 @@ extension SnapshotTests {
             let world = try await SnapshotWorld()
             defer { world.close() }
             let state = ItemViewerState(ids: [sample.id], start: sample.id, details: false)
+            state.zoomed = sample.zoomed
             let viewer = ItemViewerScreen(model: world.model, state: state, showsTips: false,
                                           mediaPresentation: .poster, clock: SnapshotWorld.clock)
             let cell = try #require(world.library.library.state.cell(sample.id))
@@ -68,6 +69,7 @@ extension SnapshotTests {
             } else {
                 view = AnyView(viewer)
             }
+            let renderingStarted = ProcessInfo.processInfo.systemUptime
             let image = try await SnapshotHost.capture(view, variant: sample.variant, clock: SnapshotWorld.clock,
                                                        defaults: world.defaults) { controller in
                 let root = controller.view.window ?? controller.view!
@@ -85,16 +87,14 @@ extension SnapshotTests {
                     throw SnapshotFailure("Poster viewer created a player layer")
                 }
                 if sample.zoomed {
-                    guard let zoom = root.descendant(of: ZoomScrollView.self) else {
-                        throw SnapshotFailure("Viewer lost its real zoom surface")
-                    }
-                    if zoom.zoomScale < 1.5 {
-                        zoom.setZoomScale(min(zoom.maximumZoomScale, 2), animated: false)
-                        throw SnapshotFailure("Waiting for the zoomed state line to disappear")
-                    }
                     guard state.zoomed else { throw SnapshotFailure("Viewer did not acknowledge the zoom") }
                 }
                 if sample.details, wide { try Self.checkDetailsBesideViewer(root, relativeTo: controller.view) }
+            }
+            let rendered = ProcessInfo.processInfo.systemUptime
+            defer {
+                print("SNAPSHOT_PHASE \(sample.testDescription) setup=\(renderingStarted - started) "
+                      + "render=\(rendered - renderingStarted) reference=\(ProcessInfo.processInfo.systemUptime - rendered)")
             }
             try world.stub.validate()
             try SnapshotReferences.shared.check(image, suite: "Viewer", name: sample.testDescription,

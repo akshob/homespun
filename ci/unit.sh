@@ -18,6 +18,7 @@ TEST_RUNNER_HOMESPUN_SNAPSHOT_CI=${GITHUB_ACTIONS:-false} \
 TEST_RUNNER_HOMESPUN_SNAPSHOT_HOST=iPhone-18-Pro \
 TEST_RUNNER_HOMESPUN_XCODE_BUILD=$(xcodebuild -version | awk '/Build version/ {print $3}') \
 TEST_RUNNER_HOMESPUN_SNAPSHOTS=${HOMESPUN_SNAPSHOTS:-verify} \
+TEST_RUNNER_HOMESPUN_SNAPSHOT_DIAG=${HOMESPUN_SNAPSHOT_DIAG:-1} \
 test_without_building $RESULTS/unit.xcresult -only-testing:HomespunTests -only-testing:HomespunWidgetTests \
   -skip-testing:HomespunTests/PerformanceTests 2>&1 \
   | tee $RESULTS/unit.log | filter

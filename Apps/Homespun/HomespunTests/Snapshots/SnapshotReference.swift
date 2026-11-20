@@ -96,6 +96,11 @@ final class SnapshotReferences {
 
     func check(_ input: CGImage, suite: String, name: String, elapsed: Double,
                tolerance: SnapshotDiff.Tolerance = .init()) throws {
+        try autoreleasepool { try checkImage(input, suite: suite, name: name, elapsed: elapsed, tolerance: tolerance) }
+    }
+
+    private func checkImage(_ input: CGImage, suite: String, name: String, elapsed: Double,
+                            tolerance: SnapshotDiff.Tolerance) throws {
         let started = ProcessInfo.processInfo.systemUptime
         try prepare()
         guard !suite.isEmpty, !name.isEmpty, !suite.contains("/"), !name.contains("/"),

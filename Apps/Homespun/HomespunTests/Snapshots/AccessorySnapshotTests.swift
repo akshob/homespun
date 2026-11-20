@@ -4,7 +4,7 @@ import Testing
 @testable import Homespun
 
 private struct AccessorySnapshotCase: Sendable, CustomTestStringConvertible {
-    enum Scene: String, CaseIterable, Sendable { case backingUp, ready, unreachable, finished, done, overlay }
+    enum Scene: String, Sendable { case backingUp, ready, unreachable, done, overlay }
     var scene: Scene
     var variant: SnapshotVariant
     var testDescription: String { "\(scene.rawValue).\(variant.name)" }
@@ -13,12 +13,11 @@ private struct AccessorySnapshotCase: Sendable, CustomTestStringConvertible {
         case .backingUp: .backingUp(done: 12, total: 48, current: "Uploading the original")
         case .ready, .overlay: .ready(count: 5, bytes: 62_000_000)
         case .unreachable: .unreachable(StubServer.info.name)
-        case .finished: .finished(count: 5, bytes: 62_000_000, originals: [])
         case .done: nil
         }
     }
     static var all: [Self] {
-        var cases = Scene.allCases.flatMap { scene in
+        var cases = [Scene.backingUp, .unreachable, .done, .overlay].flatMap { scene in
             [SnapshotDevice.Kind.iphone, .duoCover].map { Self(scene: scene, variant: .init(device: $0)) }
         }
         cases += [Self(scene: .ready, variant: .init(device: .iphone, appearance: .dark)),

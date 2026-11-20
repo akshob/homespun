@@ -67,8 +67,10 @@ enum SnapshotCanvas {
         }
 
         func render() throws -> CGImage {
+            try autoreleasepool {
+            let started = ProcessInfo.processInfo.systemUptime
             layout()
-            func pauseIndicators(_ view: UIView) {
+            @MainActor func pauseIndicators(_ view: UIView) {
                 if view is UIActivityIndicatorView {
                     // This runs a layer animation even when UIView animations are disabled.
                     view.layer.speed = 0
@@ -87,7 +89,12 @@ enum SnapshotCanvas {
             }
             guard drawn else { throw SnapshotFailure("Snapshot hierarchy did not finish drawing") }
             guard let cgImage = image.cgImage else { throw SnapshotFailure("Snapshot produced no bitmap") }
-            return try SnapshotImage.sRGB(cgImage)
+            let normalized = try SnapshotImage.sRGB(cgImage)
+            if ProcessInfo.processInfo.environment["HOMESPUN_SNAPSHOT_DIAG"] == "1" {
+                print("SNAPSHOT_DRAW_SECONDS \(ProcessInfo.processInfo.systemUptime - started)")
+            }
+            return normalized
+            }
         }
 
         layout()
@@ -117,9 +124,13 @@ enum SnapshotCanvas {
             let identical = bytes != nil && nextBytes != nil && CFEqual(bytes, nextBytes)
             var stable = identical
             if !stable, ready {
+                let compared = ProcessInfo.processInfo.systemUptime
                 // Hierarchy snapshots may differ only by sub-JND compositor dithering.
                 stable = try SnapshotDiff.compare(next, to: oldImage,
                     tolerance: .init(deltaE: 2.3, fraction: 0, maximum: 2.3)).passed
+                if ProcessInfo.processInfo.environment["HOMESPUN_SNAPSHOT_DIAG"] == "1" {
+                    print("SNAPSHOT_STABILITY_SECONDS \(ProcessInfo.processInfo.systemUptime - compared)")
+                }
             }
             if ready, stable {
                 let actual = controller.view.safeAreaInsets

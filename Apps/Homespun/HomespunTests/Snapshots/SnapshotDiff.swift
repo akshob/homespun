@@ -81,6 +81,10 @@ enum SnapshotDiff {
     ])
 
     static func compare(_ actual: CGImage, to reference: CGImage, tolerance: Tolerance = Tolerance()) throws -> Result {
+        try autoreleasepool { try comparePixels(actual, to: reference, tolerance: tolerance) }
+    }
+
+    private static func comparePixels(_ actual: CGImage, to reference: CGImage, tolerance: Tolerance) throws -> Result {
         guard actual.width == reference.width, actual.height == reference.height else {
             return Result(sizeMatches: false, changedFraction: nil, maximumDeltaE: nil, passed: false,
                           difference: try SnapshotImage.solid(width: actual.width, height: actual.height,
