@@ -45,6 +45,9 @@ final class DemoModeUITests: XCTestCase {
         let estimate = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "demo's 21 sample")).firstMatch
         XCTAssertTrue(estimate.waitForExistence(timeout: 30), "review set was not used")
         nothingAsked("review download")
+        app.buttons["estimate.notNow"].tap()
+        app.openTab("Library")
+        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 20), "review samples did not reach the Library")
 
         XCUIDevice.shared.press(.home)
         app.activate()
@@ -54,10 +57,24 @@ final class DemoModeUITests: XCTestCase {
         app.launchArguments = ["-hideTips", "-demoMediaBase", endpoint, "-demoPrepareMinimum", "5"]
         app.launch()
         waitForPreparing()
-        XCTAssertTrue(app.buttons["estimate.choose"].waitForExistence(timeout: 30), "cold launch lost the paired demo")
+        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 30), "cold launch lost the completed setup")
         let second = try await counts()
         XCTAssertEqual(second["sessions", default: 0] - first["sessions", default: 0], 1)
         XCTAssertEqual(second["files", default: 0] - first["files", default: 0], 16)
+
+        app.openTab("Server")
+        let leaveButton = app.buttons["demo.leave"].firstMatch
+        XCTAssertTrue(app.reveal(leaveButton))
+        leave(leaveButton)
+        let again = app.buttons["setup.demo"]
+        XCTAssertTrue(again.waitForExistence(timeout: 20))
+        XCTAssertTrue(again.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        again.tap()
+        waitForPreparing()
+        XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30))
+        let third = try await counts()
+        XCTAssertEqual(third["sessions", default: 0] - second["sessions", default: 0], 1)
+        XCTAssertEqual(third["files", default: 0] - second["files", default: 0], 16)
     }
 
     @MainActor func testDemoFromWelcomeToLeaving() throws {
