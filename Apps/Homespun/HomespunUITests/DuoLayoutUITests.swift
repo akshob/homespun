@@ -107,7 +107,7 @@ final class DuoLayoutUITests: XCTestCase {
             throw XCTSkip("Run on the open iPhone Duo with DUO_POSES=1 and a test server.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "-resetDemo", "-demoPrepareMinimum", "3"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "-resetDemo", "-holdDemoPreparation"]
         pose("landscape", file: poses)
         app.launch()
         app.pair(address: address, code: code)
@@ -129,6 +129,24 @@ final class DuoLayoutUITests: XCTestCase {
         app.buttons["demo.prepare.cancel"].tap()
         XCTAssertTrue(preparing.waitForNonExistence(timeout: 10))
         XCTAssertTrue(demo.exists, "Cancel lost Help and About's navigation")
+    }
+
+    @MainActor func testStatusDoesNotCoverTheTabsAfterChangingColumns() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let poses = environment["DUO_POSE_FILE"], let address = environment["HOMESPUN_SERVER"],
+              let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Run on the open iPhone Duo with DUO_POSES=1 and a test server.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        pose("landscape", file: poses)
+        app.launch()
+        app.pair(address: address, code: code)
+        if app.gridItems("Ready to free up").count < 2 { _ = app.compactOldestOnScreen(2) }
+        checkActivity(app, pose: "landscape")
+        app.openTab("Server")
+        XCTAssertTrue(app.descendants(matching: .any)["check.server"].waitForExistence(timeout: 15),
+                      "the status intercepted the Server tab")
     }
 
     @MainActor func testVideosCompareSideBySide() throws {
@@ -305,6 +323,15 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(app.openItem(), "\(pose): no viewer before an app link")
         app.open(URL(string: "homespun://activity")!)
         XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "\(pose): an app link left the viewer over the app")
+        let deadline = Date().addingTimeInterval(5)
+        var arrived = false
+        repeat {
+            let activity = app.tab("Activity")
+            arrived = activity.exists && activity.isSelected
+            if arrived { break }
+            usleep(200_000)
+        } while Date() < deadline
+        XCTAssertTrue(arrived, "\(pose): the app link didn't finish opening Activity")
         app.openTab("Library")
     }
 
@@ -355,6 +382,16 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 15), "\(pose): Activity doesn't show the newest run")
         sleep(1)
         attach(app, "\(pose), Activity")
+        let status = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier IN %@", ["remove.originals", "offer.free", "accessory.unreachable",
+                                         "job.progress", "accessory.new", "remove.progress", "accessory.almostFull"]
+        )).firstMatch
+        let server = app.tab("Server")
+        XCTAssertTrue(status.waitForExistence(timeout: 10), "\(pose): no floating status after backing up")
+        if status.exists, server.exists, server.frame.midX > app.windows.firstMatch.frame.width * 0.8 {
+            XCTAssertLessThanOrEqual(status.frame.maxX, server.frame.minX,
+                                     "\(pose): the floating status covers the Server tab")
+        }
         guard pose == "landscape" else {
             // Held tall the run is across the width, the list behind the sidebar button (like Settings).
             XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == 'Show Sidebar'")).firstMatch.exists,
