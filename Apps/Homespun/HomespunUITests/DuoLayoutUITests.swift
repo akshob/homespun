@@ -25,6 +25,7 @@ final class DuoLayoutUITests: XCTestCase {
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         pose("landscape", file: poses)
         app.launch()
+        checkLibrarySpan(app, pose: "launched open, landscape")
         app.pair(address: address, code: code)
         app.openTab("Library")
         if app.gridItems("Ready to free up").count < 2 { _ = app.compactOldestOnScreen(2) }
@@ -67,6 +68,11 @@ final class DuoLayoutUITests: XCTestCase {
         attach(app, "folded, another item")
         app.closeItem()
         checkGrid(app, columns: 4, pose: "folded")
+        let accessory = app.descendants(matching: .any)["remove.originals"].firstMatch
+        let serverTab = app.tab("Server")
+        if accessory.exists, serverTab.exists, serverTab.frame.midX > app.windows.firstMatch.frame.width * 0.8 {
+            XCTAssertLessThanOrEqual(accessory.frame.maxX, serverTab.frame.minX, "the floating status covers the folded tabs")
+        }
         // Folding goes back to the list, and its pages open with Back.
         app.openTab("Server")
         let check = app.buttons["settings.check"]
@@ -101,7 +107,7 @@ final class DuoLayoutUITests: XCTestCase {
             throw XCTSkip("Run on the open iPhone Duo with DUO_POSES=1 and a test server.")
         }
         let app = XCUIApplication()
-        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "-resetDemo", "-demoPrepareMinimum", "3"]
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "-resetDemo", "-holdDemoPreparation"]
         pose("landscape", file: poses)
         app.launch()
         app.pair(address: address, code: code)
@@ -123,6 +129,24 @@ final class DuoLayoutUITests: XCTestCase {
         app.buttons["demo.prepare.cancel"].tap()
         XCTAssertTrue(preparing.waitForNonExistence(timeout: 10))
         XCTAssertTrue(demo.exists, "Cancel lost Help and About's navigation")
+    }
+
+    @MainActor func testStatusDoesNotCoverTheTabsAfterChangingColumns() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let poses = environment["DUO_POSE_FILE"], let address = environment["HOMESPUN_SERVER"],
+              let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Run on the open iPhone Duo with DUO_POSES=1 and a test server.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        pose("landscape", file: poses)
+        app.launch()
+        app.pair(address: address, code: code)
+        if app.gridItems("Ready to free up").count < 2 { _ = app.compactOldestOnScreen(2) }
+        checkActivity(app, pose: "landscape")
+        app.openTab("Server")
+        XCTAssertTrue(app.descendants(matching: .any)["check.server"].waitForExistence(timeout: 15),
+                      "the status intercepted the Server tab")
     }
 
     @MainActor func testVideosCompareSideBySide() throws {
@@ -156,6 +180,7 @@ final class DuoLayoutUITests: XCTestCase {
                     if play.waitForExistence(timeout: 3) { break }
                 }
             }
+
             XCTAssertTrue(play.waitForExistence(timeout: 10), "no Side by Side for the video")
             let original = app.descendants(matching: .any)["compare.image.original"]
             let compact = app.descendants(matching: .any)["compare.image.compact"]
@@ -200,7 +225,48 @@ final class DuoLayoutUITests: XCTestCase {
         app.choose("grid.filter", "Photos and Videos")
     }
 
+    @MainActor func testLibraryFillsTheOpenDisplayOnLaunchAndUnfold() throws {
+        guard let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"] else {
+            throw XCTSkip("Needs the iPhone Duo pose driver.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        for name in ["landscape", "portrait"] {
+            pose(name, file: poses)
+            app.launch()
+            checkLibrarySpan(app, pose: "launched open, \(name)")
+            pose("folded", file: poses)
+            XCTAssertTrue(app.wait(width: 0..<500))
+            pose(name, file: poses)
+            XCTAssertTrue(app.wait(wide: name == "landscape"))
+            checkLibrarySpan(app, pose: "unfolded, \(name)")
+            app.terminate()
+        }
+    }
+
     // MARK: - Checks
+
+    @MainActor private func checkLibrarySpan(_ app: XCUIApplication, pose: String,
+                                             file: StaticString = #filePath, line: UInt = #line) {
+        let grid = app.descendants(matching: .any)["grid"].firstMatch
+        XCTAssertTrue(grid.waitForExistence(timeout: 20), file: file, line: line)
+        XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 10), file: file, line: line)
+        let screen = app.windows.firstMatch.frame
+        if pose != "folded" {
+            XCTAssertGreaterThan(screen.width, 500, "\(pose): not open", file: file, line: line)
+        }
+        XCTAssertEqual(grid.frame.minX, screen.minX, accuracy: 1, "\(pose): grid shifted", file: file, line: line)
+        XCTAssertEqual(grid.frame.maxX, screen.maxX, accuracy: 1, "\(pose): grid container is narrow", file: file, line: line)
+        let row = app.gridRow().map(\.frame)
+        guard let first = row.first, let last = row.last else {
+            return XCTFail("\(pose): no full row", file: file, line: line)
+        }
+        let tab = app.tab("Library")
+        let strip = tab.exists && tab.frame.midX > screen.minX + screen.width * 0.8
+        XCTAssertEqual(first.minX, screen.minX, accuracy: 1, "\(pose): empty leading space", file: file, line: line)
+        XCTAssertLessThanOrEqual(screen.maxX - last.maxX, strip ? 100 : 4,
+                                 "\(pose): visible rows don't span the display", file: file, line: line)
+    }
 
     /// A full row of cells runs edge to edge with only the hairline spacing between them.
     @MainActor private func checkGrid(_ app: XCUIApplication, columns: Int, pose: String,
@@ -208,6 +274,7 @@ final class DuoLayoutUITests: XCTestCase {
         app.openTab("Library")
         let grid = app.descendants(matching: .any)["grid"]
         XCTAssertTrue(grid.waitForExistence(timeout: 10), file: file, line: line)
+        checkLibrarySpan(app, pose: pose, file: file, line: line)
         sleep(1)
         XCTAssertGreaterThan(app.gridItems().allElementsBoundByIndex.filter { app.isOnScreen($0) }.count, 0,
                              "\(pose): the grid is blank", file: file, line: line)
@@ -231,10 +298,11 @@ final class DuoLayoutUITests: XCTestCase {
     /// The viewer fills the screen; Details opens beside the photo and closes again.
     @MainActor private func checkItem(_ app: XCUIApplication, pose: String) {
         app.openTab("Library")
+        let tabs = app.tabFrames()
         XCTAssertTrue(app.openItem(), "\(pose): no item viewer")
         let viewer = app.descendants(matching: .any)["item.viewer"], screen = app.windows.firstMatch.frame
         XCTAssertGreaterThan(viewer.frame.width, screen.width * 0.85, "\(pose): the viewer isn't full width")
-        XCTAssertFalse(app.isOnScreen(app.tab("Activity")), "\(pose): the tabs show over the viewer")
+        XCTAssertFalse(app.tab("Activity").isHittable, "\(pose): the tabs are reachable through the viewer")
         attach(app, "\(pose), item")
         app.buttons["item.details"].tap()
         let details = app.descendants(matching: .any)["details.list"]
@@ -246,7 +314,25 @@ final class DuoLayoutUITests: XCTestCase {
         app.buttons["details.done"].tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5), "\(pose): Details didn't close")
         app.closeItem()
+        app.assertTabFrames(tabs)
+        let monitor = app.descendants(matching: .any)["perf.monitor"].firstMatch
+        if monitor.exists {
+            XCTAssertEqual(app.behind().changes, 0, "\(pose): the app behind the viewer changed")
+        }
         XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10), "\(pose): no grid after closing")
+        XCTAssertTrue(app.openItem(), "\(pose): no viewer before an app link")
+        app.open(URL(string: "homespun://activity")!)
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "\(pose): an app link left the viewer over the app")
+        let deadline = Date().addingTimeInterval(5)
+        var arrived = false
+        repeat {
+            let activity = app.tab("Activity")
+            arrived = activity.exists && activity.isSelected
+            if arrived { break }
+            usleep(200_000)
+        } while Date() < deadline
+        XCTAssertTrue(arrived, "\(pose): the app link didn't finish opening Activity")
+        app.openTab("Library")
     }
 
     /// Free Up Space takes the whole screen: the chosen item compared side by side (beside or
@@ -296,6 +382,16 @@ final class DuoLayoutUITests: XCTestCase {
         XCTAssertTrue(rows.firstMatch.waitForExistence(timeout: 15), "\(pose): Activity doesn't show the newest run")
         sleep(1)
         attach(app, "\(pose), Activity")
+        let status = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier IN %@", ["remove.originals", "offer.free", "accessory.unreachable",
+                                         "job.progress", "accessory.new", "remove.progress", "accessory.almostFull"]
+        )).firstMatch
+        let server = app.tab("Server")
+        XCTAssertTrue(status.waitForExistence(timeout: 10), "\(pose): no floating status after backing up")
+        if status.exists, server.exists, server.frame.midX > app.windows.firstMatch.frame.width * 0.8 {
+            XCTAssertLessThanOrEqual(status.frame.maxX, server.frame.minX,
+                                     "\(pose): the floating status covers the Server tab")
+        }
         guard pose == "landscape" else {
             // Held tall the run is across the width, the list behind the sidebar button (like Settings).
             XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label == 'Show Sidebar'")).firstMatch.exists,

@@ -11,8 +11,6 @@ struct LibraryView: View {
     @State private var filter = LibraryState.Filter.all
     @State private var media = LibraryModel.Media.all
     @State private var selection = GridSelection()
-    /// The item whose Details are open in the viewer.
-    @State private var details: String?
     /// The grid's structure for the current filter (built off the main thread); it changes only
     /// when items come, go or move, so badge changes don't rebuild the grid.
     @State private var data = GridData()
@@ -21,16 +19,12 @@ struct LibraryView: View {
     @State private var builtKey: GridKey?
     /// Bumped whenever `data` is replaced, so the grid reloads only then.
     @State private var dataVersion = 0
-    @Namespace private var zoom
-    /// The cell an item zooms out of and back into.
-    @State private var gridZoom = GridZoom()
     /// Select mode's Newest (the tab bar, whose second tap does this, is hidden then).
     @State private var newestTaps = 0
     /// What Back Up and Free Up Space would take from the selection (worked out off the main thread).
     @State private var selectionParts = SelectionParts()
     @State private var selectionBytes: (bytes: Int, exact: Bool)?
     @State private var sheet: Sheet?
-    @State private var path: [String] = []
     /// The grid's density: 2 (large), 4 (medium) or 6 (small) columns on an iPhone.
     @AppStorage("gridColumns") private var columns = 4
     /// Drag-to-select: where the drag started, whether it selects or deselects, and the selection before it.
@@ -39,6 +33,7 @@ struct LibraryView: View {
     @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
     @Environment(\.showsTips) private var showsTips
+    @Environment(\.statusAccessoryInset) private var accessoryInset
 
     enum Sheet: Identifiable {
         case backUp([String]), legend, setup, identity, restore([String])
@@ -67,7 +62,7 @@ struct LibraryView: View {
     private var settings: AppSettings { model.settings }
 
     var body: some View {
-        NavigationStack(path: $path) {
+        NavigationStack {
             content
                 .background(Theme.background)
                 .navigationTitle(selecting ? selectionTitle : "Library")
@@ -75,13 +70,6 @@ struct LibraryView: View {
                 .toolbarTitleDisplayMode(selecting ? .inline : .large)
                 .toolbar { toolbar }
                 .toolbar(selecting ? .hidden : .automatic, for: .tabBar)
-                .navigationDestination(for: String.self) { id in
-                    // Zooms from its cell, and a swipe down shrinks it back into the cell of the item
-                    // shown (the grid keeps it in view behind the viewer, like Photos).
-                    ItemViewer(model: model, ids: visibleIDs, start: id, details: $details, freeUp: openFreeUp,
-                               onShow: { gridZoom.shown = $0 })
-                        .navigationTransition(.zoom(sourceID: GridZoom.sourceID, in: zoom))
-                }
                 .sheet(item: $sheet) { sheet in
                     switch sheet {
                     case .backUp(let ids): BackUpSheet(controller: controller, identifiers: ids) { endSelecting() }
@@ -98,23 +86,16 @@ struct LibraryView: View {
                 // Get Started: pick what to try, from what isn't backed up.
                 .onChange(of: controller.choosePending, initial: true) { _, pending in
                     guard pending else { return }
-                    controller.choosePending = false
-                    path = []
-                    filter = .notBackedUp
-                    selecting = true
-                    controller.journey.used(.select)
+                    ItemViewerPresence.shared.close(animated: false) {
+                        controller.choosePending = false
+                        filter = .notBackedUp
+                        selecting = true
+                        controller.journey.used(.select)
+                    }
                 }
                 .onChange(of: filter) { PerfMonitor.shared.begin("filter") }
                 .onChange(of: media) { PerfMonitor.shared.begin("filter") }
                 .onChange(of: selecting) { _, on in controller.isSelecting = on }
-        }
-        // On the stack, not inside the pushed viewer: there the inspector nested navigation stacks and
-        // SwiftUI trapped when the next item opened (open iPhone Duo).
-        .inspector(isPresented: Binding(get: { details != nil }, set: { if !$0 { details = nil } })) {
-            if let details {
-                ItemDetailsPanel(model: model, id: details) { self.details = nil }
-                    .inspectorColumnWidth(min: 280, ideal: 320, max: 400)
-            }
         }
     }
 
@@ -144,8 +125,6 @@ struct LibraryView: View {
             }
         }
     }
-
-    private var visibleIDs: [String] { data.ids }
 
     private struct GridKey: Equatable {
         /// The grid shows once the library is loaded: data built before that doesn't count.
@@ -205,12 +184,10 @@ struct LibraryView: View {
         PerfMonitor.shared.startAutoscrollIfAsked()
     }
 
-    /// The grid: a collection view whose cells are UIKit, with a SwiftUI stand-in for the zoom over
-    /// the cell an item opens from.
+    /// The grid's UIKit cells are also the viewer's zoom sources.
     private var grid: some View {
-        GridView(library: controller.library, selection: selection, counts: counts, zoom: gridZoom, input: gridInput,
+        GridView(library: controller.library, selection: selection, counts: counts, input: gridInput,
                  actions: gridActions)
-            .overlay(alignment: .topLeading) { GridZoomSource(zoom: gridZoom, namespace: zoom) }
             .ignoresSafeArea()
             .onAppear { Self.recordLaunch() }
     }
@@ -219,11 +196,14 @@ struct LibraryView: View {
         GridInput(data: data, dataVersion: dataVersion, stateVersion: controller.library.state.version, selecting: selecting,
                   selectionVersion: selection.version, countsVersion: counts.version, filter: filter, paired: settings.isPaired,
                   serverName: controller.serverName, density: columns, newest: controller.newestRequests &+ newestTaps,
+                  accessoryInset: accessoryInset,
                   notice: AnyView(top), noticeKey: topKey)
     }
 
     private var gridActions: GridActions {
-        GridActions(tapped: { tapped($0) }, menu: { menu(for: $0, opening: $1) }, dragSelect: { dragSelect(to: $0) },
+        GridActions(tapped: { tapped($0) }, viewer: { start, ids, details in
+            ItemViewerController(model: model, state: ItemViewerState(ids: ids, start: start, details: details), showsTips: showsTips)
+        }, menu: { menu(for: $0, opening: $1) }, dragSelect: { dragSelect(to: $0) },
                     dragEnded: { endDragSelect() }, resize: { resize($0) })
     }
 
@@ -303,7 +283,7 @@ struct LibraryView: View {
             guard let selectionBytes, !selected.isEmpty else { return "" }
             return (selectionBytes.exact ? "" : "About ") + LibraryController.bytes(selectionBytes.bytes)
         }
-        // The demo says so, always.
+        // Normal states always have a subtitle, so connection changes don't resize the title.
         let demo = settings.isDemo ? "Demo · " : ""
         let state = controller.library.state
         if filter != .all || media != .all {
@@ -447,7 +427,7 @@ struct LibraryView: View {
         .accessibilityIdentifier("grid.menu")
     }
 
-    /// A cell's menu (none while selecting); `opening` goes first when it opens the item.
+    /// A cell's menu (none while selecting); `opening` opens the viewer with Details.
     private func menu(for cell: LibraryState.Cell, opening: @escaping () -> Void) -> UIMenu {
         var items: [UIMenuElement] = []
         if cell.canFree, let original = cell.original {
@@ -463,9 +443,7 @@ struct LibraryView: View {
             })
         }
         items.append(UIAction(title: "Show Details", image: UIImage(systemName: "info.circle")) { _ in
-            // The zoom's stand-in is drawn first, so the item zooms out of its cell.
             opening()
-            DispatchQueue.main.async { path.append(cell.id) }
         })
         items.append(UIAction(title: cell.badge.label, attributes: .disabled) { _ in })
         return UIMenu(children: items)
@@ -483,11 +461,7 @@ struct LibraryView: View {
     private var freeableInSelection: Set<String> { selectionParts.freeable }
 
     private func tapped(_ cell: LibraryState.Cell) {
-        guard selecting else {
-            PerfMonitor.shared.begin("open")
-            path.append(cell.id)
-            return
-        }
+        guard selecting else { return }
         guard data.selectable.contains(cell.id) else { return }
         if selected.contains(cell.id) { selected.remove(cell.id) } else { selected.insert(cell.id) }
         Announce.say(selected.isEmpty ? "None selected" : "\(selected.count) selected")

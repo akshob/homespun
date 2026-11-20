@@ -7,55 +7,30 @@ import SwiftUI
 /// between items; pinch or double-tap to zoom; touch and hold plays a Live Photo.
 struct ItemViewer: View {
     let model: AppModel
-    let ids: [String]
-    let start: String
+    @Bindable var state: ItemViewerState
     var freeUp: (Set<String>?) -> Void
-    /// The item shown, whenever it changes (where closing the viewer zooms back to).
-    var onShow: (String) -> Void
-    /// The item whose Details are open (nil: closed). The Library shows them: as an inspector beside
-    /// the stack on the open iPhone Duo; inside this pushed screen it nested stacks and SwiftUI trapped.
-    @Binding var details: String?
-    @State private var current: String?
     /// Restore Original's sheet is up.
     @State private var restoring = false
-    @State private var zoomed = false
     @State private var comparing: String?
     @State private var playback = VideoPlayback()
-    /// Swipe down to close: how far the item has been dragged.
-    @State private var drag: CGSize = .zero
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.showsTips) private var showsTips
     @Environment(\.appClock) private var clock
     @Environment(\.mediaPresentation) private var mediaPresentation
     @ScaledMetric(relativeTo: .subheadline) private var lineHeight: CGFloat = 52
 
-    init(model: AppModel, ids: [String], start: String, details: Binding<String?>,
-         freeUp: @escaping (Set<String>?) -> Void, onShow: @escaping (String) -> Void = { _ in }) {
-        self.model = model
-        self.ids = ids
-        self.start = start
-        self.freeUp = freeUp
-        self.onShow = onShow
-        _details = details
-        _current = State(initialValue: start)
-    }
-
-    private var shown: String { current ?? start }
+    private var shown: String { state.shown }
     private var server: String { model.library.serverName }
     private var immich: Bool { model.settings.server?.mode == .immich }
 
     var body: some View {
         let cell = cell(shown), asset = model.library.library.item(shown)
-        let pulled = min(max(drag.height, 0) / 400, 1)
         ZStack {
-            Color.black.opacity(1 - pulled * 0.8).ignoresSafeArea()
+            Color.black.ignoresSafeArea()
             pager.ignoresSafeArea()
-                .scaleEffect(1 - pulled * 0.3)
-                .offset(x: drag.width, y: max(drag.height, 0))
-            if let cell, !zoomed, drag == .zero { stateLine(cell, asset: asset) }
+            if let cell, !state.zoomed { stateLine(cell, asset: asset) }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if asset?.itemKind == .video, !zoomed, drag == .zero {
+            if asset?.itemKind == .video, !state.zoomed {
                 VideoScrubber(playback: playback, durationOverride: mediaPresentation == .poster ? asset?.duration : nil)
                     .padding(.horizontal, 20).padding(.bottom, 8)
             }
@@ -66,26 +41,24 @@ struct ItemViewer: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarColorScheme(.dark, for: .navigationBar, .bottomBar)
         .toolbarBackgroundVisibility(.hidden, for: .navigationBar, .bottomBar)
-        .toolbar(.hidden, for: .tabBar)
         .toolbar { toolbar(cell, isVideo: asset?.itemKind == .video) }
-        .itemScreen()
+        .accessibilityAction(.escape) { state.close() }
         .onAppear { PerfMonitor.shared.endAfterFrame("open") }
-        .onChange(of: current) { _, id in
-            zoomed = false
-            guard let id else { return }
-            onShow(id)
+        .onChange(of: state.shown) { _, id in
+            state.zoomed = false
+            state.onShow(id)
             // Open Details follow the item shown.
-            if details != nil { details = id }
+            if state.details != nil { state.details = id }
         }
         // Compare goes over the viewer, and Back leaves it: Details close.
         .onDisappear {
-            details = nil
+            state.details = nil
             playback.pause()
         }
         .sheet(isPresented: $restoring) {
             RestoreOriginalSheet(controller: model.library, compacts: [shown]) { restored in
                 // The compact copy shown is gone: back to the grid, where the original is.
-                if restored { dismiss() }
+                if restored { state.close() }
             }
         }
         .navigationDestination(item: $comparing) { id in
@@ -98,14 +71,10 @@ struct ItemViewer: View {
     /// Every item the viewer goes through, a page each (UIKit: exact pages, reused).
     private var pager: some View {
         // From the item shown, should SwiftUI make the pager again while the viewer stays.
-        ItemPager(ids: ids, start: shown, current: $current, zoomed: $zoomed, playback: playback,
-                  item: { model.library.library.item($0) }, label: spokenLabel) { drag = $0 } released: { translation, velocity in
-            if translation.height > 120 || velocity.height > 900 {
-                dismiss()
-            } else {
-                withAnimation(.snappy) { drag = .zero }
-            }
-        }
+        ItemPager(ids: state.ids, start: shown,
+                  current: Binding(get: { state.shown }, set: { if let id = $0 { state.shown = id } }),
+                  zoomed: $state.zoomed, playback: playback,
+                  item: { model.library.library.item($0) }, label: spokenLabel)
     }
 
     /// The cell for an item (the library state keeps an index by identifier).
@@ -167,8 +136,13 @@ struct ItemViewer: View {
     // MARK: Toolbar
 
     @ToolbarContentBuilder private func toolbar(_ cell: LibraryState.Cell?, isVideo: Bool) -> some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button("Back", systemImage: "chevron.backward") { state.close() }
+                .tint(.white)
+                .accessibilityIdentifier("item.close")
+        }
         ToolbarItem(placement: .bottomBar) {
-            Button("Details", systemImage: "info.circle") { details = shown }
+            Button("Details", systemImage: "info.circle") { state.details = shown }
                 .tint(.white)
                 .disabled(cell == nil)
                 .accessibilityIdentifier("item.details")
@@ -278,7 +252,7 @@ struct ItemViewer: View {
     #endif
 }
 
-/// Details of the item shown in the viewer: beside the Library's stack on the open iPhone Duo (the
+/// Details in the viewer's inspector: beside the photo on the open iPhone Duo (the
 /// photo narrows to make room), a sheet on a phone. Its own view, so job progress redraws only it.
 struct ItemDetailsPanel: View {
     let model: AppModel
@@ -289,33 +263,6 @@ struct ItemDetailsPanel: View {
         if let cell = ItemViewer.cell(id, model: model) {
             ItemDetailsSheet(model: model, cell: cell, job: ItemViewer.jobState(cell, model: model), close: close)
         }
-    }
-}
-
-/// Whether an item screen (the viewer, Compare) is showing. The tab view hides its bottom
-/// accessory meanwhile, which would otherwise cover their toolbar; it comes back a moment after
-/// the last one closes, so it doesn't flash while Compare opens over the viewer.
-@MainActor @Observable
-final class ItemPresence {
-    static let shared = ItemPresence()
-    private var count = 0
-    var isOpen: Bool { count > 0 }
-
-    fileprivate func opened() { count += 1 }
-
-    fileprivate func closed() {
-        Task {
-            try? await Task.sleep(for: .milliseconds(400))
-            count = max(0, count - 1)
-        }
-    }
-}
-
-extension View {
-    /// Marks a full-screen item screen (see `ItemPresence`).
-    func itemScreen() -> some View {
-        onAppear { ItemPresence.shared.opened() }
-            .onDisappear { ItemPresence.shared.closed() }
     }
 }
 

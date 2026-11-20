@@ -86,9 +86,6 @@ struct ItemPager: UIViewControllerRepresentable {
     var item: (String) -> (any LibraryItem)?
     /// VoiceOver's label for a page.
     var label: (String) -> String
-    /// Swipe down to close: the drag so far, then where and how fast it was let go.
-    var dragged: (CGSize) -> Void
-    var released: (_ translation: CGSize, _ velocity: CGSize) -> Void
 
     func makeUIViewController(context: Context) -> ItemPagerController {
         let controller = ItemPagerController(ids: ids, start: start)
@@ -108,8 +105,6 @@ struct ItemPager: UIViewControllerRepresentable {
         let current = $current, zoomed = $zoomed
         controller.shown = { current.wrappedValue = $0 }
         controller.zoomChanged = { zoomed.wrappedValue = $0 }
-        controller.swipeDown.changed = dragged
-        controller.swipeDown.ended = released
         controller.zoomed = zoomed.wrappedValue
         controller.update(ids: ids)
         controller.refresh()
@@ -131,11 +126,9 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     var shown: (String) -> Void = { _ in }
     /// The page shown zoomed in or back out.
     var zoomChanged: (Bool) -> Void = { _ in }
-    let swipeDown = SwipeDownToClose()
     var zoomed = false {
         didSet {
             collectionView.isScrollEnabled = !zoomed
-            swipeDown.enabled = !zoomed
         }
     }
 
@@ -184,7 +177,6 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         collectionView.register(VideoPageCell.self, forCellWithReuseIdentifier: VideoPageCell.reuse)
         collectionView.accessibilityIdentifier = "item.viewer"
         view.addSubview(collectionView)
-        swipeDown.attach(to: collectionView)
         images.ready = { [weak self] id in self?.imageReady(id) }
         tellPosition()
     }
@@ -485,51 +477,5 @@ final class ItemImages {
             }
         }
         return await image?.byPreparingForDisplay() ?? image
-    }
-}
-
-/// Swipe down to close the item, like Photos: a vertical pan on the pager (it covers photos and
-/// videos), which the paging and zooming scroll views wait for. A drag that starts sideways fails it
-/// at once, so paging stays immediate; it's off while the item is zoomed in (the drag pans the photo
-/// then).
-@MainActor
-final class SwipeDownToClose: NSObject, UIGestureRecognizerDelegate {
-    var changed: (CGSize) -> Void = { _ in }
-    var ended: (_ translation: CGSize, _ velocity: CGSize) -> Void = { _, _ in }
-    var enabled = true {
-        didSet { pan.isEnabled = enabled }
-    }
-
-    private lazy var pan: UIPanGestureRecognizer = {
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-        pan.delegate = self
-        pan.maximumNumberOfTouches = 1
-        return pan
-    }()
-
-    func attach(to view: UIScrollView) {
-        view.addGestureRecognizer(pan)
-    }
-
-    /// Starts only for a drag that's mostly downward.
-    func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-        guard let pan = gesture as? UIPanGestureRecognizer else { return false }
-        let velocity = pan.velocity(in: nil)
-        return velocity.y > 0 && velocity.y > abs(velocity.x) * 1.2
-    }
-
-    /// The scroll views' pans wait for it.
-    func gestureRecognizer(_ gesture: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool {
-        other is UIPanGestureRecognizer && other.view is UIScrollView
-    }
-
-    @objc private func panned(_ pan: UIPanGestureRecognizer) {
-        let translation = pan.translation(in: nil), velocity = pan.velocity(in: nil)
-        switch pan.state {
-        case .changed: changed(CGSize(width: translation.x, height: translation.y))
-        case .ended: ended(CGSize(width: translation.x, height: translation.y), CGSize(width: velocity.x, height: velocity.y))
-        case .cancelled, .failed: ended(.zero, .zero)
-        default: break
-        }
     }
 }
