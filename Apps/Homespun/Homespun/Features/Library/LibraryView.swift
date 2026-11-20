@@ -5,7 +5,8 @@ import SwiftUI
 
 /// The Library tab (DESIGN 02): every photo and video with its badge, a Filter menu, Select mode
 /// with Back Up, and Free Up Space. Tapping an item opens it.
-struct LibraryView: View {
+struct LibraryView: View, Equatable {
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool { lhs.model === rhs.model }
     let model: AppModel
     var freeUp: (Set<String>?) -> Void
     @State private var filter = LibraryState.Filter.all
@@ -13,12 +14,10 @@ struct LibraryView: View {
     @State private var selection = GridSelection()
     /// The grid's structure for the current filter (built off the main thread); it changes only
     /// when items come, go or move, so badge changes don't rebuild the grid.
-    @State private var data = GridData()
+    @State private var store = GridStore()
     @State private var counts = SectionCounts()
     @State private var dataReady = false
-    @State private var builtKey: GridKey?
-    /// Bumped whenever `data` is replaced, so the grid reloads only then.
-    @State private var dataVersion = 0
+    @State private var build = GridBuild()
     /// Select mode's Newest (the tab bar, whose second tap does this, is hidden then).
     @State private var newestTaps = 0
     /// What Back Up and Free Up Space would take from the selection (worked out off the main thread).
@@ -33,7 +32,6 @@ struct LibraryView: View {
     @State private var dragBase = Set<String>()
     @Environment(\.openURL) private var openURL
     @Environment(\.showsTips) private var showsTips
-    @Environment(\.statusAccessoryInset) private var accessoryInset
 
     enum Sheet: Identifiable {
         case backUp([String]), legend, setup, identity, restore([String])
@@ -60,13 +58,15 @@ struct LibraryView: View {
         nonmutating set { selection.ids = newValue }
     }
     private var settings: AppSettings { model.settings }
+    private var data: GridData { store.data }
 
     var body: some View {
+        let _ = RenderProbe.count("render.library")
         NavigationStack {
             content
                 .background(Theme.background)
                 .navigationTitle(selecting ? selectionTitle : "Library")
-                .navigationSubtitle(subtitle)
+                .modifier(LibrarySubtitle(text: { subtitle }))
                 .toolbarTitleDisplayMode(selecting ? .inline : .large)
                 .toolbar { toolbar }
                 .toolbar(selecting ? .hidden : .automatic, for: .tabBar)
@@ -82,7 +82,7 @@ struct LibraryView: View {
                 .task(id: selection.version) {
                     await measureSelection()
                 }
-                .task(id: gridKey) { await rebuildData() }
+                .modifier(GridDataTrigger(key: { gridKey }, rebuild: { await rebuildData() }))
                 // Get Started: pick what to try, from what isn't backed up.
                 .onChange(of: controller.choosePending, initial: true) { _, pending in
                     guard pending else { return }
@@ -126,7 +126,7 @@ struct LibraryView: View {
         }
     }
 
-    private struct GridKey: Equatable {
+    fileprivate struct GridKey: Equatable {
         /// The grid shows once the library is loaded: data built before that doesn't count.
         var loaded: Bool
         var version: Int
@@ -145,30 +145,21 @@ struct LibraryView: View {
     private func rebuildData() async {
         // The task runs again whenever the Library comes back on screen; nothing to do if nothing changed.
         let key = gridKey
-        if dataReady, key == builtKey { return }
+        if dataReady, key == build.key { return }
         let state = controller.library.state, filter = filter, months = controller.library.monthsSnapshot
         let ready = controller.loaded
         let kind = await controller.library.identifiers(media)
         let old = data
-        let (new, same) = await Task.detached(priority: .userInitiated) { () -> (GridData, Bool) in
+        let (new, change) = await Task.detached(priority: .userInitiated) { () -> (GridData, GridChange) in
             let new = GridData(state: state, filter: filter, media: kind, months: months)
-            let same = old.stateVersion >= 0 && new.ids == old.ids
-                && new.sections.map(\.range) == old.sections.map(\.range) && new.sections.map(\.id) == old.sections.map(\.id)
-            return (new, same)
+            return (new, GridChange.between(old, new))
         }.value
         guard !Task.isCancelled else { return }
         counts.update(new)
-        if !same {
-            let old = data
-            data = new
-            dataVersion &+= 1
-            releaseInBackground(old)
-        } else {
-            releaseInBackground(new)
-        }
+        store.apply(new, change: change)
         if ready {
             dataReady = true
-            builtKey = key
+            build.key = key
         }
         PerfMonitor.shared.endAfterFrame("filter")
     }
@@ -186,17 +177,16 @@ struct LibraryView: View {
 
     /// The grid's UIKit cells are also the viewer's zoom sources.
     private var grid: some View {
-        GridView(library: controller.library, selection: selection, counts: counts, input: gridInput,
+        GridView(library: controller.library, selection: selection, counts: counts, store: store, input: gridInput,
                  actions: gridActions)
             .ignoresSafeArea()
             .onAppear { Self.recordLaunch() }
     }
 
     private var gridInput: GridInput {
-        GridInput(data: data, dataVersion: dataVersion, stateVersion: controller.library.state.version, selecting: selecting,
-                  selectionVersion: selection.version, countsVersion: counts.version, filter: filter, paired: settings.isPaired,
+        GridInput(selecting: selecting,
+                  selectionVersion: selection.version, filter: filter, paired: settings.isPaired,
                   serverName: controller.serverName, density: columns, newest: controller.newestRequests &+ newestTaps,
-                  accessoryInset: accessoryInset,
                   notice: AnyView(top), noticeKey: topKey)
     }
 
@@ -212,7 +202,7 @@ struct LibraryView: View {
     private var top: some View {
         VStack(spacing: 12) {
             notice
-            if data.cells.isEmpty { empty }
+            if store.isEmpty { empty }
         }
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -220,7 +210,7 @@ struct LibraryView: View {
     /// What `top` says, so the grid draws and measures it again only when that changes.
     private var topKey: String {
         let notice = controller.access == .limited ? "limited" : !settings.isPaired ? "setup" : ""
-        let empty = !data.cells.isEmpty ? "" : controller.library.count == 0 ? "none"
+        let empty = !store.isEmpty ? "" : controller.library.count == 0 ? "none"
             : filter == .notBackedUp && media == .all ? "done.\(controller.serverName)" : "nothing.\(filter.rawValue)"
         return [notice, empty].filter { !$0.isEmpty }.joined(separator: " ")
     }
@@ -309,8 +299,11 @@ struct LibraryView: View {
                 Button("Done", systemImage: "xmark") { endSelecting() }.accessibilityIdentifier("select.done")
             }
             ToolbarItem(placement: .primaryAction) {
-                Button(allSelectableSelected ? "Deselect All" : "Select All") { toggleSelectAll() }
-                    .accessibilityIdentifier("select.all")
+                LibraryAggregate {
+                    let _ = counts.version
+                    Button(allSelectableSelected ? "Deselect All" : "Select All") { toggleSelectAll() }
+                        .accessibilityIdentifier("select.all")
+                }
             }
             ToolbarItemGroup(placement: .bottomBar) {
                 Menu {
@@ -375,10 +368,30 @@ struct LibraryView: View {
     }
 
     private var filterButton: some View {
-        filterMenu
+        LibraryAggregate { filterMenu }
             .popoverTip(showsTips ? BadgeTip() : nil) { action in
                 if action.id == "guide" { openLegend() }
             }
+    }
+
+    private struct LibrarySubtitle: ViewModifier {
+        var text: () -> String
+        func body(content: Content) -> some View { content.navigationSubtitle(text()) }
+    }
+
+    private struct LibraryAggregate<Content: View>: View {
+        @ViewBuilder var content: () -> Content
+        var body: some View { content() }
+    }
+
+    private struct GridDataTrigger: ViewModifier {
+        var key: () -> LibraryView.GridKey
+        var rebuild: () async -> Void
+        func body(content: Content) -> some View { content.task(id: key()) { await rebuild() } }
+    }
+
+    @MainActor private final class GridBuild {
+        var key: LibraryView.GridKey?
     }
 
     private var filterMenu: some View {
@@ -462,7 +475,7 @@ struct LibraryView: View {
 
     private func tapped(_ cell: LibraryState.Cell) {
         guard selecting else { return }
-        guard data.selectable.contains(cell.id) else { return }
+        guard counts.selectable.contains(cell.id) else { return }
         if selected.contains(cell.id) { selected.remove(cell.id) } else { selected.insert(cell.id) }
         Announce.say(selected.isEmpty ? "None selected" : "\(selected.count) selected")
     }
@@ -555,10 +568,24 @@ final class SectionCounts {
     @ObservationIgnored private(set) var selectable: Set<String> = []
     /// Bumped on every update, for the grid's headers.
     private(set) var version = 0
+    @ObservationIgnored private(set) var changedSections = Set<Int>()
+
+    func takeChangedSections() -> Set<Int> {
+        defer { changedSections = [] }
+        return changedSections
+    }
 
     func update(_ data: GridData) {
         let new = Dictionary(data.sections.map { ($0.id, $0.open) }, uniquingKeysWith: { a, _ in a })
-        if new != open { open = new }
+        guard new != open || selectable != data.selectable else { return }
+        changedSections.formUnion(Set(open.keys).union(new.keys).filter { open[$0] != new[$0] })
+        let changedSelection = selectable.symmetricDifference(data.selectable)
+        for id in changedSelection {
+            if let position = data.positions[id], let section = data.sections.first(where: { $0.range.contains(position) }) {
+                changedSections.insert(section.id)
+            }
+        }
+        open = new
         let old = selectable
         selectable = data.selectable
         version &+= 1

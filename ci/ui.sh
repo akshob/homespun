@@ -200,7 +200,7 @@ if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
     stamp simulator.reboot.end
     run_tests; STATUS=$?
 fi
-if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests)* ]]; then
+if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests)* ]]; then
     require_test_environment $RESULTS/$NAME.log || STATUS=1
 fi
 if [[ -n ${STUB_PORT:-} ]]; then
