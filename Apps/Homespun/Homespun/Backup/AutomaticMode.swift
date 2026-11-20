@@ -73,7 +73,7 @@ final class AutomaticMode {
     /// while it's on screen).
     private let system: Bool
 
-    var enabled: Bool { state.enabled }
+    var enabled: Bool { ReleaseFeatures.automaticMode && state.enabled }
     /// Backs up everything not backed up yet, not only items added since it was turned on.
     var backsUpEverything: Bool { state.since == .distantPast }
 
@@ -94,6 +94,7 @@ final class AutomaticMode {
 
     /// `existing`: also back up what's already on the iPhone, not only new items.
     func enable(existing: Bool) async {
+        guard ReleaseFeatures.automaticMode else { return }
         Telemetry.shared.record(.featureUsed("automatic", existing ? "on.everything" : "on.new"))
         state.enabled = true
         state.since = existing ? .distantPast : Date()
@@ -133,7 +134,9 @@ final class AutomaticMode {
     func setNotifies(_ on: Bool) {
         state.notifies = on
         save()
-        if on, system { Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge]) } }
+        if ReleaseFeatures.automaticMode, on, system {
+            Task { _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge]) }
+        }
     }
 
     func disable() {
@@ -151,7 +154,7 @@ final class AutomaticMode {
 
     /// Asks iOS for a background run: on power and network, an hour or more from now.
     func schedule() {
-        guard state.enabled, system else { return }
+        guard enabled, system else { return }
         let request = BGProcessingTaskRequest(identifier: Self.taskID)
         request.requiresExternalPower = true
         request.requiresNetworkConnectivity = true
@@ -200,6 +203,7 @@ final class AutomaticMode {
     /// included): an item Homespun merely can't see (hidden, limited access, a restored backup with
     /// other identifiers) is never reported. Needs Full Access.
     func reportRemoved(settings: AppSettings, ledger: CompactLedger) async {
+        guard ReleaseFeatures.automaticMode else { return }
         let photos = photos
         guard photos.authorization() == .authorized, let client = settings.client else { return }
         let backedUp = await ledger.backedUpSnapshot()
@@ -248,7 +252,7 @@ final class AutomaticMode {
     @discardableResult
     func run(settings: AppSettings, job: CompactJob, premium: Premium, notify: Bool) async -> Summary {
         var summary = Summary()
-        guard state.enabled, premium.isUnlocked, !running else { return summary }
+        guard enabled, premium.isUnlocked, !running else { return summary }
         let photos = photos
         guard photos.authorization() == .authorized else {
             summary.skipped = "Homespun needs Full Access to Photos."
@@ -376,7 +380,11 @@ final class AutomaticMode {
         return "On · ran \(when)"
     }
 
-    static func notify(_ summary: Summary) async {
+    static func notify(_ summary: Summary,
+                       deliver: @MainActor (UNNotificationRequest) async throws -> Void = {
+                           try await UNUserNotificationCenter.current().add($0)
+                       }) async {
+        guard ReleaseFeatures.automaticMode else { return }
         let content = UNMutableNotificationContent()
         content.title = "Ready to free up space"
         let count = summary.removable
@@ -384,6 +392,6 @@ final class AutomaticMode {
             + "Open Homespun to remove \(count == 1 ? "it" : "them") from this iPhone."
         content.sound = .default
         let request = UNNotificationRequest(identifier: "homespun.removable", content: content, trigger: nil)
-        try? await UNUserNotificationCenter.current().add(request)
+        try? await deliver(request)
     }
 }

@@ -45,7 +45,7 @@ for one in $runs; do
       # A pull request's iPhone run: pair, back up, compare, Keep Original, free up; the viewer;
       # Select All; rename this iPhone.
       run quick zsh $D/ui.sh quick iPhone-18-Pro \
-        HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare,HomespunUITests/LibraryUITests/testSelectAllMarksEveryCell,HomespunUITests/ServerModeUITests/test1CompactThroughServerAndRemoveOriginals,HomespunUITests/ServerTabUITests/test7RePairKeepsTheConfirmedNameAndOneActiveDevice,HomespunUITests/ServerTabUITests/test8ServerFollowsItsPinnedKeyToANewAddress,HomespunUITests/ServerTabUITests/testRenameThisIPhone 8780 ;;
+        HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare,HomespunUITests/LibraryUITests/testSelectAllMarksEveryCell,HomespunUITests/ServerModeUITests/test1CompactThroughServerAndRemoveOriginals,HomespunUITests/ServerTabUITests/test7RePairKeepsTheConfirmedNameAndOneActiveDevice,HomespunUITests/ServerTabUITests/test8ServerFollowsItsPinnedKeyToANewAddress,HomespunUITests/ServerTabUITests/testRenameThisIPhone,HomespunUITests/PremiumUITests/testReleaseScopeHidesPremiumAndAutomaticSurfaces 8780 ;;
     quick-duo)
       # A pull request's iPhone Duo run: open, in every pose (layouts, Free Up Space, the viewer).
       run quick-duo env EXTRA=12 DUO_POSES=1 zsh $D/ui.sh quick-duo iPhone-Duo \

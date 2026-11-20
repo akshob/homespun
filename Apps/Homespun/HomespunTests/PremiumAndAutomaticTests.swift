@@ -4,10 +4,24 @@ import Testing
 @testable import Homespun
 
 @Test func premiumRowsAndPurchaseCopyExcludeUnavailableFeatures() {
-    #expect(PremiumFeature.available == [.automatic, .widgets])
-    #expect(PremiumFeature.backupFeatures == [.automatic])
-    #expect(!PremiumFeature.cloudCopies.isAvailable)
-    #expect(PremiumFeature.purchaseDescription == "Automatic Mode and widgets")
+    #expect(PremiumFeature.available == [.automatic, .cloudCopies, .widgets])
+    #expect(PremiumFeature.backupFeatures == [.automatic, .cloudCopies])
+    #expect(PremiumFeature.cloudCopies.isAvailable)
+    #expect(PremiumFeature.purchaseDescription == "Automatic Mode, Cloud Copies and widgets")
+}
+
+@Test func releaseFeaturesDefaultOffAndDebugOverrideIsExplicit() {
+    #expect(!ReleaseFeatures.resolve(shipping: false, arguments: [], environment: [:]))
+    #expect(ReleaseFeatures.resolve(shipping: true, arguments: [], environment: [:]))
+    #if DEBUG
+    #expect(ReleaseFeatures.resolve(shipping: false, arguments: [], environment: ["HOMESPUN_RELEASE_FEATURES": "1"]))
+    #expect(!ReleaseFeatures.resolve(shipping: true, arguments: ["-releaseFeatures", "NO"],
+                                     environment: ["HOMESPUN_RELEASE_FEATURES": "1"]))
+    #expect(ReleaseFeatures.resolve(shipping: false, arguments: ["-releaseFeatures", "YES"], environment: [:]))
+    #else
+    #expect(!ReleaseFeatures.resolve(shipping: false, arguments: ["-releaseFeatures", "YES"],
+                                     environment: ["HOMESPUN_RELEASE_FEATURES": "1"]))
+    #endif
 }
 
 @Test func automaticModePicksNewItemsNotYetBackedUp() {

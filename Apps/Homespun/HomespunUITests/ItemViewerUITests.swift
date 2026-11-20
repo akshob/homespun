@@ -24,7 +24,7 @@ final class ItemViewerUITests: XCTestCase {
         guard let address = server, let code = environment["HOMESPUN_PAIRING_CODE"] else {
             throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
         }
-        let app = launch()
+        let app = launch(["-releaseFeatures", "YES"])
         app.pair(address: address, code: code)
         if app.gridItems("Ready to free up").count < 2 { _ = app.compactNewest(2) }
 

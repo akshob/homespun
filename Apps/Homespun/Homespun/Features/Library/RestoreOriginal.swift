@@ -74,7 +74,9 @@ struct RestoreOriginalSheet: View {
                 promise("trash", controller.settings.isDemo
                         ? "Then Homespun asks to delete the compact copies, as iOS would. In the demo, nothing is deleted."
                         : "Then iOS asks to delete the compact copies. They stay in Recently Deleted for 30 days.")
-                promise("lock", "It stays full size: Free Up Space and automatic mode leave it alone until you make a compact copy again.")
+                promise("lock", ReleaseFeatures.automaticMode
+                        ? "It stays full size: Free Up Space and automatic mode leave it alone until you make a compact copy again."
+                        : "It stays full size: Free Up Space leaves it alone until you make a compact copy again.")
                 if edited > 0 {
                     InlineNotice(tone: .warning, title: edited == 1 && items.count == 1 ? "You edited this compact copy"
                                     : "You edited \(edited) of these compact copies",

@@ -27,7 +27,7 @@ final class WidgetGalleryUITests: XCTestCase {
         // Launching again ends the running app first.
         let app = XCUIApplication()
         app.launchArguments = ["-onboardingComplete", "YES", "-hideTips", "-widgetDemo", state]
-        app.launch()
+        app.launchWithFeatures()
         XCTAssertTrue(app.hasTab("Library"))
         // The widgets get the facts once the main screen has loaded.
         sleep(6)

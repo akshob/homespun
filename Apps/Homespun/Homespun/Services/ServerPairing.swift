@@ -40,7 +40,7 @@ struct ServerPairing {
         let url = try secureURL(link.serverURL)
         for attempt in 0..<2 {
             let client = capture(url: url, expected: link.fingerprint)
-            defer { if client.trust != .demo { client.session.invalidateAndCancel() } }
+            defer { client.retireSession() }
             do {
                 let nonce = PairingCrypto.nonce()
                 let challenge = try await client.pairingChallenge(nonce: PairingCrypto.encode(nonce))
@@ -92,7 +92,7 @@ struct ServerPairing {
         let url = try secureURL(url)
         var client = capture(url: url)
         client.timeout = 6
-        defer { if client.trust != .demo { client.session.invalidateAndCancel() } }
+        defer { client.retireSession() }
         let nonce = PairingCrypto.nonce()
         let ticket = try await client.requestApproval(deviceName: deviceName,
             commitment: PairingCrypto.encode(PairingCrypto.commitment(nonce: nonce)))
@@ -122,7 +122,7 @@ struct ServerPairing {
                 guard confirmed else { throw IdentityFailure(observed: fingerprint) }
                 let trust: ServerTrust = client.trust == .demo ? .demo : .pinned([fingerprint])
                 let (session, delegate) = ServerSessions.shared.freshSession(trust: trust)
-                defer { session.invalidateAndCancel() }
+                defer { delegate.lifetime.retire(session: session) }
                 let verified = ServerClient(baseURL: url, token: ticket.secret, trust: trust, session: session, delegate: delegate)
                 let response = try await verified.completeApproval(ticket.id, installID: installID)
                 return Paired(url: url, response: response, pins: ServerPins(pins: [fingerprint], source: "approval"))
@@ -148,7 +148,7 @@ struct ServerPairing {
         let url = try secureURL(url)
         for attempt in 0..<2 {
             let client = capture(url: url)
-            defer { if client.trust != .demo { client.session.invalidateAndCancel() } }
+            defer { client.retireSession() }
             let nonce = PairingCrypto.nonce(), hash = PairingCrypto.tokenHash(token)
             do {
                 let proof = try await client.verifyIdentity(keyID: PairingCrypto.keyID(tokenHash: hash),

@@ -36,8 +36,9 @@ final class AppModel {
         job.history = history
         library = LibraryController(settings: settings, job: job, premium: premium, automatic: automatic,
                                     copyFinder: copyFinder)
-        status = StatusPublisher(settings: settings, library: library, history: history, automatic: automatic,
-                                 premium: premium)
+        status = ReleaseFeatures.widgets || ReleaseFeatures.watch
+            ? StatusPublisher(settings: settings, library: library, history: history, automatic: automatic,
+                              premium: premium) : nil
         let history = history
         Task { await history.load() }
     }
@@ -61,6 +62,10 @@ final class AppModel {
 
     /// Registers the background run; must happen before the app finishes launching.
     nonisolated static func registerBackgroundRun() {
+        guard ReleaseFeatures.automaticMode else {
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: AutomaticMode.taskID)
+            return
+        }
         BGTaskScheduler.shared.register(forTaskWithIdentifier: AutomaticMode.taskID, using: nil) { task in
             let box = TaskBox(task: task)
             let work = Task { @MainActor in

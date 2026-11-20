@@ -15,7 +15,7 @@ final class DemoModeUITests: XCTestCase {
     @MainActor func testDemoFromWelcomeToLeaving() throws {
         app = XCUIApplication()
         app.launchArguments += ["-hideTips", "-resetDemo"]
-        app.launch()
+        app.launchWithFeatures()
 
         // Welcome: Try the Demo, beside the ways to set up a real server.
         let demo = app.buttons["setup.demo"]
@@ -183,7 +183,7 @@ final class DemoModeUITests: XCTestCase {
         // And it stays left when Homespun opens again.
         app.terminate()
         app.launchArguments = ["-hideTips"]
-        app.launch()
+        app.launchWithFeatures()
         XCTAssertTrue(app.buttons["setup.find"].waitForExistence(timeout: 20), "not at Welcome after leaving")
         XCTAssertFalse(app.buttons["demo.menu"].exists, "still in the demo")
     }
@@ -193,7 +193,7 @@ final class DemoModeUITests: XCTestCase {
     @MainActor func testTurningOnAsksForThePurchaseInTheDemo() throws {
         app = XCUIApplication()
         app.launchArguments += ["-hideTips", "-resetDemo", "-premiumLocked", "YES"]
-        app.launch()
+        app.launchWithFeatures()
         let demo = app.buttons["setup.demo"]
         XCTAssertTrue(demo.waitForExistence(timeout: 20), "no Try the Demo on Welcome")
         demo.tap()
@@ -212,7 +212,7 @@ final class DemoModeUITests: XCTestCase {
         app.goBack(from: "Automatic Mode")
 
         let cloud = app.buttons["settings.connectors"]
-        if AppFeatures.cloudCopies {
+        if ReleaseFeatures.cloudCopies {
             XCTAssertTrue(app.reveal(cloud), "no Cloud Copies row")
             cloud.tap()
             let oneDrive = app.buttons["connector.onedrive"]
@@ -238,7 +238,7 @@ final class DemoModeUITests: XCTestCase {
     @MainActor func testPreparingTheDemoKeepsItsPhotos() throws {
         app = XCUIApplication()
         app.launchArguments = ["-hideTips", "-resetDemo", "-holdDemoPreparation"]
-        app.launch()
+        app.launchWithFeatures()
         let demo = app.buttons["setup.demo"], preparing = app.descendants(matching: .any)["demo.prepare"]
         XCTAssertTrue(demo.waitForExistence(timeout: 20))
         demo.tap()
@@ -283,7 +283,7 @@ final class DemoModeUITests: XCTestCase {
 
         app.terminate()
         app.launchArguments = ["-hideTips", "-demoPrepareMinimum", "3"]
-        app.launch()
+        app.launchWithFeatures()
         XCTAssertTrue(preparing.waitForExistence(timeout: 10), "a cold launch didn't draw the media again")
         XCTAssertEqual(app.buttons["demo.prepare.cancel"].label, "Leave the Demo")
         waitForPreparing()

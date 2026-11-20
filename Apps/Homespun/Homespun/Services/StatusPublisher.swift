@@ -43,10 +43,14 @@ final class StatusPublisher {
         var send: @Sendable (Data, Bool) async -> Void
 
         static var live: Self {
-            let watch = WatchLink()
+            let watch = ReleaseFeatures.watch ? WatchLink() : nil
             return Self(read: { StatusStore.read() }, write: { StatusStore.write($0) },
-                        reload: { WidgetCenter.shared.reloadTimelines(ofKind: StatusStore.widgetKind) },
-                        send: { await watch.send($0, complication: $1) })
+                        reload: {
+                            if ReleaseFeatures.widgets {
+                                WidgetCenter.shared.reloadTimelines(ofKind: StatusStore.widgetKind)
+                            }
+                        },
+                        send: { await watch?.send($0, complication: $1) })
         }
     }
 
@@ -63,6 +67,7 @@ final class StatusPublisher {
     /// Only an unpaired iPhone shares demo facts. Leaving publishes its own empty status again,
     /// including to the watch; a paired person's status is never replaced.
     func showDemo(_ model: AppModel?) {
+        guard ReleaseFeatures.widgets || ReleaseFeatures.watch else { return }
         guard model == nil || !settings.isPaired else { return }
         guard model != nil || demo != nil else { return }
         demo = model
@@ -79,6 +84,7 @@ final class StatusPublisher {
     /// Also runs on Welcome: if the app closed before leaving finished, the widgets and watch must
     /// not keep a demo status just because the person's own setup isn't complete yet.
     func clearDepartedDemo() async {
+        guard ReleaseFeatures.widgets || ReleaseFeatures.watch else { return }
         let destination = destination
         let stored = await Task.detached(priority: .utility) { destination.read() }.value
         guard activeDemo == nil, stored?.demo == true else { return }
@@ -87,6 +93,7 @@ final class StatusPublisher {
 
     /// From here on, every change is published (the first one shortly after).
     func start() {
+        guard ReleaseFeatures.widgets || ReleaseFeatures.watch else { return }
         guard !started else { return }
         started = true
         #if DEBUG
@@ -128,6 +135,7 @@ final class StatusPublisher {
 
     /// Publishes right away (the end of a background run, which may be suspended any moment).
     func publishNow() async {
+        guard ReleaseFeatures.widgets || ReleaseFeatures.watch else { return }
         pending?.cancel()
         pending = nil
         await (activeDemo?.history ?? history).load()
@@ -138,6 +146,7 @@ final class StatusPublisher {
     /// Going to the background: a change still waiting for its turn is published now, and widgets
     /// redraw now rather than when the reload interval ends (the app is suspended before then).
     func publishInBackground() {
+        guard ReleaseFeatures.widgets || ReleaseFeatures.watch else { return }
         let waiting = pending.map { !$0.isCancelled } ?? false
         pending?.cancel()
         pending = nil

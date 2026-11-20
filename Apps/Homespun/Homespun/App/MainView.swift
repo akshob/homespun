@@ -50,7 +50,7 @@ struct RootView: View {
                 if let link = PairingLink(url) {
                     // The demo pairs only with its pretend server: a link is for the person's own Homespun.
                     if settings.isDemo { linkInDemo = true } else { settings.pendingLink = link }
-                } else if let link = AppLink(url) {
+                } else if let link = AppLink(url), link.isAvailable {
                     model.router.pending = link
                 }
             }
@@ -170,7 +170,9 @@ struct MainTabView: View {
                 PairConfirmView(settings: model.settings, link: link) {}
             case .unlock(let feature):
                 // Once unlocked the widgets fill in on their own (StatusPublisher): nothing to carry on with.
-                UnlockSheet(feature: feature, premium: model.premium, server: model.library.serverName) {}
+                if ReleaseFeatures.premium {
+                    UnlockSheet(feature: feature, premium: model.premium, server: model.library.serverName) {}
+                }
             }
         }
         .onChange(of: settings.pendingLink, initial: true) { _, link in
@@ -200,6 +202,7 @@ struct MainTabView: View {
 
     /// Where a widget's link leads.
     private func open(_ link: AppLink) {
+        guard link.isAvailable else { return }
         switch link {
         case .freeUp: openFreeUp(nil)
         case .activity: tab = .activity

@@ -16,7 +16,7 @@ cleanup() {
 }
 trap cleanup EXIT
 failed=()
-cd $APP && xcodegen generate --quiet
+cd $APP && zsh scripts/generate-project.sh --testing
 echo "::group::build (Profile)"
 xcodebuild build-for-testing -project Homespun.xcodeproj -scheme HomespunPerf -configuration Profile -destination id=$PERF_SIM \
   -derivedDataPath $PERF_DD -clonedSourcePackagesDirPath $CI_STATE/spm 2>&1 | filter

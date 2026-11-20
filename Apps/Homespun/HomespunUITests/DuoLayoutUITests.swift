@@ -24,7 +24,7 @@ final class DuoLayoutUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
         pose("landscape", file: poses)
-        app.launch()
+        app.launchWithFeatures()
         checkLibrarySpan(app, pose: "launched open, landscape")
         app.pair(address: address, code: code)
         app.openTab("Library")

@@ -177,7 +177,7 @@ final class ServerDiscovery {
     /// Asks a server found at `url` what it runs on.
     private func ask(_ name: String, _ url: URL) async {
         var client = ServerClient(baseURL: url, trust: url.host == DemoServer.host ? .demo : .capture(expected: nil))
-        defer { if client.trust != .demo { client.session.finishTasksAndInvalidate() } }
+        defer { client.retireSession() }
         client.timeout = 6
         do {
             let options = try await client.pairingOptions()

@@ -15,7 +15,7 @@ fi
 # The iPhone build embeds the watch app, but doesn't build its watchOS UI test bundle.
 WATCH_DD=$DD/watch
 cd $APP
-timed build.generate xcodegen generate --quiet
+timed build.generate zsh scripts/generate-project.sh --testing
 stamp build.start
 STATUS=0
 xcodebuild build-for-testing -project Homespun.xcodeproj -scheme HomespunWatch \

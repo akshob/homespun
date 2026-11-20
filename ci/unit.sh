@@ -17,4 +17,21 @@ test_without_building $RESULTS/unit.xcresult -only-testing:HomespunTests -only-t
   | tee $RESULTS/unit.log | filter
 STATUS=$?
 stamp xcodebuild.end
+if (( STATUS == 0 )); then
+    specs=($DD/Build/Products/HomespunReleaseScope_*iphonesimulator*.xctestrun(N))
+    if (( ${#specs} != 1 )); then
+        echo "error: missing release-scope test manifest" >&2
+        exit 1
+    fi
+    rm -rf $RESULTS/release-scope.xcresult
+    stamp xcodebuild.start
+    XCTESTRUN=$specs[1] test_without_building $RESULTS/release-scope.xcresult 2>&1 \
+      | tee $RESULTS/release-scope.log | filter
+    STATUS=$?
+    stamp xcodebuild.end
+    if ! grep -Eq 'testReleaseDisablesEntryPoints.*passed' $RESULTS/release-scope.log; then
+        echo "error: release-scope regression did not execute and pass" >&2
+        STATUS=1
+    fi
+fi
 exit $STATUS

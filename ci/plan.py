@@ -70,7 +70,9 @@ def plan(env, files):
     if mode == "pr":
         draft = env.get("DRAFT") == "true"
         ui = list(QUICK) if app and not draft else []
-        if app and not draft and touches(files, WATCH_PATHS, ("Apps/Homespun/project.yml", "ci/watch.sh")):
+        if app and not draft and touches(files, WATCH_PATHS, (
+                "Apps/Homespun/project.yml", "Apps/Homespun/project-features.yml",
+                "Apps/Homespun/ReleaseFeatures.xcconfig", "Apps/Homespun/scripts/generate-project.sh", "ci/watch.sh")):
             ui.append("watch")
         why = f"{'draft ' if draft else ''}pull request: {len(files)} files changed"
         return {"server": server, "telemetry": telemetry, "site": site, "app": app, "package": False, "ui": ui,

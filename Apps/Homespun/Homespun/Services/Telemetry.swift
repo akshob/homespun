@@ -56,6 +56,7 @@ final class Telemetry {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             queued = (try? decoder.decode([Event].self, from: Data(contentsOf: queueURL))) ?? []
+            if !ReleaseFeatures.premium { queued.removeAll { $0.name == "premium.event" } }
         }
     }
 
@@ -97,6 +98,7 @@ final class Telemetry {
     /// Queues an event if the person shares (before they've decided, setup events wait in memory).
     func record(_ event: Event) {
         guard !paused else { return }
+        guard ReleaseFeatures.premium || event.name != "premium.event" else { return }
         switch consent {
         case .sharing:
             queued.append(event)

@@ -34,6 +34,10 @@ struct AutomaticModeView: View {
     @State private var preview: CompactPreview?
 
     var body: some View {
+        if ReleaseFeatures.automaticMode { content }
+    }
+
+    @ViewBuilder private var content: some View {
         let automatic = model.automatic, settings = model.settings, premium = model.premium
         let enabled = automatic.enabled && premium.isUnlocked
         List {
@@ -255,6 +259,18 @@ struct NotificationsView: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
+        if ReleaseFeatures.automaticMode {
+            content
+        } else {
+            List {
+                Text("Backup results are in Activity. Homespun doesn't send notifications in this version.")
+            }
+            .homespunList()
+            .navigationTitle("Notifications")
+        }
+    }
+
+    private var content: some View {
         List {
             Section {
                 VStack(alignment: .leading, spacing: 18) {
@@ -264,7 +280,7 @@ struct NotificationsView: View {
                             "At most once a day, after a night of backing up: “1.2 GB ready to free up.”")
                     promise("exclamationmark.triangle", "Or when something needs you",
                             "Only if backing up has failed for 3 nights in a row.")
-                    promise("hand.raised", "Nothing else", "No tips, no offers, no Premium, no streaks.")
+                    promise("hand.raised", "Nothing else", "No tips, no offers, no streaks.")
                 }
                 .padding(.vertical, 8)
             } footer: {

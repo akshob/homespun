@@ -95,6 +95,14 @@ enum AppLink: Equatable, Sendable {
     /// The unlock sheet for a Premium feature: `homespun://unlock?feature=widgets`.
     case unlock(feature: String)
 
+    var isAvailable: Bool {
+        switch self {
+        case .automatic: ReleaseFeatures.automaticMode
+        case .unlock: ReleaseFeatures.premium
+        default: ReleaseFeatures.widgets
+        }
+    }
+
     var url: URL {
         var parts = URLComponents()
         parts.scheme = "homespun"

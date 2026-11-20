@@ -104,6 +104,45 @@ test_without_building "$RESULTS/watch.xcresult" -parallel-testing-enabled NO
         self.assertIn("-xctestrun\n" + str(watch) + "\n", run.stdout)
         self.assertNotIn("-project", run.stdout)
 
+    def test_unit_runs_both_manifests_and_requires_the_release_regression_to_execute(self):
+        products = Path(self.env["DD"]) / "Build/Products"
+        products.mkdir(parents=True)
+        main = products / "Homespun_iphonesimulator27.2.xctestrun"
+        scope = products / "HomespunReleaseScope_iphonesimulator27.2.xctestrun"
+        main.touch()
+        calls = self.root / "build-calls"
+        builder = self.bin / "xcodebuild"
+        builder.write_text("""#!/usr/bin/env python3
+import json, os, sys
+spec = sys.argv[sys.argv.index("-xctestrun") + 1]
+with open(os.environ["BUILD_CALLS"], "a") as log:
+    log.write(json.dumps(spec) + "\\n")
+if "HomespunReleaseScope_" in spec and os.environ.get("OMIT_SCOPE_TEST") != "1":
+    print("Test Case '-[HomespunTests.ReleaseScopeTests testReleaseDisablesEntryPoints]' passed (0.001 seconds).")
+else:
+    print("** TEST EXECUTE SUCCEEDED **")
+""")
+        builder.chmod(0o755)
+        for missing, omitted, status in [(False, False, 0), (False, True, 1), (True, False, 1)]:
+            with self.subTest(missing=missing, omitted=omitted):
+                calls.write_text("")
+                if missing:
+                    scope.unlink()
+                else:
+                    scope.touch()
+                run = subprocess.run(
+                    ["zsh", str(self.checkout / "ci/unit.sh")],
+                    env={**self.env, "BUILD_CALLS": str(calls), "XCTESTRUN": "",
+                         "OMIT_SCOPE_TEST": "1" if omitted else "0"},
+                    text=True, capture_output=True, timeout=15)
+                self.assertEqual(run.returncode, status, run.stdout + run.stderr)
+                executed = [json.loads(line) for line in calls.read_text().splitlines()]
+                self.assertEqual(executed, [str(main)] if missing else [str(main), str(scope)])
+                if omitted:
+                    self.assertIn("regression did not execute and pass", run.stderr)
+                if missing:
+                    self.assertIn("missing release-scope test manifest", run.stderr)
+
     def test_pending_boot_is_claimed_once_without_booting_a_second_simulator(self):
         manifest = Path(self.env["CI_STATE"]) / "presim/iPhone-18-Pro"
         manifest.parent.mkdir(parents=True)
