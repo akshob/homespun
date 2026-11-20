@@ -162,7 +162,7 @@ struct RunItemRow: View {
     /// What it's doing now, while the run is in progress.
     private var working: String? {
         guard let current = job?.runProgress.current, current.asset == item.assetID else { return nil }
-        return current.message
+        return job?.currentMessage
     }
 
     var body: some View {

@@ -152,6 +152,49 @@ final class PerformanceUITests: XCTestCase {
 
     // MARK: Tests
 
+    /// The same budget with the grid still: per-item imports must not reload 35,000 thumbnails.
+    @MainActor func test11BackUpTwentyItemsWhileGridIsStill() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["HOMESPUN_SERVER"], let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Needs perf.sh's isolated server.")
+        }
+        try launch()
+        app.pair(address: address, code: code)
+        app.openTab("Library")
+        tapBarButton("grid.menu")
+        let sizes = menuItem("Grid Size")
+        if sizes.waitForExistence(timeout: 5) { sizes.tap() }
+        app.buttons["Small"].firstMatch.tap()
+        sleep(2)
+        tapBarButton("select.start")
+        let screen = app.windows.firstMatch.frame
+        let items = app.gridItems("Not backed up").allElementsBoundByIndex.filter {
+            $0.isHittable && $0.frame.midY > screen.minY + 120 && $0.frame.midY < screen.maxY - 180
+        }.suffix(20)
+        XCTAssertEqual(items.count, 20)
+        for item in items { item.tap() }
+        XCTAssertTrue(app.hasScreen("20 Selected", timeout: 5))
+        sleep(2)
+        let before = monitor()
+        tapBarButton("compact.selected")
+        let progress = app.descendants(matching: .any)["job.progress"].firstMatch
+        XCTAssertTrue(progress.waitForExistence(timeout: 20))
+        let deadline = Date().addingTimeInterval(600)
+        repeat { sleep(5) } while progress.exists && Date() < deadline
+        XCTAssertFalse(progress.exists)
+        sleep(2)
+        let after = monitor()
+        func delta(_ key: String) -> Double { (after[key] ?? 0) - (before[key] ?? 0) }
+        let n = delta("job.finished")
+        print("PERF backup: \(after)")
+        XCTAssertEqual(n, 20)
+        XCTAssertEqual(after["backup.slowFrames"] ?? .infinity, 0)
+        XCTAssertLessThanOrEqual(after["backup.hitchMsPerS"] ?? .infinity, 5)
+        XCTAssertLessThanOrEqual(after["GridApply.p95"] ?? .infinity, 2)
+        XCTAssertLessThanOrEqual(delta("library.buildState"), n)
+        XCTAssertEqual(delta("grid.reloads"), 0)
+    }
+
     @MainActor func test01LaunchToGrid() throws {
         try launch()
         let launchMs = monitor()["launch"] ?? .infinity, fromMain = monitor()["launchFromMain"] ?? .infinity

@@ -60,7 +60,7 @@ for one in $runs; do
       # A bigger library (the newest cells far from the oldest; the filter crash needed it; paging
       # through items and turning the iPhone needs a few), over many months.
       run library env EXTRA=200 DATED=240 zsh $D/ui.sh library iPhone-18-Pro \
-        HomespunUITests/LibraryUITests,HomespunUITests/ItemPagingUITests,HomespunUITests/GridScrollUITests 8799 ;;
+        HomespunUITests/LibraryUITests,HomespunUITests/ItemPagingUITests,HomespunUITests/GridScrollUITests,HomespunUITests/GridRedrawUITests/testRealServerBackUpTouchesOnlyChangedCells 8799 ;;
     later)
       run later zsh $D/later.sh later iPhone-18-Pro 8796 ;;
     copies)
@@ -83,7 +83,7 @@ for one in $runs; do
         HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests 8793 open ;;
     demo)
       # Try the Demo needs no server and no Photos access: on an iPhone, then on iPhone Duo's cover.
-      run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests 8800
+      run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests,HomespunUITests/GridRedrawUITests 8800
       run demo-duo env SERVERLESS=1 zsh $D/ui.sh demo-duo iPhone-Duo HomespunUITests/DemoModeUITests 8801 ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;

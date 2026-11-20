@@ -56,6 +56,8 @@ final class LibraryController {
     /// Originals from the current Back Up; offered once the run finishes.
     private var batch = Set<String>()
     private var started = false
+    /// Keep the running accessory until the finished/ready facts have arrived, without a hide/show.
+    private var finishingBackups = 0
 
     init(settings: AppSettings, job: CompactJob, premium: Premium, automatic: AutomaticMode, copyFinder: CopyFinder) {
         self.settings = settings
@@ -67,6 +69,15 @@ final class LibraryController {
         library = LibraryModel(catalog: settings.photos as? any ItemCatalog)
         journey = JourneyLog(defaults: settings.defaults, tips: !settings.isDemo)
         access = settings.photos.authorization()
+        job.onPhaseChange = { [weak self] in self?.jobChanged() }
+        job.onRunFinished = { [weak self] in
+            self?.finishingBackups += 1
+            Task { [weak self] in
+                await self?.jobFinished()
+                self?.finishingBackups -= 1
+                await Telemetry.shared.flush()
+            }
+        }
     }
 
     var isRemoving: Bool { if case .checking = removal { true } else { false } }
@@ -102,7 +113,7 @@ final class LibraryController {
     func start(loaded: () -> Void = {}) async {
         guard !started else { return }
         started = true
-        library.onChange = { @MainActor [weak self] in Task { await self?.refreshGrid() } }
+        library.onChange = { @MainActor [weak self] in self?.scheduleRefreshGrid() }
         await refresh()
         // Only what this Apple Account owns; the product itself loads where the purchase is offered.
         await premium.refresh()
@@ -169,9 +180,9 @@ final class LibraryController {
         inputs.paired = settings.isPaired
         if case .unreachable = settings.serverStatus { inputs.unreachable = serverName }
         if case .checking(let message) = removal { inputs.removing = message }
-        if job.isRunning {
+        if job.isRunning || finishingBackups > 0 {
             let run = job.runProgress
-            inputs.backingUp = (run.done, run.total, run.current?.name)
+            inputs.backingUp = (run.done, run.total, run.current?.name ?? (finishingBackups > 0 ? job.items.last?.name : nil))
         }
         if let finished { inputs.finished = (finished.count, finished.bytes, Set(finished.originals)) }
         inputs.readyCount = ready.count
@@ -251,6 +262,10 @@ final class LibraryController {
             }
         }
         guard finished else { return }
+        scheduleRefreshGrid()
+    }
+
+    private func scheduleRefreshGrid() {
         pendingRebuild?.cancel()
         pendingRebuild = Task {
             try? await Task.sleep(for: .milliseconds(400))
@@ -262,9 +277,9 @@ final class LibraryController {
     @ObservationIgnored private var pendingRebuild: Task<Void, Never>?
 
     func jobFinished() async {
+        jobChanged()
         journey.backupFinished()
         await refreshReady()
-        await refreshGrid()
         let backedUp = batch
         batch = []
         guard !backedUp.isEmpty, settings.isPaired else { return }
