@@ -120,24 +120,25 @@ struct DemoReviewCodeButton: View {
                 problem = "The code couldn't be saved. Try again."
             }
 
-            struct ForgetReviewCodeButton: View {
-                @State private var stored = DemoReviewCodeStore().read() != nil
-                @State private var problem = false
-
-                var body: some View {
-                    if stored {
-                        Button("Forget Review Code", role: .destructive) {
-                            do {
-                                try DemoReviewCodeStore.forget()
-                                stored = false
-                            } catch { problem = true }
-                        }
-                        .accessibilityIdentifier("demo.review.forget")
-                        .alert("The code couldn't be removed. Try again.", isPresented: $problem) { Button("OK") {} }
-                    }
-                }
-            }
             saving = false
+        }
+    }
+}
+
+struct ForgetReviewCodeButton: View {
+    @State private var stored = DemoReviewCodeStore().read() != nil
+    @State private var problem = false
+
+    var body: some View {
+        if stored {
+            Button("Forget Review Code", role: .destructive) {
+                do {
+                    try DemoReviewCodeStore.forget()
+                    stored = false
+                } catch { problem = true }
+            }
+            .accessibilityIdentifier("demo.review.forget")
+            .alert("The code couldn't be removed. Try again.", isPresented: $problem) { Button("OK") {} }
         }
     }
 }
