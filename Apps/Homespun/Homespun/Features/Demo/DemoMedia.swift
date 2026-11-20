@@ -268,13 +268,21 @@ struct DemoMediaGenerator: Sendable {
         // A cancelled or failed attempt must never leave drawn originals in a review-photo set.
         let source = photos == nil ? "drawn" : "reviewer-v1"
         let sourceURL = output.appendingPathComponent("source.txt")
-        if (try? String(contentsOf: sourceURL, encoding: .utf8)) != source {
+        let sourceMarker: Data
+        if let photos {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            sourceMarker = try encoder.encode(photos.map(\.file).sorted { $0.file < $1.file })
+        } else {
+            sourceMarker = Data(source.utf8)
+        }
+        if (try? Data(contentsOf: sourceURL)) != sourceMarker {
             for url in try manager.contentsOfDirectory(at: output, includingPropertiesForKeys: nil)
                 where url.lastPathComponent != "downloads" {
                 try manager.removeItem(at: url)
             }
         }
-        try Data(source.utf8).write(to: sourceURL, options: .atomic)
+        try sourceMarker.write(to: sourceURL, options: .atomic)
         let manifestURL = output.appendingPathComponent("manifest.json")
         if let data = try? Data(contentsOf: manifestURL),
            let previous = try? JSONDecoder().decode(DemoMediaManifest.self, from: data), previous.version != DemoArt.version {
@@ -338,7 +346,11 @@ struct DemoMediaGenerator: Sendable {
                 try Task.checkCancellation()
                 let url = output.appendingPathComponent(path)
                 let bytes = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                files[path] = .init(bytes: bytes, sha256: try Fingerprint.sha256(of: url))
+                let sha256 = try Fingerprint.sha256(of: url)
+                if let expected = photos?.first(where: { $0.file.file == path })?.file {
+                    guard bytes == expected.size, sha256 == expected.sha256 else { throw DemoDownload.Failure.integrity }
+                }
+                files[path] = .init(bytes: bytes, sha256: sha256)
             }
         }
         try Task.checkCancellation()

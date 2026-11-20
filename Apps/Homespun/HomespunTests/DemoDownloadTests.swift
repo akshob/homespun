@@ -211,7 +211,7 @@ import UniformTypeIdentifiers
         let f = try Fixture()
         defer { try? FileManager.default.removeItem(at: f.folder) }
         try f.serve()
-        let photos = try await f.downloader.run { _, _ in }
+        var photos = try await f.downloader.run { _, _ in }
         let output = f.folder.appendingPathComponent("assembled")
         let result = try await DemoMediaGenerator(bundled: DemoMediaStore.bundledFolder, output: output, limit: 2,
                                                   photos: photos).run { _ in }
@@ -222,6 +222,22 @@ import UniformTypeIdentifiers
         #expect(samples.filter { $0.kind == "video" }.count == 3)
         #expect(samples.filter { $0.kind == "live_photo" }.count == 1)
         #expect(try Data(contentsOf: output.appendingPathComponent(photos[0].file.file)) == f.jpeg)
+        try Data(repeating: 0, count: f.jpeg.count).write(to: output.appendingPathComponent(photos[0].file.file))
+        let previouslyVerified = photos
+        await #expect(throws: DemoDownload.Failure.integrity) {
+            _ = try await DemoMediaGenerator(bundled: DemoMediaStore.bundledFolder, output: output, limit: 2,
+                                            photos: previouslyVerified).run { _ in }
+        }
+        #expect(!FileManager.default.fileExists(atPath: output.appendingPathComponent("manifest.json").path))
+        var changed = f.jpeg
+        changed.append(0)
+        try changed.write(to: photos[0].url)
+        photos[0].file.size = changed.count
+        photos[0].file.sha256 = SHA256.hash(data: changed).map { String(format: "%02x", $0) }.joined()
+        _ = try await DemoMediaGenerator(bundled: DemoMediaStore.bundledFolder, output: output, limit: 2,
+                                        photos: photos).run { _ in }
+        #expect(try Data(contentsOf: output.appendingPathComponent(photos[0].file.file)) == changed,
+                "a changed authenticated set must not reuse an earlier assembled original")
     }
 }
 
