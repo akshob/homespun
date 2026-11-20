@@ -25,7 +25,7 @@ import UniformTypeIdentifiers
                 context.fill(CGRect(x: 0, y: 0, width: 64, height: 48))
             }
             let url = folder.appendingPathComponent("fixture.jpg")
-            try DemoArt.writeImage(image, to: url, type: .jpeg, quality: 0.8, date: "2025-01-01T10:00:00Z")
+            try DemoArt.writeImage(image, to: url, type: .jpeg, quality: 0.8, date: "2025-01-01T10:00:00+00:00")
             jpeg = try Data(contentsOf: url)
             let size = jpeg.count
             let hash = SHA256.hash(data: jpeg).map { String(format: "%02x", $0) }.joined()

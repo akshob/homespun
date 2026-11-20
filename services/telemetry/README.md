@@ -308,8 +308,13 @@ never require or accept the public telemetry key as authorization.
   manifest object. Responses are `private, no-store`; no public bucket or unsigned URL is used.
   Bad codes, lockouts, missing/expired credentials and unauthorized objects return the same 403.
 - No request/invocation logs, code/token/body logging, analytics IDs or cookies. Only aggregate usage
-  and rate-limit counters persist. IP processing is only for serving and limiting these requests:
-  no additional App Privacy collection category is introduced (no retained identifiable download log).
+  and rate-limit counters persist. Failed-attempt counters expire within 25 minutes and are removed
+  by daily cleanup; successful authorizations keep no IP-keyed record.
+- **App Privacy:** raw IPs, codes and tokens are not retained, but keyed failed-attempt counters are.
+  The manifest conservatively adds **App Functionality** to the existing, not-linked **Device ID**
+  declaration for this abuse-prevention use. Mirror that purpose in App Store Connect before submission.
+  This is not tracking. Apple's [collection definition and IP guidance](https://developer.apple.com/app-store/app-privacy-details/)
+  distinguish real-time-only processing from retained data; a hash is not a blanket disclosure exemption.
 
 ### Setup and upload (owner only)
 

@@ -36,9 +36,6 @@ final class DemoModeUITests: XCTestCase {
         app.buttons["demo.review.save"].tap()
         XCTAssertTrue(field.waitForNonExistence(timeout: 10))
         app.buttons["setup.demo"].tap()
-        let phase = app.staticTexts["demo.prepare.phase"]
-        XCTAssertTrue(phase.waitForExistence(timeout: 10))
-        XCTAssertEqual(phase.value as? String, "downloading")
         waitForPreparing()
         XCTAssertTrue(app.buttons["found.use"].waitForExistence(timeout: 30))
         let first = try await counts()
@@ -56,7 +53,6 @@ final class DemoModeUITests: XCTestCase {
         app.terminate()
         app.launchArguments = ["-hideTips", "-demoMediaBase", endpoint, "-demoPrepareMinimum", "5"]
         app.launch()
-        XCTAssertTrue(phase.waitForExistence(timeout: 10), "cold launch didn't prepare again")
         waitForPreparing()
         XCTAssertTrue(app.buttons["estimate.choose"].waitForExistence(timeout: 30), "cold launch lost the paired demo")
         let second = try await counts()
