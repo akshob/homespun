@@ -23,7 +23,7 @@ export interface DemoManifest {
 }
 
 const encoder = new TextEncoder();
-const LIFETIME = 900;
+const LIFETIME = 3600;
 const forbidden = () => new HttpError(403, "forbidden");
 const hex = (bytes: ArrayBuffer) => Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 const unhex = (text: string) => Uint8Array.from(text.match(/../g) ?? [], (b) => Number.parseInt(b, 16));
@@ -95,8 +95,8 @@ async function charge(env: Env, type: "sessions" | "reads" | "bytes", amount = 1
 	const budget = await Budget.load(env, now), writes = withWrites({}, 8);
 	if (!budget.allows(writes, 90)) throw busy(now);
 	await budget.add(env.DB, writes).run();
-	const caps = type === "sessions" ? [[day, 200]] as const : type === "reads"
-		? [[day, 1000], [day.slice(0, 7), 20_000]] as const : [[day, 1_000_000_000]] as const;
+	const caps = type === "sessions" ? [[day, 2000]] as const : type === "reads"
+		? [[day, 5000], [day.slice(0, 7), 150_000]] as const : [[day, 10_000_000_000]] as const;
 	for (const [period, cap] of caps) {
 		const result = await env.DB.prepare(`INSERT INTO usage (key, value) SELECT ?1, ?2 WHERE ?2 <= ?3
 			ON CONFLICT(key) DO UPDATE SET value = value + excluded.value WHERE value + excluded.value <= ?3 RETURNING value`)
@@ -105,31 +105,27 @@ async function charge(env: Env, type: "sessions" | "reads" | "bytes", amount = 1
 	}
 }
 
-async function limit(request: Request, env: Env, file: boolean): Promise<void> {
-	const limiter = file ? env.DEMO_FILE_LIMITER : env.DEMO_LIMITER;
-	try {
-		if ((await limiter.limit({ key: request.headers.get("CF-Connecting-IP") ?? "unknown" })).success) return;
-	} catch { /* Fail closed: this gate protects private media. */ }
-	throw forbidden();
-}
-
 export async function handleDemo(request: Request, env: Env): Promise<Response> {
 	const path = new URL(request.url).pathname;
 	if (path === "/v1/demo/session") {
 		if (request.method !== "POST") throw forbidden();
-		await limit(request, env, false);
 		await charge(env, "sessions");
 		if (!env.DEMO_CODE_SHA256 || !/^[a-f0-9]{64}$/.test(env.DEMO_CODE_SHA256)) throw new HttpError(503, "unavailable");
-		const window = Math.floor(Date.now() / (LIFETIME * 1000));
+		const now = Math.floor(Date.now() / 1000);
 		const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-		const counter = await sign(`lockout.${window}.${ip}`, env);
-		const failures = await env.DB.prepare("SELECT failures FROM demo_lockouts WHERE key = ?1").bind(counter).first<number>("failures");
-		if ((failures ?? 0) >= 5) throw forbidden();
+		const counter = await sign(`lockout.${ip}`, env);
+		const locked = await env.DB.prepare("SELECT locked_until FROM demo_lockouts WHERE key = ?1").bind(counter).first<number>("locked_until");
+		if ((locked ?? 0) > now) throw forbidden();
 		const body = await readJsonBody(request, 256);
 		const code = typeof body.value.code === "string" ? body.value.code.toUpperCase().replace(/[-\s]/g, "") : "";
 		if (!equal(await digest(code), env.DEMO_CODE_SHA256)) {
-			await env.DB.prepare(`INSERT INTO demo_lockouts (key, failures, expires) VALUES (?1, 1, ?2)
-				ON CONFLICT(key) DO UPDATE SET failures = failures + 1`).bind(counter, (window + 1) * LIFETIME).run();
+			await env.DB.prepare(`INSERT INTO demo_lockouts (key, failures, window_start, locked_until, expires)
+				VALUES (?1, 1, ?2, 0, ?2 + 600)
+				ON CONFLICT(key) DO UPDATE SET
+					failures = CASE WHEN window_start <= ?2 - 600 THEN 1 ELSE failures + 1 END,
+					window_start = CASE WHEN window_start <= ?2 - 600 THEN ?2 ELSE window_start END,
+					locked_until = CASE WHEN window_start > ?2 - 600 AND failures >= 9 THEN ?2 + 900 ELSE 0 END,
+					expires = ?2 + 1500`).bind(counter, now).run();
 			throw forbidden();
 		}
 		await charge(env, "reads");
@@ -140,7 +136,6 @@ export async function handleDemo(request: Request, env: Env): Promise<Response> 
 
 	const file = /^\/v1\/demo\/files\/(demo-[a-z0-9-]+\.(?:heic|jpg))$/.exec(path)?.[1];
 	if (!file || request.method !== "GET") throw forbidden();
-	await limit(request, env, true);
 	const hash = await verifyToken((request.headers.get("Authorization") ?? "").replace(/^Bearer /, ""), env);
 	await charge(env, "reads", 2);
 	const media = await manifest(env);

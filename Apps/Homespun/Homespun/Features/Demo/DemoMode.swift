@@ -54,7 +54,7 @@ final class DemoMode {
         // UI tests start without a demo left by an earlier test.
         if ProcessInfo.processInfo.arguments.contains("-resetDemo") {
             Self.wipe()
-            try? DemoReviewCodeStore().remove()
+            try? DemoReviewCodeStore.forget()
         }
         #endif
         // On when the app last closed: it carries on where it was. (Without its marker, the folder is
@@ -96,7 +96,7 @@ final class DemoMode {
                 let ready = await DemoMediaStore.shared.readyFolder()
                 try Task.checkCancellation()
                 guard preparationID == id else { return }
-                if let folder = ready {
+                if let folder = ready, DemoDownload.configured(folder: folder) == nil {
                     await previous?.value
                     try await finish(folder, origin: origin, id: id, drawnSince: nil)
                     return
@@ -241,6 +241,9 @@ final class DemoMode {
         Task {
             try? await Task.sleep(for: .seconds(3))
             Self.wipe()
+            if await DemoMediaStore.shared.manifest()?.source == "reviewer-v1" || DemoReviewCodeStore().read() != nil {
+                try? await DemoMediaStore.shared.reset()
+            }
             DemoMode.shared.settling = false
         }
         Announce.say("Left the demo.")

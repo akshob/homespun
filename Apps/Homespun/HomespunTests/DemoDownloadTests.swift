@@ -105,6 +105,51 @@ import UniformTypeIdentifiers
         #expect(!contents.contains { $0.hasPrefix("demo-") || $0.hasSuffix(".part") })
     }
 
+    @Test func expiryMidDownloadRenewsSilentlyWithoutDownloadingVerifiedFilesAgain() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        let sessions = Mutex(0), requests = Mutex<[String: Int]>([:])
+        let manifestData = try JSONEncoder().encode(f.manifest)
+        ReviewProtocol.handler.withLock { handler in
+            handler = { request in
+                if request.httpMethod == "POST" {
+                    let number = sessions.withLock { $0 += 1; return $0 }
+                    return (200, try JSONSerialization.data(withJSONObject: [
+                        "manifest": JSONSerialization.jsonObject(with: manifestData),
+                        "token": "session-\(number)", "expiresAt": Int(Date().timeIntervalSince1970) + 3600,
+                    ]))
+                }
+                let path = request.url!.lastPathComponent
+                let count = requests.withLock { counts in
+                    counts[path, default: 0] += 1
+                    return counts.count
+                }
+                if count == 2, request.value(forHTTPHeaderField: "Authorization") == "Bearer session-1" {
+                    return (403, Data())
+                }
+                return (200, f.jpeg)
+            }
+        }
+        let files = try await f.downloader.run { _, _ in }
+        #expect(files.count == 16 && sessions.withLock { $0 } == 2)
+        #expect(requests.withLock { $0.values.sorted() } == Array(repeating: 1, count: 15) + [2])
+    }
+
+    @Test func onlyAnAuthorizedCodeIsSaved() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        let store = DemoReviewCodeStore(service: "photos.homespun.test.review.\(UUID().uuidString)")
+        defer { try? store.remove() }
+        var downloader = f.downloader
+        downloader.codeStore = store
+        ReviewProtocol.handler.withLock { $0 = { _ in (403, Data()) } }
+        await #expect(throws: DemoDownload.Failure.code) { _ = try await downloader.run { _, _ in } }
+        #expect(store.read() == nil)
+        try f.serve()
+        _ = try await downloader.run { _, _ in }
+        #expect(store.read() == downloader.code)
+    }
+
     @Test func failedDownloadFallsBackToTheWholeDrawnLibrary() async throws {
         let full = try await DemoTestMedia.ready.value
         let root = try DemoTestMedia.makeRoot()

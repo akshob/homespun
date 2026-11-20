@@ -36,6 +36,7 @@ struct DemoHelpSection: View {
         Section {
             if model.settings.isDemo {
                 LeaveDemoButton()
+                ForgetReviewCodeButton()
             } else {
                 Button { confirming = true } label: {
                     ServerRow(title: "Try the Demo", symbol: "play.rectangle", value: nil, chevron: true)
@@ -45,6 +46,7 @@ struct DemoHelpSection: View {
                 .accessibilityHint(busy.map { "Available once Homespun has finished \($0)." } ?? "")
                 .accessibilityIdentifier("help.demo")
                 DemoReviewCodeButton()
+                ForgetReviewCodeButton()
             }
         } footer: {
             if model.settings.isDemo {

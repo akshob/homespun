@@ -88,7 +88,8 @@
       Requests carry no installation, analytics, device, or photo-library identifiers, cookies, or app version.
       A short-lived access token authorizes only the sample files. Neither the code, token nor raw IP address is
       stored by the developer; only aggregate usage counters and short-lived keyed rate-limit counters are kept.
-      Request logging is disabled. The code is kept in this iPhone's non-synced Keychain until you clear it.
+      Request logging is disabled. After successful authorization the reusable code is kept in this iPhone's
+      non-synced Keychain until you choose Forget Review Code. Hour-long file sessions renew automatically.
       Downloads are repeated after each cold launch, not after backgrounding, and failure uses drawn photos instead.
       All prepared sample photos are deleted the next time Homespun starts. In the demo,
       Homespun doesn't read or change your Photos library, records no analytics, sends no problem reports, and pairs

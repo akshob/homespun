@@ -146,7 +146,7 @@ actor DemoMediaStore {
         if let flight {
             pending = flight
         } else {
-            if let ready = readyFolder() { return ready }
+            if let ready = readyFolder(), download(folder.appendingPathComponent("downloads")) == nil { return ready }
             if let free = freeSpace(), free < Self.neededBytes { throw Failure.diskFull(neededBytes: Self.neededBytes) }
             let available = availableMemory()
             guard available >= 320 << 20 else { throw Failure.lowMemory }

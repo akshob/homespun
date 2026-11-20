@@ -44,9 +44,7 @@
 	// Per-IP limits. The binding only supports 10 s or 60 s periods.
 	"ratelimits": [
 		{ "name": "LIMITER", "namespace_id": "4701", "simple": { "limit": 60, "period": 60 } },
-		{ "name": "REPORT_LIMITER", "namespace_id": "4702", "simple": { "limit": 2, "period": 60 } },
-		{ "name": "DEMO_LIMITER", "namespace_id": "4703", "simple": { "limit": 10, "period": 60 } },
-		{ "name": "DEMO_FILE_LIMITER", "namespace_id": "4704", "simple": { "limit": 120, "period": 60 } }
+		{ "name": "REPORT_LIMITER", "namespace_id": "4702", "simple": { "limit": 2, "period": 60 } }
 	],
 
 	// Email Routing: may send only to verified destination addresses (REPORT_TO).

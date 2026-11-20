@@ -6,12 +6,11 @@ import { randomIp, sendWith } from "./helpers";
 
 const code = "TESTTESTTESTTEST";
 const secret = "local-test-signing-key-not-used-in-production";
-const allowed = { limit: async () => ({ success: true }) };
 let bindings: Partial<Record<keyof Env, unknown>>;
 let media: DemoManifest;
 
 beforeEach(async () => {
-	bindings = { DEMO_CODE_SHA256: await digest(code), DEMO_SIGNING_KEY: secret, DEMO_LIMITER: allowed, DEMO_FILE_LIMITER: allowed };
+	bindings = { DEMO_CODE_SHA256: await digest(code), DEMO_SIGNING_KEY: secret };
 	const bytes = "synthetic photo";
 	media = { version: 1, totalBytes: bytes.length * 16, files: await Promise.all(Array.from({ length: 16 }, async (_, i) => ({
 		file: `demo-test-${i}.jpg`, size: bytes.length, sha256: await digest(bytes), kind: "photo",
@@ -32,7 +31,7 @@ describe("private reviewer demo", () => {
 		expect(response.headers.get("Cache-Control")).toBe("no-store");
 		const body = await response.json<{ manifest: DemoManifest; token: string; expiresAt: number }>();
 		expect(body.manifest).toEqual(media);
-		expect(body.expiresAt).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 900);
+		expect(body.expiresAt).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 3600);
 		const request = new Request(`https://telemetry.homespun.photos/v1/demo/files/${media.files[0].file}`,
 			{ headers: { Authorization: `Bearer ${body.token}`, "CF-Connecting-IP": randomIp() } });
 		const worker = (await import("../src/index")).default;
@@ -44,7 +43,7 @@ describe("private reviewer demo", () => {
 
 	it("gives the same unhelpful 403 for wrong, absent and locked-out codes", async () => {
 		const ip = randomIp();
-		for (let i = 0; i < 5; i++) {
+		for (let i = 0; i < 10; i++) {
 			const bad = await sendWith(bindings, "POST", "/v1/demo/session", { code: "wrong" }, { ip, key: null });
 			expect(bad.status).toBe(403);
 			expect(await bad.json()).toEqual({ error: "forbidden" });
@@ -56,17 +55,13 @@ describe("private reviewer demo", () => {
 		expect((await sendWith(bindings, "GET", "/v1/demo/files/manifest.json")).status).toBe(403);
 	});
 
-	it("fails closed on a denied or unavailable rate limiter", async () => {
-		for (const limiter of [{ limit: async () => ({ success: false }) }, { limit: async () => { throw new Error("offline"); } }]) {
-			bindings.DEMO_LIMITER = limiter;
-			expect((await grant()).status).toBe(403);
-		}
-	});
-
-	it("uses the actual per-IP session limiter", async () => {
-		delete bindings.DEMO_LIMITER;
+	it("allows reuse, including a success immediately after nine failures on a shared IP", async () => {
 		const ip = randomIp();
-		for (let i = 0; i < 10; i++) expect((await grant(ip)).status).toBe(200);
+		for (let i = 0; i < 9; i++) {
+			expect((await sendWith(bindings, "POST", "/v1/demo/session", { code: "wrong" }, { ip })).status).toBe(403);
+		}
+		for (let i = 0; i < 3; i++) expect((await grant(ip)).status).toBe(200);
+		expect((await sendWith(bindings, "POST", "/v1/demo/session", { code: "wrong" }, { ip })).status).toBe(403);
 		expect((await grant(ip)).status).toBe(403);
 	});
 
@@ -74,7 +69,7 @@ describe("private reviewer demo", () => {
 		const config = { ...env, ...bindings } as Env, now = Date.now();
 		const token = await sessionToken("a".repeat(64), config, now);
 		expect(await verifyToken(token, config, now)).toBe("a".repeat(64));
-		await expect(verifyToken(token, config, now + 900_000)).rejects.toMatchObject({ status: 403 });
+		await expect(verifyToken(token, config, now + 3_600_000)).rejects.toMatchObject({ status: 403 });
 		await expect(verifyToken(token, config, now - 1000)).rejects.toMatchObject({ status: 403 });
 		await expect(verifyToken(token.slice(0, -2) + "ZZ", config, now)).rejects.toMatchObject({ status: 403 });
 		await expect(verifyToken(token, { ...config, DEMO_CODE_SHA256: "b".repeat(64) }, now)).rejects.toMatchObject({ status: 403 });
@@ -91,7 +86,7 @@ describe("private reviewer demo", () => {
 
 	it("stops demo requests at their daily cap and preserves the telemetry write reserve", async () => {
 		const day = new Date().toISOString().slice(0, 10);
-		await env.DB.prepare("INSERT OR REPLACE INTO usage(key,value) VALUES (?1,200)").bind(`demo.sessions.${day}`).run();
+		await env.DB.prepare("INSERT OR REPLACE INTO usage(key,value) VALUES (?1,2000)").bind(`demo.sessions.${day}`).run();
 		expect((await grant()).status).toBe(503);
 	});
 });

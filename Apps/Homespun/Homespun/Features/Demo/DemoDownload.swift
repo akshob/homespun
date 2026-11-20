@@ -44,7 +44,7 @@ struct DemoDownloadedPhoto: Sendable {
 
 struct DemoDownload: Sendable {
     enum Failure: Error, Equatable {
-        case manifest, integrity, unavailable, code
+        case manifest, integrity, unavailable, code, expired
     }
 
     struct Session: Decodable {
@@ -58,6 +58,7 @@ struct DemoDownload: Sendable {
     var folder: URL
     var protocolClasses: [AnyClass]? = nil
     var timeout: TimeInterval = 15
+    var codeStore: DemoReviewCodeStore? = nil
 
     static func configured(folder: URL) -> DemoDownload? {
         let arguments = ProcessInfo.processInfo.arguments
@@ -70,8 +71,8 @@ struct DemoDownload: Sendable {
         #else
         let base = URL(string: "https://telemetry.homespun.photos/v1/demo/")!
         #endif
-        guard let code = DemoReviewCodeStore().read(), !code.isEmpty else { return nil }
-        return DemoDownload(base: base, code: code, folder: folder)
+        guard let code = DemoReviewCodeStore.candidate.withLock({ $0 }) ?? DemoReviewCodeStore().read(), !code.isEmpty else { return nil }
+        return DemoDownload(base: base, code: code, folder: folder, codeStore: DemoReviewCodeStore())
     }
 
     func configuration() -> URLSessionConfiguration {
@@ -99,7 +100,7 @@ struct DemoDownload: Sendable {
         } onCancel: { session.invalidateAndCancel() }
     }
 
-    private func download(using session: URLSession, progress: @Sendable (Int, Int) async -> Void) async throws -> [DemoDownloadedPhoto] {
+    private func authorize(using session: URLSession) async throws -> Session {
         try Task.checkCancellation()
         var request = URLRequest(url: base.appendingPathComponent("session"))
         request.httpMethod = "POST"
@@ -118,7 +119,14 @@ struct DemoDownload: Sendable {
         try grant.manifest.validate()
         guard !grant.token.isEmpty, grant.token.utf8.count <= 256, !grant.token.contains(where: \.isWhitespace),
               grant.expiresAt > Int(Date().timeIntervalSince1970),
-              grant.expiresAt <= Int(Date().timeIntervalSince1970) + 900 else { throw Failure.manifest }
+              grant.expiresAt <= Int(Date().timeIntervalSince1970) + 3600 else { throw Failure.manifest }
+        try codeStore?.save(code)
+        return grant
+    }
+
+    private func download(using session: URLSession, progress: @Sendable (Int, Int) async -> Void) async throws -> [DemoDownloadedPhoto] {
+        var grant = try await authorize(using: session)
+        let manifest = grant.manifest
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var directory = folder
         var values = URLResourceValues()
@@ -127,7 +135,7 @@ struct DemoDownload: Sendable {
         var done = 0
         var photos: [DemoDownloadedPhoto] = []
         await progress(done, grant.manifest.totalBytes)
-        for file in grant.manifest.files.sorted(by: { $0.size > $1.size }) {
+        for file in manifest.files.sorted(by: { $0.size > $1.size }) {
             try Task.checkCancellation()
             let destination = folder.appendingPathComponent(file.file)
             if !verified(file, at: destination) {
@@ -135,14 +143,23 @@ struct DemoDownload: Sendable {
                 var last: Error = Failure.unavailable
                 for attempt in 0..<3 {
                     do {
+                        if grant.expiresAt <= Int(Date().timeIntervalSince1970) + 5 {
+                            grant = try await authorize(using: session)
+                            guard grant.manifest == manifest else { throw Failure.manifest }
+                        }
                         try await fetch(file, token: grant.token, session: session, destination: destination) { bytes in
-                            await progress(completed + bytes, grant.manifest.totalBytes)
+                            await progress(completed + bytes, manifest.totalBytes)
                         }
                         last = Failure.unavailable
                         break
                     } catch {
                         try Task.checkCancellation()
                         last = error
+                        if error as? Failure == .expired, attempt < 2 {
+                            grant = try await authorize(using: session)
+                            guard grant.manifest == manifest else { throw Failure.manifest }
+                            continue
+                        }
                         if let failure = error as? Failure, failure != .integrity { throw error }
                         if attempt == 2 { throw error }
                         try await Task.sleep(for: attempt == 0 ? .milliseconds(500) : .seconds(2))
@@ -170,7 +187,9 @@ struct DemoDownload: Sendable {
         var request = URLRequest(url: base.appendingPathComponent("files").appendingPathComponent(file.file))
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         let (stream, response) = try await session.bytes(for: request)
-        guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+        guard let response = response as? HTTPURLResponse else { throw Failure.unavailable }
+        if response.statusCode == 401 || response.statusCode == 403 { throw Failure.expired }
+        guard response.statusCode == 200,
               response.expectedContentLength == -1 || response.expectedContentLength == file.size else { throw Failure.unavailable }
         FileManager.default.createFile(atPath: part.path, contents: nil)
         let handle = try FileHandle(forWritingTo: part)

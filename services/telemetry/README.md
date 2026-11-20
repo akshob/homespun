@@ -286,8 +286,6 @@ in the dashboard are replaced by the next deploy.) To see the counters:
 npx wrangler d1 execute homespun-telemetry --remote --command "SELECT * FROM usage ORDER BY key"
 ```
 
-## Develop and test
-
 ## Private reviewer demo
 
 The existing Worker also gates a **second, private R2 bucket**, `homespun-demo`. Sharing the Worker
@@ -296,13 +294,16 @@ never require or accept the public telemetry key as authorization.
 
 - `POST /v1/demo/session {"code":"…"}` checks the normalized code's SHA-256 against the
   `DEMO_CODE_SHA256` secret with the runtime's constant-time comparison.
-  `DEMO_LIMITER` allows 10 attempts/minute/IP, failing closed. Five bad codes lock out that address
-  until the end of the current 15-minute window. D1 stores only an HMAC-keyed, window-specific counter,
+  Only failures count per IP: 10 bad codes in a 10-minute window cause a 15-minute cooldown.
+  Successful authorizations have no per-IP limit (reviewers may share an address).
+  D1 stores only an HMAC-keyed, expiring counter,
   never a raw IP, code or session token. Expired counters are removed by daily retention.
 - Success returns `{manifest, token, expiresAt}`. The manifest contains exactly 16 entries with
   `file, sha256, size, kind, width, height, date, category`, with synthetic dates and no source paths.
-  The HMAC token is valid for at most 900 seconds and binds the manifest and current code hash.
+  The HMAC token is valid for at most one hour and binds the manifest and current code hash.
   Rotating either `DEMO_CODE_SHA256` or `DEMO_SIGNING_KEY` invalidates existing tokens.
+  Codes are reusable and never expire until rotation. The app exchanges its stored code for a fresh
+  session at every demo start and silently refreshes expired sessions while resuming remaining files.
 - `GET /v1/demo/files/:name` requires `Authorization: Bearer <token>` and streams only a named
   manifest object. Responses are `private, no-store`; no public bucket or unsigned URL is used.
   Bad codes, lockouts, missing/expired credentials and unauthorized objects return the same 403.
@@ -330,12 +331,16 @@ The media remain all rights reserved, usable only by Homespun's demo and App Sto
 The 64 MiB demo-set cap is reserved from the existing 8 GB R2 storage allowance by lowering
 `R2_MAX_BYTES` to 7,932,891,136. Uploads are owner-only (17 Class A operations per set, outside
 the Worker's upload accounting). Demo requests have their own atomic allowances in `usage`:
-200 session attempts/day, 1,000 R2 reads/day and 20,000/month, plus 1 GB streamed/day.
+2,000 session attempts/day, 5,000 R2 reads/day and 150,000/month (1.5% of the free 10M Class B reads),
+plus 10 GB streamed/day (R2 egress is free). This allows roughly 147 complete 40 MB downloads/day,
+before other shared D1 limits, rather than restricting successful uses of a code or IP.
 A session costs one manifest read; a file request reserves two reads (manifest and object).
 They also charge the shared D1 write budget and stop at 90%, leaving telemetry reports headroom.
 Failed reservations may over-count, never under-count. No unbounded R2 list, write or public reads
 exist. Daily/monthly aggregate counters follow the existing retention. A flood can still consume
 the Workers Free request allowance, as documented below.
+
+## Develop and test
 
 Requires Node.js 22.12 or later (Wrangler 4, Vitest 5). Everything runs locally with Miniflare (D1, R2, rate limits and
 a simulated `send_email`); no Cloudflare account is needed.

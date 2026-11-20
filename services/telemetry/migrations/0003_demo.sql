@@ -3,5 +3,7 @@
 CREATE TABLE demo_lockouts (
     key TEXT PRIMARY KEY,
     failures INTEGER NOT NULL,
+    window_start INTEGER NOT NULL,
+    locked_until INTEGER NOT NULL,
     expires INTEGER NOT NULL
 );
