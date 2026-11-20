@@ -201,8 +201,9 @@ struct LibraryState: Equatable, Sendable {
 
     /// Applies job changes to the cells they concern (nil: the item left the job), keeping the
     /// counts. Items whose badge comes from a compact copy aren't the job's to change.
-    mutating func apply(job changes: [String: CompactJob.State?]) {
-        var changed = false
+    @discardableResult
+    mutating func apply(job changes: [String: CompactJob.State?]) -> [String] {
+        var changed: [String] = []
         for (id, state) in changes {
             guard let index = positions[id] else { continue }
             let cell = cells[index]
@@ -212,9 +213,25 @@ struct LibraryState: Equatable, Sendable {
             for filter in Filter.allCases where filter != .all && cell.matches(filter) { counts[filter, default: 0] -= 1 }
             cells[index].badge = badge
             for filter in Filter.allCases where filter != .all && cells[index].matches(filter) { counts[filter, default: 0] += 1 }
-            changed = true
+            changed.append(id)
         }
-        if changed { version &+= 1 }
+        if !changed.isEmpty { version &+= 1 }
+        return changed
+    }
+
+    /// Includes removed originals as well as their newly shown compact copies.
+    func changedIDs(from previous: LibraryState) -> Set<String>? {
+        guard !previous.cells.isEmpty else { return nil }
+        var changed = Set<String>()
+        for cell in cells where previous.cell(cell.id) != cell {
+            changed.insert(cell.id)
+            if changed.count > 500 { return nil }
+        }
+        for cell in previous.cells where positions[cell.id] == nil {
+            changed.insert(cell.id)
+            if changed.count > 500 { return nil }
+        }
+        return changed
     }
 
     /// Takes the version of the state it replaces plus one, so a view keyed on it always updates.
@@ -402,7 +419,12 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private var library: [String] = []
     @ObservationIgnored private var album = Set<String>()
     @ObservationIgnored private var observing = false
-    @ObservationIgnored private var pendingNotice: Task<Void, Never>?
+    @ObservationIgnored private var changedIDs: Set<String>? = []
+
+    func takeChangedIDs() -> Set<String>? {
+        defer { changedIDs = [] }
+        return changedIDs
+    }
     /// The latest inputs, so job changes can be applied and the state rebuilt without them.
     @ObservationIgnored private var inputs = Inputs()
     @ObservationIgnored private var building: Task<Void, Never>?
@@ -548,9 +570,12 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         for (position, id) in contents.ids.enumerated() where index[id] == nil { index[id] = position }
         self.index = index
         count = contents.ids.count
+        // New/removed identifiers are picked up by the state rebuild. Only an existing item's
+        // changed month needs to regroup the old state before that.
+        let regrouped = contents.months.contains { id, month in months[id].map { $0 != month } ?? false }
         months = contents.months
+        if regrouped { monthsVersion += 1 }
         media = contents.media
-        monthsVersion += 1
         album = contents.album
     }
 
@@ -602,17 +627,19 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         let mine = generation
         let library = library, album = album, inputs = inputs, previous = state, read = libraryRead
         let signpost = PerfMonitor.signposter.beginInterval("BuildState")
-        let built = await Task.detached(priority: .userInitiated) { () -> LibraryState? in
+        RenderProbe.count("library.buildState")
+        let built = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?)? in
             var new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
                                    backedUp: inputs.backedUp)
             guard new != previous else { return nil }
             new.follow(previous)
-            return new
+            return (new, new.changedIDs(from: previous))
         }.value
         PerfMonitor.signposter.endInterval("BuildState", signpost)
         guard mine == generation else { return }
-        if let built {
+        if let (built, diff) = built {
             let old = state
+            if let diff { changedIDs?.formUnion(diff) } else { changedIDs = nil }
             state = built
             releaseInBackground(old)
         }
@@ -623,8 +650,10 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// (a finished item's compact copy) follows in a rebuild.
     func apply(job changes: [String: CompactJob.State?]) {
         guard !changes.isEmpty else { return }
+        generation &+= 1
         for (id, value) in changes { inputs.job[id] = value }
-        state.apply(job: changes)
+        let changed = state.apply(job: changes)
+        changedIDs?.formUnion(changed)
     }
 
     nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
@@ -639,11 +668,19 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
             let after = details.fetchResultAfterChanges
             if !rereading, let ids = Self.applying(details, to: library) {
                 setAssets(after, ids: ids)
+                var monthsChanged = false
+                for asset in details.removedObjects {
+                    months[asset.localIdentifier] = nil
+                    media[asset.localIdentifier] = nil
+                }
                 for asset in details.insertedObjects + details.changedObjects {
-                    months[asset.localIdentifier] = Self.monthKey(asset.creationDate)
+                    let month = Self.monthKey(asset.creationDate)
+                    if index[asset.localIdentifier] != nil, media[asset.localIdentifier] != nil,
+                       months[asset.localIdentifier] != month { monthsChanged = true }
+                    months[asset.localIdentifier] = month
                     media[asset.localIdentifier] = MediaInfo(asset)
                 }
-                monthsVersion += 1
+                if monthsChanged { monthsVersion += 1 }
                 changed = true
             } else {
                 reread(after)
@@ -670,12 +707,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// the snapshot for the next launch is written.
     private func changedContents() {
         saveSnapshot()
-        pendingNotice?.cancel()
-        pendingNotice = Task {
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            onChange?()
-        }
+        onChange?()
     }
 
     /// A full read is under way: changes meanwhile start another (only the latest is applied).

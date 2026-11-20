@@ -138,12 +138,13 @@ final class LongRun {
         var reported: Int64 = 0, step = "", stepStarted = Date()
         while !expiry.expired, job.isRunning || job.hasWaiting {
             let progress = job.runProgress
-            let current = progress.current.map { "\($0.asset) \($0.message)" } ?? ""
+            let current = progress.current.map { "\($0.asset) \(job.currentMessage)" } ?? ""
             if current != step {
                 step = current
                 stepStarted = Date()
             }
-            let fraction = progress.current.map { Self.fraction(step: $0.message, seconds: Date().timeIntervalSince(stepStarted)) } ?? 0
+            let fraction = progress.current == nil ? 0
+                : Self.fraction(step: job.currentMessage, seconds: Date().timeIntervalSince(stepStarted))
             reported = max(reported, Int64(progress.done) * 100 + Int64(fraction * 100))
             task.progress.totalUnitCount = Int64(max(progress.total, 1)) * 100
             task.progress.completedUnitCount = min(reported, task.progress.totalUnitCount)

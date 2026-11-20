@@ -55,21 +55,22 @@ extension SnapshotTests {
                 let data = GridData(state: library.state, filter: .all, media: media, months: library.monthsSnapshot)
                 let counts = SectionCounts()
                 counts.update(data)
+                let store = GridStore()
+                store.apply(data, change: .reload)
                 let selection = GridSelection()
                 selection.active = sample.scene == .selected
                 if selection.active { selection.ids = data.selectable }
                 let input = GridInput(
-                    data: data, dataVersion: 1, stateVersion: library.state.version, selecting: selection.active,
-                    selectionVersion: selection.version, countsVersion: counts.version, filter: .all, paired: true,
-                    serverName: world.library.serverName, density: sample.density, newest: 0, accessoryInset: 0,
+                    selecting: selection.active, selectionVersion: selection.version, filter: .all, paired: true,
+                    serverName: world.library.serverName, density: sample.density, newest: 0,
                     notice: AnyView(EmptyView()), noticeKey: "")
                 let actions = GridActions(tapped: { _ in }, viewer: {
                     ItemViewerController(model: world.model, state: ItemViewerState(ids: $1, start: $0, details: $2),
                                          showsTips: false)
                 }, menu: { _, _ in nil }, dragSelect: { _ in },
                                           dragEnded: {}, resize: { _ in })
-                let controller = GridController(library: library, selection: selection, counts: counts,
-                                                input: input, actions: actions, clock: SnapshotWorld.clock)
+                let controller = GridController(library: library, selection: selection, counts: counts, store: store,
+                                                input: input, actions: actions, accessoryInset: 0, clock: SnapshotWorld.clock)
                 image = try await SnapshotHost.capture(controller, device: SnapshotDevice.measured(sample.variant.device),
                                                        appearance: sample.variant.userInterfaceStyle,
                                                        category: sample.variant.category) { controller in

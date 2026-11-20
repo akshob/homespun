@@ -56,7 +56,6 @@ final class CompactJob {
         struct Current: Equatable {
             var asset: String
             var name: String
-            var message: String
         }
 
         var total = 0
@@ -72,6 +71,10 @@ final class CompactJob {
     /// The latest state of each item picked this session.
     private(set) var states: [String: State] = [:]
     private(set) var runProgress = RunProgress()
+    private(set) var currentMessage = ""
+    @ObservationIgnored var onPhaseChange: (@MainActor () -> Void)?
+    @ObservationIgnored var onRunFinished: (@MainActor () -> Void)?
+    @ObservationIgnored private var phaseNoticePending = false
     /// Items before this one aren't waiting (items are appended, and never go back to waiting).
     @ObservationIgnored private var nextWaiting = 0
     /// Picks being read from Photos (`enqueue`), and what Stop dropped meanwhile: those items
@@ -112,7 +115,18 @@ final class CompactJob {
 
     private func noteChange(_ id: String, _ state: State?) {
         phaseChanges[id] = .some(state)
+        bumpPhase()
+    }
+
+    private func bumpPhase() {
         phaseVersion &+= 1
+        guard !phaseNoticePending else { return }
+        phaseNoticePending = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            phaseNoticePending = false
+            onPhaseChange?()
+        }
     }
 
     /// Only the newest item of an asset changes state (an asset is never queued twice at once), and
@@ -122,6 +136,7 @@ final class CompactJob {
         items[index].state = state
         states[items[index].assetIdentifier] = state
         if old.isOpen, !state.isOpen {
+            RenderProbe.count("job.finished")
             runProgress.done += 1
             if case .saved(let original, let compact) = state {
                 runProgress.originalBytes += original
@@ -204,7 +219,7 @@ final class CompactJob {
             states[item.assetIdentifier] = item.state
             phaseChanges[item.assetIdentifier] = .some(item.state)
         }
-        phaseVersion &+= 1
+        bumpPhase()
         if !isRunning {
             isRunning = true
             Task { await run() }
@@ -241,7 +256,7 @@ final class CompactJob {
         current = nil
         resync()
         for item in dropped { phaseChanges[item.assetIdentifier] = .some(states[item.assetIdentifier]) }
-        phaseVersion &+= 1
+        bumpPhase()
     }
 
     /// Stops after the item being worked on: items waiting are dropped, and everything already
@@ -255,7 +270,7 @@ final class CompactJob {
         guard !dropped.isEmpty else { return }
         resync()
         for id in dropped { phaseChanges[id] = .some(states[id]) }
-        phaseVersion &+= 1
+        bumpPhase()
     }
 
     func pause() {
@@ -290,7 +305,10 @@ final class CompactJob {
             isPaused = false
             isRunning = false
             UIApplication.shared.isIdleTimerDisabled = false
+            PerfMonitor.shared.framesEnded("backup")
+            onRunFinished?()
         }
+        PerfMonitor.shared.framesBegan("backup")
         if settings.usesServer { await settings.refreshServerInfo() }
         while true {
             while isPaused, hasWaiting {
@@ -301,7 +319,8 @@ final class CompactJob {
             setState(index, .working("Starting"))
             current = (id, index)
             if let name = settings.photos.describe(items[index].assetIdentifier)?.name { items[index].name = name }
-            runProgress.current = .init(asset: items[index].assetIdentifier, name: items[index].name, message: "Starting")
+            currentMessage = "Starting"
+            runProgress.current = .init(asset: items[index].assetIdentifier, name: items[index].name)
             let state: State
             do {
                 guard let compactor = settings.compactor(ledger: ledger) else {
@@ -330,6 +349,7 @@ final class CompactJob {
             if let position = position(of: id) { setState(position, state) }
             current = nil
             runProgress.current = nil
+            currentMessage = ""
         }
     }
 
@@ -376,7 +396,7 @@ final class CompactJob {
         guard let index = position(of: id), case .working = items[index].state else { return }
         items[index].state = .working(message)
         states[items[index].assetIdentifier] = .working(message)
-        runProgress.current?.message = message
+        currentMessage = message
     }
 
     /// Where an item is: the one being worked on at once, others by search.

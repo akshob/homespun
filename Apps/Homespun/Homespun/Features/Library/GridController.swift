@@ -5,14 +5,8 @@ import UIKit
 
 /// What the Library grid shows, from `LibraryView`.
 struct GridInput {
-    var data: GridData
-    /// Bumped whenever `data` is replaced (comparing 35,000 cells on every update would cost too much).
-    var dataVersion: Int
-    /// The library state's version: badges changed.
-    var stateVersion: Int
     var selecting: Bool
     var selectionVersion: Int
-    var countsVersion: Int
     var filter: LibraryState.Filter
     var paired: Bool
     var serverName: String
@@ -20,7 +14,6 @@ struct GridInput {
     var density: Int
     /// Bumped to bring the newest items (the Library tab tapped again, Select mode's Newest).
     var newest: Int
-    var accessoryInset: CGFloat
     /// What's above the first month (the notice, or the empty state), and what it says, so it's
     /// measured again only when that changes.
     var notice: AnyView
@@ -42,19 +35,21 @@ struct GridActions {
 
 /// The Library grid: a collection view with `GridLayout`, hosted in SwiftUI.
 struct GridView: UIViewControllerRepresentable {
+    @Environment(\.statusAccessoryInset) private var accessoryInset
     let library: LibraryModel
     let selection: GridSelection
     let counts: SectionCounts
+    let store: GridStore
     var input: GridInput
     var actions: GridActions
 
     func makeUIViewController(context: Context) -> GridController {
-        GridController(library: library, selection: selection, counts: counts, input: input, actions: actions,
-                       clock: context.environment.appClock)
+        GridController(library: library, selection: selection, counts: counts, store: store, input: input, actions: actions,
+                       accessoryInset: accessoryInset, clock: context.environment.appClock)
     }
 
     func updateUIViewController(_ controller: GridController, context: Context) {
-        controller.update(input, actions: actions)
+        controller.update(input, actions: actions, accessoryInset: accessoryInset)
     }
 }
 
@@ -66,11 +61,13 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private let library: LibraryModel
     private let selection: GridSelection
     private let counts: SectionCounts
+    private let store: GridStore
     private var input: GridInput
     private var actions: GridActions
     private let clock: AppClock
     private var data = GridData()
     private var dataVersion = -1
+    private var accessoryInset: CGFloat
     private let layout = GridLayout()
     private var collectionView: UICollectionView!
     private let thumbnails: GridThumbnails
@@ -108,14 +105,16 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var lastZoomSource: Int?
     private var pendingOpen: (id: String, details: Bool)?
 
-    init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, input: GridInput,
-         actions: GridActions, clock: AppClock = .live) {
+    init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, store: GridStore, input: GridInput,
+         actions: GridActions, accessoryInset: CGFloat, clock: AppClock = .live) {
         self.library = library
         self.selection = selection
         self.counts = counts
+        self.store = store
         self.input = input
         self.actions = actions
         self.clock = clock
+        self.accessoryInset = accessoryInset
         thumbnails = GridThumbnails(manager: library.catalog == nil ? library.thumbnails : nil,
                                     source: { [unowned library] in library.source },
                                     catalog: library.catalog)
@@ -141,7 +140,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                                 withReuseIdentifier: MonthHeaderView.reuse)
         collectionView.accessibilityIdentifier = "grid"
         self.collectionView = collectionView
-        collectionView.contentInset.bottom = input.accessoryInset
+        collectionView.contentInset.bottom = accessoryInset
         view = collectionView
         installGestures()
     }
@@ -165,7 +164,13 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                 self.view.setNeedsLayout()
             }
         }
-        apply(data: input.data, version: input.dataVersion)
+        apply(data: store.data, version: store.version, change: .reload)
+        _ = store.takeUpdates(after: store.version)
+        _ = library.takeChangedIDs()
+        _ = counts.takeChangedSections()
+        watchData()
+        watchState()
+        watchCounts()
         if PerfMonitor.shared.enabled {
             PerfMonitor.shared.blankProbe = { [weak self] in self?.blankCells() ?? (0, 0) }
         }
@@ -225,15 +230,16 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     // MARK: Updates from SwiftUI
 
-    func update(_ new: GridInput, actions: GridActions) {
+    func update(_ new: GridInput, actions: GridActions, accessoryInset: CGFloat) {
         let old = input
         input = new
         self.actions = actions
         if new.selecting != old.selecting { resizeAnchor = nil }
-        if new.accessoryInset != old.accessoryInset {
+        if accessoryInset != self.accessoryInset {
+            self.accessoryInset = accessoryInset
             resizeAnchor = nil
             let offset = collectionView.contentOffset
-            collectionView.contentInset.bottom = new.accessoryInset
+            collectionView.contentInset.bottom = accessoryInset
             collectionView.contentOffset = offset
             if placed {
                 pinned = isFront && abs(offset.y - offsetRange.upperBound) < 1
@@ -246,17 +252,20 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             noticeMeasured = nil
             view.setNeedsLayout()
         }
-        if new.dataVersion != dataVersion { apply(data: new.data, version: new.dataVersion) }
         if new.density != old.density {
             resizeAnchor = nil
             view.setNeedsLayout()
             view.layoutIfNeeded()
             PerfMonitor.shared.endAfterFrame("gridSize")
         }
-        if new.stateVersion != old.stateVersion || new.selecting != old.selecting || new.selectionVersion != old.selectionVersion
-            || new.countsVersion != old.countsVersion || new.filter != old.filter || new.paired != old.paired
-            || new.serverName != old.serverName {
+        if new.filter != old.filter || new.paired != old.paired || new.serverName != old.serverName {
             refreshVisible()
+        } else if new.selecting != old.selecting || new.selectionVersion != old.selectionVersion {
+            for case let cell as GridCell in collectionView.visibleCells {
+                guard let id = cell.item else { continue }
+                cell.updateSelection(selecting: new.selecting, selected: new.selecting && selection.ids.contains(id))
+            }
+            refreshHeaders()
         }
         selectPan.isEnabled = new.selecting
         holdDrag.isEnabled = new.selecting
@@ -265,15 +274,63 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     /// New items (a filter, the library changed): the item in view stays where it is on screen, or
     /// the newest end stays in view.
-    private func apply(data new: GridData, version: Int) {
+    private func apply(data new: GridData, version: Int, change: GridChange) {
+        let started = CACurrentMediaTime()
+        let signpost = PerfMonitor.signposter.beginInterval("GridApply")
+        defer {
+            PerfMonitor.signposter.endInterval("GridApply", signpost)
+            RenderProbe.sample("GridApply", milliseconds: (CACurrentMediaTime() - started) * 1000)
+        }
+        let old = data
+        if let viewer = presentedViewer, let position = old.positions[viewer.state.shown],
+           new.ids.indices.contains(position),
+           new.cells[position].original == viewer.state.shown || old.cells[position].original == new.ids[position] {
+            viewer.state.shown = new.ids[position]
+        }
+        presentedViewer?.state.ids = new.ids
+        if case .swap(let positions) = change {
+            data = new
+            dataVersion = version
+            thumbnails.retarget(order: new.ids, positions: new.positions)
+            RenderProbe.count("grid.swaps", by: positions.count)
+            for position in positions {
+                let path = indexPath(of: position)
+                guard let cell = collectionView.cellForItem(at: path) as? GridCell else { continue }
+                let id = new.ids[position]
+                cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels, keepImage: true)
+                update(cell, position: position)
+            }
+            releaseInBackground(old)
+            return
+        }
         let place = turning ?? currentPlace()
         resizeAnchor = nil
         held = nil
-        let old = data
+        if case .batch(let batch) = change {
+            RenderProbe.count("grid.batches")
+            thumbnails.retarget(order: new.ids, positions: new.positions)
+            lastPreheat = nil
+            UIView.performWithoutAnimation {
+                collectionView.performBatchUpdates {
+                    data = new
+                    dataVersion = version
+                    layout.geometry = GridGeometry(metrics: layout.geometry.metrics, months: new.sections.map(\.range.count))
+                    collectionView.deleteSections(batch.deletedSections)
+                    collectionView.insertSections(batch.insertedSections)
+                    collectionView.deleteItems(at: batch.deleted)
+                    collectionView.insertItems(at: batch.inserted)
+                }
+                restore(place, old: old)
+            }
+            refreshHeaders()
+            releaseInBackground(old)
+            publishProbe()
+            return
+        }
         data = new
-        presentedViewer?.state.ids = new.ids
         dataVersion = version
         layout.geometry = GridGeometry(metrics: layout.geometry.metrics, months: new.sections.map(\.range.count))
+        RenderProbe.count("grid.reloads")
         collectionView.reloadData()
         thumbnails.reset(order: new.ids, pixels: pixels)
         lastPreheat = nil
@@ -283,6 +340,59 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         }
         releaseInBackground(old)
         publishProbe()
+    }
+
+    private func watchData() {
+        withObservationTracking {
+            _ = store.version
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                for (data, change, version) in store.takeUpdates(after: dataVersion) {
+                    apply(data: data, version: version, change: change)
+                }
+                watchData()
+            }
+        }
+    }
+
+    private func watchState() {
+        withObservationTracking {
+            _ = library.state
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                stateChanged()
+                watchState()
+            }
+        }
+    }
+
+    private func stateChanged() {
+        let started = CACurrentMediaTime()
+        let signpost = PerfMonitor.signposter.beginInterval("GridApply")
+        defer {
+            PerfMonitor.signposter.endInterval("GridApply", signpost)
+            RenderProbe.sample("GridApply", milliseconds: (CACurrentMediaTime() - started) * 1000)
+        }
+        guard let ids = library.takeChangedIDs() else { return refreshVisible() }
+        for id in ids {
+            guard library.state.cell(id) != nil, let position = data.positions[id],
+                  let cell = collectionView.cellForItem(at: indexPath(of: position)) as? GridCell else { continue }
+            update(cell, position: position)
+        }
+    }
+
+    private func watchCounts() {
+        withObservationTracking {
+            _ = counts.version
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                refreshHeaders(sections: counts.takeChangedSections())
+                watchCounts()
+            }
+        }
     }
 
     // MARK: Geometry
@@ -304,6 +414,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     override func viewWillLayoutSubviews() {
+        RenderProbe.count("grid.layouts")
         super.viewWillLayoutSubviews()
         relayout()
         let notice = CGRect(x: 0, y: 0, width: layout.geometry.metrics.width, height: noticeHeight)
@@ -485,12 +596,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     private func configure(_ cell: GridCell?, at indexPath: IndexPath?) {
         guard let cell, let indexPath, let position = position(indexPath) else { return }
+        RenderProbe.count("grid.configs")
         let id = data.cells[position].id
         cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
         update(cell, position: position)
     }
 
     private func update(_ cell: GridCell, position: Int) {
+        RenderProbe.count("grid.configs")
         let initial = data.cells[position]
         let state = library.state.cell(initial.id) ?? initial
         cell.update(state: state, selecting: selection.active, selected: selection.active && selection.ids.contains(initial.id),
@@ -557,8 +670,12 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         for case let cell as GridCell in collectionView.visibleCells {
             if let indexPath = collectionView.indexPath(for: cell), let position = position(indexPath) { update(cell, position: position) }
         }
+        refreshHeaders()
+    }
+
+    private func refreshHeaders(sections: Set<Int>? = nil) {
         for indexPath in collectionView.indexPathsForVisibleSupplementaryElements(ofKind: GridLayout.headerKind)
-            where indexPath.section < data.sections.count {
+            where indexPath.section < data.sections.count && (sections == nil || sections!.contains(data.sections[indexPath.section].id)) {
             if let header = collectionView.supplementaryView(forElementKind: GridLayout.headerKind, at: indexPath) as? MonthHeaderView {
                 configure(header, month: indexPath.section)
             }

@@ -12,37 +12,15 @@ struct StatusAccessoryModifier: ViewModifier {
     let open: (StatusAccessory.Action) -> Void
     @State private var layout = AccessoryLayout()
     @State private var height: CGFloat = 0
+    @State private var visible = false
 
     func body(content: Content) -> some View {
-        let status = AccessoryLadder.pick(model.library.accessoryInputs)
-        let visible = status != nil && !model.library.isSelecting
+        let _ = RenderProbe.count("render.accessory")
         content
-            .environment(\.statusAccessoryInset, visible ? height + 8 : 0)
+            .environment(\.statusAccessoryInset, visible && height > 0 ? height + 8 : 0)
             .onChange(of: visible) { _, visible in if !visible { layout = AccessoryLayout() } }
             .overlay {
-                GeometryReader { proxy in
-                    let bounds = CGRect(origin: .zero, size: proxy.size).inset(by: layout.insets)
-                    let width = min(640, max(0, bounds.width - 24))
-                    ZStack(alignment: .topLeading) {
-                        if visible {
-                            AccessoryInsets { layout = $0 }.allowsHitTesting(false)
-                        }
-                        if visible, bounds.width > 0, bounds.height > 100 {
-                            VStack(spacing: 0) {
-                                Spacer(minLength: 0)
-                                StatusAccessorySurface(status: status, serverName: model.library.serverName,
-                                                       width: width, open: open)
-                                    // A sidebar changes the available width without resizing the window.
-                                    .id([proxy.size.width, proxy.size.height, width])
-                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-                            }
-                            .frame(width: bounds.width, height: bounds.height)
-                            .offset(x: bounds.minX, y: bounds.minY - 8)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                }
-                .ignoresSafeArea()
+                AccessoryContent(model: model, open: open, layout: $layout, height: $height, visible: $visible)
             }
     }
 }
@@ -56,6 +34,43 @@ struct StatusAccessorySurface: View {
     var body: some View {
         StatusAccessory(status: status, serverName: serverName, width: width, open: open)
             .glassEffect(.regular, in: .rect(cornerRadius: 24))
+    }
+}
+
+private struct AccessoryContent: View {
+    let model: AppModel
+    let open: (StatusAccessory.Action) -> Void
+    @Binding var layout: AccessoryLayout
+    @Binding var height: CGFloat
+    @Binding var visible: Bool
+
+    var body: some View {
+        let status = AccessoryLadder.pick(model.library.accessoryInputs)
+        let shown = status != nil && !model.library.isSelecting
+        GeometryReader { proxy in
+            let bounds = CGRect(origin: .zero, size: proxy.size).inset(by: layout.insets)
+            let width = min(640, max(0, bounds.width - 24))
+            ZStack(alignment: .topLeading) {
+                if shown {
+                    AccessoryInsets { layout = $0 }.allowsHitTesting(false)
+                }
+                if shown, bounds.width > 0, bounds.height > 100 {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        StatusAccessorySurface(status: status, serverName: model.library.serverName,
+                                               width: width, open: open)
+                            // A sidebar changes the available width without resizing the window.
+                            .id([proxy.size.width, proxy.size.height, width])
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+                    }
+                    .frame(width: bounds.width, height: bounds.height)
+                    .offset(x: bounds.minX, y: bounds.minY - 8)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .ignoresSafeArea()
+        .onChange(of: shown, initial: true) { _, shown in visible = shown }
     }
 }
 
