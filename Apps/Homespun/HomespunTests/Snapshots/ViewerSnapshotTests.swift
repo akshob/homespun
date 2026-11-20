@@ -52,8 +52,8 @@ extension SnapshotTests {
             defer { world.close() }
             let state = ItemViewerState(ids: [sample.id], start: sample.id, details: false)
             state.zoomed = sample.zoomed
-            let viewer = ItemViewerScreen(model: world.model, state: state, showsTips: false,
-                                          mediaPresentation: .poster, clock: SnapshotWorld.clock)
+            let viewer = ItemViewerNavigation(model: world.model, state: state, freeUp: { _ in })
+                .tint(Theme.accent)
             let cell = try #require(world.library.library.state.cell(sample.id))
             let details = sample.details ? await ItemDetails.load(model: world.model, cell: cell) : nil
             let wide = sample.variant.device == .duoInnerPortrait || sample.variant.device == .duoInnerLandscape

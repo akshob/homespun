@@ -180,6 +180,8 @@ Details references draw the real viewer and `ItemDetailsPanel` content in a 400-
 on regular layouts, or the real panel alone on compact layouts. The host phone's system
 inspector adaptation is not a virtual Duo: actual inspector presentation/resize transitions
 remain in XCUI. Numeric checks measure the rendered app-content pane frames.
+The production screen and snapshots share `ItemViewerNavigation`; reference rendering does
+not construct the system inspector wrapper that is excluded from appearance coverage.
 
 The perceptual diff rejects a size change, more than 0.05% of pixels with ΔE > 2.3, or any
 pixel with ΔE > 15. A complete suite has a 180-second budget including fixture setup,

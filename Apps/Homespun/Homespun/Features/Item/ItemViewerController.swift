@@ -111,16 +111,12 @@ struct ItemViewerScreen: View {
     let model: AppModel
     let state: ItemViewerState
     let showsTips: Bool
-    var mediaPresentation = MediaPresentation.interactive
-    var clock = AppClock.live
     @State private var freeUp: FreeUpRequest?
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        NavigationStack {
-            ItemViewer(model: model, state: state) {
-                freeUp = FreeUpRequest(scope: $0, wide: sizeClass == .regular)
-            }
+        ItemViewerNavigation(model: model, state: state) {
+            freeUp = FreeUpRequest(scope: $0, wide: sizeClass == .regular)
         }
         .inspector(isPresented: Binding(get: { state.details != nil }, set: { if !$0 { state.details = nil } })) {
             if let id = state.details {
@@ -130,13 +126,20 @@ struct ItemViewerScreen: View {
         }
         .modifier(FreeUpPresentation(model: model, request: $freeUp))
         .environment(\.showsTips, showsTips)
-        .environment(\.mediaPresentation, mediaPresentation)
-        .environment(\.appClock, clock)
-        .environment(\.locale, clock.locale).environment(\.calendar, clock.calendar).environment(\.timeZone, clock.timeZone)
-        .transaction { if mediaPresentation == .poster { $0.disablesAnimations = true; $0.animation = nil } }
         .defaultAppStorage(model.settings.defaults)
         .tint(Theme.accent)
         // The performance report must remain reachable while the app behind is covered.
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
+    }
+
+}
+
+struct ItemViewerNavigation: View {
+    let model: AppModel
+    let state: ItemViewerState
+    var freeUp: (Set<String>?) -> Void
+
+    var body: some View {
+        NavigationStack { ItemViewer(model: model, state: state, freeUp: freeUp) }
     }
 }
