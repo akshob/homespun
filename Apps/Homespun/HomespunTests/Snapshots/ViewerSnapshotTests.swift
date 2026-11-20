@@ -109,7 +109,7 @@ extension SnapshotTests {
             var viewport = pager.bounds
             viewport.size.width -= ItemPagerController.gap
             let photoFrame = pager.convert(viewport, to: view)
-            let detailsFrame = details.convert(details.bounds.inset(by: details.adjustedContentInset), to: view)
+            let detailsFrame = details.convert(details.bounds, to: view).intersection(view.safeAreaLayoutGuide.layoutFrame)
             guard photoFrame.width > 200, detailsFrame.width >= 260, detailsFrame.width <= 420,
                   photoFrame.maxX <= detailsFrame.minX + 1,
                   abs(photoFrame.midY - detailsFrame.midY) < view.bounds.height / 3 else {

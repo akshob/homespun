@@ -184,6 +184,8 @@ remain in XCUI. Numeric checks measure the rendered app-content pane frames.
 The perceptual diff rejects a size change, more than 0.05% of pixels with ΔE > 2.3, or any
 pixel with ΔE > 15. A complete suite has a 180-second budget including fixture setup,
 rendering and comparison; the job summary reports it and warns for references above 300 KB.
+Full-precision Core Image maximum/threshold/average reductions and heatmaps avoid Debug
+Swift per-pixel loops; exact pixel buffers use a byte-equality fast path.
 On failure, `snapshots-failed-<run>` contains reference/actual/magenta-diff PNGs and JSON
 metrics, linked from the summary. Fixture files live under `ci-results/snapshot-state` and
 are removed by their tests.

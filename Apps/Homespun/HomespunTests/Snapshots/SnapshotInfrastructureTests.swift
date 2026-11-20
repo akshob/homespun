@@ -16,6 +16,7 @@ struct SnapshotInfrastructureTests {
         let difference = try SnapshotDiff.compare(sparse, to: white)
         #expect(!difference.passed)
         #expect(try #require(difference.changedFraction) < 0.0005)
+        #expect(abs(try #require(difference.changedFraction) - 1.0 / (128 * 128)) < 0.000001)
         #expect(try #require(difference.maximumDeltaE) > 90)
         #expect(difference.difference != nil)
         #expect(try SnapshotDiff.compare(sparse, to: white, tolerance: .init(maximum: 101)).passed)

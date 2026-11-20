@@ -76,6 +76,7 @@ enum SnapshotDiff {
 
     private static let context = CIContext(options: [
         .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
+        .workingFormat: CIFormat.RGBAf.rawValue,
         .cacheIntermediates: false,
     ])
 
@@ -101,42 +102,60 @@ enum SnapshotDiff {
         filter.inputImage = CIImage(cgImage: actual)
         filter.image2 = CIImage(cgImage: reference)
         guard let image = filter.outputImage else { throw SnapshotFailure("Lab ΔE filter is unavailable") }
-        var values = [Float](repeating: 0, count: width * height)
-        values.withUnsafeMutableBytes { bytes in
-            context.render(image, toBitmap: bytes.baseAddress!, rowBytes: width * MemoryLayout<Float>.size,
-                           bounds: rect, format: .Rf, colorSpace: nil)
-        }
-        var changed = 0, maximum: Float = 0
-        for value in values {
-            guard value.isFinite else { throw SnapshotFailure("Non-finite Lab ΔE in snapshot comparison") }
-            if value > tolerance.deltaE { changed += 1 }
-            maximum = max(maximum, value)
-        }
-        let fraction = Double(changed) / Double(values.count)
+        let maximumFilter = CIFilter.areaMaximum()
+        maximumFilter.inputImage = image
+        maximumFilter.extent = rect
+        guard let maximumImage = maximumFilter.outputImage else { throw SnapshotFailure("Missing maximum ΔE") }
+        let maximum = scalar(maximumImage)
+        let gray = CIFilter.colorMatrix()
+        // Lab ΔE carries its scalar in alpha too; color matrices unpremultiply inputs.
+        gray.inputImage = image.premultiplyingAlpha()
+        let red = CIVector(x: 0.01, y: 0, z: 0, w: 0)
+        gray.rVector = red
+        gray.gVector = red
+        gray.bVector = red
+        gray.aVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+        gray.biasVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+        let threshold = CIFilter.colorThreshold()
+        threshold.inputImage = gray.outputImage
+        threshold.threshold = tolerance.deltaE / 100
+        guard let thresholdImage = threshold.outputImage else { throw SnapshotFailure("Missing ΔE threshold mask") }
+        let mask = thresholdImage.cropped(to: rect)
+        let average = CIFilter.areaAverage()
+        average.inputImage = mask
+        average.extent = rect
+        guard let averageImage = average.outputImage else { throw SnapshotFailure("Missing changed-pixel fraction") }
+        let fraction = Double(scalar(averageImage))
+        guard maximum.isFinite, fraction.isFinite else { throw SnapshotFailure("Non-finite Lab ΔE in snapshot comparison") }
         let passed = fraction <= tolerance.fraction && maximum <= tolerance.maximum
         return Result(sizeMatches: true, changedFraction: fraction, maximumDeltaE: Double(maximum), passed: passed,
-                      difference: passed ? nil : try heatmap(actual, values: values, threshold: tolerance.deltaE))
+                      difference: passed ? nil : try heatmap(actual, mask: mask))
     }
 
-    private static func heatmap(_ actual: CGImage, values: [Float], threshold: Float) throws -> CGImage {
-        let context = try SnapshotImage.context(width: actual.width, height: actual.height)
-        context.draw(actual, in: CGRect(x: 0, y: 0, width: actual.width, height: actual.height))
-        guard let data = context.data else { throw SnapshotFailure("Could not draw snapshot difference") }
-        let pixels = data.bindMemory(to: UInt8.self, capacity: values.count * 4)
-        for (index, value) in values.enumerated() {
-            let offset = index * 4
-            if value > threshold {
-                pixels[offset] = 255
-                pixels[offset + 1] = 0
-                pixels[offset + 2] = 255
-            } else {
-                pixels[offset] /= 4
-                pixels[offset + 1] /= 4
-                pixels[offset + 2] /= 4
-            }
-            pixels[offset + 3] = 255
+    private static func scalar(_ image: CIImage) -> Float {
+        var value: Float = 0
+        withUnsafeMutableBytes(of: &value) { bytes in
+            context.render(image, toBitmap: bytes.baseAddress!, rowBytes: MemoryLayout<Float>.size,
+                           bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .Rf, colorSpace: nil)
         }
-        guard let image = context.makeImage() else { throw SnapshotFailure("Could not encode snapshot difference") }
+        return value
+    }
+
+    private static func heatmap(_ actual: CGImage, mask: CIImage) throws -> CGImage {
+        let rect = CGRect(x: 0, y: 0, width: actual.width, height: actual.height)
+        let dim = CIFilter.colorMatrix()
+        dim.inputImage = CIImage(cgImage: actual)
+        dim.rVector = CIVector(x: 0.25, y: 0, z: 0, w: 0)
+        dim.gVector = CIVector(x: 0, y: 0.25, z: 0, w: 0)
+        dim.bVector = CIVector(x: 0, y: 0, z: 0.25, w: 0)
+        let blend = CIFilter.blendWithMask()
+        blend.inputImage = CIImage(color: CIColor(red: 1, green: 0, blue: 1)).cropped(to: rect)
+        blend.backgroundImage = dim.outputImage
+        blend.maskImage = mask
+        guard let output = blend.outputImage,
+              let image = context.createCGImage(output, from: rect, format: .RGBA8, colorSpace: SnapshotImage.colorSpace) else {
+            throw SnapshotFailure("Could not encode snapshot difference")
+        }
         return image
     }
 }
