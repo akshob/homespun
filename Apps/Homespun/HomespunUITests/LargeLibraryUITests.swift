@@ -29,7 +29,7 @@ final class LargeLibraryUITests: XCTestCase {
         // Swipe back through older items.
         let viewer = app.descendants(matching: .any)["item.viewer"]
         let swiped = Date()
-        for _ in 0..<12 { viewer.swipeRight() }
+        for _ in 0..<12 { app.pageItem(older: true) }
         XCTAssertTrue(state.waitForExistence(timeout: 5), "the viewer stopped answering")
         print("12 swipes in \(String(format: "%.1f", Date().timeIntervalSince(swiped))) s")
         XCTAssertLessThan(Date().timeIntervalSince(swiped), 40)

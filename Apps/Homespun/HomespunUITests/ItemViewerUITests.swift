@@ -24,7 +24,7 @@ final class ItemViewerUITests: XCTestCase {
         guard let address = server, let code = environment["HOMESPUN_PAIRING_CODE"] else {
             throw XCTSkip("Set HOMESPUN_SERVER and HOMESPUN_PAIRING_CODE to run against a server.")
         }
-        let app = launch()
+        let app = launch(["-releaseFeatures", "YES"])
         app.pair(address: address, code: code)
         if app.gridItems("Ready to free up").count < 2 { _ = app.compactNewest(2) }
 
@@ -55,6 +55,7 @@ final class ItemViewerUITests: XCTestCase {
         let original = app.staticTexts["compare.original"], compact = app.staticTexts["compare.compact"]
         XCTAssertTrue(original.waitForExistence(timeout: 30), "the original didn't load")
         XCTAssertTrue(compact.waitForExistence(timeout: 30), "the compact copy didn't load")
+        XCTAssertFalse(app.tab("Library").isHittable, "the tab bar is reachable through Compare")
         XCTAssertTrue(original.label.contains("on this iPhone"), original.label)
         let split = app.descendants(matching: .any)["compare.split"]
         XCTAssertEqual(split.value as? String, "Split at 50 percent")
@@ -73,17 +74,39 @@ final class ItemViewerUITests: XCTestCase {
         // Swipe back to the item before it: not backed up, with Back Up.
         XCTAssertTrue(state.waitForExistence(timeout: 5))
         let viewer = app.descendants(matching: .any)["item.viewer"]
-        viewer.swipeRight()
+        app.pageItem(older: true)
         XCTAssertTrue(waitFor(state, label: "Not backed up · only on this iPhone"), state.label)
         XCTAssertTrue(app.buttons["item.action"].label.contains("Back Up"))
         XCTAssertFalse(app.buttons["item.compare"].exists)
         attach(app, "Swiped to an item not backed up")
-        viewer.swipeLeft()
+        app.pageItem(older: false)
         XCTAssertTrue(waitFor(state, prefix: "Ready to free up"), state.label)
         // Double-tap zooms; the state line steps aside while zoomed.
         app.shownPage().doubleTap()
         XCTAssertTrue(state.waitForNonExistence(timeout: 5), "the state line stayed over a zoomed photo")
         attach(app, "Zoomed")
+        app.goBack()
+        let library = app.tab("Library")
+        XCTAssertTrue(library.waitForExistence(timeout: 0.2), "the tabs disappeared while the viewer closed")
+        if app.tabBars.firstMatch.exists { XCTAssertTrue(library.isHittable) }
+        let screen = app.windows.firstMatch.frame
+        guard let item = app.gridItems().allElementsBoundByIndex.first(where: {
+            app.isOnScreen($0) && $0.frame.minY > screen.minY + 150 && $0.frame.maxY < screen.maxY - 150
+        }) else {
+            return XCTFail("no item for Show Details")
+        }
+        item.press(forDuration: 0.7)
+        app.buttons["Show Details"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["details.list"].waitForExistence(timeout: 5),
+                      "Show Details didn't open the viewer's inspector")
+        app.buttons["details.done"].tap()
+        app.goBack()
+        XCTAssertTrue(library.waitForExistence(timeout: 0.2), "the tabs disappeared after Show Details")
+        XCTAssertTrue(open(item, app))
+        app.open(URL(string: "homespun://activity")!)
+        XCTAssertTrue(viewer.waitForNonExistence(timeout: 5), "an app link left the viewer over the app")
+        XCTAssertTrue(app.hasScreen("Activity"))
+        app.openTab("Library")
     }
 
     /// Frees one original from the viewer, then Compare downloads it from the server.

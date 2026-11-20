@@ -35,9 +35,16 @@ final class ItemPagingUITests: XCTestCase {
             XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label),
                                                           object: play)], timeout: 8) == .completed
         }
-        XCTAssertTrue(labeled("Pause"), "the video didn't autoplay")
-        XCTAssertTrue(labeled("Play"), "the video didn't end")
         let position = app.sliders["item.position"]
+        let autoplayed = NSPredicate { _, _ in
+            // A short clip can finish during a snapshot, before XCTest observes its Pause label.
+            let elapsed = (position.value as? String ?? "").split(separator: " ").first ?? ""
+            let parts = elapsed.split(separator: ":").compactMap { Int($0) }
+            return (parts.count >= 2 && parts.contains { $0 > 0 }) || play.label == "Pause"
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: autoplayed, object: nil)], timeout: 8),
+                       .completed, "the video didn't autoplay")
+        XCTAssertTrue(labeled("Play"), "the video didn't end")
         let ended = position.value as? String ?? ""
         XCTAssertTrue(ended.hasPrefix("0:03") || ended.hasPrefix("0:02"), "no progress: \(ended)")
         play.tap()
@@ -76,7 +83,7 @@ final class ItemPagingUITests: XCTestCase {
         check(app, viewer, at: opened.index, "opened")
         // On to the newest (its cell can be under the bars), the newest photos (`EXTRA=`) behind it.
         while opened.index < opened.count {
-            viewer.swipeLeft()
+            app.pageItem(older: false)
             opened.index += 1
             check(app, viewer, at: opened.index, "to the newest, \(opened.index)")
         }
@@ -84,16 +91,16 @@ final class ItemPagingUITests: XCTestCase {
 
         // Five older items, one at a time, then back to the newest.
         for step in 1...5 {
-            viewer.swipeRight()
+            app.pageItem(older: true)
             check(app, viewer, at: opened.index - step, "\(step) back")
         }
         for step in (0..<5).reversed() {
-            viewer.swipeLeft()
+            app.pageItem(older: false)
             check(app, viewer, at: opened.index - step, "\(5 - step) forward")
         }
         // Another item than the one opened, then other sizes: the same item stays.
-        viewer.swipeRight()
-        viewer.swipeRight()
+        app.pageItem(older: true)
+        app.pageItem(older: true)
         let shown = opened.index - 2
         check(app, viewer, at: shown, "2 back")
         if let poses {
@@ -108,20 +115,35 @@ final class ItemPagingUITests: XCTestCase {
                 check(app, viewer, at: shown, name)
             }
         }
-        viewer.swipeLeft()
+        app.pageItem(older: false)
         check(app, viewer, at: shown + 1, "after turning, 1 forward")
 
         // Zoomed in, a swipe pans the photo instead of paging; zoomed out, it pages again.
         let state = app.staticTexts["item.state"]
         XCTAssertTrue(state.waitForExistence(timeout: 5), "no state line")
-        app.shownPage().doubleTap()
+        func doubleTapVisiblePicture() {
+            let window = app.windows.firstMatch, screen = window.frame
+            let visible = app.shownPage().frame.intersection(viewer.frame).intersection(screen)
+            XCTAssertFalse(visible.isEmpty, "no visible picture to double-tap")
+            // Panning can put the full image's accessibility centre under the toolbar.
+            window.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: visible.midX - screen.minX, dy: visible.midY - screen.minY)).doubleTap()
+        }
+        doubleTapVisiblePicture()
         XCTAssertTrue(state.waitForNonExistence(timeout: 5), "didn't zoom in")
         viewer.swipeRight()
         sleep(1)
         XCTAssertEqual(position(viewer)?.index, shown + 1, "a swipe paged while zoomed in")
-        app.shownPage().doubleTap()
+        viewer.swipeDown()
+        XCTAssertTrue(viewer.exists, "a downward pan dismissed a zoomed photo")
+        XCTAssertEqual(position(viewer)?.index, shown + 1)
+        doubleTapVisiblePicture()
         XCTAssertTrue(state.waitForExistence(timeout: 5), "didn't zoom out")
-        viewer.swipeRight()
+        let start = viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 35)),
+                    withVelocity: .slow, thenHoldForDuration: 0.4)
+        XCTAssertTrue(viewer.exists, "a short downward drag didn't cancel")
+        app.pageItem(older: true)
         check(app, viewer, at: shown, "zoomed out, 1 back")
     }
 

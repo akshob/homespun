@@ -510,14 +510,13 @@ struct CompareView: View {
     }
 }
 
-/// Compare on its own screen: its title, no tabs, the status accessory out of the way. Part of
-/// another screen, that screen has them.
+/// Compare on its own screen supplies its title; embedded Compare uses its parent's title.
 private struct CompareScreen: ViewModifier {
     let standalone: Bool
 
     func body(content: Content) -> some View {
         if standalone {
-            content.navigationTitle("Compare").navigationBarTitleDisplayMode(.inline).toolbar(.hidden, for: .tabBar).itemScreen()
+            content.navigationTitle("Compare").navigationBarTitleDisplayMode(.inline)
         } else {
             content
         }

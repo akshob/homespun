@@ -83,6 +83,16 @@ The app build also archives a `HomespunReleaseScope` test manifest. `unit.sh` ru
 off after the normal feature-enabled units, without resolving packages again. The quick iPhone lane
 includes the release-scope UI regression; the full iPhone lane keeps all purchase/deep-link tests.
 `WidgetGalleryUITests` remains opt-in for screenshots, using the `--testing` project and Debug opt-in.
+
+`ui.sh` also exposes its isolated server's control file to UI tests. Writing `offline` or `online`
+stops or restarts that test server; the matching `.ack` file confirms completion. The Library's
+status-layout regression uses it at the newest end and mid-scroll, on iPhone and in the Duo poses.
+Its Debug-only `-probeServerStatus` launch argument checks the real server every five seconds without
+leaving the Library, so foregrounding or changing tabs cannot hide an inset jump.
+Demo cancellation checks use Debug-only `-holdDemoPreparation`: the first preparation stays on its
+loading page until cancelled, even if media finishes during an accessibility snapshot. A retry in
+the same process runs normally, so these checks still verify media reuse and successful entry.
+
 Test servers accept only HTTPS. Readiness probes derive an SPKI pin from that test server's
 `tls/certificate.pem` and use `curl -k --pinnedpubkey`; port-occupancy checks are tokenless HTTPS
 probes. Pairing links carry `fp=`, and address-and-code runs authenticate the server's code proof.
@@ -91,7 +101,8 @@ Xcode); writing `rotate-key` there rotates only that run's temporary server key.
 The address-recovery test uses `wrong-key-port` and `move-port`: it first refuses a separate-key
 server, then restarts the original data/key on the lane's port plus 1000. A DEBUG-only candidate
 list simulates Bonjour results in the simulator, but the TLS pin probe is real and cannot be
-bypassed. The harness tracks the current server PID so every restarted server is stopped.
+bypassed. One supervisor owns both the online/offline controls and these host actions, tracking
+the current server PID, data and port so every restarted server is stopped.
 The pairing-retention UI test renames this iPhone, unpairs and pairs again with a fresh code
 from the `pairing-code` host action. It checks the confirmed name and one active Devices row.
 
@@ -128,6 +139,8 @@ only the macOS package job at the new head. This avoids repeating a full passing
 GitHub's Re-run Job otherwise checks out the original, immutable commit. Package failures
 keep their complete log in the `package-results-<run>` artifact.
 After a lane-only fix, use its targeted input to validate it without repeating the full matrix.
+GitHub's job rerun includes dependencies; jobs inside the reusable suite can rerun other suite jobs
+too. Prefer the targeted workflow input (for example `ui=duo-open`) for a lane-only follow-up.
 
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).

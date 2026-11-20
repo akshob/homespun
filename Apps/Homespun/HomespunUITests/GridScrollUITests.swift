@@ -15,11 +15,12 @@ final class GridScrollUITests: XCTestCase {
     /// On iPhone Duo with poses (`ci/ui.sh` with `DUO_POSES=1`): the file `ui.sh` watches to fold and turn it.
     private let poses = ProcessInfo.processInfo.environment["DUO_POSE_FILE"]
 
-    @MainActor private func launch() throws {
+    @MainActor private func launch(checkServer: Bool = false) throws {
         // Folded, where XCTest's gestures reach the app.
         pose("folded")
         app = XCUIApplication()
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips", "YES", "-perfMonitor", "YES"]
+        if checkServer { app.launchArguments.append("-probeServerStatus") }
         app.launch()
         XCTAssertTrue(app.gridItems().firstMatch.waitForExistence(timeout: 30), "no photos in the Library")
         XCTAssertTrue(app.descendants(matching: .any)["perf.monitor"].waitForExistence(timeout: 10), "no grid report")
@@ -148,9 +149,160 @@ final class GridScrollUITests: XCTestCase {
         }
     }
 
+    @MainActor func testTheTabsStayWhileTheViewerCloses() throws {
+        try launch()
+        _ = try settled()
+        for name in poses == nil ? ["iPhone"] : ["landscape", "portrait", "folded"] {
+            if poses != nil {
+                pose(name)
+                XCTAssertTrue(waitForWindow {
+                    name == "folded" ? $0.width < 500 : $0.width > 500 && ($0.width > $0.height) == (name == "landscape")
+                })
+                sleep(3)
+            }
+            for _ in 0..<2 { app.tab("Library").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+            _ = try settled()
+
+            for close in ["Back", "Swipe", "Paged"] {
+                let frames = app.tabFrames(), before = report()
+                XCTAssertEqual(frames.count, 3, "\(name): missing tabs before opening")
+                let screen = app.windows.firstMatch.frame
+                let cells = app.gridItems().allElementsBoundByIndex.filter {
+                    $0.frame.minY > screen.minY + 150 && $0.frame.maxY < screen.maxY - 150 && app.isOnScreen($0)
+                }
+                let target = close == "Paged"
+                    ? cells.min(by: { ($0.frame.minY, $0.frame.minX) < ($1.frame.minY, $1.frame.minX) })
+                    : cells.dropFirst(cells.count / 2).first
+                guard let cell = target else { return XCTFail("no cell to open") }
+                cell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+                let viewer = app.descendants(matching: .any)["item.viewer"].firstMatch
+                XCTAssertTrue(viewer.waitForExistence(timeout: 8))
+                sleep(1)
+                if close == "Paged" {
+                    for _ in 0..<Int(before.value("grid.columns")) * 2 + 1 {
+                        var attempts = 0
+                        app.pageItem(older: true) {
+                            attempts += 1
+                            if self.poses != nil, screen.width > 500, attempts == 2 {
+                                self.pose("swipe \(screen.width * 0.2) \(screen.height * 0.35) \(screen.width * 0.8) \(screen.height * 0.35)")
+                            } else {
+                                viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.35))
+                                    .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.35)),
+                                           withVelocity: .fast, thenHoldForDuration: 0)
+                            }
+                        }
+                    }
+                    sleep(1)
+                    let paged = report()
+                    XCTAssertLessThan(paged.value("grid.shown"), before.value("grid.first"), "paging didn't leave the original screen")
+                    XCTAssertEqual(paged.value("grid.zoom"), paged.value("grid.shown"), "closing would zoom into the wrong cell")
+                }
+                if close == "Swipe" {
+                    viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.3))
+                        .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.85)))
+                    if poses != nil, screen.width > 500, !viewer.waitForNonExistence(timeout: 1) {
+                        pose("swipe \(screen.width * 0.3) \(screen.height * 0.3) \(screen.width * 0.3) \(screen.height * 0.85)")
+                    }
+                } else {
+                    app.goBack()
+                }
+                let deadline = Date().addingTimeInterval(1.5)
+                repeat {
+                    app.assertTabFrames(frames)
+                } while Date() < deadline
+                XCTAssertTrue(viewer.waitForNonExistence(timeout: 3))
+                let after = report()
+                print("BEHIND \(name) \(close): changes=\(after.value("behind.changes")) samples=\(after.value("behind.samples"))")
+                print("BEHIND deltas: \(after.values.filter { $0.key.hasPrefix("behind.") })")
+                XCTAssertEqual(after.value("behind.changes"), 0, "\(name), \(close): the app behind the viewer changed")
+                XCTAssertGreaterThan(after.value("behind.samples"), 10)
+                XCTAssertGreaterThanOrEqual(after.value("grid.source"), 0, "the zoom didn't have a real cell to land in")
+                XCTAssertEqual(after.value("grid.bounces"), before.value("grid.bounces"))
+                XCTAssertEqual(after.value("grid.jumps"), before.value("grid.jumps"))
+                if close != "Paged" {
+                    XCTAssertEqual(after.value("grid.offset"), before.value("grid.offset"), accuracy: 1)
+                }
+            }
+        }
+    }
+
+    @MainActor func testServerStatusDoesNotMoveTheLibrary() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let control = environment["SERVER_CONTROL_FILE"], let address = environment["HOMESPUN_SERVER"],
+              let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Needs ci/ui.sh's stoppable test server.")
+        }
+        addTeardownBlock {
+            try "online".write(toFile: control, atomically: true, encoding: .utf8)
+            for _ in 0..<200 {
+                if (try? String(contentsOfFile: control + ".ack", encoding: .utf8))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == "online" { return }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            XCTFail("the test server didn't restart")
+        }
+        try launch(checkServer: true)
+        app.pair(address: address, code: code)
+        app.openTab("Library")
+        _ = try settled()
+        for name in poses == nil ? ["iPhone"] : ["landscape", "portrait", "folded"] {
+            if poses != nil {
+                pose(name)
+                XCTAssertTrue(waitForWindow {
+                    name == "folded" ? $0.width < 500 : $0.width > 500 && ($0.width > $0.height) == (name == "landscape")
+                })
+                sleep(3)
+            }
+            for middle in [false, true] {
+                if middle {
+                    // XCTest's open-Duo swipes are unreliable; scroll folded, then reopen.
+                    if poses != nil { pose("folded"); sleep(3) }
+                    let range = report()
+                    let distance = min(250, (range.value("grid.bottom") - range.value("grid.top")) / 6)
+                    for _ in 0..<3 { drag(by: CGFloat(distance)) }
+                    if poses != nil { pose(name); sleep(3) }
+                } else {
+                    for _ in 0..<2 { app.tab("Library").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() }
+                }
+                _ = try settled()
+                let before = report(), tabs = app.tabFrames()
+                if middle {
+                    XCTAssertGreaterThan(before.value("grid.offset"), before.value("grid.top") + 100)
+                    XCTAssertLessThan(before.value("grid.offset"), before.value("grid.bottom") - 100)
+                } else {
+                    XCTAssertEqual(before.value("grid.offset"), before.value("grid.bottom"), accuracy: 1)
+                }
+                let title = app.screenTitle("Library").frame
+                let cells = app.gridItems().allElementsBoundByIndex.filter { app.isOnScreen($0) }
+                let frames = cells.map(\.frame)
+                for online in [false, true] {
+                    let wanted = online ? "online" : "offline"
+                    try wanted.write(toFile: control, atomically: true, encoding: .utf8)
+                    let deadline = Date().addingTimeInterval(20)
+                    while (try? String(contentsOfFile: control + ".ack", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) != wanted,
+                          Date() < deadline { usleep(100_000) }
+                    XCTAssertEqual((try? String(contentsOfFile: control + ".ack", encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines), wanted)
+                    let unreachable = app.descendants(matching: .any)["accessory.unreachable"].firstMatch
+                    if online {
+                        XCTAssertTrue(unreachable.waitForNonExistence(timeout: 20))
+                    } else {
+                        XCTAssertTrue(unreachable.waitForExistence(timeout: 20))
+                    }
+                    sleep(2)
+                    let after = report()
+                    print("STATUS \(name) middle=\(middle) \(wanted): offset \(before.value("grid.offset")) -> \(after.value("grid.offset"))")
+                    XCTAssertEqual(after.value("grid.offset"), before.value("grid.offset"), accuracy: 0.5)
+                    XCTAssertEqual(after.value("grid.bounces"), before.value("grid.bounces"))
+                    app.assertTabFrames(tabs)
+                    XCTAssertEqual(app.screenTitle("Library").frame, title)
+                    XCTAssertEqual(cells.map(\.frame), frames, "server status moved the visible cells")
+                }
+            }
+        }
+    }
+
     /// Closing an item at the newest end leaves the grid where it was, not even a few frames elsewhere
-    /// (on the open Duo the tab bar the viewer hid comes back a moment after the grid, and its insets
-    /// differ until then). In every pose on iPhone Duo: taps reach the open Duo, swipes don't.
+    /// on the iPhone and in every pose on iPhone Duo.
     @MainActor func testClosingTheViewerAtTheNewestStaysPut() throws {
         try launch()
         _ = try settled()
@@ -204,7 +356,7 @@ final class GridScrollUITests: XCTestCase {
         let viewer = app.descendants(matching: .any)["item.viewer"].firstMatch
         XCTAssertTrue(viewer.waitForExistence(timeout: 8), "the item didn't open")
         // Older items, past the top row: out of the grid's view.
-        for _ in 0..<Int(middle.value("grid.columns")) * 2 + 1 { viewer.swipeRight() }
+        for _ in 0..<Int(middle.value("grid.columns")) * 2 + 1 { app.pageItem(older: true) }
         sleep(2)
         let paged = report()
         let shown = paged.value("grid.shown")
@@ -218,6 +370,7 @@ final class GridScrollUITests: XCTestCase {
         XCTAssertTrue(viewer.waitForNonExistence(timeout: 8), "the viewer didn't close")
         sleep(2)
         let back = report()
+        XCTAssertEqual(back.value("grid.source"), shown, "the zoom didn't return to the real cell of the item shown")
         XCTAssertTrue(back.value("grid.first") <= shown && shown <= back.value("grid.last"),
                       "closed: item \(shown) isn't in view (\(back.value("grid.first"))–\(back.value("grid.last")))")
         XCTAssertEqual(back.value("grid.jumps"), start.value("grid.jumps"))
@@ -315,6 +468,10 @@ final class GridScrollUITests: XCTestCase {
     /// Asks `ui.sh` to fold or turn iPhone Duo (nothing elsewhere), then waits until it has.
     @MainActor private func pose(_ name: String) {
         guard let poses else { return }
+        // A timed-out test can leave the driver finishing a fold. Don't overwrite its request.
+        let prior = Date().addingTimeInterval(90)
+        while FileManager.default.fileExists(atPath: poses), Date() < prior { usleep(250_000) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: poses), "the previous simulator request didn't finish")
         XCTAssertNoThrow(try name.write(toFile: poses, atomically: true, encoding: .utf8))
         let deadline = Date().addingTimeInterval(90)
         while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
@@ -350,7 +507,7 @@ final class GridScrollUITests: XCTestCase {
     /// The grid's report (`perf.monitor`): where it is, its ends, the items in view, jumps, cells without pictures.
     @MainActor private func report() -> Report {
         var values: [String: Double] = [:]
-        for part in app.descendants(matching: .any)["perf.monitor"].label.split(separator: ";") {
+        for part in app.descendants(matching: .any)["perf.monitor"].firstMatch.label.split(separator: ";") {
             let pair = part.split(separator: "=", maxSplits: 1)
             if pair.count == 2, let value = Double(pair[1]) { values[String(pair[0])] = value }
         }

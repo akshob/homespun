@@ -74,6 +74,34 @@ extension XCUIApplication {
         return tabBars.buttons[title]
     }
 
+    @MainActor func tabFrames() -> [String: CGRect] {
+        Dictionary(uniqueKeysWithValues: ["Library", "Activity", "Server"].compactMap {
+            let element = tab($0)
+            return element.exists ? ($0, element.frame) : nil
+        })
+    }
+
+    @MainActor func assertTabFrames(_ before: [String: CGRect], file: StaticString = #filePath, line: UInt = #line) {
+        let now = tabFrames()
+        XCTAssertEqual(Set(now.keys), Set(before.keys), "tabs disappeared", file: file, line: line)
+        for (title, frame) in before {
+            guard let actual = now[title] else { continue }
+            XCTAssertEqual(actual.minX, frame.minX, accuracy: 0.5, title, file: file, line: line)
+            XCTAssertEqual(actual.minY, frame.minY, accuracy: 0.5, title, file: file, line: line)
+            XCTAssertEqual(actual.width, frame.width, accuracy: 0.5, title, file: file, line: line)
+            XCTAssertEqual(actual.height, frame.height, accuracy: 0.5, title, file: file, line: line)
+        }
+    }
+
+    @MainActor func behind() -> (changes: Double, samples: Double) {
+        var values: [String: Double] = [:]
+        for part in descendants(matching: .any)["perf.monitor"].firstMatch.label.split(separator: ";") {
+            let pair = part.split(separator: "=", maxSplits: 1)
+            if pair.count == 2, let value = Double(pair[1]) { values[String(pair[0])] = value }
+        }
+        return (values["behind.changes"] ?? .nan, values["behind.samples"] ?? .nan)
+    }
+
     /// Whether an element is on screen, from its frame (asking whether far-off cells are hittable
     /// fails the test instead of answering).
     @MainActor func isOnScreen(_ element: XCUIElement) -> Bool {
@@ -117,6 +145,10 @@ extension XCUIApplication {
     /// beside it, so without a Back button this does nothing (a bar's first button there is
     /// something else, such as More).
     @MainActor func goBack(from title: String? = nil) {
+        let close = descendants(matching: .any)["item.close"].firstMatch
+        if close.exists {
+            return close.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
         // The strip's buttons on the open Duo say they can't be hit, though they can.
         let strip = descendants(matching: .any)["BackButton"]
         // Relative to the element: screen coordinates are rotated on the open Duo.
@@ -243,7 +275,7 @@ extension XCUIApplication {
     }
 
     /// Whether the Server tab says the server is connected (waits a little), back on Library.
-    @MainActor func isConnected(timeout: TimeInterval = 20) -> Bool {
+    @MainActor func isConnected(timeout: TimeInterval = 30) -> Bool {
         openTab("Server")
         let status = descendants(matching: .any)["server.status"]
         let connected = NSPredicate(format: "label CONTAINS 'Connected' OR value CONTAINS 'Connected'")
@@ -259,6 +291,33 @@ extension XCUIApplication {
         }
         openTab("Library")
         return ok
+    }
+
+    /// A slow simulator can lose a swipe. Observe the page before trying exactly once more.
+    @MainActor func pageItem(older: Bool, file: StaticString = #filePath, line: UInt = #line,
+                             gesture: (() -> Void)? = nil) {
+        let viewer = descendants(matching: .any)["item.viewer"].firstMatch
+        let state = staticTexts["item.state"].firstMatch
+        let before = viewer.value as? String
+        let sentence = state.exists ? state.label : nil
+        let swipe = gesture ?? {
+            let start: CGFloat = older ? 0.2 : 0.8
+            let end: CGFloat = older ? 0.8 : 0.2
+            viewer.coordinate(withNormalizedOffset: CGVector(dx: start, dy: 0.35))
+                .press(forDuration: 0.05, thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: end, dy: 0.35)),
+                       withVelocity: .fast, thenHoldForDuration: 0)
+        }
+        for _ in 0..<2 {
+            swipe()
+            let deadline = Date().addingTimeInterval(4)
+            repeat {
+                if !viewer.exists { return XCTFail("a horizontal swipe closed the viewer", file: file, line: line) }
+                if let before, let shown = viewer.value as? String, shown != before { return }
+                if before == nil, let sentence, state.exists, state.label != sentence { return }
+                usleep(200_000)
+            } while Date() < deadline
+        }
+        XCTFail("the viewer didn't page after two swipes", file: file, line: line)
     }
 
     /// Grid items, optionally only those with this badge (`Badge.label` in the app).
@@ -288,7 +347,7 @@ extension XCUIApplication {
                       file: file, line: line)
         buttons["select.start"].tap()
         // In the grid's order (oldest first).
-        let all = candidates.allElementsBoundByIndex.filter { isOnScreen($0) }
+        let all = candidates.allElementsBoundByIndex.filter { isOnScreen($0) && $0.isHittable }
         let chosen = Array(newest ? all.suffix(min(count, all.count)) : all.prefix(min(count, all.count)))
         for item in chosen { item.tap() }
         XCTAssertTrue(hasScreen("\(chosen.count) Selected", timeout: 5), "selection count",
