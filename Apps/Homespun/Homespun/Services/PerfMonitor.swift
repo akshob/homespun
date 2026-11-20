@@ -47,7 +47,7 @@ final class PerfMonitor {
     private var open: [String: (start: CFTimeInterval, state: OSSignpostIntervalState)] = [:]
     /// Bumped on every change so the hidden label redraws.
     private(set) var version = 0
-    var onChange: (() -> Void)?
+    var observers: [UUID: () -> Void] = [:]
 
     private init() {}
 
@@ -143,7 +143,7 @@ final class PerfMonitor {
 
     private func changed() {
         version += 1
-        onChange?()
+        for observer in observers.values { observer() }
         // Also in a file, for measuring without the UI test runner (which turns accessibility on).
         try? Data(summary.utf8).write(to: URL.documentsDirectory.appendingPathComponent("perf-monitor.txt"))
     }
@@ -289,6 +289,7 @@ final class PerfMonitor {
 /// The monitor's totals in a hidden label the UI tests read (only with `-perfMonitor`).
 struct PerfMonitorLabel: View {
     @State private var text = ""
+    @State private var observer = UUID()
 
     var body: some View {
         if PerfMonitor.shared.enabled {
@@ -301,8 +302,9 @@ struct PerfMonitorLabel: View {
                 .allowsHitTesting(false)
                 .onAppear {
                     text = PerfMonitor.shared.summary
-                    PerfMonitor.shared.onChange = { text = PerfMonitor.shared.summary }
+                    PerfMonitor.shared.observers[observer] = { text = PerfMonitor.shared.summary }
                 }
+                .onDisappear { PerfMonitor.shared.observers.removeValue(forKey: observer) }
         }
     }
 }

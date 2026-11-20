@@ -20,6 +20,7 @@ struct GridInput {
     var density: Int
     /// Bumped to bring the newest items (the Library tab tapped again, Select mode's Newest).
     var newest: Int
+    var accessoryInset: CGFloat
     /// What's above the first month (the notice, or the empty state), and what it says, so it's
     /// measured again only when that changes.
     var notice: AnyView
@@ -29,7 +30,8 @@ struct GridInput {
 /// What the grid does with taps, menus, drags and pinches.
 struct GridActions {
     var tapped: (LibraryState.Cell) -> Void
-    /// A cell's menu; the closure it gets goes before anything that opens the item (for the zoom).
+    var viewer: (_ start: String, _ ids: [String], _ details: Bool) -> ItemViewerController
+    /// A cell's menu; its closure opens Details once the menu has closed.
     var menu: (LibraryState.Cell, _ opening: @escaping () -> Void) -> UIMenu?
     /// Drag-to-select reached this item (the first call is where the drag started).
     var dragSelect: (String) -> Void
@@ -38,58 +40,16 @@ struct GridActions {
     var resize: (CGFloat) -> Void
 }
 
-/// The cell an item zooms out of when it opens and back into when it closes: the grid's cells are
-/// UIKit, so a SwiftUI picture of the cell stands in for it as the zoom's source, over the cell.
-@MainActor @Observable
-final class GridZoom {
-    struct Source: Equatable {
-        var id: String
-        /// In the grid's own coordinates (the whole screen).
-        var frame: CGRect
-        var image: UIImage?
-    }
-
-    var source: Source?
-    /// The item the viewer shows (its `onShow`): the grid keeps its cell in view and zooms back into it.
-    var shown: String?
-    static let sourceID = "grid.zoom"
-}
-
-/// The zoom's stand-in, where the cell is.
-struct GridZoomSource: View {
-    let zoom: GridZoom
-    let namespace: Namespace.ID
-
-    var body: some View {
-        if let source = zoom.source {
-            Group {
-                if let image = source.image {
-                    Image(uiImage: image).resizable().scaledToFill()
-                } else {
-                    Theme.fill
-                }
-            }
-            .frame(width: source.frame.width, height: source.frame.height)
-            .clipped()
-            .matchedTransitionSource(id: GridZoom.sourceID, in: namespace)
-            .offset(x: source.frame.minX, y: source.frame.minY)
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
-    }
-}
-
 /// The Library grid: a collection view with `GridLayout`, hosted in SwiftUI.
 struct GridView: UIViewControllerRepresentable {
     let library: LibraryModel
     let selection: GridSelection
     let counts: SectionCounts
-    let zoom: GridZoom
     var input: GridInput
     var actions: GridActions
 
     func makeUIViewController(context: Context) -> GridController {
-        GridController(library: library, selection: selection, counts: counts, zoom: zoom, input: input, actions: actions)
+        GridController(library: library, selection: selection, counts: counts, input: input, actions: actions)
     }
 
     func updateUIViewController(_ controller: GridController, context: Context) {
@@ -105,7 +65,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private let library: LibraryModel
     private let selection: GridSelection
     private let counts: SectionCounts
-    private let zoom: GridZoom
     private var input: GridInput
     private var actions: GridActions
     private var data = GridData()
@@ -118,7 +77,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var noticeMeasured: (key: String, width: CGFloat, category: UIContentSizeCategory)?
     /// The grid has been put at the newest items (or the top) once.
     private var placed = false
-    /// At the newest end: stays there when the items, the width or the bars change.
+    /// At the newest end: stays there when the items or the width change, not when an overlay changes.
     private var pinned = true
     /// Where a pinch ended, to keep the item under it in place when the columns change.
     private var pinchPoint: CGPoint?
@@ -137,13 +96,21 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var lastPreheat: ClosedRange<CGFloat>?
     private var lastOffset: CGFloat = 0
     private var tracking = false
+    private var appeared = false
+    private var viewportSize = CGSize.zero
+    private var windowSize: CGSize?
+    private var resizeAnchor: Place?
+    private var behindProbe: BehindProbe?
+    private weak var presentedViewer: ItemViewerController?
+    private var openedPosition: Int?
+    private var lastZoomSource: Int?
+    private var pendingOpen: (id: String, details: Bool)?
 
-    init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, zoom: GridZoom, input: GridInput,
+    init(library: LibraryModel, selection: GridSelection, counts: SectionCounts, input: GridInput,
          actions: GridActions) {
         self.library = library
         self.selection = selection
         self.counts = counts
-        self.zoom = zoom
         self.input = input
         self.actions = actions
         thumbnails = GridThumbnails(manager: library.thumbnails, source: { [unowned library] in library.source },
@@ -170,6 +137,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                                 withReuseIdentifier: MonthHeaderView.reuse)
         collectionView.accessibilityIdentifier = "grid"
         self.collectionView = collectionView
+        collectionView.contentInset.bottom = input.accessoryInset
         view = collectionView
         installGestures()
     }
@@ -194,7 +162,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             }
         }
         apply(data: input.data, version: input.dataVersion)
-        watchViewer()
         if PerfMonitor.shared.enabled {
             PerfMonitor.shared.blankProbe = { [weak self] in self?.blankCells() ?? (0, 0) }
         }
@@ -202,6 +169,10 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     override func didMove(toParent parent: UIViewController?) {
         super.didMove(toParent: parent)
+        if parent == nil {
+            behindProbe?.stop()
+            presentedViewer?.presentingViewController?.dismiss(animated: false)
+        }
         adoptAsContentScrollView()
     }
 
@@ -213,45 +184,26 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         isFront = false
-        barsTimeout?.cancel()
-        awaitingBars = false
     }
-
-    /// Back from an item, the tab bar the viewer hid returns a few frames after the grid appears (the
-    /// open Duo's strip reports other insets until then): the insets from before the item opened stay
-    /// until the bars are back, so the grid doesn't go there and back.
-    private var awaitingBars = false
-    private var barsTimeout: DispatchWorkItem?
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if !isFront, collectionView.adjustedContentInset != lastInsets {
-            awaitingBars = true
-            barsTimeout?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.barsSettled() }
-            barsTimeout = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
-        } else {
-            isFront = true
-            lastInsets = collectionView.adjustedContentInset
-            view.setNeedsLayout()
-            // The bars may differ from when it last showed (the newest end stays in view).
+        let updateBars = !appeared || resizeAnchor != nil
+        isFront = true
+        lastInsets = collectionView.adjustedContentInset
+        view.setNeedsLayout()
+        if !appeared {
+            appeared = true
             if placed, pinned { setOffset(offsetRange.upperBound) }
+        } else if let resizeAnchor {
+            restore(resizeAnchor)
         }
-        // Back from an item: the zoom has landed, its stand-in goes.
-        following?.cancel()
-        let paged = viewerItem != nil
-        viewerItem = nil
-        if zoom.source != nil || zoom.shown != nil {
-            zoom.source = nil
-            zoom.shown = nil
+        if updateBars {
+            // Newly installed bars learn the existing position before the next displayed frame.
+            let offset = collectionView.contentOffset
+            collectionView.contentOffset = CGPoint(x: offset.x, y: offset.y - 1)
+            collectionView.contentOffset = offset
         }
-        // The bars learn where the grid is when it scrolls: opened at the newest, the large title
-        // has to collapse at once.
-        let offset = collectionView.contentOffset
-        collectionView.contentOffset = CGPoint(x: offset.x, y: offset.y - 1)
-        collectionView.contentOffset = offset
-        if paged { publishProbe() }
     }
 
     /// The navigation bar (its large title, its edge effect) and the tab bar (minimising on scroll,
@@ -273,13 +225,26 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         let old = input
         input = new
         self.actions = actions
+        if new.selecting != old.selecting { resizeAnchor = nil }
+        if new.accessoryInset != old.accessoryInset {
+            resizeAnchor = nil
+            let offset = collectionView.contentOffset
+            collectionView.contentInset.bottom = new.accessoryInset
+            collectionView.contentOffset = offset
+            if placed {
+                pinned = isFront && abs(offset.y - offsetRange.upperBound) < 1
+                _ = currentPlace()
+            }
+        }
         if new.noticeKey != old.noticeKey {
+            resizeAnchor = nil
             noticeHost.rootView = new.notice
             noticeMeasured = nil
             view.setNeedsLayout()
         }
         if new.dataVersion != dataVersion { apply(data: new.data, version: new.dataVersion) }
         if new.density != old.density {
+            resizeAnchor = nil
             view.setNeedsLayout()
             view.layoutIfNeeded()
             PerfMonitor.shared.endAfterFrame("gridSize")
@@ -298,9 +263,11 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     /// the newest end stays in view.
     private func apply(data new: GridData, version: Int) {
         let place = turning ?? currentPlace()
+        resizeAnchor = nil
         held = nil
         let old = data
         data = new
+        presentedViewer?.state.ids = new.ids
         dataVersion = version
         layout.geometry = GridGeometry(metrics: layout.geometry.metrics, months: new.sections.map(\.range.count))
         collectionView.reloadData()
@@ -319,6 +286,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     override func viewWillTransition(to size: CGSize, with coordinator: any UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
         let place = heldPlace() ?? currentPlace()
+        resizeAnchor = place
         turning = place
         turns += 1
         coordinator.animate(alongsideTransition: nil) { [weak self] _ in
@@ -363,8 +331,17 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     /// A new width, column count, text size or notice: a new geometry, with the place kept.
     private func relayout() {
-        guard let metrics = metrics(), metrics != layout.geometry.metrics || !placed && data.ids.count > 0 else { return }
-        let place = heldPlace() ?? currentPlace(at: pinchPoint)
+        let size = collectionView.bounds.size
+        let resized = size != viewportSize
+        let currentWindow = view.window?.bounds.size
+        let changedWindow = currentWindow != nil && currentWindow != windowSize
+        if changedWindow {
+            resizeAnchor = heldPlace() ?? (pinned ? .newest : lastPlace)
+            windowSize = currentWindow
+        }
+        guard let metrics = metrics(), metrics != layout.geometry.metrics || resized || changedWindow || !placed && data.ids.count > 0 else { return }
+        let place = resizeAnchor ?? heldPlace() ?? (resized && viewportSize != .zero ? (pinned ? .newest : lastPlace) : currentPlace(at: pinchPoint))
+        viewportSize = size
         held = (place, CACurrentMediaTime() + 1)
         pinchPoint = nil
         let before = pixels
@@ -391,17 +368,13 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             : noticeHost.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude)).height.rounded(.up)
     }
 
-    /// The bars' insets. While an item is open over the grid, the grid is out of the window and has
-    /// none; it keeps the ones it had (and gets back), so following the viewer's item and the zoom's
-    /// stand-in are where they'll be.
+    /// Keep the last insets while UIKit detaches the grid for a cover or a fold.
     private var insets: UIEdgeInsets {
         if collectionView.window != nil, isFront { lastInsets = collectionView.adjustedContentInset }
         return lastInsets
     }
 
-    /// Whether the Library is the screen showing: from when it has appeared until it starts to go (an
-    /// item opening over it hides the tab bar, which mustn't move the grid behind it). Folding and
-    /// turning keep it showing.
+    /// The over-full-screen viewer leaves the Library in place; other covers can detach it.
     private var isFront = true
 
     private var lastInsets = UIEdgeInsets.zero
@@ -478,6 +451,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     /// The newest items at the bottom, like when the Library opens.
     private func showNewest() {
+        resizeAnchor = nil
         let range = offsetRange
         let distance = range.upperBound - collectionView.contentOffset.y
         let animated = distance < collectionView.bounds.height * 2
@@ -616,10 +590,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             actions.tapped(cell)
             return false
         }
-        // The zoom's stand-in is drawn first, so the item zooms out of its cell when it opens.
         PerfMonitor.shared.begin("open")
-        prepareZoom(position)
-        DispatchQueue.main.async { [weak self] in self?.actions.tapped(cell) }
+        openViewer(at: position)
         return false
     }
 
@@ -628,22 +600,86 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         guard !selection.active, indexPaths.count == 1, let position = position(indexPaths[0]) else { return nil }
         let cell = library.state.cell(data.cells[position].id) ?? data.cells[position]
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
-            self?.actions.menu(cell) { [weak self] in self?.prepareZoom(position) }
+            self?.actions.menu(cell) { [weak self] in self?.pendingOpen = (cell.id, true) }
         }
     }
 
-    /// The zoom's stand-in goes over the item's cell.
-    private func prepareZoom(_ position: Int) {
-        guard position < data.cells.count else { return }
-        let id = data.cells[position].id
-        let frame = layout.geometry.frame(ofItem: position).offsetBy(dx: -collectionView.bounds.minX, dy: -collectionView.bounds.minY)
-        let shown = (collectionView.cellForItem(at: indexPath(of: position)) as? GridCell).flatMap { $0.item == id ? $0.image : nil }
-        zoom.source = GridZoom.Source(id: id, frame: frame, image: shown ?? (zoom.source?.id == id ? zoom.source?.image : nil))
-        guard shown == nil else { return }
-        _ = thumbnails.request(id, pixels: pixels) { [weak self] image, _ in
-            guard let self, self.zoom.source?.id == id else { return }
-            self.zoom.source?.image = image
+    func collectionView(_ collectionView: UICollectionView, willEndContextMenuInteraction configuration: UIContextMenuConfiguration,
+                        animator: (any UIContextMenuInteractionAnimating)?) {
+        let open: () -> Void = { [weak self] in
+            guard let self, let pending = self.pendingOpen else { return }
+            self.pendingOpen = nil
+            guard let position = self.data.positions[pending.id] else { return }
+            PerfMonitor.shared.begin("open")
+            self.openViewer(at: position, details: pending.details)
         }
+        if let animator {
+            animator.addCompletion { DispatchQueue.main.async(execute: open) }
+        } else {
+            DispatchQueue.main.async(execute: open)
+        }
+    }
+
+    private func openViewer(at position: Int, details: Bool = false) {
+        guard presentedViewer == nil, presentedViewController == nil, data.cells.indices.contains(position),
+              let presenter = view.window?.rootViewController, presenter.presentedViewController == nil else { return }
+        resizeAnchor = nil
+        let id = data.cells[position].id
+        let viewer = actions.viewer(id, data.ids, details)
+        lastZoomSource = nil
+        viewer.state.onShow = { [weak self] in self?.viewerChanged($0) }
+        viewer.resumed = { [weak self] in self?.behindProbe?.cancelClosing() }
+        viewer.closing = { [weak self] in
+            guard let self else { return }
+            self.following?.cancel()
+            if let id = self.presentedViewer?.state.shown { _ = self.zoomCell(for: id) }
+            self.behindProbe?.closing(offset: self.collectionView.contentOffset.y)
+        }
+        viewer.closed = { [weak self, weak viewer] in
+            guard let self else { return }
+            let id = viewer?.state.shown
+            self.behindProbe?.closed()
+            self.presentedViewer = nil
+            self.viewerItem = nil
+            self.following?.cancel()
+            self.publishProbe()
+            let cell = id.flatMap { self.data.positions[$0] }.flatMap { self.collectionView.cellForItem(at: self.indexPath(of: $0)) }
+            if self.view.window != nil { UIAccessibility.post(notification: .layoutChanged, argument: cell) }
+        }
+        let options = UIViewController.Transition.ZoomOptions()
+        options.interactiveDismissShouldBegin = { [weak viewer] context in
+            guard let viewer, !viewer.state.zoomed else { return false }
+            return context.velocity.dy > 0 && context.velocity.dy > abs(context.velocity.dx) * 1.2
+        }
+        options.dimmingColor = .clear
+        viewer.preferredTransition = .zoom(options: options) { [weak self] context in
+            guard let viewer = context.zoomedViewController as? ItemViewerController else { return nil }
+            return self?.zoomCell(for: viewer.state.shown)
+        }
+        openedPosition = position
+        viewerItem = id
+        presentedViewer = viewer
+        startBehindProbe()
+        ItemViewerPresence.shared.opened(viewer)
+        // The entire app is the presenter, including its tabs and floating accessory.
+        presenter.present(viewer, animated: true)
+    }
+
+    /// UIKit asks again at dismissal, when paging may have changed the item shown.
+    private func zoomCell(for id: String) -> UIView? {
+        guard let position = data.positions[id] else { return nil }
+        let frame = layout.geometry.frame(ofItem: position)
+        if !visibleRect.intersects(frame), collectionView.bounds.height > 0 { follow(id) }
+        collectionView.layoutIfNeeded()
+        let cell = collectionView.cellForItem(at: indexPath(of: position))
+        if PerfMonitor.shared.enabled {
+            let source = cell == nil ? -1 : position
+            if source != lastZoomSource {
+                lastZoomSource = source
+                PerfMonitor.shared.note(["grid.source": Double(source)])
+            }
+        }
+        return cell
     }
 
     private func indexPath(of position: Int) -> IndexPath {
@@ -656,26 +692,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var viewerItem: String?
     private var following: DispatchWorkItem?
 
-    private func watchViewer() {
-        withObservationTracking { _ = zoom.shown } onChange: { [weak self] in
-            // Called before the change: read it after.
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.viewerChanged(self.zoom.shown)
-                    self.watchViewer()
-                }
-            }
-        }
-    }
-
     /// The viewer showed another item. Its cell is put in view behind the viewer (like Photos) once
     /// paging pauses, so closing zooms into it; paging itself costs the grid nothing.
     private func viewerChanged(_ id: String?) {
         guard id != viewerItem else { return }
+        resizeAnchor = nil
         viewerItem = id
         following?.cancel()
-        guard let id, zoom.source?.id != id else { return }
+        guard let id else { return }
         let work = DispatchWorkItem { [weak self] in self?.follow(id) }
         following = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
@@ -689,7 +713,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
             setOffset(min(max(frame.midY - visible.height / 2 - insets.top, range.lowerBound),
                           range.upperBound))
         }
-        prepareZoom(position)
         publishProbe()
     }
 
@@ -698,7 +721,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool { false }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        if awaitingBars { barsSettled() }
+        resizeAnchor = nil
         held = nil
         placedAt = nil
         if !tracking {
@@ -736,9 +759,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         } else {
             if PerfMonitor.shared.enabled, !animatingScroll { checkBounce(y) }
             if let placedAt, CACurrentMediaTime() < placedAt.until, abs(y - placedAt.y) > 0.5 {
-                // UIKit moved it, not the person: back to the newest end, or where it was put.
-                let range = offsetRange
-                setOffset(pinned ? range.upperBound : min(max(placedAt.y, range.lowerBound), range.upperBound))
+                // UIKit moved it, not the person. A changing bar must not repin it to a new end.
+                setOffset(placedAt.y)
             }
         }
         updatePreheat()
@@ -747,37 +769,11 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     }
 
     func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) {
-        if awaitingBars {
-            // The bars are back as they were before the item opened: nothing moves.
-            if scrollView.adjustedContentInset == lastInsets { barsSettled() }
-            return
-        }
         guard scrollView.window != nil, isFront else { return }
-        // The bars changed (the tab bar minimised, the accessory came, the screen turned): the newest
-        // end, or the item in view, stays in view.
-        if placed, !scrollView.isTracking, !scrollView.isDecelerating {
-            if let place = heldPlace() { restore(place) } else if pinned { setOffset(offsetRange.upperBound) }
-        }
+        // A fold can deliver its final insets after its final bounds. Only that resize restores an
+        // anchor; changing an accessory clears it and merely changes the scroll range.
+        if let resizeAnchor { restore(resizeAnchor) }
         view.setNeedsLayout()
-        publishProbe()
-    }
-
-    /// The bars are back (or half a second has passed): the grid takes their insets, and moves only if
-    /// they differ from before the item opened.
-    private func barsSettled() {
-        barsTimeout?.cancel()
-        barsTimeout = nil
-        guard awaitingBars else { return }
-        awaitingBars = false
-        isFront = true
-        let old = lastInsets
-        lastInsets = collectionView.adjustedContentInset
-        if old != lastInsets {
-            view.setNeedsLayout()
-            if placed, !collectionView.isTracking, !collectionView.isDecelerating {
-                if let place = heldPlace() { restore(place) } else if pinned { setOffset(offsetRange.upperBound) }
-            }
-        }
         publishProbe()
     }
 
@@ -967,10 +963,114 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                     "grid.first": Double(items.lowerBound), "grid.last": Double(items.upperBound - 1),
                     "grid.anchor": Double(geometry.anchor(in: visible)?.item ?? -1), "grid.blank": Double(self.blankCells().blank),
                     "grid.shown": Double(self.viewerItem.flatMap { self.data.positions[$0] } ?? -1),
-                    "grid.zoom": Double(self.zoom.source.flatMap { self.data.positions[$0.id] } ?? -1),
+                    "grid.zoom": Double(self.viewerItem.flatMap { self.data.positions[$0] } ?? self.openedPosition ?? -1),
                 ])
             }
         }
+    }
+
+    private func startBehindProbe() {
+        guard PerfMonitor.shared.enabled else { return }
+        behindProbe?.stop()
+        behindProbe = BehindProbe { [weak self] in
+            guard let self, let window = self.view.window else { return nil }
+            let tab = self.tabBarController?.tabBar
+            let nav = self.navigationController?.navigationBar
+            return BehindProbe.Sample(
+                insets: self.collectionView.adjustedContentInset,
+                offset: self.collectionView.contentOffset.y,
+                tabHidden: tab?.isHidden, tabAlpha: tab?.alpha,
+                tabFrame: tab.map { $0.convert($0.bounds, to: window) },
+                safeArea: self.tabBarController?.view.safeAreaInsets,
+                navFrame: nav.map { $0.convert($0.bounds, to: window) })
+        }
+    }
+}
+
+/// Samples every in-window frame, including the frames XCTest misses during dismissal.
+@MainActor private final class BehindProbe: NSObject {
+    struct Sample: Equatable {
+        var insets: UIEdgeInsets
+        var offset: CGFloat
+        var tabHidden: Bool?
+        var tabAlpha: CGFloat?
+        var tabFrame: CGRect?
+        var safeArea: UIEdgeInsets?
+        var navFrame: CGRect?
+    }
+
+    private let sample: () -> Sample?
+    private var baseline: Sample?
+    private var closingOffset: CGFloat?
+    private var link: CADisplayLink?
+    private var end: CFTimeInterval?
+    private var changes = 0
+    private var samples = 0
+    private var isClosing = false
+    private var publishedAt: CFTimeInterval = 0
+    private var deltas: [String: Double] = [:]
+
+    init(sample: @escaping () -> Sample?) {
+        self.sample = sample
+        super.init()
+        baseline = sample()
+        PerfMonitor.shared.note(["behind.changes": 0, "behind.samples": 0])
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func closing(offset: CGFloat? = nil) {
+        isClosing = true
+        closingOffset = offset ?? sample()?.offset ?? baseline?.offset
+    }
+
+    func closed() { end = CACurrentMediaTime() + 1 }
+    func cancelClosing() {
+        isClosing = false
+        closingOffset = nil
+        end = nil
+    }
+    func stop() {
+        link?.invalidate()
+        link = nil
+        publish()
+    }
+
+    private func publish() {
+        publishedAt = CACurrentMediaTime()
+        var values = deltas
+        values["behind.changes"] = Double(changes)
+        values["behind.samples"] = Double(samples)
+        PerfMonitor.shared.note(values)
+    }
+
+    @objc private func tick() {
+        if let end, CACurrentMediaTime() > end {
+            stop()
+            return
+        }
+        guard var now = sample(), var baseline else { return }
+        if isClosing { samples += 1 }
+        // Paging may deliberately move the grid before closing; the bars must never change.
+        baseline.offset = closingOffset ?? now.offset
+        if !isClosing { now.offset = baseline.offset }
+        let nav = now.navFrame ?? .zero, oldNav = baseline.navFrame ?? .zero
+        let tab = now.tabFrame ?? .zero, oldTab = baseline.tabFrame ?? .zero
+        let safe = now.safeArea ?? .zero, oldSafe = baseline.safeArea ?? .zero
+        let measured: [String: CGFloat] = [
+            "behind.top": now.insets.top - baseline.insets.top, "behind.bottom": now.insets.bottom - baseline.insets.bottom,
+            "behind.left": now.insets.left - baseline.insets.left, "behind.right": now.insets.right - baseline.insets.right,
+            "behind.navY": nav.minY - oldNav.minY, "behind.navHeight": nav.height - oldNav.height,
+            "behind.tabY": tab.minY - oldTab.minY, "behind.tabHeight": tab.height - oldTab.height,
+            "behind.tabWidth": tab.width - oldTab.width, "behind.tabAlpha": (now.tabAlpha ?? 0) - (baseline.tabAlpha ?? 0),
+            "behind.safeTop": safe.top - oldSafe.top, "behind.safeBottom": safe.bottom - oldSafe.bottom,
+            "behind.safeLeft": safe.left - oldSafe.left, "behind.safeRight": safe.right - oldSafe.right,
+            "behind.offset": now.offset - baseline.offset,
+        ]
+        for (key, value) in measured { deltas[key] = max(deltas[key] ?? 0, Double(abs(value))) }
+        if now != baseline { changes += 1 }
+        if isClosing, CACurrentMediaTime() - publishedAt > 0.1 { publish() }
     }
 }
 

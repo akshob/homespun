@@ -97,6 +97,10 @@ copies to compare with their originals (from the server); "They Look Right" free
 and the Get Started card open the Library to pick a few items to try.
 
 Videos play in the item viewer, with Play/Pause and a position slider below the picture.
+The viewer zooms over the whole app from the tapped thumbnail, without changing the tabs or
+the Library's layout. Back or a downward swipe returns it to the thumbnail of the item shown.
+Connection and backup messages also float above the content: appearing or disappearing changes
+the scroll range, not the visible cells, tabs or title.
 Autoplay follows the iPhone's accessibility setting. On the open iPhone Duo, Compare can show
 both videos side by side: they play, pause, seek and zoom together, with sound from one copy
 at a time. Sound switches between the original and the compact copy.
@@ -366,6 +370,11 @@ with their pairing and show a notice; a changed key with a failed proof blocks b
 Transient check failures keep the existing pin and retry automatically after 60 seconds, backing off
 to at most 15 minutes; activation and background preparation also retry. A corrupt
 identity stops the server rather than silently replacing the key.
+
+Foreground reachability checks share that HTTPS verification path. They keep the last status
+while checking; a known-good server gets a second 12-second attempt before a network failure
+shows “Can't reach”. Pin mismatches go straight to proof verification, never an ordinary network
+retry. Rechecking an existing pin keeps the last status visible until verification concludes.
 
 The server checks each upload's SHA-256 before accepting it,
 stores originals read-only, and lets the app remove an original only after checking its copy

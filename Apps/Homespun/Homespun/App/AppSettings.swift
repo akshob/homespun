@@ -39,6 +39,7 @@ final class AppSettings {
         var task: Task<Void, Never>
     }
     private var securityWork: VerificationWork?
+    @ObservationIgnored private var infoWork: VerificationWork?
     private var lastIdentityAttempt = Date.distantPast
     private let identityRetryBaseDelay: TimeInterval
     private let identityNow: @Sendable () -> Date
@@ -204,6 +205,7 @@ final class AppSettings {
         // The demo's sample photos never go to a real server.
         guard !isDemo || newURL.host == DemoServer.host else { throw DemoOnly() }
         guard newURL.scheme == "https" else { throw ServerPairing.IdentityFailure() }
+        infoWork?.task.cancel()
         var pins = pins
         pins.serviceName = serviceName ?? pins.serviceName ?? response.server.name
         try tokens.setPins(pins, for: newURL.absoluteString)
@@ -233,6 +235,7 @@ final class AppSettings {
     }
 
     func unpair() {
+        infoWork?.task.cancel()
         revokeCurrentDevice()
         if let serverURL {
             var accounts = [serverURL.absoluteString]
@@ -346,7 +349,7 @@ final class AppSettings {
             ServerSessions.shared.reset(url)
             clearIdentityRetry()
             identityObserved = nil
-            serverStatus = .unknown
+            if connectionProblem != nil { serverStatus = .unknown }
             AppLog.server.notice("Found the paired server at its new address: \(url.absoluteString, privacy: .private)")
             return true
         } catch {
@@ -356,11 +359,20 @@ final class AppSettings {
 
     /// Checks the server answers and picks up changes (for example Immich being connected).
     func refreshServerInfo() async {
-        await secureLegacyPairing()
-        if nextIdentityRetry != nil, pins != nil,
-           identityNow().timeIntervalSince(lastIdentityAttempt) >= identityRetryBaseDelay {
-            await reverifyIdentity()
+        if let infoWork { await infoWork.task.value; return }
+        let id = UUID()
+        let task = Task { await checkServerInfo() }
+        infoWork = VerificationWork(id: id, task: task)
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
         }
+        if infoWork?.id == id { infoWork = nil }
+    }
+
+    private func checkServerInfo() async {
+        await secureLegacyPairing()
         if case .identityProblem = serverStatus, identityObserved != nil, let url = serverURL,
            let token = tokens.token(for: url.absoluteString) {
             // The old address may now belong to another server; its identity failure must not block finding our pinned key.
@@ -369,22 +381,43 @@ final class AppSettings {
         guard connectionProblem == nil else { return }
         guard var client else { return }
         let before = serverStatus
+        let knownGood = before == .reachable || (before == .unknown && server != nil)
+        let token = client.token
+        func current() -> Bool {
+            guard let url = serverURL, token != nil else { return false }
+            return tokens.token(for: url.absoluteString) == token && connectionProblem == nil
+        }
+        // A retry keeps the last result on screen until it learns something new.
         if serverStatus == .unknown { serverStatus = .checking }
-        client.timeout = 6
+        client.timeout = 12
         do {
-            let info = try await client.info()
+            let info: ServerAPI.ServerInfo
+            do {
+                info = try await client.info()
+            } catch {
+                if Self.isCancellation(error) || error is ServerClient.IdentityMismatch
+                    || error is ServerPairing.IdentityFailure || error is ServerPairing.UnrecognisedIdentity { throw error }
+                if let failure = error as? ServerClient.Failure,
+                   failure.status == 401 || failure.code == "tls_blocked" || failure.code == "insecure" { throw error }
+                guard knownGood, current() else { throw error }
+                // Confirm a transient failure before replacing a known-good result.
+                info = try await client.info()
+            }
+            guard current() else { return }
+            try Task.checkCancellation()
             // A live TLS connection can outlast a rotation. Only the proof, not this hint, authorizes a new pin.
             if let fingerprint = info.tls?.fingerprint, case .pinned(let trusted) = client.trust,
                !trusted.contains(fingerprint) {
                 identityObserved = fingerprint
                 await reverifyIdentity()
-                if serverStatus == .reachable { store(info) }
+                if current(), serverStatus == .reachable { store(info) }
                 return
             }
             store(info)
             serverStatus = .reachable
             Telemetry.shared.recordServerInfoDaily(info)
         } catch let mismatch as ServerClient.IdentityMismatch {
+            guard current(), !Task.isCancelled else { return }
             identityObserved = mismatch.observed
             await reverifyIdentity()
         } catch where Self.isCancellation(error) {
@@ -392,8 +425,10 @@ final class AppSettings {
             // "Can't reach" here showed a working server as unreachable until the next check.
             if serverStatus == .checking { serverStatus = before }
         } catch let error as ServerClient.Failure where error.status == 401 {
+            guard current(), !Task.isCancelled else { return }
             serverStatus = .unreachable("The server no longer recognises this iPhone. Pair it again.")
         } catch {
+            guard current(), !Task.isCancelled else { return }
             AppLog.server.notice("server unreachable: \(Telemetry.Event.code(error), privacy: .public)")
             serverStatus = .unreachable("Can't reach \(server?.name ?? "the server"). Make sure this iPhone is on your home network.")
         }
@@ -458,7 +493,7 @@ final class AppSettings {
         let allowSystemTrust = oldURL.scheme == "https"
             && (previous?.pins.isEmpty == true || (!reverify && !tokens.hasPinRecord(for: oldURL.absoluteString)))
         let before = serverStatus
-        serverStatus = .securing
+        if previous == nil { serverStatus = .securing }
         do {
             let url = try ServerPairing.secureURL(oldURL)
             let verified: ServerPairing.Verified
