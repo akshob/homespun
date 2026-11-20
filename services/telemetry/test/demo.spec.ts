@@ -61,7 +61,7 @@ describe("private reviewer demo", () => {
 			expect((await sendWith(bindings, "POST", "/v1/demo/session", { code: "wrong" }, { ip })).status).toBe(403);
 		}
 		for (let i = 0; i < 3; i++) expect((await grant(ip)).status).toBe(200);
-		expect((await sendWith(bindings, "POST", "/v1/demo/session", { code: "wrong" }, { ip })).status).toBe(403);
+		expect((await sendWith(bindings, "POST", "/v1/demo/session", undefined, { ip, body: "not-json" })).status).toBe(403);
 		expect((await grant(ip)).status).toBe(403);
 	});
 

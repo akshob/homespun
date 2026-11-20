@@ -129,6 +129,8 @@ Cancel preserves verified files for a retry within the launch. Downloads live in
 excluded from backup, and are wiped at each cold launch. Bad codes, unavailable networks or integrity
 failures fall back to the whole drawn set. Sessions renew silently, including during slow downloads.
 The code works until rotation; Forget Review Code in Help and About restores the usual offline demo.
+Each demo start exchanges it for a fresh session; leaving a reviewer demo discards its downloaded
+set so the next start downloads again without typing. Slow downloads offer Draw Them Instead.
 No photo-library or installation identifiers are sent. The private photos are all rights reserved,
 not part of this repository or its license. See [the Worker](services/telemetry/README.md#private-reviewer-demo).
 

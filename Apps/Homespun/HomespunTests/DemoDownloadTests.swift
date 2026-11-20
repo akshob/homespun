@@ -27,9 +27,10 @@ import UniformTypeIdentifiers
             let url = folder.appendingPathComponent("fixture.jpg")
             try DemoArt.writeImage(image, to: url, type: .jpeg, quality: 0.8, date: "2025-01-01T10:00:00Z")
             jpeg = try Data(contentsOf: url)
+            let size = jpeg.count
             let hash = SHA256.hash(data: jpeg).map { String(format: "%02x", $0) }.joined()
-            manifest = DemoDownloadManifest(version: 1, totalBytes: jpeg.count * 16, files: (0..<16).map {
-                .init(file: "demo-test-\($0).jpg", sha256: hash, size: jpeg.count, kind: "photo",
+            manifest = DemoDownloadManifest(version: 1, totalBytes: size * 16, files: (0..<16).map {
+                .init(file: "demo-test-\($0).jpg", sha256: hash, size: size, kind: "photo",
                       width: 64, height: 48, date: "2025-01-01T10:00:00Z", category: "nature")
             })
         }

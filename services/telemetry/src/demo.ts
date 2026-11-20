@@ -117,9 +117,10 @@ export async function handleDemo(request: Request, env: Env): Promise<Response> 
 		const counter = await sign(`lockout.${ip}`, env);
 		const locked = await env.DB.prepare("SELECT locked_until FROM demo_lockouts WHERE key = ?1").bind(counter).first<number>("locked_until");
 		if ((locked ?? 0) > now) throw forbidden();
-		let body: JsonBody;
-		try { body = await readJsonBody(request, 256); } catch { throw forbidden(); }
-		const code = typeof body.value.code === "string" ? body.value.code.toUpperCase().replace(/[-\s]/g, "") : "";
+		let body: JsonBody | undefined;
+		try { body = await readJsonBody(request, 256); } catch { /* Malformed bodies count as failed attempts too. */ }
+		const value = body?.value.code;
+		const code = typeof value === "string" ? value.toUpperCase().replace(/[-\s]/g, "") : "";
 		if (!equal(await digest(code), env.DEMO_CODE_SHA256)) {
 			await env.DB.prepare(`INSERT INTO demo_lockouts (key, failures, window_start, locked_until, expires)
 				VALUES (?1, 1, ?2, 0, ?2 + 600)

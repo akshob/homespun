@@ -110,6 +110,9 @@ and may not exist in other checkouts.
   `DemoDownload` uses an identifier-free ephemeral session to the telemetry Worker's private R2 gate.
   Sixteen verified photos replace drawn stills; motion stays bundled, derivatives are made on-phone.
   Downloads are inside the launch-scoped media folder (excluded from backup), never a persistent cache.
+  Leaving a reviewer demo clears its media; the normal drawn demo still reuses its prepared media.
+  The code is saved only after authorization, reusable until rotation, and cleared from Help and About.
+  Expired hour-long sessions renew silently and resume verified files; successful uses have no per-IP limit.
   Failure draws the whole normal set. Private media and reviewer credentials must NEVER enter git.
   Debug draws unless `-demoMediaBase` explicitly names loopback; `-demoMediaDraw` always draws.
   CI's demo lanes use `ci/demo-media-stub.py` (synthetic media and a test code); never R2 or the internet.
