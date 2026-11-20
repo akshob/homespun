@@ -177,12 +177,29 @@ test_without_building "$RESULTS/watch.xcresult" -parallel-testing-enabled NO
 
     def test_first_device_matches_each_distinct_lane_kind_and_rejects_unknown(self):
         for lane, device in [("quick-duo", "iPhone-Duo"), ("demo", "iPhone-18-Pro"),
+                             ("probe", "iPhone-18-Pro"),
                              ("watch", "Apple-Watch-Series-12-46mm")]:
             run = self.shell(f'zsh "$ROOT/ci/lane.sh" --first-device {lane}')
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(run.stdout.strip(), device)
         unknown = self.shell('zsh "$ROOT/ci/lane.sh" --first-device unknown')
         self.assertNotEqual(unknown.returncode, 0)
+
+    def test_nightly_traits_append_only_to_existing_iphone_and_duo_segments(self):
+        for lane in ("iphone", "duo-open", "quick"):
+            for enabled in ("", "1"):
+                with self.subTest(lane=lane, enabled=enabled):
+                    run = self.shell("""
+zsh() { printf '%s\\t' "$@"; printf '\\n'; }
+env() { while [[ ${1:-} == *=* ]]; do shift; done; "$@"; }
+source "$ROOT/ci/lane.sh" "$RUN_NAME"
+""", RUN_NAME=lane, TRAIT_PROBE=enabled)
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    calls = [line.split("\t") for line in run.stdout.splitlines()
+                             if "/ci/ui.sh\t" in line]
+                    self.assertEqual(len(calls), 1, run.stdout)
+                    expected = bool(enabled) and lane != "quick"
+                    self.assertEqual("HomespunUITests/SnapshotProbeUITests" in calls[0][3], expected)
 
 
 if __name__ == "__main__":

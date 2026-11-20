@@ -11,7 +11,7 @@ import UIKit
 /// thumbnails: nothing is cached in Photos then.
 @MainActor
 final class GridThumbnails {
-    let manager: PHCachingImageManager
+    let manager: PHCachingImageManager?
     private let source: () -> AssetSource
     private let catalog: (any ItemCatalog)?
     /// The thumbnails' side in pixels (a cell's side on screen).
@@ -23,11 +23,11 @@ final class GridThumbnails {
     private var order: [String] = []
     private let images = NSCache<NSString, UIImage>()
 
-    init(manager: PHCachingImageManager, source: @escaping () -> AssetSource, catalog: (any ItemCatalog)? = nil) {
+    init(manager: PHCachingImageManager?, source: @escaping () -> AssetSource, catalog: (any ItemCatalog)? = nil) {
         self.manager = manager
         self.source = source
         self.catalog = catalog
-        manager.allowsCachingHighQualityImages = false
+        manager?.allowsCachingHighQualityImages = false
         images.totalCostLimit = 32 * 1024 * 1024
         images.countLimit = 200
     }
@@ -71,7 +71,7 @@ final class GridThumbnails {
                 handler(prepared, true)
             })
         }
-        guard let asset = source().asset(id) else { return nil }
+        guard let manager, let asset = source().asset(id) else { return nil }
         let deliver = Delivery { [weak self] image, final in
             if final { self?.remember(image, id: id, pixels: pixels) }
             handler(image, final)
@@ -86,7 +86,7 @@ final class GridThumbnails {
 
     func cancel(_ request: Request) {
         switch request {
-        case .photos(let id): manager.cancelImageRequest(id)
+        case .photos(let id): manager?.cancelImageRequest(id)
         case .catalog(let task): task.cancel()
         }
     }
@@ -107,7 +107,7 @@ final class GridThumbnails {
 
     /// New items or a new size: the window starts again.
     func reset(order: [String], pixels: CGFloat) {
-        if pixels != self.pixels || !window.isEmpty || !prefetched.isEmpty {
+        if let manager, pixels != self.pixels || !window.isEmpty || !prefetched.isEmpty {
             let manager = Unchecked(value: manager)
             Self.queue.async { manager.value.stopCachingImagesForAllAssets() }
         }
@@ -158,17 +158,17 @@ final class GridThumbnails {
     }
 
     private func cache(start: [String], stop: [String]) {
-        guard !start.isEmpty || !stop.isEmpty else { return }
-        let size = CGSize(width: pixels, height: pixels), source = source(), manager = Unchecked(value: manager)
+        guard let manager, !start.isEmpty || !stop.isEmpty else { return }
+        let size = CGSize(width: pixels, height: pixels), source = source(), managerBox = Unchecked(value: manager)
         // Reading assets faults them in from Photos' database: in the background, in order.
         Self.queue.async {
             if !stop.isEmpty {
-                manager.value.stopCachingImages(for: source.assets(stop), targetSize: size, contentMode: .aspectFill,
-                                                options: Self.options())
+                managerBox.value.stopCachingImages(for: source.assets(stop), targetSize: size, contentMode: .aspectFill,
+                                                   options: Self.options())
             }
             if !start.isEmpty {
-                manager.value.startCachingImages(for: source.assets(start), targetSize: size, contentMode: .aspectFill,
-                                                 options: Self.options())
+                managerBox.value.startCachingImages(for: source.assets(start), targetSize: size, contentMode: .aspectFill,
+                                                    options: Self.options())
             }
         }
     }

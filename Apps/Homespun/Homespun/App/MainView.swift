@@ -257,10 +257,10 @@ struct FreeUpPresentation: ViewModifier {
     func body(content: Content) -> some View {
         content
             .fullScreenCover(item: presentation(wide: true), onDismiss: dismissed) {
-                FreeUpSpaceScreen(controller: model.library, scope: $0.scope)
+                FreeUpSpaceScreen(model: model, scope: $0.scope)
             }
             .sheet(item: presentation(wide: false), onDismiss: dismissed) {
-                FreeUpSpaceScreen(controller: model.library, scope: $0.scope)
+                FreeUpSpaceScreen(model: model, scope: $0.scope)
             }
     }
 

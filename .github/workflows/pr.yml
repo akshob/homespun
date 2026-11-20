@@ -31,6 +31,7 @@ jobs:
       app: ${{ steps.plan.outputs.app }}
       package: ${{ steps.plan.outputs.package }}
       ui: ${{ steps.plan.outputs.ui }}
+      unit: ${{ steps.plan.outputs.unit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,4 +59,5 @@ jobs:
       app: ${{ needs.plan.outputs.app == 'true' }}
       package: ${{ needs.plan.outputs.package == 'true' }}
       ui: ${{ needs.plan.outputs.ui }}
+      unit: ${{ needs.plan.outputs.unit == 'true' }}
       retry: true

@@ -9,7 +9,7 @@ import UIKit
 @MainActor
 final class ThumbnailLoader {
     let library: LibraryModel
-    private let manager: PHCachingImageManager
+    private let manager: PHCachingImageManager?
     private let catalog: (any ItemCatalog)?
     /// The requested size, in pixels.
     let pixels: CGSize
@@ -24,7 +24,7 @@ final class ThumbnailLoader {
 
     init(library: LibraryModel, side: CGFloat, scale: CGFloat) {
         self.library = library
-        manager = library.thumbnails
+        manager = library.catalog == nil ? library.thumbnails : nil
         catalog = library.catalog
         pixels = Self.pixels(side: side, scale: scale)
     }
@@ -49,7 +49,7 @@ final class ThumbnailLoader {
             let side = pixels.width
             return .catalog(Task { if let image = await catalog.thumbnail(id, side: side), !Task.isCancelled { deliver(image) } })
         }
-        guard let asset = asset(id) else { return nil }
+        guard let manager, let asset = asset(id) else { return nil }
         return .photos(manager.requestImage(for: asset, targetSize: pixels, contentMode: .aspectFill, options: Self.options()) { image, _ in
             guard let image else { return }
             if Thread.isMainThread {
@@ -62,14 +62,14 @@ final class ThumbnailLoader {
 
     func cancel(_ request: Request) {
         switch request {
-        case .photos(let id): manager.cancelImageRequest(id)
+        case .photos(let id): manager?.cancelImageRequest(id)
         case .catalog(let task): task.cancel()
         }
     }
 
     /// Caches the thumbnails of items about to show.
     func preheat(_ ids: [String]) {
-        guard catalog == nil else { return }
+        guard catalog == nil, let manager else { return }
         fetch(ids)
         let new = ids.compactMap { id in cached[id] == nil ? assets[id] : nil }
         guard !new.isEmpty else { return }
@@ -80,7 +80,7 @@ final class ThumbnailLoader {
     /// Items no longer about to show.
     func stopPreheating(_ ids: [String]) {
         let gone = ids.compactMap { cached.removeValue(forKey: $0) }
-        guard !gone.isEmpty else { return }
+        guard !gone.isEmpty, let manager else { return }
         manager.stopCachingImages(for: gone, targetSize: pixels, contentMode: .aspectFill, options: Self.options())
     }
 

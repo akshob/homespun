@@ -419,7 +419,7 @@ struct AddressPage: View {
             codeError = nil
         }
         .onChange(of: address) { _, _ in addressError = nil }
-        .onAppear { focus = address.isEmpty ? .address : .code }
+        .onAppear { if flow.autofocusFields { focus = address.isEmpty ? .address : .code } }
     }
 
     private func pair() async {

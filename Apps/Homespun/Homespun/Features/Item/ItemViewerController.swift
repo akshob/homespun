@@ -115,10 +115,8 @@ struct ItemViewerScreen: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     var body: some View {
-        NavigationStack {
-            ItemViewer(model: model, state: state) {
-                freeUp = FreeUpRequest(scope: $0, wide: sizeClass == .regular)
-            }
+        ItemViewerNavigation(model: model, state: state) {
+            freeUp = FreeUpRequest(scope: $0, wide: sizeClass == .regular)
         }
         .inspector(isPresented: Binding(get: { state.details != nil }, set: { if !$0 { state.details = nil } })) {
             if let id = state.details {
@@ -132,5 +130,16 @@ struct ItemViewerScreen: View {
         .tint(Theme.accent)
         // The performance report must remain reachable while the app behind is covered.
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
+    }
+
+}
+
+struct ItemViewerNavigation: View {
+    let model: AppModel
+    let state: ItemViewerState
+    var freeUp: (Set<String>?) -> Void
+
+    var body: some View {
+        NavigationStack { ItemViewer(model: model, state: state, freeUp: freeUp) }
     }
 }

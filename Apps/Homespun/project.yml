@@ -202,7 +202,9 @@ targets:
   HomespunTests:
     type: bundle.unit-test
     platform: iOS
-    sources: [HomespunTests]
+    sources:
+      - path: HomespunTests
+        excludes: ["__Snapshots__", "__Snapshots__/**"]
     configFiles:
       Debug: Signing.xcconfig
       Release: Signing.xcconfig

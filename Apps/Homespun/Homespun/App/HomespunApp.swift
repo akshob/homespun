@@ -4,6 +4,9 @@ import SwiftUI
 @main
 struct HomespunApp: App {
     init() {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-traitProbe") { return }
+#endif
         PerfMonitor.mainStarted = CACurrentMediaTime()
         AppModel.registerBackgroundRun()
         Journey.configureTips()
@@ -15,7 +18,17 @@ struct HomespunApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { AppRoot(demo: .shared) }
+        WindowGroup {
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-traitProbe") {
+                TraitProbeScreen().ignoresSafeArea()
+            } else {
+                AppRoot(demo: .shared)
+            }
+#else
+            AppRoot(demo: .shared)
+#endif
+        }
     }
 }
 

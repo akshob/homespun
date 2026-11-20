@@ -7,6 +7,7 @@ each failing test with its message, and performance lines. CI tooling only.
 """
 import glob, json, os, subprocess, sys
 from timing import timing_summary
+from snapshot_report import snapshot_summary, budget_exceeded
 
 results, title = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "Tests")
 lines = [f"### {title}", "", "| Run | Passed | Failed | Skipped |", "|---|---|---|---|"]
@@ -68,9 +69,12 @@ if quarantined:
 if perf:
     lines += ["", "#### Performance", "```", *perf, "```"]
 lines += timing_summary(results)
+lines += snapshot_summary(results, os.environ.get("HOMESPUN_SNAPSHOT_ARTIFACT_URL", ""))
 report = "\n".join(lines) + "\n"
 print(report)
 path = os.environ.get("GITHUB_STEP_SUMMARY")
 if path:
     with open(path, "a") as file:
         file.write(report)
+if budget_exceeded(results):
+    raise SystemExit("Snapshot suite exceeded its three-minute budget")

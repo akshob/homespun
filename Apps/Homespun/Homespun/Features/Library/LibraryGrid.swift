@@ -433,7 +433,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// The grid waits for this: shown empty first, it would open at the top instead of the newest.
     private(set) var loaded = false
     @ObservationIgnored private var libraryRead = false
-    let thumbnails = PHCachingImageManager()
+    @ObservationIgnored lazy var thumbnails = PHCachingImageManager()
     /// Where the items come from when it isn't Photos (the demo's sample photos); nil: Photos.
     let catalog: (any ItemCatalog)?
 

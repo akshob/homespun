@@ -144,6 +144,80 @@ After a lane-only fix, use its targeted input to validate it without repeating t
 GitHub's job rerun includes dependencies; jobs inside the reusable suite can rerun other suite jobs
 too. Prefer the targeted workflow input (for example `ui=duo-open`) for a lane-only follow-up.
 
+### Simulator trait probe
+
+`gh workflow run ci.yml --ref <branch> -f ui=custom -f runs=probe` builds once and probes a fresh
+iPhone and Duo sequentially, with no server, PhotoKit access or media imports. The DEBUG-only
+`-traitProbe` screen reports actual window bounds, safe areas, size classes and display/native
+scales. Download `traits-probe-<run>` for the five JSON records (iPhone portrait/landscape, Duo
+cover and inner portrait/landscape). References use those measurements, not estimated devices.
+
+Custom runs accept validated segment names separated by spaces; empty or unknown names fail
+before any macOS work. A probe-only dispatch omits unrelated jobs, including the unit job.
+Nightly adds the same probe to the existing `iphone` and `duo-open` invocations (no extra
+simulators or macOS jobs) and warns when measurements differ from `__Snapshots__/TRAITS.json`.
+The label reads live window traits, rather than a value cached during layout. Pose changes
+keep the probe foregrounded, using the existing Duo driver's pre-warmed active display.
+
+### Deterministic snapshots
+
+Appearance and layout tests belong in `HomespunTests/Snapshots`; XCUI remains for real flows,
+performance, transitions, hit-testing and system UI. This infrastructure does not remove any
+existing end-to-end coverage. `SnapshotWorld` composes the real app models with an in-memory
+catalog, isolated defaults/ledger, memory-only tokens and installation identity, and a
+fail-closed `URLProtocol` server. It is not demo mode or a ready-made-state launch argument.
+Media is synthetic; videos use poster frames rather than offscreen player layers.
+Use `world.comparison(id)` for a preloaded Compare presentation: even a freed original comes
+from the protocol stub into the world's own folder, never a fresh live session. A supplied
+`CompareView` model is already loaded and is not reloaded while host traits settle.
+
+The renderer attaches a window to the hosted app's foreground scene, applies measured
+`__Snapshots__/TRAITS.json` traits/insets at layout scale 3, and waits for identical pixels and
+settled geometry. App-content readiness has a five-second bound; frame settling has a
+two-second bound once content is ready.
+Consecutive frames must be byte-identical or have no pixel above the ΔE 2.3 JND; this
+excludes sub-JND compositor dithering, not changing app content. References are opaque
+sRGB PNGs rasterised at 2x.
+Hierarchy drawing includes hosted SwiftUI navigation/scroll content that `layer.render` can
+omit; UIKit activity indicators are frozen at a fixed animation time before comparison.
+Grid edges/columns, Details placement and Compare placement also have numeric assertions.
+The fixed clock is 2026-06-15 10:00 UTC, with `en_US`, Gregorian and UTC formatting.
+System glass, keyboards and sheet detents are deliberately outside snapshot coverage.
+Details references draw the real viewer and `ItemDetailsPanel` content in a 400-point column
+on regular layouts, or the real panel alone on compact layouts. The host phone's system
+inspector adaptation is not a virtual Duo: actual inspector presentation/resize transitions
+remain in XCUI. Numeric checks measure the rendered app-content pane frames.
+The production screen and snapshots share `ItemViewerNavigation`; reference rendering does
+not construct the system inspector wrapper that is excluded from appearance coverage.
+
+The perceptual diff rejects a size change, more than 0.05% of pixels with ΔE > 2.3, or any
+pixel with ΔE > 15. A complete suite has a 180-second budget including fixture setup,
+rendering and comparison; the job summary reports it and warns for references above 300 KB.
+Full-precision Core Image maximum/threshold/average reductions and heatmaps avoid Debug
+Swift per-pixel loops; exact pixel buffers use a byte-equality fast path.
+On failure, `snapshots-failed-<run>` contains reference/actual/magenta-diff PNGs and JSON
+metrics, linked from the summary. Fixture files live under `ci-results/snapshot-state` and
+are removed by their tests.
+
+Record application references **only on the pinned CI simulator**:
+
+```sh
+gh workflow run ci.yml --ref <branch> -f ui=none -f snapshots=record
+gh run download <run> -n snapshots-recorded-<run> \
+  -D Apps/Homespun/HomespunTests/__Snapshots__
+```
+
+Review the changed PNGs, then commit the intended images, `TRAITS.json` and `ENVIRONMENT.txt`
+(no LFS). `record-missing` records new names but verifies, and never overwrites, existing
+ones; it requires a matching environment pin from an earlier recording. Normal unit jobs use
+`verify` and cannot change references. The pin includes renderer version, Xcode build,
+runtime build, host model/device and process locale: a CI mismatch fails with a re-record
+instruction; a different local environment skips the reference suites, not the renderer's
+contract tests. `TEST_RUNNER_HOMESPUN_SNAPSHOT_DIR`, `..._RESULTS`, `..._SNAPSHOTS` and
+`..._SNAPSHOT_CI` are forwarded by `ci/unit.sh` through the archived runner manifest.
+To refresh measurements and record images using one build, use
+`-f ui=custom -f runs=probe -f snapshots=record`; it runs only the probe and unit jobs.
+
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).
 

@@ -31,6 +31,9 @@ final class LibraryController {
     let copyFinder: CopyFinder
     let library: LibraryModel
     let journey: JourneyLog
+    private let clock: AppClock
+    private let updatesTips: Bool
+    private let phoneFreeSpace: @Sendable () -> Int?
     private(set) var access: PHAuthorizationStatus
     /// The grid has its first contents, so it can open scrolled to the newest items.
     private(set) var loaded = false
@@ -59,15 +62,24 @@ final class LibraryController {
     /// Keep the running accessory until the finished/ready facts have arrived, without a hide/show.
     private var finishingBackups = 0
 
-    init(settings: AppSettings, job: CompactJob, premium: Premium, automatic: AutomaticMode, copyFinder: CopyFinder) {
+    init(settings: AppSettings, job: CompactJob, premium: Premium, automatic: AutomaticMode, copyFinder: CopyFinder,
+         clock: AppClock = .live, tips: Bool? = nil,
+         phoneFreeSpace: @escaping @Sendable () -> Int? = {
+             (try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+                 .volumeAvailableCapacityForImportantUsage.map(Int.init)
+         }) {
         self.settings = settings
         self.job = job
         self.premium = premium
         self.automatic = automatic
         self.copyFinder = copyFinder
+        self.clock = clock
+        let updatesTips = tips ?? !settings.isDemo
+        self.updatesTips = updatesTips
+        self.phoneFreeSpace = phoneFreeSpace
         // A library that lists its own items (the demo's) is read through it; Photos by the model itself.
         library = LibraryModel(catalog: settings.photos as? any ItemCatalog)
-        journey = JourneyLog(defaults: settings.defaults, tips: !settings.isDemo)
+        journey = JourneyLog(defaults: settings.defaults, tips: updatesTips)
         access = settings.photos.authorization()
         job.onPhaseChange = { [weak self] in self?.jobChanged() }
         job.onRunFinished = { [weak self] in
@@ -150,7 +162,7 @@ final class LibraryController {
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
-        if !settings.isDemo {
+        if updatesTips {
             TipState.notBackedUp = state.count(.notBackedUp)
             TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
             TipState.automaticOn = automatic.enabled
@@ -193,16 +205,14 @@ final class LibraryController {
     }
 
     private func refreshNewSinceBackup() async {
-        phoneFreeBytes = await Task.detached(priority: .utility) {
-            (try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-                .volumeAvailableCapacityForImportantUsage.map(Int.init)
-        }.value
+        let read = phoneFreeSpace
+        phoneFreeBytes = await Task.detached(priority: .utility) { read() }.value
         guard let last = journey.lastBackup else {
             newSinceBackup = nil
             return
         }
         let count = await newItems().count
-        newSinceBackup = (count, Calendar.current.dateComponents([.day], from: last, to: .now).day ?? 0)
+        newSinceBackup = (count, clock.calendar.dateComponents([.day], from: last, to: clock.now()).day ?? 0)
     }
 
     /// The items not backed up that were created since the last backup, in library order.

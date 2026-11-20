@@ -11,10 +11,13 @@ on:
       telemetry: {type: boolean, default: false, description: The telemetry Worker's tests}
       site: {type: boolean, default: false, description: The website's checks}
       app: {type: boolean, default: false, description: macOS build and the app's unit tests}
+      unit: {type: boolean, default: true, description: Run the separate app unit job}
       package: {type: boolean, default: false, description: The package's tests on macOS}
       ui: {type: string, default: "[]", description: UI runs (ci/lane.sh) as a JSON list}
       retry: {type: boolean, default: true, description: A failed UI run gets one more try}
       performance: {type: boolean, default: false, description: Opt-in nightly TLS upload regression}
+      traits: {type: boolean, default: false, description: Probe simulator traits in existing iPhone and Duo lanes}
+      snapshots: {type: string, default: verify, description: "Snapshot mode (verify, record or record-missing)"}
 
 permissions:
   contents: read
@@ -153,6 +156,7 @@ jobs:
   unit:
     name: App unit tests
     needs: build
+    if: inputs.unit
     runs-on: xcode-27
     timeout-minutes: 45
     env:
@@ -176,9 +180,28 @@ jobs:
       - name: The build of this commit
         run: mkdir -p ~/ci/dd && tar -xzf ${{ runner.temp }}/build.tgz -C ~/ci/dd
       - name: Unit tests (and the PhotoKit ones, in the app)
+        env:
+          HOMESPUN_SNAPSHOTS: ${{ inputs.snapshots }}
         run: zsh ci/unit.sh
+      - name: Keep snapshot differences
+        id: snapshot-diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-failed-${{ github.run_id }}
+          path: ci-results/snapshots
+          retention-days: 7
+      - name: Keep recorded snapshots
+        if: always() && inputs.snapshots != 'verify'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshots-recorded-${{ github.run_id }}
+          path: Apps/Homespun/HomespunTests/__Snapshots__
+          retention-days: 7
       - name: Summary
         if: always()
+        env:
+          HOMESPUN_SNAPSHOT_ARTIFACT_URL: ${{ steps.snapshot-diffs.outputs.artifact-url }}
         run: python3 ci/summary.py ci-results "App unit tests"
       - name: Collect timing metadata
         if: always()
@@ -247,7 +270,15 @@ jobs:
       - name: UI tests
         env:
           RETRY_UI: ${{ inputs.retry && '1' || '' }}
+          TRAIT_PROBE: ${{ inputs.traits && '1' || '' }}
         run: zsh ci/lane.sh ${{ matrix.run }}
+      - name: Keep simulator traits
+        if: always() && (matrix.run == 'probe' || (inputs.traits && (matrix.run == 'iphone' || matrix.run == 'duo-open')))
+        uses: actions/upload-artifact@v4
+        with:
+          name: traits-${{ matrix.run }}-${{ github.run_id }}
+          path: ci-results/traits
+          retention-days: 7
       - name: Summary
         if: always()
         run: python3 ci/summary.py ci-results "UI (${{ matrix.run }})"

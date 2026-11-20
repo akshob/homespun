@@ -25,6 +25,14 @@ enum CompareMode: String, CaseIterable, Identifiable {
 /// is deleted when Compare closes.
 @MainActor @Observable
 final class CompareModel {
+    struct Downloads: Sendable {
+        var directory: @Sendable () throws -> URL = { try PhotoLibrary.workDirectory() }
+        var fetch: @Sendable (ServerClient, String, ServerAPI.ResourceRole, URL, String,
+                             @escaping @Sendable (Int64, Int64) -> Void) async throws -> URL = {
+            try await CompareModel.fetch($0, assetID: $1, role: $2, to: $3, name: $4, progress: $5)
+        }
+    }
+
     enum Status: Equatable {
         case loading
         case downloading(received: Int64, expected: Int64)
@@ -45,12 +53,16 @@ final class CompareModel {
     private(set) var compactPlayer: AVPlayer?
     private(set) var originalFacts = MediaFacts()
     private(set) var compactFacts = MediaFacts()
+    private(set) var duration: TimeInterval = 0
     private(set) var server = "your server"
     @ObservationIgnored private var client: ServerClient?
     @ObservationIgnored private var download: Task<Void, Never>?
     @ObservationIgnored private var folder: URL?
     @ObservationIgnored let pair = VideoPair()
     @ObservationIgnored private var videoSwitch = 0
+    @ObservationIgnored private let downloads: Downloads
+
+    init(downloads: Downloads = Downloads()) { self.downloads = downloads }
 
     var isVideo: Bool { kind == .video }
     var hasOriginal: Bool { original != nil || originalPlayer != nil }
@@ -64,7 +76,7 @@ final class CompareModel {
         return nil
     }
 
-    func load(model: AppModel, compactIdentifier: String) async {
+    func load(model: AppModel, compactIdentifier: String, presentation: MediaPresentation = .interactive) async {
         close()
         status = .loading
         original = nil
@@ -73,6 +85,7 @@ final class CompareModel {
         compactPlayer = nil
         originalFacts = MediaFacts()
         compactFacts = MediaFacts()
+        duration = 0
         server = model.library.serverName
         client = model.settings.client
         let photos = model.settings.photos
@@ -81,6 +94,7 @@ final class CompareModel {
             return
         }
         kind = asset.itemKind ?? .photo
+        duration = asset.duration
         compactFacts = asset.mediaFacts().main
         let match = await model.job.ledger.snapshot().first { $0.value.compactIdentifier == compactIdentifier }
         guard !Task.isCancelled else { return }
@@ -93,7 +107,7 @@ final class CompareModel {
         case .immich: status = .inImmich
         case .unknown: status = .noOriginal
         }
-        if isVideo {
+        if isVideo, presentation == .interactive {
             let player = await asset.player()
             guard !Task.isCancelled else { return }
             compactPlayer = player
@@ -102,7 +116,7 @@ final class CompareModel {
             compact = await asset.image(size: nil, fast: false)
         }
         if case .phone = source, let originalAsset, !Task.isCancelled {
-            if isVideo {
+            if isVideo, presentation == .interactive {
                 let player = await originalAsset.player()
                 guard !Task.isCancelled else { return }
                 originalPlayer = player
@@ -119,7 +133,7 @@ final class CompareModel {
         guard case .server(let assetID) = source, let client, download == nil else { return }
         let folder: URL
         do {
-            folder = try self.folder ?? PhotoLibrary.workDirectory()
+            folder = try self.folder ?? downloads.directory()
         } catch {
             status = .failed(error.localizedDescription)
             return
@@ -130,8 +144,8 @@ final class CompareModel {
         Announce.say("Getting the original from \(server).")
         download = Task {
             do {
-                let url = try await Self.fetch(client, assetID: assetID, role: OriginalSource.role(for: kind), to: folder,
-                                               name: OriginalSource.fileName(for: kind)) { received, expected in
+                let url = try await downloads.fetch(client, assetID, OriginalSource.role(for: kind), folder,
+                                                    OriginalSource.fileName(for: kind)) { received, expected in
                     Task { @MainActor in
                         guard case .downloading = self.status else { return }
                         self.status = .downloading(received: received, expected: expected)
@@ -257,19 +271,26 @@ struct CompareView: View {
     let compactIdentifier: String
     /// False when it's part of another screen (Free Up Space on the open iPhone Duo), which has the title.
     var standalone = true
-    @State private var compare = CompareModel()
+    private let loadsOnAppear: Bool
+    @State private var compare: CompareModel
     @State private var mode = CompareMode.split
-    @State private var split = 0.5
+    @State private var split: Double
     @State private var holding = false
     @State private var zoomed = false
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.mediaPresentation) private var mediaPresentation
 
     static let stage = "compare.stage"
 
-    init(model: AppModel, compactIdentifier: String, standalone: Bool = true) {
+    /// A supplied comparison is already loaded; otherwise the view owns loading.
+    init(model: AppModel, compactIdentifier: String, standalone: Bool = true, split: Double = 0.5,
+         comparison: CompareModel? = nil) {
         self.model = model
         self.compactIdentifier = compactIdentifier
         self.standalone = standalone
+        loadsOnAppear = comparison == nil
+        _split = State(initialValue: min(1, max(0, split)))
+        _compare = State(initialValue: comparison ?? CompareModel())
     }
 
     /// Touch and hold shows the other version.
@@ -311,14 +332,15 @@ struct CompareView: View {
             .accessibilityIdentifier("compare.mode")
             stage
             if compare.isVideo, shown == .sideBySide {
-                CompareTransport(pair: compare.pair)
+                CompareTransport(pair: compare.pair, durationOverride: mediaPresentation == .poster ? compare.duration : nil)
             }
             facts
         }
         .background(Theme.background)
         .modifier(CompareScreen(standalone: standalone))
         .task(id: compactIdentifier) {
-            await compare.load(model: model, compactIdentifier: compactIdentifier)
+            guard loadsOnAppear else { return }
+            await compare.load(model: model, compactIdentifier: compactIdentifier, presentation: mediaPresentation)
             guard !Task.isCancelled else { return }
             mode = Self.adjusted(mode, video: compare.isVideo, regular: sizeClass == .regular)
             if compare.isVideo, mode == .sideBySide { compare.pair.active = true }
@@ -336,11 +358,11 @@ struct CompareView: View {
     private var stage: some View {
         GeometryReader { geo in
             ZStack {
-                if compare.isVideo, shown == .sideBySide {
+                if compare.isVideo, mediaPresentation == .interactive, shown == .sideBySide {
                     SideBySide(media: .videos(original: compare.originalPlayer, compact: compare.compactPlayer,
                                               size: compare.videoSize),
                                originalLabel: originalPill, compactLabel: "Compact copy · in Photos")
-                } else if compare.isVideo {
+                } else if compare.isVideo, mediaPresentation == .interactive {
                     let player = shown == .original ? compare.originalPlayer : compare.compactPlayer
                     if let player {
                         VideoPlayer(player: player).id(shown)

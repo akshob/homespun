@@ -74,6 +74,16 @@ struct ItemDetailsSheet: View {
     var close: (() -> Void)?
     @State private var details: ItemDetails?
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.appClock) private var clock
+
+    init(model: AppModel, cell: LibraryState.Cell, job: CompactJob.State? = nil,
+         close: (() -> Void)? = nil, details: ItemDetails? = nil) {
+        self.model = model
+        self.cell = cell
+        self.job = job
+        self.close = close
+        _details = State(initialValue: details)
+    }
 
     private func done() {
         if let close { close() } else { dismiss() }
@@ -112,7 +122,7 @@ struct ItemDetailsSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .task { details = await ItemDetails.load(model: model, cell: cell) }
+        .task { if details == nil { details = await ItemDetails.load(model: model, cell: cell) } }
     }
 
     // MARK: Where it is, and sizes
@@ -163,7 +173,9 @@ struct ItemDetailsSheet: View {
     }
 
     private var backedUpLine: String {
-        let when = details?.backedUpAt?.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+        let style = Date.FormatStyle(locale: clock.locale, calendar: clock.calendar, timeZone: clock.timeZone)
+            .month(.abbreviated).day().hour().minute()
+        let when = details?.backedUpAt?.formatted(style)
         let verb = immich ? "Found in Immich" : "Backed up"
         return [when.map { "\(verb) \($0)" }, "checked (SHA-256)"].compactMap(\.self).joined(separator: " · ")
     }

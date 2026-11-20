@@ -101,9 +101,10 @@ final class CompactJob {
     let settings: AppSettings
     let ledger: CompactLedger
 
-    init(settings: AppSettings, ledger: CompactLedger = CompactLedger()) {
+    init(settings: AppSettings, ledger: CompactLedger = CompactLedger(), initialStates: [String: State] = [:]) {
         self.settings = settings
         self.ledger = ledger
+        states = initialStates
     }
 
     /// The items whose phase changed since the last call (nil: no longer in the job), latest state each.

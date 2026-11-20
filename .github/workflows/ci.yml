@@ -14,8 +14,16 @@ on:
       ui:
         description: Checks or UI runs
         type: choice
-        options: [none, quick, full, watch, duo-open, package]
+        options: [none, quick, full, watch, duo-open, package, custom]
         default: quick
+      runs:
+        description: Space-separated segment names for custom runs (probe records simulator traits)
+        type: string
+      snapshots:
+        description: Snapshot reference mode (recording is CI only)
+        type: choice
+        options: [verify, record, record-missing]
+        default: verify
 
 permissions:
   contents: read
@@ -39,6 +47,7 @@ jobs:
       app: ${{ steps.plan.outputs.app }}
       package: ${{ steps.plan.outputs.package }}
       ui: ${{ steps.plan.outputs.ui }}
+      unit: ${{ steps.plan.outputs.unit }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,6 +59,8 @@ jobs:
           BEFORE: ${{ github.event.before }}
           SHA: ${{ github.sha }}
           UI_INPUT: ${{ inputs.ui }}
+          RUNS_INPUT: ${{ inputs.runs }}
+          SNAPSHOTS_INPUT: ${{ inputs.snapshots }}
         run: |
           python3 -m unittest discover -s ci -p 'test_*.py'
           python3 ci/plan.py
@@ -66,6 +77,8 @@ jobs:
       app: ${{ needs.plan.outputs.app == 'true' }}
       package: ${{ needs.plan.outputs.package == 'true' }}
       ui: ${{ needs.plan.outputs.ui }}
+      unit: ${{ needs.plan.outputs.unit == 'true' }}
+      snapshots: ${{ inputs.snapshots || 'verify' }}
       retry: true
 
 

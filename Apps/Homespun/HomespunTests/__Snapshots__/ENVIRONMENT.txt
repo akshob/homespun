@@ -1,0 +1,6 @@
+hostDevice=iPhone-18-Pro
+hostModel=iPhone19,2
+locale=en_US
+renderer=2
+runtimeBuild=24B8117
+xcodeBuild=27B52

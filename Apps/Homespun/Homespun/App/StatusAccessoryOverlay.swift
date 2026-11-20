@@ -25,6 +25,18 @@ struct StatusAccessoryModifier: ViewModifier {
     }
 }
 
+struct StatusAccessorySurface: View {
+    let status: AccessoryLadder.State?
+    let serverName: String
+    let width: CGFloat
+    var open: (StatusAccessory.Action) -> Void
+
+    var body: some View {
+        StatusAccessory(status: status, serverName: serverName, width: width, open: open)
+            .glassEffect(.regular, in: .rect(cornerRadius: 24))
+    }
+}
+
 private struct AccessoryContent: View {
     let model: AppModel
     let open: (StatusAccessory.Action) -> Void
@@ -45,11 +57,10 @@ private struct AccessoryContent: View {
                 if shown, bounds.width > 0, bounds.height > 100 {
                     VStack(spacing: 0) {
                         Spacer(minLength: 0)
-                        StatusAccessory(status: status, serverName: model.library.serverName,
-                                        width: width, open: open)
+                        StatusAccessorySurface(status: status, serverName: model.library.serverName,
+                                               width: width, open: open)
                             // A sidebar changes the available width without resizing the window.
                             .id([proxy.size.width, proxy.size.height, width])
-                            .glassEffect(.regular, in: .rect(cornerRadius: 24))
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
                     }
                     .frame(width: bounds.width, height: bounds.height)
