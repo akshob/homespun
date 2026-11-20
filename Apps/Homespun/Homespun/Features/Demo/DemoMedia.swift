@@ -13,7 +13,8 @@ actor DemoMediaStore {
     static let shared = DemoMediaStore(root: .applicationSupportDirectory)
     nonisolated static let folderName = "Homespun Demo Media"
     nonisolated static var bundledFolder: URL { Bundle.main.bundleURL.appendingPathComponent("Demo", isDirectory: true) }
-    nonisolated static let neededBytes: Int64 = 160 << 20
+    nonisolated static let neededBytes: Int64 = 64 << 20
+    nonisolated static let reviewNeededBytes: Int64 = 160 << 20
     nonisolated let folder: URL
 
     enum Failure: Error, Equatable, Sendable {
@@ -30,7 +31,9 @@ actor DemoMediaStore {
 
         var message: String {
             switch self {
-            case .diskFull: "The demo needs about 160 MB free on this iPhone. Free up some space, then try again."
+            case .diskFull(let bytes):
+                "The demo needs about \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)) free on this iPhone. "
+                    + "Free up some space, then try again."
             case .lowMemory: "This iPhone is short of memory right now. Close some apps, then try again."
             case .failed: "Something went wrong drawing the sample photos. Try again."
             }
@@ -100,8 +103,8 @@ actor DemoMediaStore {
         do {
             if FileManager.default.fileExists(atPath: folder.path) { try FileManager.default.moveItem(at: folder, to: old) }
         } catch {
-            // If renaming fails, don't let an earlier launch's files pass the ready check.
-            try? FileManager.default.removeItem(at: folder.appendingPathComponent("manifest.json"))
+            // Never reuse verified downloads from an earlier process, even if the rename failed.
+            try? FileManager.default.removeItem(at: folder)
         }
         Task.detached(priority: .utility) {
             let siblings = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
@@ -140,20 +143,21 @@ actor DemoMediaStore {
     func readyFolder() -> URL? { manifest() == nil ? nil : folder }
 
     /// Single-flight, and cancellable even though the drawing task runs off the actor's executor.
-    func prepare(progress: @escaping @Sendable (Progress) async -> Void) async throws -> URL {
+    func prepare(forceDraw: Bool = false, progress: @escaping @Sendable (Progress) async -> Void) async throws -> URL {
         try Task.checkCancellation()
         let pending: (id: UUID, task: Task<URL, Error>)
         if let flight {
             pending = flight
         } else {
-            if let ready = readyFolder(), download(folder.appendingPathComponent("downloads")) == nil { return ready }
-            if let free = freeSpace(), free < Self.neededBytes { throw Failure.diskFull(neededBytes: Self.neededBytes) }
+            let download = forceDraw ? nil : download(folder.appendingPathComponent("downloads", isDirectory: true))
+            if let ready = readyFolder(), download == nil, manifest()?.source != "reviewer-v1" { return ready }
+            let needed = download == nil ? Self.neededBytes : Self.reviewNeededBytes
+            if let free = freeSpace(), free < needed { throw Failure.diskFull(neededBytes: needed) }
             let available = availableMemory()
             guard available >= 320 << 20 else { throw Failure.lowMemory }
             let limit = Self.limit(cores: cores, available: available)
             concurrency.withLock { $0 = limit }
             let generator = DemoMediaGenerator(bundled: bundled, output: folder, limit: limit)
-            let download = download(folder.appendingPathComponent("downloads", isDirectory: true))
             let freeSpace = freeSpace
             let id = UUID()
             let task = Task.detached(priority: .userInitiated) { [self] in
@@ -193,7 +197,7 @@ actor DemoMediaStore {
                     throw CancellationError()
                 } catch {
                     try Task.checkCancellation()
-                    if let free = freeSpace(), free < Self.neededBytes { throw Failure.diskFull(neededBytes: Self.neededBytes) }
+                    if let free = freeSpace(), free < needed { throw Failure.diskFull(neededBytes: needed) }
                     Logger(subsystem: "photos.homespun.app", category: "Demo")
                         .error("Couldn't draw demo media: \(String(describing: error), privacy: .private)")
                     throw Failure.failed(String(describing: error))

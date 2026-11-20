@@ -20,7 +20,7 @@ struct DemoDownloadManifest: Codable, Sendable, Equatable {
     }
 
     func validate() throws {
-        guard version == 1, files.count == 16, Set(files.map(\.file)).count == files.count,
+        guard version == 1, files.count == 16, Set(files.map(\.name)).count == files.count,
               totalBytes > 0, totalBytes <= 64 << 20 else { throw DemoDownload.Failure.manifest }
         var total = 0
         for file in files {

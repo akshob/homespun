@@ -220,7 +220,7 @@ Caps, as string vars in `wrangler.jsonc` (digits only; anything else falls back 
 
 | Var | Default | Counter in `usage` | Why |
 | --- | --- | --- | --- |
-| `R2_MAX_BYTES` | 8000000000 | `r2.bytes` (stored now) | 80% of 10 GB |
+| `R2_MAX_BYTES` | 7932891136 | `r2.bytes` (stored now) | 80% of 10 GB, less 64 MiB reserved for private demo photos |
 | `R2_MAX_PUTS_MONTH` | 800000 | `r2.puts.YYYY-MM` | 80% of 1M Class A |
 | `R2_MAX_PUTS_DAY` | 25000 | `r2.puts.YYYY-MM-DD` | About a month's cap / 31, so one day can't use up the month |
 | `R2_MAX_BYTES_DAY` | 250000000 | `r2.bytes.YYYY-MM-DD` (added that day) | The same for bytes |
@@ -266,8 +266,8 @@ Each alert lists all current counters and caps.
 1,000 sharing installs make about 30k R2 writes a month (3% of the free tier) and keep 1–3 GB
 with the 90-day metrics retention. Diagnostics and reports are rare. In D1 that is about 9k rows
 written a day for payloads, plus about 4 per event (10 events per install per day would be 40k).
-The Worker never reads R2, so there are no Class B operations in normal operation; only your own
-downloads with `wrangler r2 object get` count.
+The telemetry endpoints never read R2. Only private reviewer-demo downloads (bounded separately below)
+and your own downloads with `wrangler r2 object get` incur Class B operations.
 
 Things the budget can't cover:
 

@@ -200,6 +200,9 @@ enum DemoTestMedia {
         defer { try? FileManager.default.removeItem(at: root) }
         _ = try await DemoMediaGenerator(bundled: DemoMediaStore.bundledFolder, output: store.folder, limit: 1,
                                         only: ["IMG_0224"]).run { _ in }
+        let downloads = store.folder.appendingPathComponent("downloads")
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        try Data("verified within the earlier launch".utf8).write(to: downloads.appendingPathComponent("demo-test.jpg"))
         DemoMediaStore.purgeAtLaunch(root: root)
         #expect(!FileManager.default.fileExists(atPath: store.folder.path))
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
@@ -229,6 +232,9 @@ enum DemoTestMedia {
         #expect(!DemoMode.canResume(media: root, state: root), "an earlier demo with no media manifest must restart")
         try encoder.encode(manifest).write(to: saved)
         #expect(DemoMode.canResume(media: root, state: root))
+        manifest.files["thumbs/photo.JPG"] = .init(bytes: 10, sha256: "a different thumbnail encoder")
+        try encoder.encode(manifest).write(to: drawn)
+        #expect(DemoMode.canResume(media: root, state: root), "derived thumbnails must not invalidate original identities")
         manifest.files["photo.JPG"]?.sha256 = "changed"
         try encoder.encode(manifest).write(to: drawn)
         #expect(!DemoMode.canResume(media: root, state: root), "a different encoder must not reuse the ledger's hashes")

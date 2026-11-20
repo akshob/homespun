@@ -55,7 +55,7 @@ import UniformTypeIdentifiers
         defer { try? FileManager.default.removeItem(at: f.folder) }
         let parsed = try JSONDecoder().decode(DemoDownloadManifest.self, from: JSONEncoder().encode(f.manifest))
         try parsed.validate()
-        for field in ["path", "sha", "size", "dimensions", "total", "duplicates"] {
+        for field in ["path", "sha", "size", "dimensions", "total", "duplicates", "duplicate-identity"] {
             var bad = parsed
             switch field {
             case "path": bad.files[0].file = "../private.jpg"
@@ -63,6 +63,7 @@ import UniformTypeIdentifiers
             case "size": bad.files[0].size = -1
             case "dimensions": bad.files[0].width = 9999
             case "total": bad.totalBytes = 1
+            case "duplicate-identity": bad.files[0].file = bad.files[1].name + ".heic"
             default: bad.files[0] = bad.files[1]
             }
             #expect(throws: (any Error).self) { try bad.validate() }
@@ -148,6 +149,28 @@ import UniformTypeIdentifiers
         try f.serve()
         _ = try await downloader.run { _, _ in }
         #expect(store.read() == downloader.code)
+    }
+
+    @Test func cancellingKeepsVerifiedFilesAndResumesOnlyTheRemainingFiles() async throws {
+        let f = try Fixture()
+        defer { try? FileManager.default.removeItem(at: f.folder) }
+        try f.serve()
+        let (events, continuation) = AsyncStream<Int>.makeStream()
+        let task = Task {
+            try await f.downloader.run { done, _ in
+                continuation.yield(done)
+                if done > 0 { try? await Task.sleep(for: .milliseconds(100)) }
+            }
+        }
+        for await done in events where done > 0 { task.cancel(); break }
+        continuation.finish()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        let saved = f.manifest.files.filter { f.downloader.verified($0, at: f.folder.appendingPathComponent($0.file)) }.count
+        #expect(saved > 0 && saved < 16)
+        #expect(try !FileManager.default.contentsOfDirectory(atPath: f.folder.path).contains { $0.hasSuffix(".part") })
+        let before = ReviewProtocol.requests.withLock { $0.count }
+        _ = try await f.downloader.run { _, _ in }
+        #expect(ReviewProtocol.requests.withLock { $0.count } - before == 17 - saved)
     }
 
     @Test func failedDownloadFallsBackToTheWholeDrawnLibrary() async throws {

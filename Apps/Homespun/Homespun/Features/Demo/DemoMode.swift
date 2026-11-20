@@ -79,7 +79,7 @@ final class DemoMode {
         prepare(origin: .tapped)
     }
 
-    private func prepare(origin: Origin) {
+    private func prepare(origin: Origin, forceDraw: Bool = false) {
         self.origin = origin
         if origin == .launch { Telemetry.shared.paused = true }
         let id = UUID(), previous = work
@@ -96,7 +96,8 @@ final class DemoMode {
                 let ready = await DemoMediaStore.shared.readyFolder()
                 try Task.checkCancellation()
                 guard preparationID == id else { return }
-                if let folder = ready, DemoDownload.configured(folder: folder) == nil {
+                if let folder = ready, !forceDraw, DemoDownload.configured(folder: folder) == nil,
+                   await DemoMediaStore.shared.manifest()?.source != "reviewer-v1" {
                     await previous?.value
                     try await finish(folder, origin: origin, id: id, drawnSince: nil)
                     return
@@ -109,7 +110,7 @@ final class DemoMode {
                 await previous?.value
                 try Task.checkCancellation()
                 guard preparationID == id else { return }
-                let folder = try await DemoMediaStore.shared.prepare { [weak self] progress in
+                let folder = try await DemoMediaStore.shared.prepare(forceDraw: forceDraw) { [weak self] progress in
                     guard let self else { return }
                     await MainActor.run {
                         guard self.preparationID == id, case .drawing = self.preparation else { return }
@@ -187,6 +188,12 @@ final class DemoMode {
         guard case .failed = preparation else { return }
         preparation = .drawing(nil)
         prepare(origin: origin ?? .tapped)
+    }
+
+    func drawInstead() {
+        guard let origin, case .drawing(let progress) = preparation, progress?.phase == .downloading else { return }
+        work?.cancel()
+        prepare(origin: origin, forceDraw: true)
     }
 
     private func beginBackgroundTask(id: UUID) {

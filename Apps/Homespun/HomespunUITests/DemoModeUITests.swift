@@ -24,7 +24,8 @@ final class DemoModeUITests: XCTestCase {
         let before = try await counts()
         app = XCUIApplication()
         app.launchArguments = ["-hideTips", "-resetDemo", "-demoMediaBase", endpoint, "-demoPrepareMinimum", "5"]
-        app.launchWithFeatures()
+        app.launchEnvironment["HOMESPUN_RELEASE_FEATURES"] = "0"
+        app.launch()
         let entry = app.buttons["demo.review"].firstMatch
         XCTAssertTrue(entry.waitForExistence(timeout: 20))
         entry.tap()
@@ -54,7 +55,7 @@ final class DemoModeUITests: XCTestCase {
         XCTAssertEqual(backgrounded, first, "backgrounding downloaded again")
         app.terminate()
         app.launchArguments = ["-hideTips", "-demoMediaBase", endpoint, "-demoPrepareMinimum", "5"]
-        app.launchWithFeatures()
+        app.launch()
         XCTAssertTrue(phase.waitForExistence(timeout: 10), "cold launch didn't prepare again")
         waitForPreparing()
         XCTAssertTrue(app.buttons["estimate.choose"].waitForExistence(timeout: 30), "cold launch lost the paired demo")

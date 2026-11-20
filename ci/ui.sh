@@ -155,7 +155,7 @@ if [[ -n ${STUB_PORT:-} ]]; then
 fi
 if [[ -n ${MEDIA_PORT:-} ]]; then
     stamp demo-media.start.start
-    timed demo-media.port wait_port_free $MEDIA_PORT || exit 1
+    python3 -c 'import socket,sys; s=socket.socket(); s.bind(("127.0.0.1",int(sys.argv[1]))); s.close()' $MEDIA_PORT || exit 1
     python3 ${0:A:h}/demo-media-stub.py $MEDIA_PORT & MEDIA_STUB=$!
     media_ready=0
     for attempt in {1..50}; do
@@ -163,7 +163,7 @@ if [[ -n ${MEDIA_PORT:-} ]]; then
         kill -0 $MEDIA_STUB 2>/dev/null || break
         sleep 0.1
     done
-    (( media_ready )) || { echo "demo media stub did not start"; exit 1; }
+    (( media_ready )) && kill -0 $MEDIA_STUB 2>/dev/null || { echo "demo media stub did not start"; exit 1; }
     export TEST_RUNNER_HOMESPUN_DEMO_MEDIA=http://127.0.0.1:$MEDIA_PORT/v1/demo/
     stamp demo-media.start.end
 fi

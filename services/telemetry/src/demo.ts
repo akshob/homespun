@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { Budget, busy, withWrites } from "./budget";
-import { HttpError, isObject, json, MB, readJsonBody } from "./http";
+import { HttpError, isObject, json, MB, readJsonBody, type JsonBody } from "./http";
 
 declare global {
 	interface Env {
@@ -64,8 +64,9 @@ export function parseManifest(value: unknown): DemoManifest {
 	const names = new Set<string>();
 	let total = 0;
 	for (const f of value.files) {
+		const name = typeof f?.file === "string" ? f.file.replace(/\.(heic|jpg)$/, "") : "";
 		if (!isObject(f) || typeof f.file !== "string" || !/^demo-[a-z0-9-]+\.(heic|jpg)$/.test(f.file)
-			|| names.has(f.file) || typeof f.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(f.sha256)
+			|| names.has(name) || typeof f.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(f.sha256)
 			|| !Number.isSafeInteger(f.size) || (f.size as number) <= 0 || (f.size as number) > 8 * MB
 			|| f.kind !== "photo" || !Number.isInteger(f.width) || !Number.isInteger(f.height)
 			|| (f.width as number) <= 0 || (f.height as number) <= 0 || (f.width as number) > 4032 || (f.height as number) > 4032
@@ -73,7 +74,7 @@ export function parseManifest(value: unknown): DemoManifest {
 			|| !Number.isFinite(Date.parse(f.date)) || typeof f.category !== "string" || !/^[a-z-]{1,40}$/.test(f.category)) {
 			throw new HttpError(503, "unavailable");
 		}
-		names.add(f.file);
+		names.add(name);
 		total += f.size as number;
 	}
 	if (total !== value.totalBytes || total > 64 * MB) throw new HttpError(503, "unavailable");
@@ -116,7 +117,8 @@ export async function handleDemo(request: Request, env: Env): Promise<Response> 
 		const counter = await sign(`lockout.${ip}`, env);
 		const locked = await env.DB.prepare("SELECT locked_until FROM demo_lockouts WHERE key = ?1").bind(counter).first<number>("locked_until");
 		if ((locked ?? 0) > now) throw forbidden();
-		const body = await readJsonBody(request, 256);
+		let body: JsonBody;
+		try { body = await readJsonBody(request, 256); } catch { throw forbidden(); }
 		const code = typeof body.value.code === "string" ? body.value.code.toUpperCase().replace(/[-\s]/g, "") : "";
 		if (!equal(await digest(code), env.DEMO_CODE_SHA256)) {
 			await env.DB.prepare(`INSERT INTO demo_lockouts (key, failures, window_start, locked_until, expires)

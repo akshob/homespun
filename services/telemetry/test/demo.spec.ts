@@ -65,6 +65,16 @@ describe("private reviewer demo", () => {
 		expect((await grant(ip)).status).toBe(403);
 	});
 
+	it("allows the same code again after the cooldown; counters contain no raw IP", async () => {
+		const ip = randomIp();
+		for (let i = 0; i < 10; i++) await sendWith(bindings, "POST", "/v1/demo/session", { code: "wrong" }, { ip });
+		expect((await grant(ip)).status).toBe(403);
+		const counters = await env.DB.prepare("SELECT key, locked_until FROM demo_lockouts").all<{ key: string; locked_until: number }>();
+		expect(counters.results.every((row) => /^[a-f0-9]{64}$/.test(row.key))).toBe(true);
+		await env.DB.prepare("UPDATE demo_lockouts SET locked_until = 0, window_start = 0").run();
+		expect((await grant(ip)).status).toBe(200);
+	});
+
 	it("expires sessions, rejects tampering, and invalidates them on code rotation", async () => {
 		const config = { ...env, ...bindings } as Env, now = Date.now();
 		const token = await sessionToken("a".repeat(64), config, now);

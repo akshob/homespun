@@ -12,7 +12,7 @@ import hashlib, json, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 m = json.loads((root / "manifest.json").read_text())
 assert set(m) == {"version", "totalBytes", "files"} and m["version"] == 1
-assert len(m["files"]) == 16 and len({f["file"] for f in m["files"]}) == 16
+assert len(m["files"]) == 16 and len({pathlib.Path(f["file"]).stem for f in m["files"]}) == 16
 assert sum(f["size"] for f in m["files"]) == m["totalBytes"] <= 64 * 1024 * 1024
 for f in m["files"]:
     assert set(f) == {"file", "sha256", "size", "kind", "width", "height", "date", "category"}
