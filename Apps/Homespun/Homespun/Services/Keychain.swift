@@ -26,6 +26,25 @@ enum Keychain {
     private static let installationService = "photos.homespun.installation"
     private static let installationCache = OSAllocatedUnfairLock<DeviceInstallation?>(initialState: nil)
 
+    static func removeLegacyReviewCode(
+        defaults: UserDefaults = .standard,
+        delete: ([CFString: Any]) -> OSStatus = { SecItemDelete($0 as CFDictionary) }
+    ) {
+        let completed = "didRemoveLegacyReviewCode"
+        guard !defaults.bool(forKey: completed) else { return }
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: "photos.homespun.demo-review-code",
+            kSecAttrAccount: "review",
+            kSecAttrSynchronizable: false,
+        ]
+        let status = delete(query)
+        // Retry at a later launch if the Keychain is unavailable, without touching pairing items.
+        if status == errSecSuccess || status == errSecItemNotFound {
+            defaults.set(true, forKey: completed)
+        }
+    }
+
     static func installation() throws -> DeviceInstallation {
         try installationCache.withLock { cached in
             if let cached { return cached }

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { handleEvents } from "./events";
-import { handleDemo } from "./demo";
 import { errorResponse, HttpError, json, KB, MB, readJsonBody, type JsonBody } from "./http";
 import { deleteInstall } from "./installs";
 import { handlePayload } from "./payloads";
@@ -31,8 +30,7 @@ export default {
 			return await route(request, env);
 		} catch (error) {
 			if (error instanceof HttpError) return errorResponse(error);
-			// Demo requests carry a credential; never log their exception details.
-			if (!new URL(request.url).pathname.startsWith("/v1/demo/")) console.error("internal error", error);
+			console.error("internal error", error);
 			return errorResponse(new HttpError(500, "internal error"));
 		}
 	},
@@ -44,8 +42,6 @@ export default {
 
 async function route(request: Request, env: Env): Promise<Response> {
 	const { pathname } = new URL(request.url);
-
-	if (pathname.startsWith("/v1/demo/")) return handleDemo(request, env);
 
 	if (pathname === "/v1/health") {
 		requireMethod(request, "GET");
