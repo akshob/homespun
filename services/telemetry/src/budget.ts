@@ -19,8 +19,7 @@ export interface Limits {
 }
 
 const LIMIT_VARS: Record<keyof Limits, readonly [variable: string, fallback: number]> = {
-	// Reserve 64 MiB from the existing 8 GB allowance for the private demo bucket.
-	r2MaxBytes: ["R2_MAX_BYTES", 7_932_891_136],
+	r2MaxBytes: ["R2_MAX_BYTES", 8_000_000_000],
 	r2MaxPutsMonth: ["R2_MAX_PUTS_MONTH", 800_000],
 	r2MaxPutsDay: ["R2_MAX_PUTS_DAY", 25_000],
 	r2MaxBytesDay: ["R2_MAX_BYTES_DAY", 250_000_000],

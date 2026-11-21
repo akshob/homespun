@@ -5,6 +5,7 @@ import SwiftUI
 struct HomespunApp: App {
     init() {
         PerfMonitor.mainStarted = CACurrentMediaTime()
+        Task.detached(priority: .utility) { Keychain.removeLegacyReviewCode() }
         AppModel.registerBackgroundRun()
         Journey.configureTips()
         MetricsReceiver.shared.start()

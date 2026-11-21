@@ -220,7 +220,7 @@ Caps, as string vars in `wrangler.jsonc` (digits only; anything else falls back 
 
 | Var | Default | Counter in `usage` | Why |
 | --- | --- | --- | --- |
-| `R2_MAX_BYTES` | 7932891136 | `r2.bytes` (stored now) | 80% of 10 GB, less 64 MiB reserved for private demo photos |
+| `R2_MAX_BYTES` | 8000000000 | `r2.bytes` (stored now) | 80% of 10 GB |
 | `R2_MAX_PUTS_MONTH` | 800000 | `r2.puts.YYYY-MM` | 80% of 1M Class A |
 | `R2_MAX_PUTS_DAY` | 25000 | `r2.puts.YYYY-MM-DD` | About a month's cap / 31, so one day can't use up the month |
 | `R2_MAX_BYTES_DAY` | 250000000 | `r2.bytes.YYYY-MM-DD` (added that day) | The same for bytes |
@@ -266,8 +266,8 @@ Each alert lists all current counters and caps.
 1,000 sharing installs make about 30k R2 writes a month (3% of the free tier) and keep 1–3 GB
 with the 90-day metrics retention. Diagnostics and reports are rare. In D1 that is about 9k rows
 written a day for payloads, plus about 4 per event (10 events per install per day would be 40k).
-The telemetry endpoints never read R2. Only private reviewer-demo downloads (bounded separately below)
-and your own downloads with `wrangler r2 object get` incur Class B operations.
+The Worker never reads R2, so there are no Class B operations in normal operation; only your own
+downloads with `wrangler r2 object get` count.
 
 Things the budget can't cover:
 
@@ -285,65 +285,6 @@ in the dashboard are replaced by the next deploy.) To see the counters:
 ```bash
 npx wrangler d1 execute homespun-telemetry --remote --command "SELECT * FROM usage ORDER BY key"
 ```
-
-## Private reviewer demo
-
-The existing Worker also gates a **second, private R2 bucket**, `homespun-demo`. Sharing the Worker
-reuses its first-party TLS endpoint, D1 budget accounting and rate-limit infrastructure; demo routes
-never require or accept the public telemetry key as authorization.
-
-- `POST /v1/demo/session {"code":"…"}` checks the normalized code's SHA-256 against the
-  `DEMO_CODE_SHA256` secret with the runtime's constant-time comparison.
-  Only failures count per IP: 10 bad codes in a 10-minute window cause a 15-minute cooldown.
-  Successful authorizations have no per-IP limit (reviewers may share an address).
-  D1 stores only an HMAC-keyed, expiring counter,
-  never a raw IP, code or session token. Expired counters are removed by daily retention.
-- Success returns `{manifest, token, expiresAt}`. The manifest contains exactly 16 entries with
-  `file, sha256, size, kind, width, height, date, category`, with synthetic dates and no source paths.
-  The HMAC token is valid for at most one hour and binds the manifest and current code hash.
-  Rotating either `DEMO_CODE_SHA256` or `DEMO_SIGNING_KEY` invalidates existing tokens.
-  Codes are reusable and never expire until rotation. The app exchanges its stored code for a fresh
-  session at every demo start and silently refreshes expired sessions while resuming remaining files.
-- `GET /v1/demo/files/:name` requires `Authorization: Bearer <token>` and streams only a named
-  manifest object. Responses are `private, no-store`; no public bucket or unsigned URL is used.
-  Bad codes, lockouts, missing/expired credentials and unauthorized objects return the same 403.
-- No request/invocation logs, code/token/body logging, analytics IDs or cookies. Only aggregate usage
-  and rate-limit counters persist. Failed-attempt counters expire within 25 minutes and are removed
-  by daily cleanup; successful authorizations keep no IP-keyed record.
-- **App Privacy:** raw IPs, codes and tokens are not retained, but keyed failed-attempt counters are.
-  The manifest conservatively adds **App Functionality** to the existing, not-linked **Device ID**
-  declaration for this abuse-prevention use. Mirror that purpose in App Store Connect before submission.
-  This is not tracking. Apple's [collection definition and IP guidance](https://developer.apple.com/app-store/app-privacy-details/)
-  distinguish real-time-only processing from retained data; a hash is not a blanket disclosure exemption.
-
-### Setup and upload (owner only)
-
-Follow the manual owner deployment process below; the telemetry Worker is **not deployed by Actions**.
-Create `homespun-demo` with `wrangler r2 bucket create homespun-demo`. Leave managed `r2.dev` access
-disabled and attach no custom domains. Never enable public access. Apply D1 migrations before deploy.
-Set `DEMO_CODE_SHA256` (lowercase hex SHA-256 of uppercase alphanumerics, removing hyphens/whitespace)
-and a separate strong random `DEMO_SIGNING_KEY` with `wrangler secret put`; never commit either or
-print the code. Give the plain code only to App Review through private review notes.
-
-Run `bash scripts/demo-upload.sh LOCAL_FOLDER` from this directory, with `wrangler` on PATH and owner
-credentials in the environment. The folder must contain `manifest.json` and the 16 processed photos.
-The script validates every size/hash before uploading, publishes the manifest last, and never enables
-public access. Use a private staging folder outside git and delete local media copies after upload.
-The media remain all rights reserved, usable only by Homespun's demo and App Store pages.
-
-### Budget
-
-The 64 MiB demo-set cap is reserved from the existing 8 GB R2 storage allowance by lowering
-`R2_MAX_BYTES` to 7,932,891,136. Uploads are owner-only (17 Class A operations per set, outside
-the Worker's upload accounting). Demo requests have their own atomic allowances in `usage`:
-2,000 session attempts/day, 5,000 R2 reads/day and 150,000/month (1.5% of the free 10M Class B reads),
-plus 10 GB streamed/day (R2 egress is free). This allows roughly 147 complete 40 MB downloads/day,
-before other shared D1 limits, rather than restricting successful uses of a code or IP.
-A session costs one manifest read; a file request reserves two reads (manifest and object).
-They also charge the shared D1 write budget and stop at 90%, leaving telemetry reports headroom.
-Failed reservations may over-count, never under-count. No unbounded R2 list, write or public reads
-exist. Daily/monthly aggregate counters follow the existing retention. A flood can still consume
-the Workers Free request allowance, as documented below.
 
 ## Develop and test
 
@@ -409,6 +350,8 @@ npx wrangler dev --test-scheduled   # then: curl 'localhost:8787/cdn-cgi/handler
     Worker's logs (`wrangler tail` or the dashboard) as `report HS-…: email failed: <code>`.
 
 ## Querying
+
+Operations: the private `homespun-demo` R2 bucket retains 16 photos and its manifest for later use, with no Worker binding or public access; the unused upload script was removed.
 
 Use `npx wrangler d1 execute homespun-telemetry --remote --command "<SQL>"` (add `--json` for
 machine-readable output). Examples:

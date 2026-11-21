@@ -1,10 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import Security
 import Testing
 @testable import Homespun
 
 @MainActor @Suite(.serialized) struct AppSettingsTests {
+    @Test(arguments: [errSecSuccess, errSecItemNotFound])
+    func legacyReviewCodeCleanupRunsOnlyOnce(_ status: OSStatus) {
+        let name = "keychain-cleanup-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        var deletions = 0
+        let delete: ([CFString: Any]) -> OSStatus = { query in
+            deletions += 1
+            #expect(query[kSecClass] as? String == kSecClassGenericPassword as String)
+            #expect(query[kSecAttrService] as? String == "photos.homespun.demo-review-code")
+            #expect(query[kSecAttrAccount] as? String == "review")
+            #expect(query[kSecAttrSynchronizable] as? Bool == false)
+            #expect(query.count == 4, "cleanup must target only the retired review credential")
+            return status
+        }
+        Keychain.removeLegacyReviewCode(defaults: defaults, delete: delete)
+        Keychain.removeLegacyReviewCode(defaults: defaults, delete: delete)
+        #expect(deletions == 1)
+    }
+
+    @Test func legacyReviewCodeCleanupRetriesAfterKeychainFailure() {
+        let name = "keychain-cleanup-retry-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        var deletions = 0
+        let delete: ([CFString: Any]) -> OSStatus = { _ in
+            deletions += 1
+            return deletions == 1 ? errSecInteractionNotAllowed : errSecSuccess
+        }
+        for _ in 0..<3 {
+            Keychain.removeLegacyReviewCode(defaults: defaults, delete: delete)
+        }
+        #expect(deletions == 2)
+    }
+
     @Test func retryKeepsTheLastServerStatusUntilItConcludes() async throws {
         let name = "server-check-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!

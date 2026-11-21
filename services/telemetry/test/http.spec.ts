@@ -22,6 +22,17 @@ describe("routing", () => {
 		}
 	});
 
+	it("no longer exposes reviewer download routes", async () => {
+		for (const [method, path] of [
+			["POST", "/v1/demo/session"],
+			["GET", "/v1/demo/files/sample.jpg"],
+		]) {
+			const response = await send(method, path, undefined, { key: null });
+			expect(response.status, path).toBe(404);
+			expect(await response.json()).toEqual({ error: "not found" });
+		}
+	});
+
 	it("rejects wrong methods with 405 and Allow", async () => {
 		const cases: [string, string, string][] = [
 			["GET", "/v1/events", "POST"],

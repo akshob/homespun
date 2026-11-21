@@ -13,7 +13,6 @@ struct TryTheDemoButton: View {
             Text("See how Homespun works with sample photos. Nothing on this iPhone is changed.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-            DemoReviewCodeButton().padding(.top, 8)
         }
         .padding(.top, 4)
     }
@@ -36,7 +35,6 @@ struct DemoHelpSection: View {
         Section {
             if model.settings.isDemo {
                 LeaveDemoButton()
-                ForgetReviewCodeButton()
             } else {
                 Button { confirming = true } label: {
                     ServerRow(title: "Try the Demo", symbol: "play.rectangle", value: nil, chevron: true)
@@ -45,8 +43,6 @@ struct DemoHelpSection: View {
                 .disabled(busy != nil || DemoMode.shared.settling || DemoMode.shared.isPreparing)
                 .accessibilityHint(busy.map { "Available once Homespun has finished \($0)." } ?? "")
                 .accessibilityIdentifier("help.demo")
-                DemoReviewCodeButton()
-                ForgetReviewCodeButton()
             }
         } footer: {
             if model.settings.isDemo {
