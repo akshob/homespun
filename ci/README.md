@@ -152,6 +152,13 @@ too. Prefer the targeted workflow input (for example `ui=duo-open`) for a lane-o
 On a Mac shared by several jobs, set `SIM_SLOTS_DIR` to limit how many simulators boot at once
 (see `env.sh`).
 
+The `demo` lane also starts `demo-media-stub.py` on loopback ports 8902 (iPhone) and 8903 (Duo).
+It serves only the existing synthetic CI JPEG with a test review code; no private photos or production
+credentials are used. `testReviewCodeDownloadsFromLocalStubAndRedownloadsAfterColdLaunch` enters the
+code through the app and checks download counts, reuse after backgrounding, and cold-launch download.
+Debug refuses a non-loopback demo endpoint. Without the stub the test is skipped and all other demo
+tests keep drawing. Worker authorization, expiry, lockout and budget tests use local Miniflare.
+
 After tool installation, CI reserves `$CI_STATE/presim/<device>.pending`, then starts
 `presim.sh`. Boot deliberately does not overlap brew: trials took **197–361 s** with a
 download-cache hit and **459 s** without it, versus **31 s** in the contemporaneous build

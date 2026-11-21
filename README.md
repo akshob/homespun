@@ -121,6 +121,19 @@ and records are kept apart and deleted by Leave the Demo (the Server tab, or the
 Leaving the demo deletes what it did; the drawn photos stay until Homespun next starts from scratch.
 The demo has the same release scope as the app.
 
+For App Review only, **Have a review code?** (beside Try the Demo) accepts a reusable code, saved in the
+device-only, non-synced Keychain after successful authorization. With that code, Preparing the Demo downloads 16 private sample photos
+(about 40 MB) from the first-party Worker, verifies SHA-256 and shows byte progress. Thumbnails and
+compact copies are made on the phone; the screenshot, videos and Live Photo remain app-owned.
+Cancel preserves verified files for a retry within the launch. Downloads live in Application Support,
+excluded from backup, and are wiped at each cold launch. Bad codes, unavailable networks or integrity
+failures fall back to the whole drawn set. Sessions renew silently, including during slow downloads.
+The code works until rotation; Forget Review Code in Help and About restores the usual offline demo.
+Each demo start exchanges it for a fresh session; leaving a reviewer demo discards its downloaded
+set so the next start downloads again without typing. Slow downloads offer Draw Them Instead.
+No photo-library or installation identifiers are sent. The private photos are all rights reserved,
+not part of this repository or its license. See [the Worker](services/telemetry/README.md#private-reviewer-demo).
+
 **Planned Premium features** (not available in 1.0.0; the implementation is retained):
 
 - **Automatic mode**: new photos and videos (or, if chosen, everything not backed up yet) are

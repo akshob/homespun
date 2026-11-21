@@ -59,7 +59,7 @@ describe("limits", () => {
 	it("parses string vars and falls back to defaults", () => {
 		const defaults = limitsFrom({} as Env);
 		expect(defaults).toEqual({
-			r2MaxBytes: 8_000_000_000,
+			r2MaxBytes: 7_932_891_136,
 			r2MaxPutsMonth: 800_000,
 			r2MaxPutsDay: 25_000,
 			r2MaxBytesDay: 250_000_000,
@@ -71,7 +71,7 @@ describe("limits", () => {
 		const parsed = limitsFrom({ R2_MAX_BYTES: " 123 ", EVENTS_MAX_DAY: 7, R2_MAX_PUTS_DAY: "0" } as unknown as Env);
 		expect(parsed).toMatchObject({ r2MaxBytes: 123, eventsMaxDay: 7, r2MaxPutsDay: 0 });
 		for (const bad of ["-5", "1e3", "12.5", "lots", "", "99999999999999999999", null]) {
-			expect(limitsFrom({ R2_MAX_BYTES: bad } as unknown as Env).r2MaxBytes, String(bad)).toBe(8_000_000_000);
+			expect(limitsFrom({ R2_MAX_BYTES: bad } as unknown as Env).r2MaxBytes, String(bad)).toBe(defaults.r2MaxBytes);
 		}
 	});
 });

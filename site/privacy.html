@@ -16,7 +16,7 @@
   </header>
   <main>
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated November 19, 2026</p>
+    <p class="updated">Last updated November 20, 2026</p>
 
     <p><strong>In short:</strong> Your photos and videos stay on your iPhone or go to a server that you run. The
       developer of Homespun never receives them. The app has no accounts, ads, or tracking, and it never sells or
@@ -82,9 +82,19 @@
 
     <h2>The demo</h2>
     <p>Try the Demo uses sample photos that Homespun draws on your iPhone (and a few videos that come with the app)
-      and a pretend server inside the app. The drawn photos are deleted the next time Homespun starts. In the demo,
+      and a pretend server inside the app. For App Review only, entering a review code instead downloads 16 sample
+      photos from the developer's private Cloudflare storage, with progress and SHA-256 integrity checks.
+      The review code and your IP address reach the developer's Cloudflare service to authorize the download.
+      Requests carry no installation, analytics, device, or photo-library identifiers, cookies, or app version.
+      A short-lived access token authorizes only the sample files. Neither the code, token nor raw IP address is
+      stored by the developer; only aggregate usage counters and short-lived keyed rate-limit counters are kept.
+      Failed-attempt counters expire within 25 minutes and are removed by daily cleanup.
+      Request logging is disabled. After successful authorization the reusable code is kept in this iPhone's
+      non-synced Keychain until you choose Forget Review Code. Hour-long file sessions renew automatically.
+      Downloads are repeated after each cold launch, not after backgrounding, and failure uses drawn photos instead.
+      All prepared sample photos are deleted the next time Homespun starts. In the demo,
       Homespun doesn't read or change your Photos library, records no analytics, sends no problem reports, and pairs
-      with no real server. Leaving deletes the demo's settings and records; the drawn samples stay until the next launch.
+      with no real photo-backup server. Leaving deletes the demo's settings and records; samples stay until the next launch.
       Your own server's settings and records stay unchanged.</p>
 
     <h2>Where it goes and how long it's kept</h2>

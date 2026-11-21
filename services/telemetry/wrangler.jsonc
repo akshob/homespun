@@ -12,7 +12,8 @@
 		// Public noise filter sent by the app as `X-Homespun-Key`. Not a secret.
 		"APP_KEY": "homespun-app-v1",
 		// Hard usage caps (digits only), 80% of the free tiers by default. See README "Budget".
-		"R2_MAX_BYTES": "8000000000",
+		// Reserve 64 MiB of the existing storage budget for private demo photos.
+		"R2_MAX_BYTES": "7932891136",
 		"R2_MAX_PUTS_MONTH": "800000",
 		"R2_MAX_PUTS_DAY": "25000",
 		"R2_MAX_BYTES_DAY": "250000000",
@@ -35,7 +36,10 @@
 		}
 	],
 
-	"r2_buckets": [{ "binding": "BUCKET", "bucket_name": "homespun-telemetry" }],
+	"r2_buckets": [
+		{ "binding": "BUCKET", "bucket_name": "homespun-telemetry" },
+		{ "binding": "DEMO_BUCKET", "bucket_name": "homespun-demo" }
+	],
 
 	// Per-IP limits. The binding only supports 10 s or 60 s periods.
 	"ratelimits": [

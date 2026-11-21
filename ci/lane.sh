@@ -83,8 +83,8 @@ for one in $runs; do
         HomespunUITests/DuoLayoutUITests,HomespunUITests/ItemPagingUITests 8793 open ;;
     demo)
       # Try the Demo needs no server and no Photos access: on an iPhone, then on iPhone Duo's cover.
-      run demo env SERVERLESS=1 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests,HomespunUITests/GridRedrawUITests 8800
-      run demo-duo env SERVERLESS=1 zsh $D/ui.sh demo-duo iPhone-Duo HomespunUITests/DemoModeUITests 8801 ;;
+      run demo env SERVERLESS=1 MEDIA_PORT=8902 zsh $D/ui.sh demo iPhone-18-Pro HomespunUITests/DemoModeUITests,HomespunUITests/GridRedrawUITests 8800
+      run demo-duo env SERVERLESS=1 MEDIA_PORT=8903 zsh $D/ui.sh demo-duo iPhone-Duo HomespunUITests/DemoModeUITests 8801 ;;
     *)
       echo "unknown run: $one"; failed+=$one ;;
   esac

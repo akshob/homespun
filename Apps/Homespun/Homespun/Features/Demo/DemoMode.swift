@@ -52,7 +52,10 @@ final class DemoMode {
         }
         #if DEBUG
         // UI tests start without a demo left by an earlier test.
-        if ProcessInfo.processInfo.arguments.contains("-resetDemo") { Self.wipe() }
+        if ProcessInfo.processInfo.arguments.contains("-resetDemo") {
+            Self.wipe()
+            try? DemoReviewCodeStore.forget()
+        }
         #endif
         // On when the app last closed: it carries on where it was. (Without its marker, the folder is
         // what a demo left was still writing as it ended.)
@@ -76,7 +79,7 @@ final class DemoMode {
         prepare(origin: .tapped)
     }
 
-    private func prepare(origin: Origin) {
+    private func prepare(origin: Origin, forceDraw: Bool = false) {
         self.origin = origin
         if origin == .launch { Telemetry.shared.paused = true }
         let id = UUID(), previous = work
@@ -93,7 +96,8 @@ final class DemoMode {
                 let ready = await DemoMediaStore.shared.readyFolder()
                 try Task.checkCancellation()
                 guard preparationID == id else { return }
-                if let folder = ready {
+                if let folder = ready, !forceDraw, DemoDownload.configured(folder: folder) == nil,
+                   await DemoMediaStore.shared.manifest()?.source != "reviewer-v1" {
                     await previous?.value
                     try await finish(folder, origin: origin, id: id, drawnSince: nil)
                     return
@@ -106,7 +110,7 @@ final class DemoMode {
                 await previous?.value
                 try Task.checkCancellation()
                 guard preparationID == id else { return }
-                let folder = try await DemoMediaStore.shared.prepare { [weak self] progress in
+                let folder = try await DemoMediaStore.shared.prepare(forceDraw: forceDraw) { [weak self] progress in
                     guard let self else { return }
                     await MainActor.run {
                         guard self.preparationID == id, case .drawing = self.preparation else { return }
@@ -149,7 +153,7 @@ final class DemoMode {
         preparationID = nil
         endBackgroundTask()
         Announce.say(restarted
-                     ? "The demo started again because its sample photos were drawn again. The demo is ready. Nothing on this iPhone is changed."
+                     ? "The demo started again because its sample photos were prepared again. The demo is ready. Nothing on this iPhone is changed."
                      : "The demo is ready. Nothing on this iPhone is changed.")
     }
 
@@ -158,7 +162,7 @@ final class DemoMode {
         guard let old = try? decoder.decode(DemoMediaManifest.self, from: Data(contentsOf: state.appendingPathComponent("media.json"))),
               let new = try? decoder.decode(DemoMediaManifest.self, from: Data(contentsOf: media.appendingPathComponent("manifest.json")))
         else { return false }
-        return old.files == new.files
+        return old.files.filter { !$0.key.hasPrefix("thumbs/") } == new.files.filter { !$0.key.hasPrefix("thumbs/") }
     }
 
     func cancel() {
@@ -184,6 +188,12 @@ final class DemoMode {
         guard case .failed = preparation else { return }
         preparation = .drawing(nil)
         prepare(origin: origin ?? .tapped)
+    }
+
+    func drawInstead() {
+        guard let origin, case .drawing(let progress) = preparation, progress?.phase == .downloading else { return }
+        work?.cancel()
+        prepare(origin: origin, forceDraw: true)
     }
 
     private func beginBackgroundTask(id: UUID) {
@@ -238,6 +248,9 @@ final class DemoMode {
         Task {
             try? await Task.sleep(for: .seconds(3))
             Self.wipe()
+            if await DemoMediaStore.shared.manifest()?.source == "reviewer-v1" || DemoReviewCodeStore().read() != nil {
+                try? await DemoMediaStore.shared.reset()
+            }
             DemoMode.shared.settling = false
         }
         Announce.say("Left the demo.")

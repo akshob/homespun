@@ -41,6 +41,8 @@ export async function runRetention(env: Env, now: Date): Promise<RetentionResult
 	const limits = limitsFrom(env);
 	const cutoff = (days: number) => new Date(now.getTime() - days * DAY).toISOString();
 	const deleter = new Deleter(env, Math.floor(limits.d1MaxWritesDay * RETENTION_WRITE_SHARE));
+	const expiredDemo = await env.DB.prepare("DELETE FROM demo_lockouts WHERE expires <= ?1").bind(Math.floor(now.getTime() / 1000)).run();
+	deleter.writes += expiredDemo.meta.changes;
 
 	// Rows with R2 objects first: they cost storage.
 	const metrics = await deleter.withObjects("payloads", cutoff(RETENTION_DAYS.metrics), "metrics");
