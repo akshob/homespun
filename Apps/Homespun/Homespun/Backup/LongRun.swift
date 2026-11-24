@@ -88,26 +88,15 @@ final class LongRun {
         }
     }
 
-    nonisolated private static func expirationHandler(completion: Completion, job: CompactJob, runID: UUID)
+    nonisolated private static func expirationHandler(completion: Completion, work: Task<Void, Never>)
         -> @Sendable () -> Void {
         {
             guard completion.finish(success: false) else { return }
-            Task { @MainActor in
-                guard LongRun.shared.runID == runID else { return }
-                // Open on screen, the run simply carries on (it doesn't need the system's time). In
-                // the background, what hasn't started is dropped, or iOS ends the app.
-                guard UIApplication.shared.applicationState != .active else {
-                    LongRun.log.notice("continued processing expired while open; the run carries on")
-                    return
-                }
-                job.stopWaiting(Set(job.items.filter { $0.state == .waiting }.map(\.assetIdentifier)))
-            }
+            work.cancel()
         }
     }
 
-    /// How far along the item being worked on is (0–1), from its step: iOS ends a continued task
-    /// whose progress stops moving, and a video can take minutes on the server, so that step creeps
-    /// forward with time.
+    /// Only actual local work contributes progress; remote encoding never creeps with elapsed time.
     nonisolated static func fraction(step: String, seconds: Double) -> Double {
         switch step {
         case let step where step.hasPrefix("Uploading"):
@@ -115,7 +104,7 @@ final class LongRun {
             return 0.1 + 0.5 * min(max(percent, 0), 100) / 100
         case "Reading": return 0.02
         case "Contacting server": return 0.08
-        case "Queued on server", "Compressing on server": return min(0.6 + seconds / 400, 0.85)
+        case "Queued on server", "Compressing on server": return 0
         case "Downloading compact copy": return 0.88
         case "Compressing motion": return 0.9
         case "Checking Live Photo": return 0.93
@@ -132,21 +121,24 @@ final class LongRun {
         if let error { Telemetry.shared.record(error: error, where: "longrun.\(step)") }
     }
 
-    /// Reports the job's progress to the system until it ends; Stop from the system drops what
-    /// hasn't started (items already backed up stay backed up).
+    /// Reports local work only. Expiration revokes this opportunity, not the saved selection.
     private func follow(_ box: TaskBox, job: CompactJob, runID: UUID) async {
         let task = box.task
         let completion = Completion { success in
             if success { box.task.progress.completedUnitCount = box.task.progress.totalUnitCount }
             box.task.setTaskCompleted(success: success)
         }
-        // iOS ended it (Stop on the Lock Screen, or out of time): drop what hasn't started and say
-        // so at once, or iOS ends the app. The item in progress finishes when the app runs again.
-        task.expirationHandler = Self.expirationHandler(completion: completion, job: job, runID: runID)
+        var ended = false
+        let work = Task {
+            do { try await job.runOpportunity() }
+            catch { if !Task.isCancelled { job.showQueueProblem(error) } }
+            ended = true
+        }
+        task.expirationHandler = Self.expirationHandler(completion: completion, work: work)
         defer { if self.runID == runID { self.runID = nil } }
         // Hundredths of an item, never going backwards.
         var reported: Int64 = 0, step = "", stepStarted = Date()
-        while completion.result == nil, job.isRunning || job.hasWaiting {
+        while completion.result == nil, !ended {
             let progress = job.runProgress
             let current = progress.current.map { "\($0.asset) \(job.currentMessage)" } ?? ""
             if current != step {
@@ -161,6 +153,7 @@ final class LongRun {
             task.updateTitle(task.title, subtitle: "\(progress.done) of \(progress.total)")
             try? await Task.sleep(for: .seconds(1))
         }
+        await work.value
         completion.finish(success: true)
     }
 

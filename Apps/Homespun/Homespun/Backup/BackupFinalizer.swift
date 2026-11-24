@@ -32,6 +32,7 @@ enum BackupValidation {
 }
 
 struct BackupFinalizer: Sendable {
+    static let boundedMotionEncodingAvailable = false
     let store: BackupStore
     let photos: any PhotoSource
     let workspace: BackupWorkspace
@@ -76,6 +77,9 @@ struct BackupFinalizer: Sendable {
         }
         let cachedMotion = cached.first { $0.kind == .motion && $0.descriptor.role == .pairedVideo && $0.availability == .present
             && FileManager.default.fileExists(atPath: store.files.stagedFile(operationID: operation.id, fileID: $0.fileID).path) }
+        guard !derivative.deviceCompresses.contains(.pairedVideo) || cachedMotion != nil || Self.boundedMotionEncodingAvailable else {
+            throw BackupStageFailure.blocked("The original is retained. Saving this Live Photo needs bounded on-iPhone motion encoding, which is not yet available. No original can be removed.")
+        }
         let motion = originals.first { $0.kind == .original && $0.availability == .present && $0.descriptor.role == .fullSizePairedVideo }
             ?? originals.first { $0.kind == .original && $0.availability == .present && $0.descriptor.role == .pairedVideo }
         // Existing staged files are already counted by the Store. Reserve missing downloads plus

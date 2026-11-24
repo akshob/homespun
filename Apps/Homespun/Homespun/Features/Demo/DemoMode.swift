@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import HomespunCore
 import Observation
 import Synchronization
 import UIKit
@@ -280,12 +281,14 @@ final class DemoSession: Sendable {
     let tokens: DemoTokens
 
     init(folder: URL, defaults: UserDefaults, pace: Double = 1, media: URL,
+         processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil,
          ask: @escaping @Sendable (DemoLibrary.Question) async -> Bool = { await DemoPrompt.ask($0) }) {
         self.folder = folder
         self.defaults = defaults
         library = DemoLibrary(folder: folder.appendingPathComponent("library", isDirectory: true), media: media, ask: ask)
         let library = library
-        server = DemoServer(folder: folder.appendingPathComponent("server", isDirectory: true), pace: pace) {
+        server = DemoServer(folder: folder.appendingPathComponent("server", isDirectory: true), pace: pace,
+                            processingDelay: processingDelay) {
             library.bundledCompact(sha256: $0)
         }
         tokens = DemoTokens(defaults: defaults, library: library)

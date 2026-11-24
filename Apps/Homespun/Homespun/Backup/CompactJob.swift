@@ -645,9 +645,8 @@ final class CompactJob {
     func stopWaiting(_ identifiers: Set<String>) {
         if suppliedCompactor == nil {
             control { [self] in
-                for operation in projected.values where identifiers.contains(operation.itemID) && operation.lease != nil {
-                    if let lease = operation.lease { try await ledger.store.deferLease(lease) }
-                }
+                try await coordinator.pause(only: identifiers)
+                project([])
             }
             return
         }

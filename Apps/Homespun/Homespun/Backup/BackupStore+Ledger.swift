@@ -9,6 +9,25 @@ extension BackupStore {
         var kept: Set<String>
     }
 
+    struct ProjectionRevision: Equatable, Sendable {
+        var local: Int64
+        var external: Int64
+    }
+
+    func projectionRevision() throws -> ProjectionRevision {
+        try readState { connection in
+            .init(local: try connection.rows("SELECT total_changes() AS changes").first!.integer("changes"),
+                  external: try connection.rows("PRAGMA data_version").first!.integer("data_version"))
+        }
+    }
+
+    func keptDecisions(namespace: String) throws -> Set<String> {
+        try readState { connection in
+            try Set(connection.rows("SELECT item FROM decisions WHERE namespace = ? AND kept = 1", [.text(namespace)])
+                .map { try $0.text("item") })
+        }
+    }
+
     struct BindingInformation: Codable, Equatable, Sendable {
         var capabilities: BackupAPI.Capabilities
         var name: String
@@ -172,8 +191,13 @@ extension BackupStore {
     func ledgerProjection(namespace: String) throws -> LedgerProjection {
         try readState { connection in
             var entries: [String: CompactLedger.Entry] = [:]
+            var information: [UUID: BindingInformation] = [:]
             for row in try connection.rows("""
-                SELECT m.body FROM mappings m JOIN lineages l ON l.current_mapping = m.id WHERE l.namespace = ?
+                SELECT m.body,o.id AS operation_id,o.binding AS binding_id,
+                json_extract(CAST(o.body AS TEXT),'$.receipt.requestId') AS request_id
+                FROM mappings m JOIN lineages l ON l.current_mapping = m.id
+                LEFT JOIN imports i ON i.id = m.intent LEFT JOIN operations o ON o.id = i.operation
+                WHERE l.namespace = ?
                 """, [.text(namespace)]) {
                 let mapping = try Self.decode(SavedMapping.self, row.blob("body"))
                 var entry = mapping.entry
@@ -181,18 +205,17 @@ extension BackupStore {
                 entry.version = mapping.proof?.version
                 entry.retention = mapping.proof?.retention
                 entry.compactResources = mapping.compactResources
-                if let intent = mapping.intentID,
-                   let row = try connection.rows("SELECT body FROM imports WHERE id = ?", [.text(intent.uuidString)]).first {
-                    let effect = try Self.decode(ImportIntent.self, row.blob("body"))
-                    if let operation = try Self.operation(effect.operationID, connection) {
-                        entry.operationID = operation.id
-                        entry.bindingID = operation.bindingID
-                        entry.requestID = operation.receipt?.requestID
-                        entry.serverName = try Self.metadata("binding:" + operation.bindingID.uuidString,
-                                                            as: BindingInformation.self, connection)?.name
-                        entry.externalVerification = try Self.metadata("binding:" + operation.bindingID.uuidString,
-                            as: BindingInformation.self, connection)?.capabilities.externalVerification
+                if case .text(let operation)? = row.values["operation_id"],
+                   case .text(let binding)? = row.values["binding_id"],
+                   let bindingID = UUID(uuidString: binding) {
+                    entry.operationID = UUID(uuidString: operation)
+                    entry.bindingID = bindingID
+                    if case .text(let request)? = row.values["request_id"] { entry.requestID = UUID(uuidString: request) }
+                    if information[bindingID] == nil {
+                        information[bindingID] = try Self.metadata("binding:" + binding, as: BindingInformation.self, connection)
                     }
+                    entry.serverName = information[bindingID]?.name
+                    entry.externalVerification = information[bindingID]?.capabilities.externalVerification
                 }
                 entries[mapping.originalID] = entry
             }

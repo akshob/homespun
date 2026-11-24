@@ -6,6 +6,10 @@ import HomespunCore
 /// neither a server encoder nor a discovery backoff holds isRunning, the screen, or LongRun.
 @MainActor
 final class BackupCoordinator {
+    private struct PreparedCandidate: Codable, Sendable {
+        var metadata: BackupPhotoMetadata
+        var resources: [BackupStore.Resource]
+    }
     private struct Work {
         var stage: BackupStore.Stage
         var task: Task<Void, Never>
@@ -172,8 +176,19 @@ final class BackupCoordinator {
     func reconcileHint(bindingID: UUID) async throws -> Bool {
         guard !retired, !suspended, let context, context.binding.id == bindingID else { return false }
         let cursor = try await store.cursor(bindingID: bindingID)
-        try await resultSync.synchronize(context)
-        return try await store.cursor(bindingID: bindingID) != cursor
+        let sync = resultSync, store = store
+        return try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                try await sync.synchronize(context)
+                return try await store.cursor(bindingID: bindingID) != cursor
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(10))
+                throw CancellationError()
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? false
+        }
     }
 
     func setVisible(_ visible: Bool) {
@@ -283,6 +298,22 @@ final class BackupCoordinator {
 
     private func prepare(_ operation: BackupStore.Operation, lease: BackupStore.Lease,
                          context: BackupBindingContext, workspace: BackupWorkspace) async throws {
+        let candidateKey = "prepared-candidate:" + operation.id.uuidString
+        if let candidate = try await store.metadata(candidateKey, as: PreparedCandidate.self) {
+            guard try photos.sourceGeneration(operation.itemID) == candidate.metadata.generation else {
+                throw BackupStageFailure.sourceChanged("The previously staged original changed in Photos. Its working files are preserved; select the current item again.")
+            }
+            for resource in candidate.resources {
+                let file = store.files.stagedFile(operationID: operation.id, fileID: resource.fileID)
+                let digest = try await Task.detached { try Fingerprint.digests(of: file) }.value
+                guard digest.size == resource.descriptor.size, digest.sha256 == resource.descriptor.sha256.lowercased() else {
+                    throw BackupStageFailure.blocked("The earlier staged original needs recovery. It was not silently replaced or discarded.")
+                }
+            }
+            try await store.prepared(lease, manifest: .init(kind: candidate.metadata.kind, resources: candidate.resources.map(\.descriptor)),
+                resources: candidate.resources, captureDate: candidate.metadata.creationDate, metadata: BackupStore.encode(candidate.metadata))
+            return
+        }
         let bytes = try photos.preparationBytes(operation.itemID, mode: context.binding.mode)
         let permit = try await workspace.prepare(operation, bytes: bytes)
         do {
@@ -290,10 +321,10 @@ final class BackupCoordinator {
                 directory: permit.directory, maximumBytes: permit.maximumBytes) { [weak self] message in
                     Task { @MainActor [weak self] in self?.progress(operation.id, message) }
                 }
-            try Task.checkCancellation()
             let resources = prepared.resources.map {
                 BackupStore.Resource(fileID: $0.fileID, operationID: operation.id, kind: .original, descriptor: $0.descriptor)
             }
+            try await store.saveMetadata(candidateKey, value: PreparedCandidate(metadata: prepared.metadata, resources: resources), immutable: true)
             try await store.prepared(lease, manifest: prepared.manifest, resources: resources,
                                      captureDate: prepared.metadata.creationDate, metadata: BackupStore.encode(prepared.metadata))
         } catch {
@@ -449,23 +480,30 @@ final class BackupCoordinator {
         }
     }
 
-    func pause() async throws {
+    func pause(only ids: Set<String>? = nil) async throws {
         guard let context else { return }
         schedulingPaused = true
         driver?.cancel()
-        for work in active.values { work.task.cancel() }
+        for (id, work) in active {
+            if let ids, let operation = try await store.operation(id), !ids.contains(operation.itemID) { continue }
+            work.task.cancel()
+        }
         var cursor: Int64 = 0
         repeat {
             let page = try await store.operationPage(namespace: namespace, after: cursor)
             cursor = page.cursor
             for operation in page.operations where operation.bindingID == context.binding.id && operation.desired == .active
-                && operation.delivery != .importedVerified {
+                && operation.delivery != .importedVerified && (ids?.contains(operation.itemID) ?? true) {
                 try await store.setDesired(.paused, operationID: operation.id)
             }
             if !page.hasMore { break }
         } while true
-        for work in active.values { work.task.cancel() }
+        for (id, work) in active {
+            if let ids, let operation = try await store.operation(id), !ids.contains(operation.itemID) { continue }
+            work.task.cancel()
+        }
         await changed([])
+        if ids != nil { schedulingPaused = false; drive() }
     }
 
     func resume() async throws {
@@ -592,7 +630,11 @@ final class BackupCoordinator {
         let id = UUID()
         opportunityIDs.insert(id)
         backgroundOpportunities += 1
-        defer { backgroundOpportunities -= 1; opportunityIDs.remove(id) }
+        defer {
+            backgroundOpportunities -= 1
+            opportunityIDs.remove(id)
+            if visible, !suspended { drive() }
+        }
         do {
             try await withTaskCancellationHandler {
                 try await reconcile()

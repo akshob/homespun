@@ -27,6 +27,7 @@ extension BackupStore {
         var approvals: [PhotosRemovalApproval] = []
         var createdIdentifier: String?
         var submitted: Set<String> = []
+        var resources: [UUID]?
         var problem: String?
 
         var originals: Set<String> { Set(mappings.map(\.originalID)) }
@@ -94,6 +95,19 @@ extension BackupStore {
     }
 
     func effect(_ id: UUID) throws -> PhotoEffect? { try readState { try Self.effect(id, $0) } }
+
+    func effectResources(_ id: UUID, resources: [Resource]) throws {
+        try mutateState { connection in
+            guard var effect = try Self.effect(id, connection), effect.kind == .restore, effect.phase == .planned,
+                  BackupValidation.matches(effect.expected, resources.map(\.descriptor)),
+                  resources.allSatisfy({ $0.kind == .restoredOriginal && $0.availability == .present
+                      && effect.epochs[$0.operationID] != nil }) else { throw Failure.invalidImport }
+            let ids = resources.map(\.fileID)
+            guard effect.resources == nil || effect.resources == ids else { throw Failure.invalidImport }
+            effect.resources = ids
+            try Self.writeEffect(effect, connection)
+        }
+    }
 
     func startEffect(_ id: UUID) throws {
         try mutateState { connection in
@@ -202,6 +216,11 @@ extension BackupStore {
                 guard var effect = try Self.effect(id, connection), effect.kind == .restore,
                       let created = effect.createdIdentifier, let original = effect.mappings.first,
                       effect.mappings.count == 1, proof.version == effect.version,
+                      proof.retention == .permanent, proof.claimID != nil,
+                      proof.resources.allSatisfy({ $0.state == .verified && $0.verifiedAt != nil && $0.receivedBytes == $0.size }),
+                      BackupValidation.matches(effect.expected, proof.resources.map {
+                          .init(role: $0.role, filename: "", size: $0.size, sha256: $0.sha256)
+                      }),
                       BackupValidation.matches(effect.expected, actual),
                       effect.phase == .created || effect.phase == .verified else { throw Failure.invalidImport }
                 if let stored = try Self.metadata("restored-mapping:" + id.uuidString, as: SavedMapping.self, connection) {
@@ -216,17 +235,23 @@ extension BackupStore {
                     INSERT INTO lineages(namespace,item,generation,current_mapping) VALUES(?,?,0,?)
                     ON CONFLICT(namespace,item) DO NOTHING
                     """, [.text(effect.namespace), .text(created), .text(mapping.id.uuidString)])
-                try connection.execute("""
-                    UPDATE lineages SET current_mapping = NULL WHERE namespace = ? AND item = ? AND current_mapping = ?
-                    """, [.text(effect.namespace), .text(original.originalID), .text(original.id.uuidString)])
+                if created == original.originalID {
+                    try connection.execute("""
+                        UPDATE lineages SET current_mapping = ? WHERE namespace = ? AND item = ? AND current_mapping = ?
+                        """, [.text(mapping.id.uuidString), .text(effect.namespace), .text(created), .text(original.id.uuidString)])
+                } else {
+                    try connection.execute("""
+                        UPDATE lineages SET current_mapping = NULL WHERE namespace = ? AND item = ? AND current_mapping = ?
+                        """, [.text(effect.namespace), .text(original.originalID), .text(original.id.uuidString)])
+                }
                 try Self.saveMetadata("restored-mapping:" + id.uuidString, value: mapping, connection)
                 effect.phase = .verified
                 try Self.writeEffect(effect, connection)
                 if let operationID = original.entry.operationID {
-                    try connection.execute("""
-                        DELETE FROM file_refs WHERE owner = ? AND resource IN
-                        (SELECT id FROM resources WHERE operation = ? AND kind = 'restoredOriginal')
-                        """, [.text("operation:" + operationID.uuidString), .text(operationID.uuidString)])
+                    for resource in effect.resources ?? [] {
+                        try connection.execute("DELETE FROM file_refs WHERE owner = ? AND resource = ?",
+                            [.text("operation:" + operationID.uuidString), .text(resource.uuidString)])
+                    }
                 }
                 return mapping
             }
