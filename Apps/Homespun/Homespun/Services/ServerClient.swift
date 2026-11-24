@@ -66,12 +66,18 @@ struct ServerClient: Sendable {
         current.lifetime.retire(session: current.session)
     }
 
-    private func request(_ path: String, method: String = "GET") throws -> URLRequest {
+    func request(_ path: String, method: String = "GET", apiVersion: Int = 1,
+                 query: [URLQueryItem] = []) throws -> URLRequest {
         if case .blocked(let reason) = trust { throw Failure(status: 0, message: reason, code: "tls_blocked") }
         guard baseURL.scheme == "https" else {
             throw Failure(status: 0, message: "Homespun only connects with encryption.", code: "insecure")
         }
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/" + path))
+        guard apiVersion == 1 || apiVersion == 2,
+              var components = URLComponents(url: baseURL.appendingPathComponent("api/v\(apiVersion)/" + path),
+                                             resolvingAgainstBaseURL: false) else { throw URLError(.badURL) }
+        if !query.isEmpty { components.queryItems = query }
+        guard let url = components.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
         request.httpMethod = method
         request.timeoutInterval = timeout
         return request
@@ -97,7 +103,7 @@ struct ServerClient: Sendable {
         return request
     }
 
-    private func run<Value>(_ request: URLRequest, retrying: Bool = false,
+    func run<Value>(_ request: URLRequest, retrying: Bool = false,
                             _ operation: (URLSession, URLRequest) async throws -> Value) async throws -> Value {
         let current = connection.withLock { $0 }
         var request = try retarget(request, to: current.url)
@@ -140,15 +146,15 @@ struct ServerClient: Sendable {
         }
     }
 
-    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         try await run(request) { session, request in try await session.data(for: request) }
     }
 
-    private func download(for request: URLRequest) async throws -> (URL, URLResponse) {
+    func download(for request: URLRequest) async throws -> (URL, URLResponse) {
         try await run(request) { session, request in try await session.download(for: request) }
     }
 
-    private func check(_ data: Data, _ response: URLResponse, accepting: Set<Int> = [200, 201, 202]) throws -> Int {
+    func check(_ data: Data, _ response: URLResponse, accepting: Set<Int> = [200, 201, 202]) throws -> Int {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard accepting.contains(status) else {
             let detail = (try? ServerAPI.decoder.decode(ServerAPI.ErrorBody.self, from: data))?.error
