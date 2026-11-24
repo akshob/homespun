@@ -214,7 +214,8 @@ private struct HistoryRemote: BackupRemote {
         #expect(await job.enqueue(Array(ids.prefix(2)), trigger: .manual).isEmpty)
         #expect(job.queueProblem != nil && job.items.isEmpty && job.states.isEmpty)
         #expect(job.runProgress.total == 0 && job.runProgress.done == 0 && !job.isPreparing && !job.isRunning)
-        #expect(try await job.ledger.store.operations().isEmpty)
+        let operations = try await job.ledger.store.operations()
+        #expect(operations.isEmpty)
     }
 }
 
