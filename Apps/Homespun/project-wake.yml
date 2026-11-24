@@ -6,6 +6,7 @@ targets:
     info:
       properties:
         HomespunWakeRelayURL: "${HOMESPUN_WAKE_RELAY_URL}"
+        HomespunWakePushEnvironment: $(HOMESPUN_APNS_ENVIRONMENT)
         UIBackgroundModes:REPLACE: [processing, remote-notification]
     settings:
       base:

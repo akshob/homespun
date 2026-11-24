@@ -6,8 +6,10 @@ import UIKit
 @MainActor enum WakeSystem {
     static let enrollment: WakeEnrollment = {
         let configured = Bundle.main.object(forInfoDictionaryKey: "HomespunWakeRelayURL") as? String
-        let url = configured.flatMap { $0.isEmpty ? nil : URL(string: $0) }
-        let environment: WakeRelayAPI.Environment = Bundle.main.bundleIdentifier == "photos.homespun.app" ? .production : .sandbox
+        let pushEnvironment = Bundle.main.object(forInfoDictionaryKey: "HomespunWakePushEnvironment") as? String
+        let url = pushEnvironment.map { ["development", "production"].contains($0) } == true
+            ? configured.flatMap { $0.isEmpty ? nil : URL(string: $0) } : nil
+        let environment: WakeRelayAPI.Environment = pushEnvironment == "development" ? .sandbox : .production
         return WakeEnrollment(relayURL: url, environment: environment, storage: KeychainWakeEnrollmentStore())
     }()
 

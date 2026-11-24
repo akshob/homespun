@@ -64,6 +64,7 @@ targets:
         HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
         HomespunReleaseFeatures: $(HOMESPUN_RELEASE_FEATURES)
         HomespunWakeRelayURL: ""
+        HomespunWakePushEnvironment: ""
     dependencies:
       - package: HomespunPackage
         product: HomespunCore
