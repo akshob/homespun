@@ -67,6 +67,9 @@ private func backupManifest(_ primary: String = String(repeating: "a", count: 64
     let origin = BackupAPI.Origin(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
     let manifest = backupManifest()
     let recipe = BackupAPI.Recipe(profile: .standard, backend: "libvips-x265", pipelineVersion: 1)
+    let capabilities = BackupAPI.Capabilities(origin: origin, uploadProtocols: [.foregroundOffset], recipe: recipe,
+                                               externalVerification: .fullResourceScrub)
+    #expect(try ServerAPI.decoder.decode(BackupAPI.Capabilities.self, from: ServerAPI.encoder.encode(capabilities)) == capabilities)
     let version = BackupAPI.Version(origin: origin, assetID: try manifest.assetID(),
                                     manifestID: try manifest.identifier(), descriptorGeneration: 3,
                                     recipeID: try recipe.identifier())
