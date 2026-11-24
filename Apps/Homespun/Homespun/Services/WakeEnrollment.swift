@@ -36,7 +36,7 @@ final class WakeEnrollment {
     @ObservationIgnored private var hintWaiters: [UUID: HintWaiter] = [:]
 
     init(relayURL: URL?, environment: WakeRelayAPI.Environment, storage: any WakeEnrollmentStoring,
-         demo: Bool = false, allowed: @escaping @MainActor @Sendable () -> Bool = { !Telemetry.paused },
+         demo: Bool = false, allowed: @escaping @MainActor @Sendable () -> Bool = { !Telemetry.shared.paused },
          makeClient: @escaping @Sendable (URL) throws -> any WakeRelayServing = { try WakeRelayClient(baseURL: $0) }) {
         self.relayURL = relayURL
         self.environment = environment
