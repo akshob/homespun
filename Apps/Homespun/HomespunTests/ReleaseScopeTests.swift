@@ -51,8 +51,8 @@ final class ReleaseScopeTests: XCTestCase {
         XCTAssertNil(diagnostics["premium"])
         XCTAssertNil(diagnostics["automatic"])
         XCTAssertTrue(PremiumFeature.available.isEmpty && PremiumFeature.backupFeatures.isEmpty)
-        XCTAssertFalse(ServerTab.Route.automatic.isAvailable || ServerTab.Route.notifications.isAvailable
-                       || ServerTab.Route.premium.isAvailable
+        XCTAssertTrue(ServerTab.Route.notifications.isAvailable, "Manual completion alerts stay free")
+        XCTAssertFalse(ServerTab.Route.automatic.isAvailable || ServerTab.Route.premium.isAvailable
                        || ServerTab.Route.connectors.isAvailable)
         XCTAssertFalse(Journey.premiumMomentDue(owned: false, freedBytes: 2_000_000_000,
                                                manualBackupDays: [.now, .now.addingTimeInterval(-86_400)],
