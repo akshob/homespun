@@ -660,7 +660,8 @@ struct ImportGuideView: View {
         }
         steps.append(("Make a list of your originals",
                       "One line per item: where each original is, and the SHA-256 of the compact copy you made from it. "
-                        + "The format is at homespun.photos/import.", []))
+                        + "See “Bringing in an existing library” at "
+                        + "github.com/akshob/homespun#bringing-in-an-existing-library.", []))
         steps.append(("Check the list first", kind == .nas
                       ? "Paths in the list are the container's: /archive/2021/11/… Nothing is recorded yet."
                       : "Nothing is recorded. It lists missing files.", ["\(run) \(list) --dry-run"]))
