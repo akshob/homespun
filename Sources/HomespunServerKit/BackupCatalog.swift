@@ -140,17 +140,31 @@ extension Catalog {
         """
 
     static func backupJSON<T: Encodable>(_ value: T) throws -> String {
-        let encoder = ServerAPI.encoder
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return String(decoding: try encoder.encode(value), as: UTF8.self)
     }
 
     static func backupDecode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
-        try ServerAPI.decoder.decode(type, from: Data(json.utf8))
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let data = Data(json.utf8)
+        do {
+            return try decoder.decode(type, from: data)
+        } catch is DecodingError {
+            // Early prerelease catalog rows used millisecond dates. This compatibility is
+            // internal only; HTTP dates must still use the unchanged ISO 8601 wire codec.
+            decoder.dateDecodingStrategy = .millisecondsSince1970
+            return try decoder.decode(type, from: data)
+        }
     }
 
     static func backupIntentHash<T: Encodable>(_ value: T) throws -> String {
-        let encoder = ServerAPI.encoder
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         encoder.dateEncodingStrategy = .millisecondsSince1970
         return Fingerprint.sha256(of: try encoder.encode(value))
