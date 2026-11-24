@@ -7,11 +7,7 @@ import UIKit
     static let enrollment: WakeEnrollment = {
         let configured = Bundle.main.object(forInfoDictionaryKey: "HomespunWakeRelayURL") as? String
         let url = configured.flatMap { $0.isEmpty ? nil : URL(string: $0) }
-        #if DEBUG
-        let environment = WakeRelayAPI.Environment.sandbox
-        #else
-        let environment = WakeRelayAPI.Environment.production
-        #endif
+        let environment: WakeRelayAPI.Environment = Bundle.main.bundleIdentifier == "photos.homespun.app" ? .production : .sandbox
         return WakeEnrollment(relayURL: url, environment: environment, storage: KeychainWakeEnrollmentStore())
     }()
 

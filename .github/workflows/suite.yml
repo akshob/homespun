@@ -99,6 +99,8 @@ jobs:
           ref: ${{ inputs.ref }}
       - name: Tools
         run: brew install --quiet xcodegen ffmpeg
+      - name: Verify the optional notification build scope
+        run: python3 ci/check_wake_project.py
       - uses: actions/cache@v4
         with:
           path: ~/ci/spm
