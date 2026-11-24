@@ -15,6 +15,8 @@ static void start(void) {
     if (init_status == 0) {
         // Files are replaced in place; never serve stale decoded copies.
         vips_cache_set_max(0);
+        vips_concurrency_set(2);
+        vips_cache_set_max_mem(64 * 1024 * 1024);
     }
 }
 

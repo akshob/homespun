@@ -105,6 +105,18 @@ import Darwin
     }
 }
 
+@Test(.timeLimit(.minutes(1))) func stalledProcessProgressFailsWithoutATotalRuntimeLimit() throws {
+    let advancing = try ProcessRunner.run(["sh", "-c",
+        "for i in 1 2 3 4 5 6; do printf 'frame=%s\\nout_time_us=%s\\n' \"$i\" \"$i\"; sleep 0.1; done"], progressTimeout: 0.4)
+    #expect(String(decoding: advancing, as: UTF8.self).contains("frame=6"))
+    do {
+        try ProcessRunner.run(["sh", "-c", "printf 'frame=1\\nout_time_us=1\\n'; exec sleep 60"], progressTimeout: 0.1)
+        Issue.record("A stalled progress counter must fail")
+    } catch let failure as ProcessFailure {
+        #expect(failure.stderr.contains("Encoding stalled"))
+    }
+}
+
 @Test(.enabled(if: ProcessRunner.available("ffmpeg")))
 func compressesSyntheticVideoEndToEnd() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

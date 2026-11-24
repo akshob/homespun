@@ -50,7 +50,7 @@ public struct VideoProbe: Equatable, Sendable {
 
     #if os(Linux) || os(macOS)
     public static func read(_ url: URL) throws -> VideoProbe {
-        let data = try ProcessRunner.run(["ffprobe", "-v", "error", "-show_streams", "-show_format",
+        let data = try ProcessRunner.run(["ffprobe", "-v", "error", "-max_alloc", "268435456", "-show_streams", "-show_format",
                                           "-of", "json", url.path])
         return try parse(data, decodable: FFmpegCodecs.decodable)
     }
