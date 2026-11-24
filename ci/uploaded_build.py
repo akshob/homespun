@@ -8,7 +8,7 @@ import sys
 
 
 def uploaded_build(log: str) -> str:
-    builds = re.findall(r"^Uploaded build ([1-9][0-9]*)(?:[ \t].*)?$", log, re.MULTILINE)
+    builds = re.findall(r"^Uploaded build ([1-9][0-9]*)(?:[ \t].*|\.(?:[ \t].*)?)?$", log, re.MULTILINE)
     if len(builds) != 1:
         raise ValueError(f"Expected exactly one uploaded build number; found {len(builds)}.")
     return builds[0]
