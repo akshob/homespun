@@ -83,7 +83,10 @@ import Darwin
             while cancellation.processID == nil { try await Task.sleep(for: .milliseconds(10)) }
             return cancellation.processID
         }
-        defer { group.cancelAll() }
+        defer {
+            cancellation.cancel()
+            group.cancelAll()
+        }
         // A failed launch or unexpectedly early exit finishes the first child instead of
         // leaving an unstructured task and polling for a PID that will never appear.
         let first = try await group.next()
