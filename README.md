@@ -108,7 +108,8 @@ GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all s
 
 ## iOS app
 
-Version 1.0.0 supports iOS 26 and later. Release build numbers are timestamps from `testflight.sh`.
+Version 1.1.0 is being prepared for TestFlight and supports iOS 26 and later.
+The public App Store release is still 1.0.0. Release build numbers are timestamps from `testflight.sh`.
 
 On first launch the app explains what it does, connects to a server (tap one found on the
 network: a Mac asks you to click Allow on its screen, a Linux server gives you a code; or use a
@@ -154,7 +155,7 @@ The demo has the same release scope as the app.
 Upgrading removes the former reviewer-code Keychain item once at launch, retrying on a later
 launch if the Keychain is unavailable. The demo uses only drawn and bundled media, with no downloads.
 
-**Planned Premium features** (not available in 1.0.0; the implementation is retained):
+**Premium in 1.1.0** (one-time purchase with Family Sharing; not available in the public 1.0.0 app):
 
 - **Automatic mode**: new photos and videos (or, if chosen, everything not backed up yet) are
   backed up and compacted without being selected: when the app opens and in a background
@@ -175,20 +176,23 @@ launch if the Keychain is unavailable. The demo uses only drawn and bundled medi
   (circular, rectangular, inline, corner, and the Smart Stack, higher up when there's space to free
   or the server can't be reached). Tapping one opens that place in the app. Locked, they say
   "Unlock widgets in the Homespun app" and open the unlock sheet (`homespun://unlock?feature=widgets`).
+- **Apple Watch**: the same private, offline status on your wrist, with complications and the Smart Stack.
+- **OneDrive Cloud Copies**: the server copies verified originals into its own OneDrive app folder.
+  Tokens stay on your server; these extra copies never replace the server proof required to free up space.
 
 Automatic Mode's page (Server › Backups) opens with or without the purchase. Turning it on asks for the
-purchase first, with Restore Purchase, then carries on; one purchase unlocks Automatic Mode and widgets,
-with Family Sharing in feature-enabled builds. The local StoreKit configuration is for testing only.
-Cloud Copies also needs a Microsoft app ID in the server before a later launch.
+purchase first, with Restore Purchase, then carries on; one purchase unlocks Automatic Mode, widgets,
+Apple Watch and OneDrive Cloud Copies, with Family Sharing. The local StoreKit configuration is for testing only.
 The server's connector support stays available separately (see below).
 
-**1.0.0 release scope:** `Apps/Homespun/ReleaseFeatures.xcconfig` is the single shipping switch:
-`HOMESPUN_RELEASE_FEATURES = NO`. Release and TestFlight have no Premium, Automatic Mode,
-Cloud Copies, widgets or Watch app, and never query purchase products or entitlements. Change it to `YES` and regenerate
-with `zsh Apps/Homespun/scripts/generate-project.sh` to restore runtime features and embedding together.
+**Release feature scope:** `Apps/Homespun/ReleaseFeatures.xcconfig` is the single shipping switch:
+`HOMESPUN_RELEASE_FEATURES = YES` in 1.1.0 enables Premium, Automatic Mode, OneDrive Cloud Copies,
+widgets and Apple Watch together. The public 1.0.0 release used `NO`, omitted those targets and
+never queried purchase products or entitlements. Regenerate with
+`zsh Apps/Homespun/scripts/generate-project.sh` after changing the switch.
 All targets remain in `project.yml`. The generator's `--testing` option selects
 `project-features.yml` to embed widgets and Watch for CI, without changing the shipping switch.
-Debug runtime features require `-releaseFeatures YES` or `HOMESPUN_RELEASE_FEATURES=1`;
+Debug can explicitly enable runtime features with `-releaseFeatures YES` or `HOMESPUN_RELEASE_FEATURES=1`;
 `-releaseFeatures NO` overrides the environment for release-scope regression tests.
 Release ignores both overrides. The Homespun test scheme opts in, as do feature UI tests.
 `HomespunReleaseScope` runs the disabled-feature unit regression separately.
@@ -196,14 +200,14 @@ Debug feature-enabled builds are unlocked unless `-premiumLocked YES` is set.
 Feature-enabled TestFlight builds retain the existing sandbox-product policy.
 `Homespun.storekit` is a local App Store for trying the purchase on the simulator.
 
-The dormant automatic BGTask identifier and `processing` mode remain: there is no registration or
-scheduling while disabled, and user-started backups still use BGContinuedProcessingTask.
-The App Group entitlement is harmless without a publisher or embedded extensions and stays.
-Purchase-history privacy declarations stay conservative for retained code; disabled builds drop
-purchase telemetry, including queued events from older builds. The website describes 1.0.0 only.
+Automatic background scheduling remains conditional on the purchase and the person's choice.
+User-started backups do not require Premium. The App Group shares only the status needed by widgets
+and Apple Watch. Disabled-feature regression builds drop purchase telemetry, including queued events
+from older builds. The website continues to describe the public 1.0.0 release until 1.1.0 is released.
 `HOMESPUN_SKIP_EXPORT=1 zsh Apps/Homespun/scripts/testflight.sh` makes and checks an unsigned archive
 without credentials, export or upload. Normal uploads check both the archive and exported IPA for
-unwanted widgets and a Watch folder and fail closed if either is present.
+the required feature setting, every expected embedded target, its bundle identity and matching
+version/build numbers. Disabled-feature archives must omit widgets and Watch.
 
 On a Mac with Xcode:
 
@@ -214,7 +218,7 @@ cd Apps/Homespun && zsh scripts/generate-project.sh && open Homespun.xcodeproj
 
 The Xcode project is generated from `project.yml` and not committed.
 
-### Planned widgets and Apple Watch (not in 1.0.0)
+### Widgets and Apple Watch (Premium in 1.1.0)
 
 The widgets never use the network. Whenever what they show changes (a backup, freeing up space,
 the server's answer, Automatic Mode, Premium), the app writes a small status (`Shared/StatusSnapshot.swift`:
@@ -573,9 +577,9 @@ holding up compact copies.
 
 - **OneDrive**: sign in from the app with a code. Homespun asks only for its own app folder
   (`Apps/Homespun` in OneDrive) and checks every upload against OneDrive's QuickXorHash.
-  Until Homespun ships its own Microsoft app ID, set `HOMESPUN_ONEDRIVE_CLIENT_ID` to the
-  ID of a Microsoft app registration (public client, device code flow, delegated
-  `Files.ReadWrite.AppFolder`, `User.Read`, `offline_access`).
+  Homespun Server includes its public Microsoft application ID. A custom build can override it
+  with `HOMESPUN_ONEDRIVE_CLIENT_ID` using a public-client registration with device code flow and
+  delegated `Files.ReadWrite.AppFolder`, `User.Read`, `offline_access`. No client secret is needed.
 - Your own connectors: implement `Connector` and build a server binary that calls
   `ServerCommand.run(connectors: [YourConnector()])` from its `main`, depending on the
   `HomespunServerKit` library product.

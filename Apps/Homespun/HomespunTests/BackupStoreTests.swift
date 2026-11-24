@@ -1,0 +1,341 @@
+// SPDX-License-Identifier: Apache-2.0
+import Foundation
+import HomespunCore
+import Testing
+@testable import Homespun
+
+private struct BackupStoreFixture {
+    let directory: URL
+    let store: BackupStore
+    let binding: BackupStore.Binding
+    let operationID: UUID
+    let original: ServerAPI.ResourceDescriptor
+    let compact: ServerAPI.ResourceDescriptor
+    let receipt: BackupAPI.Receipt
+
+    static func make(processID: UUID? = nil, consumerID: String? = nil) async throws -> Self {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = BackupStore(directory: directory, legacyURL: nil, processID: processID)
+        let binding = BackupStore.Binding(id: UUID(),
+            origin: .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString),
+            trustEpoch: UUID(), baseURL: URL(string: "https://server.invalid")!, keychainReference: "test-reference",
+            consumerID: consumerID)
+        try await store.bind(binding)
+        let batch = try await store.admit(["item"], namespace: "photos", bindingID: binding.id, profile: .standard, compact: true)
+        let operationID = try #require(batch.operationIDs.first)
+        let lease = try #require(try await store.claim(operationID, stage: .preparation))
+        let originalData = Data("original".utf8), compactData = Data("c".utf8)
+        let original = ServerAPI.ResourceDescriptor(role: .photo, filename: "original.heic",
+            size: originalData.count, sha256: Fingerprint.sha256(of: originalData))
+        let compact = ServerAPI.ResourceDescriptor(role: .photo, filename: "compact.heic",
+            size: compactData.count, sha256: Fingerprint.sha256(of: compactData))
+        let resource = BackupStore.Resource(fileID: UUID(), operationID: operationID, kind: .original, descriptor: original)
+        _ = try store.files.prepareStaging(operationID: operationID)
+        try originalData.write(to: store.files.stagedFile(operationID: operationID, fileID: resource.fileID))
+        let manifest = BackupAPI.Manifest(kind: .photo, resources: [original])
+        try await store.prepared(lease, manifest: manifest, resources: [resource])
+        let recipe = BackupAPI.Recipe(profile: .standard, backend: "test", pipelineVersion: 1)
+        let version = BackupAPI.Version(origin: binding.origin, assetID: try manifest.assetID(),
+            manifestID: try manifest.identifier(), descriptorGeneration: 1, recipeID: try recipe.identifier())
+        let receipt = BackupAPI.Receipt(requestID: UUID(), operationID: operationID, version: version, revision: 1,
+            backup: .retained, compact: .ready, retention: .permanent, originals: [
+                .init(role: .photo, sha256: original.sha256, size: original.size, state: .verified,
+                      receivedBytes: original.size, verifiedAt: Date(timeIntervalSince1970: 1_000)),
+            ], derivative: .init(generationID: UUID(), version: version, resources: [
+                .init(role: .photo, filename: compact.filename, size: compact.size, sha256: compact.sha256),
+            ]))
+        _ = try await store.apply(receipt, operationID: operationID, epoch: lease.epoch)
+        return Self(directory: directory, store: store, binding: binding, operationID: operationID,
+                    original: original, compact: compact, receipt: receipt)
+    }
+
+    var proof: BackupAPI.OriginalProof {
+        .init(version: receipt.version, retention: .permanent, claimID: UUID(),
+              verifiedAt: Date(timeIntervalSince1970: 1_001), resources: receipt.originals)
+    }
+}
+
+@Test func durableAdmissionDeduplicatesAndSurvivesReopening() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let batch = try await fixture.store.admit(["item", "item", "second"], namespace: "photos",
+        bindingID: fixture.binding.id, profile: .standard, compact: true)
+    #expect(batch.selectedCount == 2)
+    #expect(batch.operationIDs.first == fixture.operationID)
+    let reopened = BackupStore(directory: fixture.directory, legacyURL: nil)
+    let operations = try await reopened.operations()
+    #expect(Set(operations.map(\.itemID)) == ["item", "second"])
+    var differentQuality = CompressionProfile.standard
+    differentQuality.photoQuality = 90
+    await #expect(throws: BackupStore.Failure.incompatibleQueuedSettings) {
+        try await reopened.admit(["third", "item"], namespace: "photos", bindingID: fixture.binding.id,
+                                 profile: differentQuality, compact: true)
+    }
+    let afterFailure = try await reopened.operations()
+    #expect(Set(afterFailure.map(\.itemID)) == ["item", "second"])
+}
+
+@Test func cancelledPreparationCannotPublishFromItsOldEpoch() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let batch = try await fixture.store.admit(["second"], namespace: "photos", bindingID: fixture.binding.id,
+                                              profile: .standard, compact: true)
+    let id = try #require(batch.operationIDs.first)
+    let lease = try #require(try await fixture.store.claim(id, stage: .preparation))
+    try await fixture.store.setDesired(.cancelled, operationID: id)
+    let resource = BackupStore.Resource(fileID: UUID(), operationID: id, kind: .original, descriptor: fixture.original)
+    await #expect(throws: BackupStore.Failure.staleOperation) {
+        try await fixture.store.prepared(lease, manifest: .init(kind: .photo, resources: [fixture.original]), resources: [resource])
+    }
+    #expect(try await fixture.store.resources(id).isEmpty)
+    #expect(try await fixture.store.operation(id)?.desired == .cancelled)
+}
+
+@Test func resultPagesAndCursorsCommitTogetherAndIgnoreOldReceiptRevisions() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    var newer = fixture.receipt
+    newer.revision = 2
+    newer.compact = .failed
+    newer.derivative = nil
+    let page = BackupAPI.Changes(origin: fixture.binding.origin, cursor: 5, hasMore: false,
+        changes: [.init(sequence: 5, receipt: newer)])
+    try await fixture.store.apply(page, bindingID: fixture.binding.id)
+    #expect(try await fixture.store.apply(fixture.receipt, operationID: fixture.operationID, epoch: 1) == .stale)
+    #expect(try await fixture.store.operation(fixture.operationID)?.receipt == newer)
+
+    var next = newer
+    next.revision = 3
+    next.compact = .queued
+    var wrongEpoch = next
+    wrongEpoch.revision = 4
+    wrongEpoch.version.origin.historyEpoch = UUID().uuidString
+    let invalid = BackupAPI.Changes(origin: fixture.binding.origin, cursor: 7, hasMore: false, changes: [
+        .init(sequence: 6, receipt: next), .init(sequence: 7, receipt: wrongEpoch),
+    ])
+    await #expect(throws: BackupStore.Failure.invalidReceipt) {
+        try await fixture.store.apply(invalid, bindingID: fixture.binding.id)
+    }
+    #expect(try await fixture.store.cursor(bindingID: fixture.binding.id) == 5)
+    #expect(try await fixture.store.operation(fixture.operationID)?.receipt == newer)
+}
+
+@Test func interruptedPhotosMutationBecomesUncertainAndCannotReimportBlindly() async throws {
+    let fixture = try await BackupStoreFixture.make(processID: UUID())
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let lease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await fixture.store.planImport(lease, expected: [fixture.compact])
+    try await fixture.store.startImport(intent.id, lease: lease)
+    let reopened = BackupStore(directory: fixture.directory, legacyURL: nil, processID: UUID())
+    try await reopened.open()
+    #expect(try await reopened.importIntent(fixture.operationID)?.phase == .uncertain)
+    let resumed = try #require(try await reopened.claim(fixture.operationID, stage: .finalization))
+    await #expect(throws: BackupStore.Failure.importNeedsReconciliation) {
+        try await reopened.planImport(resumed, expected: [fixture.compact])
+    }
+}
+
+@Test func successfulPhotosFactSurvivesCancellationWithoutReplacingNewerLineage() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let lease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await fixture.store.planImport(lease, expected: [fixture.compact])
+    try await fixture.store.startImport(intent.id, lease: lease)
+    try await fixture.store.setDesired(.cancelled, operationID: fixture.operationID)
+    _ = try await fixture.store.admit(["item"], namespace: "photos", bindingID: fixture.binding.id,
+                                      profile: .standard, compact: true)
+    try await fixture.store.importCreated(intent.id, identifier: "created-before-cancellation")
+    let mapping = try await fixture.store.finishImport(intent.id, actual: [fixture.compact], proof: fixture.proof)
+    #expect(mapping.entry.compactIdentifier == "created-before-cancellation")
+    #expect(try await fixture.store.mappings(namespace: "photos").isEmpty)
+    let outbox = try await fixture.store.outbox()
+    #expect(outbox.map(\.kind) == [.deliveryAcknowledgement])
+    let repeated = try await fixture.store.finishImport(intent.id, actual: [fixture.compact], proof: fixture.proof)
+    #expect(repeated == mapping)
+}
+
+@Test func legacyMigrationPreservesUnknownOriginAndExplicitDecisionsWithoutRewritingFiles() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let legacy = root.appendingPathComponent("ledger.json")
+    let encoder = JSONEncoder()
+    encoder.dateEncodingStrategy = .iso8601
+    let entry = CompactLedger.Entry(compactIdentifier: "legacy-compact", originalBytes: 100, compactBytes: 20,
+                                    savedAt: Date(timeIntervalSince1970: 1_000), serverAssetID: "legacy-asset")
+    let data = try encoder.encode(["legacy-item": entry])
+    try data.write(to: legacy)
+    let automatic = root.appendingPathComponent("automatic.json")
+    try JSONSerialization.data(withJSONObject: ["keptAsIs": ["explicit-keep"]]).write(to: automatic)
+    let directory = root.appendingPathComponent("Backup")
+    let store = BackupStore(directory: directory, legacyURL: legacy)
+    try await store.open()
+    let mapping = try #require(try await store.mappings(namespace: "photos")["legacy-item"])
+    #expect(mapping.entry == entry)
+    #expect(mapping.origin == nil && mapping.proof == nil)
+    #expect(try await store.decision("explicit-keep", namespace: "photos"))
+    #expect(try Data(contentsOf: legacy) == data)
+    let reopened = BackupStore(directory: directory, legacyURL: legacy)
+    #expect(try await reopened.mappings(namespace: "photos")["legacy-item"]?.id == mapping.id)
+    try encoder.encode(["changed-by-older-app": entry]).write(to: legacy)
+    let afterDowngrade = BackupStore(directory: directory, legacyURL: legacy)
+    await #expect(throws: BackupStore.Failure.legacyChanged) { try await afterDowngrade.open() }
+}
+
+@Test func stagedTransferReferencesFenceCleanupAndCompletedReplayDoesNotLeakAReference() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let resource = try #require(try await fixture.store.resources(fixture.operationID).first)
+    let session = BackupStore.TransferSession(id: UUID(), bindingID: fixture.binding.id,
+        identifier: "foreground.test.\(UUID().uuidString)", installationID: UUID())
+    try await fixture.store.registerSession(session)
+    let transfer = BackupStore.Transfer(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        sessionID: session.id, kind: .upload, version: fixture.receipt.version, expected: fixture.original,
+        resourceID: resource.fileID, uploadID: UUID())
+    try await fixture.store.stageTransfer(transfer)
+    try await fixture.store.releaseOriginalSpools(fixture.operationID)
+    #expect(try await fixture.store.claimCleanup().isEmpty)
+    try await fixture.store.attachTask(transferID: transfer.id, sessionID: session.id, taskID: 7)
+    try await fixture.store.startTransfer(transfer.id)
+    try await fixture.store.finishTransfer(transfer.id, state: .completed)
+    try await fixture.store.stageTransfer(transfer)
+    let cleanup = try await fixture.store.claimCleanup()
+    #expect(cleanup.map(\.fileID) == [resource.fileID])
+    let replacement = BackupStore.Transfer(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        sessionID: session.id, kind: .upload, version: fixture.receipt.version, expected: fixture.original,
+        resourceID: resource.fileID, uploadID: UUID())
+    await #expect(throws: BackupStore.Failure.invalidReceipt) { try await fixture.store.stageTransfer(replacement) }
+    try await fixture.store.cleanedResource(resource.fileID)
+    #expect(try await fixture.store.claimCleanup().isEmpty)
+}
+
+@Test func unprovenNativeBackgroundSessionsCannotBeRegistered() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let session = BackupStore.TransferSession(id: UUID(), bindingID: fixture.binding.id,
+        identifier: "background.test", installationID: UUID(), background: true)
+    await #expect(throws: BackupStore.Failure.nativeTransferUnavailable) {
+        try await fixture.store.registerSession(session)
+    }
+    #expect(try await fixture.store.sessions().isEmpty)
+}
+
+@Test func workspaceBudgetCountsExistingFilesOnceAndPreservesFinalizationHeadroom() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let policy = BackupSpacePolicy(maximumTransientBytes: 1_000, minimumAvailableBytes: 100,
+                                  finalizationReserveBytes: 200, maximumTransfers: 2)
+    let observation = BackupSpaceObservation(availableBytes: 500, transientBytes: 500)
+    let reservation = BackupStore.Reservation(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        stage: .upload, futureBytes: 100, systemCopyBytes: 0, taskSlots: 0)
+    try await fixture.store.reserveSpace(reservation, policy: policy, observation: observation)
+    let tooMuch = BackupStore.Reservation(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        stage: .upload, futureBytes: 200, systemCopyBytes: 0, taskSlots: 0)
+    await #expect(throws: BackupSpaceFailure.workingSpaceRequired) {
+        try await fixture.store.reserveSpace(tooMuch, policy: policy, observation: observation)
+    }
+    let finalization = BackupStore.Reservation(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        stage: .finalization, futureBytes: 200, systemCopyBytes: 0, taskSlots: 0)
+    try await fixture.store.reserveSpace(finalization, policy: policy, observation: observation)
+    #expect(try await fixture.store.reservations().count == 2)
+}
+
+@Test func workspaceBudgetFailsClosedForUnknownCapacityAndOverflow() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let reservation = BackupStore.Reservation(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        stage: .upload, futureBytes: 1, systemCopyBytes: 0, taskSlots: 0)
+    let policy = BackupSpacePolicy(maximumTransientBytes: .max, minimumAvailableBytes: .max,
+                                  finalizationReserveBytes: 0, maximumTransfers: 2)
+    await #expect(throws: BackupSpaceFailure.capacityUnavailable) {
+        try await fixture.store.reserveSpace(reservation, policy: policy,
+                                              observation: .init(availableBytes: nil, transientBytes: 0))
+    }
+    await #expect(throws: BackupSpaceFailure.workingSpaceRequired) {
+        try await fixture.store.reserveSpace(reservation, policy: policy,
+                                              observation: .init(availableBytes: .max, transientBytes: 0))
+    }
+    #expect(try await fixture.store.reservations().isEmpty)
+}
+
+@Test func unknownServerResultsAreDurableWithoutGuessingAPhotosIdentity() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    var unknown = fixture.receipt
+    unknown.operationID = UUID()
+    unknown.requestID = UUID()
+    var known = fixture.receipt
+    known.revision = 2
+    known.compact = .processing
+    known.derivative = nil
+    let page = BackupAPI.Changes(origin: fixture.binding.origin, cursor: 5, hasMore: false, changes: [
+        .init(sequence: 4, receipt: unknown), .init(sequence: 5, receipt: known),
+    ])
+    #expect(try await fixture.store.applyChanges(page, bindingID: fixture.binding.id) == .applied)
+    #expect(try await fixture.store.orphanReceipts(bindingID: fixture.binding.id) == [unknown])
+    #expect(try await fixture.store.operation(fixture.operationID)?.receipt == known)
+    #expect(try await fixture.store.cursor(bindingID: fixture.binding.id) == 5)
+    #expect(try await fixture.store.applyChanges(page, bindingID: fixture.binding.id) == .stale)
+    #expect(try await fixture.store.mappings(namespace: "photos").isEmpty)
+}
+
+@Test func pagedSnapshotDoesNotPublishPartialStateOrAdvanceItsCursor() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    var receipt = fixture.receipt
+    receipt.revision = 2
+    receipt.compact = .failed
+    receipt.derivative = nil
+    let id = try await fixture.store.beginSnapshot(bindingID: fixture.binding.id)
+    let first = BackupAPI.Snapshot(origin: fixture.binding.origin, cursor: 10, receipts: [receipt], continuation: "next")
+    let progress = try await fixture.store.applySnapshot(first, runID: id, requestedContinuation: nil)
+    #expect(!progress.complete && progress.continuation == "next")
+    #expect(try await fixture.store.cursor(bindingID: fixture.binding.id) == 0)
+    #expect(try await fixture.store.operation(fixture.operationID)?.receipt == fixture.receipt)
+    #expect(try await fixture.store.applySnapshot(first, runID: id, requestedContinuation: nil) == progress)
+    await #expect(throws: BackupStore.Failure.invalidReceipt) {
+        try await fixture.store.applySnapshot(.init(origin: fixture.binding.origin, cursor: 11, receipts: []),
+                                               runID: id, requestedContinuation: "next")
+    }
+    let finished = try await fixture.store.applySnapshot(.init(origin: fixture.binding.origin, cursor: 10, receipts: []),
+                                                          runID: id, requestedContinuation: "next")
+    #expect(finished.complete)
+    #expect(try await fixture.store.cursor(bindingID: fixture.binding.id) == 10)
+    #expect(try await fixture.store.operation(fixture.operationID)?.receipt == receipt)
+}
+
+@Test func addressReattachmentRequiresTheSameAuthenticatedOriginAndConsumer() async throws {
+    let fixture = try await BackupStoreFixture.make(consumerID: "authenticated-consumer")
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let oldLease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    try await fixture.store.retireBinding(fixture.binding.id)
+    let next = BackupStore.Binding(id: UUID(), origin: fixture.binding.origin, trustEpoch: UUID(),
+        baseURL: URL(string: "https://changed.invalid")!, keychainReference: "new-reference",
+        consumerID: "authenticated-consumer")
+    try await fixture.store.bind(next)
+    try await fixture.store.reattach(from: fixture.binding.id, to: next.id)
+    let rebound = try #require(try await fixture.store.operation(fixture.operationID))
+    #expect(rebound.bindingID == next.id && rebound.desired == .active && rebound.epoch > oldLease.epoch)
+    await #expect(throws: BackupStore.Failure.staleOperation) {
+        try await fixture.store.planImport(oldLease, expected: [fixture.compact])
+    }
+    let different = BackupStore.Binding(id: UUID(), origin: fixture.binding.origin, trustEpoch: UUID(),
+        baseURL: URL(string: "https://changed.invalid")!, keychainReference: "other-reference", consumerID: "different-consumer")
+    try await fixture.store.bind(different)
+    await #expect(throws: BackupStore.Failure.invalidReceipt) {
+        try await fixture.store.reattach(from: next.id, to: different.id)
+    }
+    #expect(try await fixture.store.operation(fixture.operationID)?.bindingID == next.id)
+}
+
+@Test func deferredCommandsCannotOvertakeAnUnacknowledgedEarlierCommand() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let first = try await fixture.store.enqueueCommand(fixture.operationID, action: .pause)
+    let second = try await fixture.store.enqueueCommand(fixture.operationID, action: .retry)
+    #expect(try await fixture.store.outbox().map(\.id) == [first])
+    try await fixture.store.retryOutbox(first, after: .distantFuture)
+    #expect(try await fixture.store.outbox().isEmpty)
+    try await fixture.store.acknowledgeOutbox(first)
+    #expect(try await fixture.store.outbox(now: Date(timeIntervalSince1970: 1)).map(\.id) == [second])
+}

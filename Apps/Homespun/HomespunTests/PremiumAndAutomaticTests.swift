@@ -7,7 +7,7 @@ import Testing
     #expect(PremiumFeature.available == [.automatic, .cloudCopies, .widgets])
     #expect(PremiumFeature.backupFeatures == [.automatic, .cloudCopies])
     #expect(PremiumFeature.cloudCopies.isAvailable)
-    #expect(PremiumFeature.purchaseDescription == "Automatic Mode, Cloud Copies and widgets")
+    #expect(PremiumFeature.purchaseDescription == "Automatic Mode, OneDrive Cloud Copies, widgets and Apple Watch")
 }
 
 @Test func releaseFeaturesDefaultOffAndDebugOverrideIsExplicit() {
