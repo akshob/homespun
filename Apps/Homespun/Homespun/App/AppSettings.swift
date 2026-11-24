@@ -118,6 +118,11 @@ final class AppSettings {
     }
 
     @ObservationIgnored var backupBindingChanged: (@MainActor () -> Void)?
+    var backupAdmissionsEnabled: Bool {
+        guard let value = defaults.object(forKey: "backupAdmissionsDisabled") else { return true }
+        guard let disabled = value as? Bool else { return false }
+        return !disabled
+    }
 
     func backupContext(store: BackupStore, namespace: String) async throws -> BackupBindingContext {
         guard !isRetired, let client, let mode = server?.mode, let token = client.token else {

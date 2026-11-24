@@ -28,6 +28,20 @@ extension BackupStore {
         }
     }
 
+    func automaticExclusions(namespace: String) throws -> Set<String> {
+        try readState { connection in
+            let rows = try connection.rows("""
+                SELECT o.body FROM operations o JOIN lineages l ON l.current_operation = o.id
+                WHERE l.namespace = ?
+                """, [.text(namespace)])
+            return try Set(rows.compactMap { row -> String? in
+                let operation = try Self.decode(Operation.self, row.blob("body"))
+                return operation.wantsCompact || operation.backup != .retained || operation.desired != .active || operation.attention
+                    ? operation.itemID : nil
+            })
+        }
+    }
+
     struct BindingInformation: Codable, Equatable, Sendable {
         var capabilities: BackupAPI.Capabilities
         var name: String
@@ -111,21 +125,20 @@ extension BackupStore {
             return .init(operations: try page.map { try Self.decode(Operation.self, $0.blob("body")) },
                          cursor: try page.last?.integer("position") ?? cursor, hasMore: rows.count > page.count)
         }
-
     }
 
     func currentOperations(_ ids: [String], namespace: String) throws -> [Operation] {
-            try readState { connection in
-                var result: [Operation] = []
-                for start in stride(from: 0, to: ids.count, by: 200) {
-                    let chunk = Array(ids[start..<min(start + 200, ids.count)])
-                    let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
-                    result += try connection.rows("""
-                        SELECT o.body FROM operations o JOIN lineages l ON l.current_operation = o.id
-                        WHERE l.namespace = ? AND l.item IN (\(placeholders))
-                        """, [.text(namespace)] + chunk.map { .text($0) }).map { try Self.decode(Operation.self, $0.blob("body")) }
-                }
-                return result
+        try readState { connection in
+            var result: [Operation] = []
+            for start in stride(from: 0, to: ids.count, by: 200) {
+                let chunk = Array(ids[start..<min(start + 200, ids.count)])
+                let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                result += try connection.rows("""
+                    SELECT o.body FROM operations o JOIN lineages l ON l.current_operation = o.id
+                    WHERE l.namespace = ? AND l.item IN (\(placeholders))
+                    """, [.text(namespace)] + chunk.map { .text($0) }).map { try Self.decode(Operation.self, $0.blob("body")) }
+            }
+            return result
         }
     }
 

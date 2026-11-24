@@ -55,6 +55,7 @@ final class CopyFinder {
     private var atHome: [String: AtHome]
     private var task: Task<Void, Never>?
     private var retired = false
+    private var suspended = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let url: URL
     private let photos: any PhotoSource
@@ -76,7 +77,7 @@ final class CopyFinder {
 
     func start(lookup: @escaping Lookup, ledger: CompactLedger, again: Bool = false,
                finished: @escaping @MainActor () async -> Void = {}) {
-        guard !retired, !isRunning, task == nil else { return }
+        guard !retired, !suspended, !isRunning, task == nil else { return }
         task = Task {
             await run(lookup: lookup, ledger: ledger, again: again)
             await finished()
@@ -85,6 +86,15 @@ final class CopyFinder {
     }
 
     func stop() { task?.cancel() }
+
+    func suspendAndWait() async {
+        suspended = true
+        stop()
+        await task?.value
+        if isRunning { await withCheckedContinuation { waiters.append($0) } }
+    }
+
+    func resume() { if !retired { suspended = false } }
 
     func retire() {
         retired = true
@@ -99,7 +109,7 @@ final class CopyFinder {
 
     /// Checks every item not known yet (`again`: also those checked before), `batch` at a time.
     func run(lookup: Lookup, ledger: CompactLedger, again: Bool = false, batch: Int = 100) async {
-        guard !retired, !isRunning else { return }
+        guard !retired, !suspended, !isRunning else { return }
         isRunning = true
         error = nil
         UIApplication.shared.isIdleTimerDisabled = true
@@ -137,6 +147,7 @@ final class CopyFinder {
         do {
             for start in stride(from: 0, to: todo.count, by: batch) {
                 try Task.checkCancellation()
+                guard !retired, !suspended else { throw CancellationError() }
                 let ids = Array(todo[start..<min(start + batch, todo.count)])
                 let hashed = await photos.copyHashes(ids)
                 let hashes = Array(Set(hashed.values.flatMap { $0.hashes.values }))

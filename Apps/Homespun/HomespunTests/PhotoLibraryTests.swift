@@ -164,6 +164,27 @@ import UniformTypeIdentifiers
         .init(compactIdentifier: compact, originalBytes: 100, compactBytes: 10, savedAt: Date(),
               serverAssetID: server ? "sha-\(compact)" : nil)
     }
+
+    @Test func readyBadgesRequireTheMatchingOriginAndNonPurgeEligibleProof() {
+        let origin = BackupAPI.Origin(serverID: "home", historyEpoch: "history")
+        let hash = Fingerprint.sha256(of: Data("original".utf8))
+        let version = BackupAPI.Version(origin: origin, assetID: hash, manifestID: hash, descriptorGeneration: 1, recipeID: hash)
+        var entry = CompactLedger.Entry(compactIdentifier: "copy", originalBytes: 100, compactBytes: 10,
+            savedAt: Date(), serverAssetID: hash, origin: origin, version: version, requestID: UUID(),
+            compactResources: [.init(role: .photo, filename: "copy.heic", size: 10, sha256: hash)], retention: .permanent)
+        func cell(_ active: BackupAPI.Origin) -> LibraryState.Cell {
+            LibraryState(library: ["original", "copy"], ledger: ["original": entry], album: [], job: [:], origin: active).cells[0]
+        }
+        #expect(cell(origin).canFree)
+        let foreign = cell(.init(serverID: "other", historyEpoch: "history"))
+        #expect(foreign.badge == .recovery && !foreign.canFree && !foreign.canRestore)
+        entry.retention = .deferred
+        #expect(!cell(origin).canFree)
+        entry.retention = .external
+        #expect(!cell(origin).canFree)
+        entry.externalVerification = .fullResourceScrub
+        #expect(cell(origin).canFree)
+    }
     let ledger = ["orig-kept": entry("copy-kept", server: true),      // original still on the phone
                   "orig-removed": entry("copy-removed", server: true), // original removed after backup
                   "orig-device": entry("copy-device", server: false),  // made on the phone only

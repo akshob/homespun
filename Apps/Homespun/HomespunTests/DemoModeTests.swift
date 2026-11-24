@@ -293,6 +293,10 @@ import UIKit
             pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
         let photo = try sample(fixture.session.library, "photo")
         #expect(await first.job.enqueue([photo.id]) == [photo.id])
+        first.settings.defaults.set(true, forKey: "backupAdmissionsDisabled")
+        let other = try #require(fixture.session.library.samples.first { $0.kind == "photo" && $0.id != photo.id })
+        #expect(await first.job.enqueue([other.id]).isEmpty)
+        #expect(try await first.job.ledger.store.currentOperations([other.id], namespace: first.job.ledger.namespace).isEmpty)
         try await first.job.runOpportunity()
         let before = try #require(try await first.job.ledger.store.currentOperations([photo.id], namespace: first.job.ledger.namespace).first)
         await first.library.stopAndWait()
@@ -314,6 +318,30 @@ import UIKit
         #expect(replay == accepted && retry.revision > accepted.revision)
         await resumed.library.stopAndWait()
         try await resumed.closeDemoStore()
+    }
+
+    @Test func keepingAnOriginalDoesNotDeleteASameIDCompactCopyThatChanged() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await model.job.enqueue([photo.id]) == [photo.id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let entry = try #require(try await model.job.ledger.entry(for: photo.id))
+        let copy = try #require(fixture.session.library.demoItem(entry.compactIdentifier))
+        try Data("a newer compact edit".utf8).write(to: copy.main)
+        let before = fixture.asked.all.count
+        await #expect(throws: BackupStageFailure.self) {
+            try await BackupKeeper(ledger: model.job.ledger, photos: fixture.session.library).keep([photo.id])
+        }
+        #expect(fixture.asked.all.count == before)
+        #expect(fixture.session.library.existing([photo.id, entry.compactIdentifier], includeHidden: true).count == 2)
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
     }
 
     @Test func durablePreparationIsBoundedAndUncertainImportsRequireAUniqueCompleteMatch() async throws {

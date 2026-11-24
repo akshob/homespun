@@ -212,7 +212,8 @@ struct LibraryView: View, Equatable {
         let notice = Self.noticeKey(problem: settings.connectionProblem, limited: controller.access == .limited,
                                     paired: settings.isPaired)
         let empty = !store.isEmpty ? "" : controller.library.count == 0 ? "none"
-            : filter == .notBackedUp && media == .all ? "done.\(controller.serverName)" : "nothing.\(filter.rawValue)"
+            : filter == .notBackedUp && media == .all
+                ? "done.\(controller.serverName).\(controller.library.state.count(.needsAttention))" : "nothing.\(filter.rawValue)"
         return [notice, empty, controller.job.queueProblem ?? "",
                 controller.job.remoteCount > 0 ? "remote.\(controller.job.remoteCount).\(controller.job.retainedCount)" : ""]
             .filter { !$0.isEmpty }.joined(separator: " ")
@@ -270,12 +271,22 @@ struct LibraryView: View, Equatable {
             ContentUnavailableView("No photos or videos", systemImage: "photo.on.rectangle",
                                    description: Text("Photos and videos you take appear here."))
         } else if filter == .notBackedUp, media == .all {
-            ContentUnavailableView {
-                Label("Everything's backed up", systemImage: "checkmark.circle.fill")
-            } description: {
-                Text("All your photos and videos have their originals on \(controller.serverName).")
-            } actions: {
-                Button("Show All Items") { filter = .all }
+            if controller.library.state.count(.needsAttention) > 0 {
+                ContentUnavailableView {
+                    Label("Some backups need attention", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text("Earlier mappings aren't current-server verification. Review them before removing any originals.")
+                } actions: {
+                    Button("Show Needs Attention") { filter = .needsAttention }
+                }
+            } else {
+                ContentUnavailableView {
+                    Label("Everything's backed up", systemImage: "checkmark.circle.fill")
+                } description: {
+                    Text("All your photos and videos have their originals on \(controller.serverName).")
+                } actions: {
+                    Button("Show All Items") { filter = .all }
+                }
             }
         } else {
             ContentUnavailableView {

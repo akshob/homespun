@@ -15,6 +15,19 @@ import Testing
     #expect(try await reopened.serverBacked().isEmpty, "A legacy server ID is not a versioned removal proof")
 }
 
+@Test func projectionCacheObservesChangesFromAnotherFacade() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let url = folder.appendingPathComponent("ledger.json")
+    let first = CompactLedger(url: url), second = CompactLedger(url: url)
+    try await first.record(original: "a", compact: "copy-a", originalBytes: 100, compactBytes: 10)
+    #expect(try await first.snapshot().count == 1)
+    try await second.record(original: "b", compact: "copy-b", originalBytes: 100, compactBytes: 10)
+    #expect(Set(try await first.snapshot().keys) == ["a", "b"])
+    try await second.store.setKeptDecision(["a"], namespace: second.namespace, kept: true)
+    #expect(try await first.decisions() == ["a"])
+}
+
 /// A corrupt migration source is preserved and blocks reads rather than becoming an empty ledger.
 @Test func unreadableLedgerIsSetAside() async throws {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

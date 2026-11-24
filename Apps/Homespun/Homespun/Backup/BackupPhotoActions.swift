@@ -180,6 +180,12 @@ struct BackupKeeper: Sendable {
         var epochs: [UUID: Int64] = [:]
         for id in ids {
             guard let entry = entries[id], var mapping = mappings[id] else { continue }
+            guard entry.verifiedCompact else {
+                throw BackupStageFailure.blocked("This earlier compact mapping lacks complete versioned proof. Both items were kept; review the mapping before deleting a copy.")
+            }
+            guard photos.item(entry.compactIdentifier)?.isEdited == false else {
+                throw BackupStageFailure.blocked("The compact copy has edits or cannot be read. It has been kept alongside the original.")
+            }
             let before = try photos.sourceGeneration(id)
             let originals = try await photos.resourceFingerprints(id)
             guard try photos.sourceGeneration(id) == before, !originals.isEmpty, originals.allSatisfy({ $0.size > 0 }) else {
@@ -192,8 +198,16 @@ struct BackupKeeper: Sendable {
                 epochs[operationID] = operation.epoch
             }
             mapping.entry = entry
+            let compact = try photos.sourceGeneration(entry.compactIdentifier)
+            if let expected = entry.compactResources {
+                let actual = try await photos.resourceFingerprints(entry.compactIdentifier)
+                guard try photos.sourceGeneration(entry.compactIdentifier) == compact,
+                      BackupValidation.matches(expected, actual) else {
+                    throw BackupStageFailure.blocked("The compact copy changed after import. Its current version has not been deleted.")
+                }
+            }
             held.append(mapping)
-            approvals.append(.init(original: before, compact: try photos.sourceGeneration(entry.compactIdentifier)))
+            approvals.append(.init(original: before, compact: compact))
         }
         guard !held.isEmpty else { return false }
         let id = UUID()
@@ -268,6 +282,9 @@ struct DurableOriginalRestorer: RestoringOriginals {
                 let restored = try await restoreOne(item)
                 report.restored.append(restored)
                 report.bytes += item.originalBytes
+            } catch let failure as PhotosCreationFailure {
+                report.copiesKept = true
+                report.problems.append("Photos created an item, but its final metadata or byte verification needs recovery. Its creation is saved; no duplicate is imported. \(failure.localizedDescription)")
             } catch { report.problems.append(error.localizedDescription) }
         }
         if !report.restored.isEmpty {
@@ -344,6 +361,9 @@ struct DurableOriginalRestorer: RestoringOriginals {
             }
             try Task.checkCancellation()
             try await ledger.store.effectResources(id, resources: resources)
+            metadata = try photos.backupMetadata(item.compact)
+            metadata.sourceID = item.key
+            try await ledger.store.effectMetadata(id, metadata: metadata)
             try await ledger.store.startEffect(id)
             let identifier: String
             do {

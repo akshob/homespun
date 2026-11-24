@@ -78,6 +78,7 @@ final class DemoMode {
 
     private func prepare(origin: Origin) {
         self.origin = origin
+        preparation = .drawing(nil)
         Telemetry.shared.paused = true
         let id = UUID(), previous = work
         #if DEBUG
