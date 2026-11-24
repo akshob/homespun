@@ -68,7 +68,8 @@ private func backupManifest(_ primary: String = String(repeating: "a", count: 64
     let version = BackupAPI.Version(origin: origin, assetID: try manifest.assetID(),
                                     manifestID: try manifest.identifier(), descriptorGeneration: 3,
                                     recipeID: try recipe.identifier())
-    let request = BackupAPI.Request(operationID: UUID(), origin: origin, manifest: manifest, profile: .standard)
+    let request = BackupAPI.Request(operationID: UUID(), origin: origin, manifest: manifest,
+                                    profile: .standard, compact: false)
     let requestData = try ServerAPI.encoder.encode(request)
     #expect(try ServerAPI.decoder.decode(BackupAPI.Request.self, from: requestData) == request)
     let requestJSON = String(decoding: requestData, as: UTF8.self)
@@ -87,6 +88,8 @@ private func backupManifest(_ primary: String = String(repeating: "a", count: 64
     for key in ["\"asset_id\"", "\"manifest_id\"", "\"recipe_id\"", "\"request_id\"", "\"operation_id\""] {
         #expect(text.contains(key))
     }
+    let command = BackupAPI.Command(operationID: UUID(), version: version, action: .compactNow)
+    #expect(try ServerAPI.decoder.decode(BackupAPI.Command.self, from: ServerAPI.encoder.encode(command)) == command)
     #expect(page.changes[0].receipt.backup == .retained)
     #expect(page.changes[0].receipt.compact == .failed)
 }
