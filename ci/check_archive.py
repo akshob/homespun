@@ -37,6 +37,8 @@ def check_archive(app: Path, *, features: bool, version: str, build: str) -> Non
             root_id = info.get("CFBundleIdentifier")
             if not isinstance(root_id, str) or not root_id:
                 raise ArchiveError("The app has no bundle identifier.")
+            if root_id != "photos.homespun.app":
+                raise ArchiveError("The archive is not the release Homespun app.")
         if info.get("CFBundleIdentifier") != root_id + suffix:
             raise ArchiveError(f"Bundle identifier does not match the app: {bundle}")
         if info.get("HomespunReleaseFeatures") != expected:

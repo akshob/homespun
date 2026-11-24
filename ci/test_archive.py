@@ -66,3 +66,16 @@ class ArchiveTests(unittest.TestCase):
         self.bundle("PlugIns/HomespunWidgets.appex", ".foreign")
         with self.assertRaises(ArchiveError):
             self.check()
+
+    def test_rejects_a_consistent_but_wrong_release_app_identity(self):
+        self.feature_bundles()
+        for path in self.app.rglob("Info.plist"):
+            with path.open("rb") as stream:
+                info = plistlib.load(stream)
+            for key in ("CFBundleIdentifier", "WKCompanionAppBundleIdentifier"):
+                if key in info:
+                    info[key] = info[key].replace("photos.homespun.app", "photos.other.app")
+            with path.open("wb") as stream:
+                plistlib.dump(info, stream)
+        with self.assertRaises(ArchiveError):
+            self.check()
