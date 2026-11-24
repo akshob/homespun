@@ -19,12 +19,15 @@ extension BackupStore {
         }
         return try readState { connection in
             try connection.rows("""
-                SELECT body FROM operations WHERE desired = 'active' AND \(predicate)
+                SELECT o.body FROM operations o JOIN lineages l
+                ON l.namespace = o.namespace AND l.item = o.item AND l.current_operation = o.id
+                AND l.generation = json_extract(CAST(o.body AS TEXT), '$.lineage')
+                WHERE desired = 'active' AND \(predicate)
                 AND json_extract(CAST(body AS TEXT), '$.lease') IS NULL
                 AND coalesce(json_extract(CAST(body AS TEXT), '$.attention'), 0) = 0
                 AND (json_extract(CAST(body AS TEXT), '$.notBefore') IS NULL
                      OR json_extract(CAST(body AS TEXT), '$.notBefore') <= ?)
-                ORDER BY rowid LIMIT ?
+                ORDER BY o.rowid LIMIT ?
                 """, [.real(now.timeIntervalSinceReferenceDate), .integer(Int64(limit))])
                 .map { try Self.decode(Operation.self, $0.blob("body")) }
         }
@@ -52,9 +55,8 @@ extension BackupStore {
         try mutateState { connection in
             guard var operation = try Self.operation(id, connection),
                   operation.epoch < Int64.max,
-                  let lineage = try connection.rows("SELECT current_operation FROM lineages WHERE namespace = ? AND item = ?",
-                                                   [.text(operation.namespace), .text(operation.itemID)]).first,
-                  try lineage.text("current_operation") == id.uuidString else { throw Failure.staleOperation }
+                  try Self.isCurrent(operation, connection),
+                  try Self.bindingUsable(operation, connection) else { throw Failure.staleOperation }
             operation.desired = .active
             operation.bindingPaused = nil
             operation.notBefore = nil
@@ -64,6 +66,7 @@ extension BackupStore {
             operation.problem = nil
             operation.backup = operation.manifest == nil ? .selected : (operation.receipt?.backup ?? .uploading)
             operation.updatedAt = Date()
+            try Self.ensureCompactPromotion(&operation, connection)
             try Self.write(operation, connection)
         }
     }
