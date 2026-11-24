@@ -212,7 +212,9 @@ extension Catalog {
                 guard old["payload_hash"]?.string == hash else { throw Self.backupConflict() }
                 return (try backupReceipt(old["id"]!.string!, principal: principal), false)
             }
-            if try database.query("SELECT id FROM backup_manifests WHERE id = ?", [.text(manifestID)]).isEmpty {
+            if let existing = try database.query("SELECT generation FROM backup_manifests WHERE id = ?", [.text(manifestID)]).first {
+                guard let generation = existing["generation"]?.int, generation > 0 else { throw Self.unsupportedBackupPreview() }
+            } else {
                 let previous = try database.query("SELECT MAX(generation) AS n FROM backup_manifests WHERE asset_id = ?",
                                                    [.text(assetID)]).first?["n"]?.int
                 let generation = try previous.map { try StorageBytes.add(Int64($0), 1) } ?? 1
@@ -264,6 +266,20 @@ extension Catalog {
                  message: "That operation identifier already describes a different request.")
     }
 
+    private static func unsupportedBackupPreview() -> APIError {
+        APIError(.unprocessableContent, code: BackupAPI.ErrorCode.unsupportedPreview,
+                 message: "This catalog contains unsupported pre-release backup generations. Automatic repair is not supported. "
+                    + "Stop the server and preserve its entire data directory and originals. For disposable preview/test data only, "
+                    + "use a new empty --data directory with its own originals root, then re-pair and reselect originals. "
+                    + "Do not delete the old originals. resync-history does not repair descriptor identities.")
+    }
+
+    private static func publishedBackupReceipt(_ json: String) throws -> BackupAPI.Receipt {
+        let receipt = try backupDecode(BackupAPI.Receipt.self, json)
+        guard receipt.version.descriptorGeneration > 0 else { throw unsupportedBackupPreview() }
+        return receipt
+    }
+
     func backupObjects(_ manifest: String) throws -> [BackupObject] {
         try database.query("SELECT * FROM backup_objects WHERE manifest_id = ? ORDER BY role", [.text(manifest)]).compactMap { row -> BackupObject? in
             guard let role = Role(rawValue: row["role"]?.string ?? "") else { return nil }
@@ -309,8 +325,9 @@ extension Catalog {
         guard let version = try database.query("SELECT asset_id, generation FROM backup_manifests WHERE id = ?", [.text(manifest)]).first else {
             throw HTTPError(.notFound)
         }
+        guard let generation = version["generation"]?.int, generation > 0 else { throw Self.unsupportedBackupPreview() }
         return .init(origin: try backupOriginRead(), assetID: version["asset_id"]!.string!, manifestID: manifest,
-                     descriptorGeneration: Int64(version["generation"]!.int!), recipeID: row["recipe_id"]!.string!)
+                     descriptorGeneration: Int64(generation), recipeID: row["recipe_id"]!.string!)
     }
 
     func backupOriginRead() throws -> BackupAPI.Origin {
@@ -578,7 +595,7 @@ extension Catalog {
                                             [.text(principal), .text(operation)]).first {
                 guard old["request_id"]?.string == id, old["payload_hash"]?.string == hash else { throw Self.backupConflict() }
                 if let outcome = old["response_json"]?.string {
-                    return try Self.backupDecode(BackupAPI.Receipt.self, outcome)
+                    return try Self.publishedBackupReceipt(outcome)
                 }
                 return try backupReceipt(id, principal: principal)
             }
@@ -658,7 +675,7 @@ extension Catalog {
                 """, [.text(principal), .integer(after), .integer(Int64(limit + 1))])
             let page = Array(rows.prefix(limit))
             let changes = try page.map { BackupAPI.Change(sequence: Int64($0["sequence"]!.int!),
-                receipt: try Self.backupDecode(BackupAPI.Receipt.self, $0["receipt_json"]!.string!)) }
+                receipt: try Self.publishedBackupReceipt($0["receipt_json"]!.string!)) }
             return .init(origin: origin, cursor: rows.count > limit ? changes.last!.sequence : high,
                          hasMore: rows.count > limit, changes: changes)
         }
@@ -700,7 +717,7 @@ extension Catalog {
                 next = token
             }
             return .init(origin: origin, cursor: Int64(cursor),
-                         receipts: try rows.prefix(limit).map { try Self.backupDecode(BackupAPI.Receipt.self, $0["receipt_json"]!.string!) },
+                         receipts: try rows.prefix(limit).map { try Self.publishedBackupReceipt($0["receipt_json"]!.string!) },
                          continuation: next)
         }
     }

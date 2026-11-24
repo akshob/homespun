@@ -502,7 +502,8 @@ final class BackupCoordinator {
                     if Task.isCancelled { return }
                     if error is CancellationError { continue }
                     failed(error)
-                    if let failure = error as? ServerClient.Failure, failure.code == BackupAPI.ErrorCode.historyChanged {
+                    if let failure = error as? ServerClient.Failure,
+                       failure.code == BackupAPI.ErrorCode.historyChanged || failure.code == BackupAPI.ErrorCode.unsupportedPreview {
                         restart = false
                         return
                     }

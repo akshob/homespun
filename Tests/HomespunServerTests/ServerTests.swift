@@ -2195,6 +2195,31 @@ private struct PauseMotionUpload: RouterMiddleware {
 
 // MARK: Versioned foreground backup protocol
 
+private extension Catalog {
+    func seedUnsupportedPreviewForTest(_ receipt: BackupAPI.Receipt) throws {
+        var preview = receipt
+        preview.version.descriptorGeneration = 0
+        let json = try Self.backupJSON(preview)
+        try database.transaction {
+            try database.execute("UPDATE backup_manifests SET generation = 0 WHERE id = ?", [.text(receipt.version.manifestID)])
+            try database.execute("UPDATE backup_requests SET receipt_json = ? WHERE id = ?",
+                                 [.text(json), .text(receipt.requestID.uuidString.lowercased())])
+            try database.execute("UPDATE result_changes SET receipt_json = ? WHERE request_id = ?",
+                                 [.text(json), .text(receipt.requestID.uuidString.lowercased())])
+        }
+    }
+
+    func previewRecordsForTest(_ manifest: String) throws -> [String] {
+        let versions = try database.query("SELECT generation, manifest_json FROM backup_manifests WHERE id = ?", [.text(manifest)])
+            .map { "\($0["generation"]!.int!):\($0["manifest_json"]!.string!)" }
+        let requests = try database.query("SELECT id, payload_hash, receipt_json FROM backup_requests WHERE manifest_id = ? ORDER BY id", [.text(manifest)])
+            .map { "\($0["id"]!.string!):\($0["payload_hash"]!.string!):\($0["receipt_json"]!.string!)" }
+        let claims = try database.query("SELECT id, policy FROM backup_claims WHERE manifest_id = ? ORDER BY id", [.text(manifest)])
+            .map { "\($0["id"]!.string!):\($0["policy"]!.string!)" }
+        return versions + requests + claims
+    }
+}
+
 func backupTestRequest(_ client: some TestClientProtocol, token: String, data: Data,
                                    kind: ServerAPI.AssetKind = .photo, compact: Bool = false,
                                    retention: BackupAPI.RetentionPolicy = .permanent) async throws
@@ -2236,6 +2261,49 @@ func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt:
         #expect(completed.status == .ok)
         return try completed.decode(BackupAPI.Receipt.self)
     }
+
+@Test func unsupportedPreviewVersionsFailActionablyWithoutRewritingHistoryOrOriginals() async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let bytes = Data("complete-preview-original".utf8)
+        let (request, first) = try await backupTestRequest(client, token: token, data: bytes)
+        let retained = try await backupTestUpload(client, token: token, receipt: first, data: bytes)
+        let catalog = fixture.server.catalog
+        try await catalog.seedUnsupportedPreviewForTest(retained)
+        let frozen = try await catalog.previewRecordsForTest(first.version.manifestID)
+        var newOperation = request
+        newOperation.operationID = UUID()
+        let admission = try await client.call("/api/v2/backup-requests", .post, token: token, json: newOperation)
+        #expect(admission.status == .unprocessableContent)
+        let problem = try admission.decode(ServerAPI.ErrorBody.self).error
+        #expect(problem.code == BackupAPI.ErrorCode.unsupportedPreview)
+        #expect(problem.message.contains("preserve") && problem.message.contains("--data"))
+        for path in [
+            "/api/v2/backup-requests?operation_id=\(request.operationID)",
+            "/api/v2/backup-requests/\(first.requestID)",
+            "/api/v2/changes?after=0&epoch=\(request.origin.historyEpoch)",
+            "/api/v2/snapshot",
+        ] {
+            let response = try await client.call(path, token: token)
+            #expect(response.status == .unprocessableContent)
+            #expect(try response.decode(ServerAPI.ErrorBody.self).error.code == BackupAPI.ErrorCode.unsupportedPreview)
+        }
+        do {
+            _ = try await catalog.rotateBackupHistory()
+            Issue.record("resync-history must not pretend to repair an unsupported descriptor identity")
+        } catch let error as APIError {
+            #expect(error.code == BackupAPI.ErrorCode.unsupportedPreview)
+        }
+        let origin = try await catalog.backupOriginRead()
+        #expect(origin == request.origin)
+        let after = try await catalog.previewRecordsForTest(first.version.manifestID)
+        #expect(after == frozen)
+        let objects = try await catalog.backupObjects(first.version.manifestID)
+        let path = try #require(objects.first?.path)
+        let original = try #require(await fixture.server.originals.url(path))
+        #expect(try Data(contentsOf: original) == bytes)
+    }
+}
 
 @Test func versionedAdmissionIsIdempotentPrincipalScopedAndRetainsBeforeCompact() async throws {
         let fixture = try await Fixture()

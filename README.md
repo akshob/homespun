@@ -537,6 +537,13 @@ restarting. It preserves the server ID and originals but advances the history ep
 client snapshots. Silent database replacement within one epoch is unsupported. Older binaries
 refuse the newer schema; a downgrade must preserve newer files and use a deliberate recovery path.
 
+Unreleased preview catalogs containing descriptor generation zero are unsupported. Requests, lookups
+and result feeds fail closed with `unsupported_preview_history`; neither retries nor `resync-history`
+repair these immutable identities. Preserve the entire old data directory and originals. Only for
+disposable preview/test data, stop the server, choose a new empty `--data` directory with a separate
+originals root, then re-pair and reselect originals that remain available. Never delete the old
+originals to work around this error. No automatic migration or repair command is provided.
+
 Conservative defaults are one photo slot, one video slot, two verification slots, two bounded
 chunk writers, one connector slot, 128 active upload records, a 64 GiB staging reservation limit
 and a 1 GiB free-space floor.

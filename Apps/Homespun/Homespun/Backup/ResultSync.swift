@@ -126,6 +126,7 @@ final class ResultSync {
                 try await store.acknowledgeOutbox(item.id)
             } catch {
                 if error is CancellationError { throw error }
+                if let failure = error as? ServerClient.Failure, failure.code == BackupAPI.ErrorCode.unsupportedPreview { throw error }
                 if error is BackupStore.Failure || error is BackupDatabase.Failure || error is BackupDatabase.RollbackFailure {
                     throw error
                 }

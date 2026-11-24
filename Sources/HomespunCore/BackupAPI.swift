@@ -358,6 +358,7 @@ public enum BackupAPI {
         public static let snapshotRequired = "snapshot_required"
         public static let idempotencyConflict = "idempotency_conflict"
         public static let versionChanged = "version_changed"
+        public static let unsupportedPreview = "unsupported_preview_history"
     }
 
     public struct OriginalProof: Codable, Equatable, Sendable {
