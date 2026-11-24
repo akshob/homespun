@@ -205,10 +205,13 @@ import UIKit
         let lease = try #require(try await model.job.ledger.store.claim(operation, stage: .preparation))
         try await model.job.ledger.store.fail(lease, code: "test_failure", message: "Synthetic attention")
         await model.job.refreshQueue()
-        let deadline = ContinuousClock.now + .seconds(10)
-        while model.job.states[id]?.phase != .failed, ContinuousClock.now < deadline { await Task.yield() }
-        try #require(!model.job.isRunning)
         await model.library.refreshGrid()
+        let deadline = ContinuousClock.now + .seconds(10)
+        while (model.job.states[id]?.phase != .failed || ActivityTab.attention(model).count != 1),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(!model.job.isRunning)
         #expect(model.job.states[id]?.phase == .failed && ActivityTab.attention(model).count == 1)
         #expect(await model.library.keepAsIs(id))
         #expect(model.library.library.state.cell(id)?.badge == .kept)
@@ -565,14 +568,16 @@ import UIKit
                                         response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
                                         pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
         let photo = try sample(fixture.session.library, "photo")
-        let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: demo.job.ledger,
-                                      pollInterval: .zero)
-        _ = try await compactor.compact(photo.id, compactNow: true) { _ in }
+        #expect(await demo.job.enqueue([photo.id]) == [photo.id])
+        try await demo.job.runOpportunity()
+        try await demo.job.runOpportunity()
         await demo.library.refreshReady()
         await demo.history.load()
-        let end = Date()
-        demo.history.record(.init(kind: .backUp, trigger: .manual, start: end - 60, end: end,
-                                   items: [.init(assetID: photo.id, name: "Sample", result: .saved)]))
+        let deadline = ContinuousClock.now + .seconds(10)
+        while demo.history.lastBackUp == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let run = try #require(demo.history.lastBackUp)
 
         let url = fixture.folder.appendingPathComponent("status.json"), messages = WatchMessages()
         let destination = StatusPublisher.Destination(read: { StatusStore.read(from: url) },
@@ -586,7 +591,7 @@ import UIKit
         #expect(shown.demo == true && shown.unlocked && !locked.isUnlocked)
         #expect(shown.server?.name == "Homespun Demo" && shown.server?.reachable == true)
         #expect(shown.ready.count == 1 && shown.ready.bytes == demo.library.ready.bytes && shown.ready.bytes > 0)
-        #expect(shown.lastBackup?.count == 1 && shown.lastBackup?.date == end)
+        #expect(shown.lastBackup?.count == 1 && shown.lastBackup?.date == run.end)
         #expect(messages.all.last?.sameFacts(as: shown) == true)
 
         publisher.showDemo(nil)
