@@ -14,7 +14,7 @@ extension BackupStore {
     }
 
     struct Transfer: Codable, Equatable, Sendable {
-        enum Kind: String, Codable, Sendable { case upload, download }
+        enum Kind: String, Codable, Sendable { case upload, download, originalDownload }
         enum State: String, Codable, Sendable {
             case intent, suspended, running, unknown, captured, completed, failed, cancelling
             var terminal: Bool { self == .completed || self == .failed }
@@ -107,6 +107,10 @@ extension BackupStore {
                           $0.role == transfer.expected.role && $0.size == transfer.expected.size
                               && $0.sha256.lowercased() == transfer.expected.sha256.lowercased()
                       }) else { throw Failure.invalidReceipt }
+            case .originalDownload:
+                guard operation.manifest?.resources.contains(where: {
+                    Self.match($0, transfer.expected)
+                }) == true else { throw Failure.invalidReceipt }
             }
             try Self.write(transfer, connection)
         }
@@ -182,9 +186,12 @@ extension BackupStore {
     func captureDownload(_ id: UUID, resource: Resource) throws {
         guard resource.kind != .original, resource.descriptor.size > 0 else { throw Failure.invalidImport }
         try mutateState { connection in
-            guard var transfer = try Self.transfer(id, connection), transfer.kind == .download,
+            guard var transfer = try Self.transfer(id, connection), transfer.kind != .upload,
                   resource.operationID == transfer.operationID, Self.match(resource.descriptor, transfer.expected),
                   transfer.capturedResourceID == nil || transfer.capturedResourceID == resource.fileID else {
+                throw Failure.invalidImport
+            }
+            guard (transfer.kind == .originalDownload) == (resource.kind == .restoredOriginal) else {
                 throw Failure.invalidImport
             }
             if let row = try connection.rows("SELECT body FROM resources WHERE id = ?", [.text(resource.fileID.uuidString)]).first {
