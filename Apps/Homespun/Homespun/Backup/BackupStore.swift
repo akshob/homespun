@@ -15,6 +15,7 @@ actor BackupStore {
         case importNeedsReconciliation
         case invalidImport
         case incompatibleQueuedSettings
+        case nativeTransferUnavailable
 
         var errorDescription: String? {
             switch self {
@@ -29,6 +30,7 @@ actor BackupStore {
             case .importNeedsReconciliation: "An earlier Photos import needs to be checked before another copy can be made."
             case .invalidImport: "The compact copy has not passed complete-resource verification."
             case .incompatibleQueuedSettings: "This item is already queued with different quality settings. Finish or cancel that work first."
+            case .nativeTransferUnavailable: "Native background transfers are not enabled for this connection."
             }
         }
     }
@@ -70,10 +72,19 @@ actor BackupStore {
         var wantsCompact: Bool
         var manifest: BackupAPI.Manifest?
         var request: BackupAPI.Request?
+        var metadata: Data?
         var receipt: BackupAPI.Receipt?
         var lease: Lease?
+        var attention = false
+        var problem: Problem?
         var createdAt: Date
         var updatedAt: Date
+    }
+
+    struct Problem: Codable, Equatable, Sendable {
+        var code: String
+        var message: String
+        var stage: Stage
     }
 
     struct Batch: Equatable, Sendable {
@@ -84,10 +95,13 @@ actor BackupStore {
 
     struct Resource: Codable, Equatable, Sendable {
         enum Kind: String, Codable, Sendable { case original, compact, motion }
+        enum FileState: String, Codable, Sendable { case present, deleting, removed }
         var fileID: UUID
         var operationID: UUID
         var kind: Kind
         var descriptor: ServerAPI.ResourceDescriptor
+        var fileState: FileState?
+        var availability: FileState { fileState ?? .present }
     }
 
     struct SavedMapping: Codable, Equatable, Sendable {
@@ -114,13 +128,14 @@ actor BackupStore {
     }
 
     struct OutboxItem: Codable, Equatable, Sendable {
-        enum Kind: String, Codable, Sendable { case deliveryAcknowledgement, readyNotification }
+        enum Kind: String, Codable, Sendable { case deliveryAcknowledgement, readyNotification, serverCommand }
         var id: UUID
         var operationID: UUID
         var bindingID: UUID
         var kind: Kind
         var payload: Data
         var attempts: Int = 0
+        var nextAttempt: Date?
     }
 
     enum ReceiptApplication: Equatable, Sendable { case applied, stale }
@@ -290,7 +305,8 @@ actor BackupStore {
         }
     }
 
-    func prepared(_ lease: Lease, manifest: BackupAPI.Manifest, resources: [Resource], captureDate: Date? = nil) throws {
+    func prepared(_ lease: Lease, manifest: BackupAPI.Manifest, resources: [Resource],
+                  captureDate: Date? = nil, metadata: Data? = nil) throws {
         _ = try manifest.validated()
         guard lease.stage == .preparation, resources.count == manifest.resources.count,
               resources.allSatisfy({ $0.operationID == lease.operationID && $0.kind == .original }),
@@ -302,10 +318,13 @@ actor BackupStore {
                                        [.text(resource.fileID.uuidString), .text(operation.id.uuidString),
                                         .text(resource.kind.rawValue), .integer(Int64(resource.descriptor.size)),
                                         .blob(try Self.encode(resource))])
+                try connection.execute("INSERT INTO file_refs (resource, owner) VALUES (?, ?)",
+                                       [.text(resource.fileID.uuidString), .text("operation:" + operation.id.uuidString)])
             }
             operation.manifest = manifest
             operation.request = .init(operationID: operation.id, origin: operation.origin, manifest: manifest,
                                       profile: operation.profile, compact: operation.wantsCompact, captureDate: captureDate)
+            operation.metadata = metadata
             operation.backup = .uploading
             operation.lease = nil
             operation.updatedAt = Date()
@@ -467,6 +486,7 @@ actor BackupStore {
             completed.lease = nil
             completed.updatedAt = Date()
             try Self.write(completed, connection)
+            try connection.execute("DELETE FROM file_refs WHERE owner = ?", [.text("operation:" + operation.id.uuidString)])
             let acknowledgement = BackupAPI.DeliveryAcknowledgement(deliveryID: id, requestID: receipt.requestID,
                 generationID: intent.generationID, version: intent.version)
             try Self.enqueue(.init(id: id, operationID: operation.id, bindingID: operation.bindingID,
@@ -489,10 +509,18 @@ actor BackupStore {
         }
     }
 
-    func outbox(limit: Int = 100) throws -> [OutboxItem] {
+    func outbox(limit: Int = 100, bindingID: UUID? = nil, now: Date = Date()) throws -> [OutboxItem] {
         guard (1...1_000).contains(limit) else { throw Failure.missingOperation }
         return try db().read { connection in
-            try connection.rows("SELECT body FROM outbox ORDER BY rowid LIMIT ?", [.integer(Int64(limit))]).map {
+            var values: [BackupDatabase.Value] = [.real(now.timeIntervalSinceReferenceDate)]
+            if let bindingID { values.append(.text(bindingID.uuidString)) }
+            values.append(.integer(Int64(limit)))
+            return try connection.rows("""
+                SELECT body FROM outbox
+                WHERE coalesce(json_extract(CAST(body AS TEXT), '$.nextAttempt'), 0) <= ?
+                \(bindingID == nil ? "" : "AND json_extract(CAST(body AS TEXT), '$.bindingID') = ?")
+                ORDER BY rowid LIMIT ?
+                """, values).map {
                 try Self.decode(OutboxItem.self, $0.blob("body"))
             }
         }
@@ -535,6 +563,14 @@ actor BackupStore {
         }
     }
 
+    func readState<Result: Sendable>(_ body: (BackupDatabase.Connection) throws -> Result) throws -> Result {
+        try db().read(body)
+    }
+
+    func mutateState<Result: Sendable>(_ body: (BackupDatabase.Connection) throws -> Result) throws -> Result {
+        try db().transaction(body)
+    }
+
     private func db() throws -> BackupDatabase {
         if let database { return database }
         try files.prepare()
@@ -574,6 +610,15 @@ actor BackupStore {
                 "CREATE TABLE IF NOT EXISTS legacy_backed_up (namespace TEXT NOT NULL, original TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(namespace, original))",
                 "CREATE TABLE IF NOT EXISTS decisions (namespace TEXT NOT NULL, item TEXT NOT NULL, kept INTEGER NOT NULL, PRIMARY KEY(namespace, item))",
                 "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, operation TEXT NOT NULL REFERENCES operations(id), body BLOB NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(id), identifier TEXT NOT NULL UNIQUE, draining INTEGER NOT NULL, body BLOB NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS transfers (id TEXT PRIMARY KEY, operation TEXT NOT NULL REFERENCES operations(id), session TEXT NOT NULL REFERENCES sessions(id), resource TEXT REFERENCES resources(id), task INTEGER, status TEXT NOT NULL, body BLOB NOT NULL, UNIQUE(session, task))",
+                "CREATE TABLE IF NOT EXISTS file_refs (resource TEXT NOT NULL REFERENCES resources(id), owner TEXT NOT NULL, PRIMARY KEY(resource, owner))",
+                "CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, operation TEXT NOT NULL REFERENCES operations(id), stage TEXT NOT NULL, body BLOB NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS photo_effects (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, item TEXT NOT NULL, kind TEXT NOT NULL, phase TEXT NOT NULL, body BLOB NOT NULL)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS photo_effects_active ON photo_effects(namespace, item, kind) WHERE phase IN ('planned', 'mutating', 'uncertain', 'created')",
+                "CREATE TABLE IF NOT EXISTS snapshot_runs (id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(id), body BLOB NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS snapshot_receipts (snapshot TEXT NOT NULL REFERENCES snapshot_runs(id), request TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(snapshot, request))",
+                "CREATE TABLE IF NOT EXISTS orphan_receipts (binding TEXT NOT NULL REFERENCES bindings(id), request TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(binding, request))",
             ] { try connection.execute(sql) }
             try connection.execute("PRAGMA application_id = \(applicationID)")
             try connection.execute("PRAGMA user_version = 1")
@@ -663,6 +708,17 @@ actor BackupStore {
                         try write(operation, connection)
                     }
                 }
+                for row in try connection.rows("SELECT t.body FROM transfers t JOIN sessions s ON s.id = t.session") {
+                    var transfer = try decode(Transfer.self, row.blob("body"))
+                    guard !transfer.state.terminal, transfer.state != .intent else { continue }
+                    transfer.state = .unknown
+                    try write(transfer, connection)
+                }
+                try connection.execute("""
+                    UPDATE photo_effects SET phase = 'uncertain',
+                    body = CAST(json_set(CAST(body AS TEXT), '$.phase', 'uncertain') AS BLOB)
+                    WHERE phase = 'mutating'
+                    """)
             }
             try connection.execute("""
                 INSERT INTO meta (key, value) VALUES ('process', ?)
@@ -680,18 +736,18 @@ actor BackupStore {
         Fingerprint.sha256(of: Data(("homespun.origin.v1\n" + origin.serverID + "\n" + origin.historyEpoch).utf8))
     }
 
-    private static func operation(_ id: UUID, _ connection: BackupDatabase.Connection) throws -> Operation? {
+    static func operation(_ id: UUID, _ connection: BackupDatabase.Connection) throws -> Operation? {
         try connection.rows("SELECT body FROM operations WHERE id = ?", [.text(id.uuidString)])
             .first.map { try decode(Operation.self, $0.blob("body")) }
     }
 
-    private static func checked(_ lease: Lease, _ connection: BackupDatabase.Connection) throws -> Operation {
+    static func checked(_ lease: Lease, _ connection: BackupDatabase.Connection) throws -> Operation {
         guard let operation = try operation(lease.operationID, connection), operation.lease == lease,
               operation.epoch == lease.epoch, operation.desired == .active else { throw Failure.staleOperation }
         return operation
     }
 
-    private static func write(_ operation: Operation, _ connection: BackupDatabase.Connection) throws {
+    static func write(_ operation: Operation, _ connection: BackupDatabase.Connection) throws {
         try connection.execute("""
             INSERT INTO operations (id, namespace, item, binding, desired, backup, delivery, body)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
@@ -772,13 +828,41 @@ actor BackupStore {
         })
     }
 
-    private static func encode<Value: Encodable>(_ value: Value) throws -> Data {
+    static func encode<Value: Encodable>(_ value: Value) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(value)
     }
 
-    private static func decode<Value: Decodable>(_ type: Value.Type, _ data: Data) throws -> Value {
+    static func decode<Value: Decodable>(_ type: Value.Type, _ data: Data) throws -> Value {
         try JSONDecoder().decode(type, from: data)
+    }
+}
+
+extension BackupStore.Operation {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        namespace = try values.decode(String.self, forKey: .namespace)
+        itemID = try values.decode(String.self, forKey: .itemID)
+        lineage = try values.decode(Int64.self, forKey: .lineage)
+        bindingID = try values.decode(UUID.self, forKey: .bindingID)
+        origin = try values.decode(BackupAPI.Origin.self, forKey: .origin)
+        epoch = try values.decode(Int64.self, forKey: .epoch)
+        desired = try values.decode(BackupStore.Desired.self, forKey: .desired)
+        backup = try values.decode(BackupAPI.BackupState.self, forKey: .backup)
+        compact = try values.decode(BackupAPI.CompactState.self, forKey: .compact)
+        delivery = try values.decode(BackupAPI.DeliveryState.self, forKey: .delivery)
+        profile = try values.decode(CompressionProfile.self, forKey: .profile)
+        wantsCompact = try values.decode(Bool.self, forKey: .wantsCompact)
+        manifest = try values.decodeIfPresent(BackupAPI.Manifest.self, forKey: .manifest)
+        request = try values.decodeIfPresent(BackupAPI.Request.self, forKey: .request)
+        metadata = try values.decodeIfPresent(Data.self, forKey: .metadata)
+        receipt = try values.decodeIfPresent(BackupAPI.Receipt.self, forKey: .receipt)
+        lease = try values.decodeIfPresent(BackupStore.Lease.self, forKey: .lease)
+        attention = try values.decodeIfPresent(Bool.self, forKey: .attention) ?? false
+        problem = try values.decodeIfPresent(BackupStore.Problem.self, forKey: .problem)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        updatedAt = try values.decode(Date.self, forKey: .updatedAt)
     }
 }
