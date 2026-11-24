@@ -1,5 +1,35 @@
 # Homespun
 
+### Optional wake relay (implementation preview)
+
+`homespun-notify` is separate, opt-in infrastructure for content-free APNs background hints.
+It is not started by `homespun-server`, has not been deployed as part of this change, and does
+not make iOS background execution or delivery guaranteed. The result cursor remains authoritative.
+Deployment and any hosting spend require a separate owner decision.
+
+The relay receives an opaque route, its generation and a random hint nonce, not media, hashes,
+file names, server addresses or progress. The iPhone's APNs token is kept only by the relay;
+the home server gets a route-scoped send credential, never the provider key or device token.
+Requests and provider failures are not logged with tokens or payloads. Pending enrollments expire
+after a day; active enrollments expire after 90 days without a device refresh, or are removed on
+opt-out or an invalid-token response. A hint does not extend that lifetime.
+
+Enrollment is deliberately two-phase. Before contacting the relay, the app must persist its
+route UUID and separate management/send secrets in device-only Keychain. A tokenless
+`POST /v1/routes/{id}/begin` returns a fresh server generation. Only after persisting that
+generation may the app `PUT /v1/routes/{id}` with the token and send secret. A late activation
+cannot recreate a deleted enrollment: activation never creates a row, and a late begin receives a
+different generation. Disabling consent fences and joins pending client registrations, then
+retries authenticated `DELETE` until acknowledged. No permanent APNs-token tombstone is needed.
+
+The separate service listens only on loopback behind an explicitly configured public HTTPS
+frontend. Run `homespun-notify --help` for private environment configuration; it requires its own
+data folder and an owner-readable-only APNs `.p8` file. Never put that key, its contents or a
+team's private signing configuration in this repository, an iPhone build or logs. TestFlight uses
+production APNs; the development app needs its own topic/environment and appropriate key scope.
+The relay coalesces hints to at most one attempt per route every 20 minutes, with fenced leases
+and retryable durable state. The generic payload contains only `content-available`.
+
 Keep full-quality originals on your own server and compact copies in Apple Photos.
 
 Website: [homespun.photos](https://homespun.photos)
