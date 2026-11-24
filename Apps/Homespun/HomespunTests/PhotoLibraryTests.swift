@@ -33,6 +33,144 @@ import UniformTypeIdentifiers
         try #require(PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject)
     }
 
+    private func opaquePhotoInputs(type: UTType, fileExtension suffix: String) throws
+        -> (directory: URL, files: [(label: String, resource: PreparedPhotoResource)]) {
+        let directory = try Synthetic.directory()
+        var prepared = false
+        defer { if !prepared { try? FileManager.default.removeItem(at: directory) } }
+        let workspace = BackupFiles(root: directory.appendingPathComponent("Backup"))
+        try workspace.prepare()
+        let operation = UUID()
+        let staging = try workspace.prepareStaging(operationID: operation)
+        let named = staging.appendingPathComponent("control." + suffix)
+        try Synthetic.photo(at: named, .init(type: type, width: 192, height: 128))
+        try BackupFiles.protect(named)
+        let opaqueID = UUID(), aliasID = UUID()
+        let opaque = workspace.stagedFile(operationID: operation, fileID: opaqueID)
+        let alias = staging.appendingPathComponent(aliasID.uuidString).appendingPathExtension(suffix)
+        // All variants share the same bytes, protection and link count; only the URL suffix differs.
+        try FileManager.default.linkItem(at: named, to: opaque)
+        try FileManager.default.linkItem(at: opaque, to: alias)
+        try BackupFiles.protect(opaque)
+        let expected = try Fingerprint.digests(of: named)
+        let descriptor = ServerAPI.ResourceDescriptor(role: .photo, filename: "declared." + suffix,
+                                                       size: expected.size, sha256: expected.sha256, sha1: expected.sha1)
+        let files = [("extensionful-control", UUID(), named), ("opaque-uuid", opaqueID, opaque), ("typed-hardlink", aliasID, alias)]
+        for (_, _, url) in files {
+            let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+            let actualType = try #require(CGImageSourceGetType(source)) as String
+            #expect(actualType == type.identifier && CGImageSourceGetStatus(source) == .statusComplete)
+            let actual = try Fingerprint.digests(of: url)
+            #expect(actual.sha256 == expected.sha256 && actual.size == expected.size)
+        }
+        prepared = true
+        return (directory, files.map {
+            ($0.0, PreparedPhotoResource(fileID: $0.1, url: $0.2, descriptor: descriptor))
+        })
+    }
+
+    private func opaqueMetadata(_ resource: PreparedPhotoResource) -> BackupPhotoMetadata {
+        .init(sourceID: "synthetic-opaque-photo", kind: .photo, creationDate: Date(timeIntervalSince1970: 1_100_000_000),
+              locationArchive: nil, favorite: true, hidden: false, albums: [],
+              generation: .init(identifier: "synthetic-opaque-photo", modified: nil, width: 192, height: 128,
+                                resources: [.init(role: .photo, name: resource.descriptor.filename, bytes: resource.descriptor.size)]))
+    }
+
+    private func opaqueFailure(_ error: any Error, label: String, resource: PreparedPhotoResource) {
+        var current: NSError? = error as NSError
+        var chain: [String] = []
+        var seen = Set<ObjectIdentifier>()
+        for _ in 0..<6 {
+            guard let value = current, seen.insert(ObjectIdentifier(value)).inserted else { break }
+            chain.append("\(value.domain):\(value.code) \(value.localizedDescription) "
+                         + "keys=\(value.userInfo.keys.sorted())")
+            current = value.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        let declared = UTType(filenameExtension: (resource.descriptor.filename as NSString).pathExtension)?.identifier ?? "unknown"
+        let actual: String
+        if let source = CGImageSourceCreateWithURL(resource.url as CFURL, nil), let type = CGImageSourceGetType(source) {
+            actual = type as String
+        } else {
+            actual = "unreadable"
+        }
+        print("PHOTOKIT opaque probe \(label): role=\(resource.descriptor.role.rawValue), "
+              + "URLextension=\(resource.url.pathExtension), declaredUTI=\(declared), actualUTI=\(actual), "
+              + "exists=\(FileManager.default.fileExists(atPath: resource.url.path)), error=\(chain.joined(separator: " -> "))")
+        Issue.record(error)
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func opaqueUUIDCompactImportKeepsVerifiedBytesAndDeclaredType() async throws {
+        let photos = PhotoKitSource()
+        for (type, suffix) in [(UTType.jpeg, "jpg"), (UTType.heic, "heic")] {
+            let inputs = try opaquePhotoInputs(type: type, fileExtension: suffix)
+            defer { try? FileManager.default.removeItem(at: inputs.directory) }
+            for (label, resource) in inputs.files {
+                do {
+                    let identifier = try await photos.importCompact([resource], metadata: opaqueMetadata(resource))
+                    let actual = try await photos.resourceFingerprints(identifier)
+                    #expect(BackupValidation.matches([resource.descriptor], actual))
+                    let imported = try asset(identifier)
+                    #expect(imported.isFavorite && PhotoLibrary.isCompactCopy(imported))
+                } catch {
+                    opaqueFailure(error, label: "compact-\(suffix)-\(label)", resource: resource)
+                }
+                let retained = try Fingerprint.digests(of: resource.url)
+                #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+            }
+        }
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func opaqueUUIDRestoreKeepsVerifiedBytesAndDeclaredName() async throws {
+        let photos = PhotoKitSource()
+        for (type, suffix) in [(UTType.jpeg, "jpg"), (UTType.heic, "heic")] {
+            let inputs = try opaquePhotoInputs(type: type, fileExtension: suffix)
+            defer { try? FileManager.default.removeItem(at: inputs.directory) }
+            for (label, resource) in inputs.files {
+                do {
+                    let identifier = try await photos.restoreResources([resource], metadata: opaqueMetadata(resource))
+                    let actual = try await photos.resourceFingerprints(identifier)
+                    #expect(BackupValidation.matches([resource.descriptor], actual))
+                    let restored = try asset(identifier)
+                    #expect(restored.creationDate == opaqueMetadata(resource).creationDate && restored.location == nil)
+                    #expect(PHAssetResource.assetResources(for: restored).first?.originalFilename == resource.descriptor.filename)
+                } catch {
+                    opaqueFailure(error, label: "restore-\(suffix)-\(label)", resource: resource)
+                }
+                let retained = try Fingerprint.digests(of: resource.url)
+                #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+            }
+        }
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func opaqueUUIDDirectPhotoKitImportReportsUnderlyingResourceErrors() async throws {
+        for (type, suffix) in [(UTType.jpeg, "jpg"), (UTType.heic, "heic")] {
+            let inputs = try opaquePhotoInputs(type: type, fileExtension: suffix)
+            defer { try? FileManager.default.removeItem(at: inputs.directory) }
+            for (label, resource) in inputs.files {
+                let box = Box()
+                do {
+                    try await PHPhotoLibrary.shared().performChanges {
+                        let request = PHAssetCreationRequest.forAsset()
+                        let options = PHAssetResourceCreationOptions()
+                        options.originalFilename = resource.descriptor.filename
+                        options.uniformTypeIdentifier = type.identifier
+                        options.shouldMoveFile = false
+                        request.addResource(with: .photo, fileURL: resource.url, options: options)
+                        box.value = request.placeholderForCreatedAsset?.localIdentifier
+                    }
+                    let identifier = try #require(box.value)
+                    let actual = try await PhotoKitSource().resourceFingerprints(identifier)
+                    #expect(BackupValidation.matches([resource.descriptor], actual))
+                } catch {
+                    opaqueFailure(error, label: "direct-\(suffix)-\(label)", resource: resource)
+                }
+            }
+        }
+    }
+
     @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
     func compactCopiesKeepTheOriginalsDetails() async throws {
         let directory = try Synthetic.directory()
