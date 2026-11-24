@@ -83,16 +83,26 @@ struct ImmichClient: Sendable {
     }
 
     /// Streams the original file to `destination`.
-    func downloadOriginal(id: String, to destination: URL) async throws {
+    func downloadOriginal(id: String, to destination: URL, maximumBytes: Int? = nil) async throws {
         guard UUID(uuidString: id) != nil else { throw Failure(description: "bad Immich asset ID") }
         let response = try await client.execute(try request("/assets/\(id)/original"), timeout: .hours(2))
         guard response.status == .ok else { throw Failure(description: "Immich download returned \(response.status.code)") }
         guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw Failure(description: "cannot create \(destination.lastPathComponent)") }
         let handle = try FileHandle(forWritingTo: destination)
         defer { try? handle.close() }
+        var written = 0
         for try await buffer in response.body {
+            if let maximumBytes {
+                guard written <= maximumBytes, buffer.readableBytes <= maximumBytes - written else {
+                    throw Failure(description: "Immich original exceeds its expected size")
+                }
+            }
             try handle.write(contentsOf: Data(buffer.readableBytesView))
+            let (next, overflow) = written.addingReportingOverflow(buffer.readableBytes)
+            guard !overflow else { throw Failure(description: "Immich original size overflow") }
+            written = next
         }
+        if let maximumBytes, written != maximumBytes { throw Failure(description: "Immich original is truncated") }
         try handle.synchronize()
     }
 

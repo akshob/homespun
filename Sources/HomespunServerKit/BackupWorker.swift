@@ -8,7 +8,7 @@ import ServiceLifecycle
 /// Shared by v1/v2 encoders, connector work and hashing. Waiting for one lane never owns
 /// another lane or a root lease. Defaults intentionally leave CPU capacity for HTTP and Photos.
 actor ServerWorkBudget {
-    enum Lane: Hashable, Sendable { case photo, video, connector, verification, transfer }
+    enum Lane: Hashable, Sendable { case photo, video, connector, verification, transfer, acquisitionPhoto, acquisitionVideo, externalProof, externalFetch }
     private var active: [Lane: Int] = [:]
     private var waiting: [Lane: [UUID]] = [:]
     let photos: Int
@@ -28,6 +28,7 @@ actor ServerWorkBudget {
         case .connector: limit = 1
         case .verification: limit = verifications
         case .transfer: limit = 2
+        case .acquisitionPhoto, .acquisitionVideo, .externalProof, .externalFetch: limit = 1
         }
         let ticket = UUID()
         waiting[lane, default: []].append(ticket)
@@ -60,7 +61,7 @@ extension Catalog {
                 SELECT j.* FROM backup_jobs j WHERE j.lane = ? AND j.status IN ('queued', 'retry_wait')
                   AND j.available_at <= ?
                   AND EXISTS(SELECT 1 FROM backup_requests r WHERE r.manifest_id = j.manifest_id
-                    AND r.recipe_id = j.recipe_id AND r.source = 'files'
+                    AND r.recipe_id = j.recipe_id
                     AND r.wants_compact = 1 AND r.paused = 0 AND r.cancelled = 0)
                 ORDER BY COALESCE((SELECT s.last_claim FROM backup_scheduler s WHERE s.principal = j.principal AND s.lane = j.lane), 0),
                   j.created_at, j.id LIMIT 1
@@ -84,7 +85,8 @@ extension Catalog {
             return .init(id: id, manifest: row["manifest_id"]!.string!,
                          recipe: try Self.backupDecode(BackupAPI.Recipe.self, row["recipe_json"]!.string!),
                          recipeID: row["recipe_id"]!.string!, generation: Int64(row["generation"]!.int!),
-                         owner: owner, fence: fence, output: output, lane: lane, attempts: (row["attempts"]?.int ?? 0) + 1)
+                         owner: owner, fence: fence, output: output, lane: lane, attempts: (row["attempts"]?.int ?? 0) + 1,
+                         externalSetID: row["external_set_id"]?.string)
         }
     }
 
@@ -141,7 +143,7 @@ extension Catalog {
             }
             try database.execute("""
                 UPDATE backup_requests SET compact_state = ?, derivative_id = ?, message = ?
-                WHERE manifest_id = ? AND recipe_id = ? AND source = 'files' AND wants_compact = 1 AND paused = 0 AND cancelled = 0
+                WHERE manifest_id = ? AND recipe_id = ? AND wants_compact = 1 AND paused = 0 AND cancelled = 0
                 """, [.text(outcome.state == .ready ? "ready" : "held"),
                        outcome.state == .ready ? .text(job.output.uuidString.lowercased()) : .null,
                        outcome.message.sqlValue, .text(job.manifest), .text(job.recipeID)])
@@ -164,7 +166,7 @@ extension Catalog {
                        .text(job.id), .text(job.owner), .integer(job.fence), .integer(job.generation)])
             try database.execute("""
                 UPDATE backup_requests SET compact_state = ?, message = ? WHERE manifest_id = ? AND recipe_id = ?
-                  AND source = 'files' AND wants_compact = 1 AND paused = 0 AND cancelled = 0
+                  AND wants_compact = 1 AND paused = 0 AND cancelled = 0
                 """, [.text(final ? "failed" : "queued"), .text(message), .text(job.manifest), .text(job.recipeID)])
             try refreshBackupRequests(job.manifest)
         }
@@ -180,7 +182,7 @@ extension Catalog {
                 let manifest = row["manifest_id"]!.string!
                 try database.execute("""
                     UPDATE backup_requests SET compact_state = 'queued' WHERE manifest_id = ? AND wants_compact = 1
-                      AND source = 'files' AND cancelled = 0 AND paused = 0 AND compact_state = 'processing'
+                      AND cancelled = 0 AND paused = 0 AND compact_state = 'processing'
                     """, [.text(manifest)])
                 try refreshBackupRequests(manifest)
             }
@@ -253,7 +255,9 @@ struct BackupWorker: Service {
         let cache = storage.cache("v2-" + job.output.uuidString.lowercased())
         defer { try? FileManager.default.removeItem(at: cache) }
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: false)
-        let sources = try await originals.place { root in
+        let sources: [Role: URL]
+        if objects.allSatisfy({ $0.path != nil }) {
+        sources = try await originals.place { root in
             var sources: [Role: URL] = [:]
             for object in try await catalog.backupObjects(job.manifest) {
                 guard let path = object.path, let source = OriginalsStore.resolve(path, in: root) else {
@@ -267,6 +271,24 @@ struct BackupWorker: Service {
                 sources[object.role] = target
             }
             return sources
+        }
+        } else {
+            guard let set = job.externalSetID else { throw Backpressure() }
+            do {
+                var external: [Role: URL] = [:]
+                for file in try await catalog.backupExternalFiles(set) {
+                    guard let source = storage.resolve(file.path) else { throw Backpressure() }
+                    let target = cache.appendingPathComponent(file.role.rawValue + "-" + Storage.sanitized(file.filename))
+                    let verified = try await detached { try Fingerprint.copy(from: source, to: target) }
+                    guard verified.size == file.size, verified.sha256 == file.sha256 else { throw Backpressure() }
+                    external[file.role] = target
+                }
+                guard external.count == manifest.resources.count else { throw Backpressure() }
+                sources = external
+            } catch {
+                try await catalog.invalidateExternalSet(set)
+                throw Backpressure()
+            }
         }
         let directory = storage.compact("v2-" + job.output.uuidString.lowercased())
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -299,8 +321,9 @@ extension Catalog {
                        .integer(job.fence), .integer(job.generation)])
             try database.execute("""
                 UPDATE backup_requests SET compact_state = 'queued', message = 'Waiting for processing storage capacity; originals remain retained.'
-                WHERE manifest_id = ? AND recipe_id = ? AND source = 'files' AND wants_compact = 1 AND paused = 0 AND cancelled = 0
+                WHERE manifest_id = ? AND recipe_id = ? AND wants_compact = 1 AND paused = 0 AND cancelled = 0
                 """, [.text(job.manifest), .text(job.recipeID)])
+            try queueBackupExternal(job.manifest)
             try refreshBackupRequests(job.manifest)
         }
     }

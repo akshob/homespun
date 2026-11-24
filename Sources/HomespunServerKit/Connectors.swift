@@ -72,6 +72,7 @@ public struct ConnectorItem: Sendable {
     public var kind: ServerAPI.AssetKind
     public var captureDate: Date?
     public var files: [File]
+    public var immutableManifestID: String?
 
     public func file(_ role: ServerAPI.ResourceRole) -> File? { files.first { $0.role == role } }
 
@@ -87,11 +88,12 @@ public struct ConnectorItem: Sendable {
         return file(.fullSizePairedVideo) ?? file(.pairedVideo)
     }
 
-    public init(assetID: String, kind: ServerAPI.AssetKind, captureDate: Date?, files: [File]) {
+    public init(assetID: String, kind: ServerAPI.AssetKind, captureDate: Date?, files: [File], immutableManifestID: String? = nil) {
         self.assetID = assetID
         self.kind = kind
         self.captureDate = captureDate
         self.files = files
+        self.immutableManifestID = immutableManifestID
     }
 }
 
@@ -119,10 +121,7 @@ public actor ConnectorContext {
     public func value(_ name: String) async throws -> String? { try await settings()[name] }
 
     public func set(_ values: [String: String?]) async throws {
-        var current = try await settings()
-        for (name, value) in values { current[name] = value }
-        let data = try JSONEncoder().encode(current)
-        try await catalog.setSetting(key, current.isEmpty ? nil : String(decoding: data, as: UTF8.self))
+        try await catalog.updateConnectorSettings(connectorID, values: values)
     }
 
     func clear() async throws { try await catalog.setSetting(key, nil) }
@@ -164,6 +163,31 @@ actor ConnectorHub {
         return enabled
     }
 
+    func enabledDestinations() async throws -> [String: String] {
+        var result: [String: String] = [:]
+        for id in try await enabledIDs() {
+            let settings = try await context(id).settings()
+            guard settings["_sign_in_pending"] != "true" else { continue }
+            result[id] = settings["_destination_epoch"] ?? "legacy"
+        }
+        return result
+    }
+
+    func copyImmutable(_ id: String, item: ConnectorItem, destination: String) async throws -> String? {
+        guard let connector = connectors[id] else { throw ConnectorError.failed("Connector unavailable.") }
+        let context = context(id)
+        let initial = try await context.settings()
+        guard initial[Self.enabledKey] == "true", initial["_sign_in_pending"] != "true",
+              (initial["_destination_epoch"] ?? "legacy") == destination else {
+            throw ConnectorError.retryLater("Destination changed.", after: 30)
+        }
+        let result = try await connector.copy(item, context: context)
+        let current = try await context.settings()
+        guard current[Self.enabledKey] == "true", current["_sign_in_pending"] != "true",
+              (current["_destination_epoch"] ?? "legacy") == destination else { throw CancellationError() }
+        return result
+    }
+
     /// Queues copies of an item whose originals were just stored and checked.
     func originalsVerified(_ assetID: String, job: Job? = nil) async throws {
         for id in try await enabledIDs() { try await queue(id, assetID: assetID, job: job) }
@@ -177,7 +201,6 @@ actor ConnectorHub {
     func info(_ id: String) async throws -> ServerAPI.ConnectorInfo? {
         guard let connector = connectors[id] else { return nil }
         let settings = try await context(id).settings()
-        let versioned = try await catalog.hasVersionedBackups()
         let fields = connector.fields.map { field in
             var field = field
             let value = settings[field.key]
@@ -188,9 +211,7 @@ actor ConnectorHub {
         return ServerAPI.ConnectorInfo(
             id: id, name: connector.name, summary: connector.summary, fields: fields, signsIn: connector.signsIn,
             account: settings[Self.accountKey], enabled: settings[Self.enabledKey] == "true",
-            message: settings[Self.messageKey] ?? (versioned
-                ? "Versioned backups are not copied to this connector yet; these copy counts cover legacy backups only." : nil),
-            counts: try await catalog.copyCounts(connector: id))
+            message: settings[Self.messageKey], counts: try await catalog.copyCounts(connector: id))
     }
 
     func all() async throws -> [ServerAPI.ConnectorInfo] {
@@ -212,6 +233,7 @@ actor ConnectorHub {
                 values[key] = value.isEmpty ? nil : String(value.prefix(4096))
             }
             try await context.set(values)
+            try await context.set(["_destination_epoch": UUID().uuidString.lowercased()])
         }
         let wasEnabled = try await context.value(Self.enabledKey) == "true"
         let enable = update.enabled ?? wasEnabled
@@ -227,6 +249,7 @@ actor ConnectorHub {
             }
         } else if update.enabled == false {
             try await context.set([Self.enabledKey: nil])
+            try await catalog.cancelBackupCopies(connector: id)
             await catalog.log("connector_disabled", detail: id)
         }
         return try await info(id)!
@@ -237,18 +260,23 @@ actor ConnectorHub {
         guard connectors[id] != nil else { throw ConnectorError.failed("No such connector.") }
         try await context(id).clear()
         try await catalog.cancelJobs(prefix: Self.jobPrefix + id)
+        try await catalog.cancelBackupCopies(connector: id)
         await catalog.log("connector_removed", detail: id)
     }
 
     func beginSignIn(_ id: String) async throws -> ServerAPI.ConnectorSignIn {
         guard let connector = connectors[id], connector.signsIn else { throw ConnectorError.failed("This connector doesn't sign in.") }
-        return try await connector.beginSignIn(context(id))
+        let context = context(id)
+        try await context.set(["_destination_epoch": UUID().uuidString.lowercased(), "_sign_in_pending": "true"])
+        do { return try await connector.beginSignIn(context) }
+        catch { try await context.set(["_sign_in_pending": nil]); throw error }
     }
 
     func pollSignIn(_ id: String) async throws -> ServerAPI.ConnectorSignInStatus {
         guard let connector = connectors[id], connector.signsIn else { throw ConnectorError.failed("This connector doesn't sign in.") }
         let status = try await connector.pollSignIn(context(id))
-        if status.state == .done { try await context(id).set([Self.accountKey: status.account, Self.messageKey: nil]) }
+        if status.state == .done { try await context(id).set([Self.accountKey: status.account, Self.messageKey: nil, "_sign_in_pending": nil]) }
+        else if status.state == .failed { try await context(id).set(["_sign_in_pending": nil]) }
         return status
     }
 

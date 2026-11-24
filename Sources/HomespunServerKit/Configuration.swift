@@ -36,6 +36,8 @@ public struct ServerConfiguration: Sendable {
     public var videoWorkers = 1
     public var minimumFreeBytes: Int64 = 1 << 30
     public var maximumStagingBytes: Int64 = 64 << 30
+    /// Owner-controlled optional relay endpoint. No endpoint is accepted from a paired device.
+    public var wakeRelayURL: URL?
 
     public init(dataDirectory: URL, host: String = "127.0.0.1", port: Int = 8787, name: String = "Homespun",
                 profile: CompressionProfile = .standard, immich: ImmichConfiguration? = nil) {
@@ -72,6 +74,12 @@ public struct ServerConfiguration: Sendable {
             configuration.port = number
         }
         configuration.name = environment["HOMESPUN_NAME"] ?? ProcessInfo.processInfo.hostName
+        if let text = environment["HOMESPUN_WAKE_RELAY_URL"], !text.isEmpty {
+            guard let url = URL(string: text), url.scheme == "https", url.host != nil, url.user == nil,
+                  url.password == nil, url.query == nil, url.fragment == nil,
+                  (1...65_535).contains(url.port ?? 443) else { throw Failure.invalid("bad HOMESPUN_WAKE_RELAY_URL") }
+            configuration.wakeRelayURL = url
+        }
         for (key, maximum) in [("HOMESPUN_PHOTO_WORKERS", 2), ("HOMESPUN_VIDEO_WORKERS", 2)] {
             if let text = environment[key] {
                 guard let count = Int(text), (1...maximum).contains(count) else { throw Failure.invalid("bad \(key)") }

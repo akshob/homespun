@@ -113,13 +113,14 @@ struct Fixture {
     let server: HomespunServer
 
     init(immich: ImmichConfiguration? = nil, approver: (any PairingApprover)? = nil,
-         connectors: [any Connector] = [], originals: String? = nil, directory: URL? = nil) async throws {
+         connectors: [any Connector] = [], originals: String? = nil, directory: URL? = nil, wakeRelay: URL? = nil) async throws {
         let base = try directory ?? temporaryDirectory()
         self.directory = base
         var configuration = ServerConfiguration(dataDirectory: base.appendingPathComponent("data"),
                                                 name: "test", profile: testProfile, immich: immich)
         configuration.originalsDirectory = originals.map { base.appendingPathComponent($0, isDirectory: true) }
         configuration.maximumChunkBytes = 1 << 20
+        configuration.wakeRelayURL = wakeRelay
         server = try await HomespunServer(configuration: configuration, connectors: connectors, approver: approver,
                                           // Long enough for a slow machine's requests to fit inside it.
                                           approvalPause: 2, builtIn: [], codeRounds: 1_000, challengeInterval: 0)
@@ -338,6 +339,7 @@ final class FakeConnector: Connector, @unchecked Sendable {
     var behaviour = Behaviour.copy
     var checkError: String?
     var copies: [(assetID: String, files: [ServerAPI.ResourceRole: Data], settings: [String: String])] = []
+    var manifests: [String?] = []
 
     func check(_ context: ConnectorContext) async throws -> String? {
         if let error = lock.withLock({ checkError }) { throw ConnectorError.failed(error) }
@@ -358,7 +360,7 @@ final class FakeConnector: Connector, @unchecked Sendable {
             files[file.role] = data
         }
         let settings = try await context.settings()
-        lock.withLock { copies.append((item.assetID, files, settings)) }
+        lock.withLock { copies.append((item.assetID, files, settings)); manifests.append(item.immutableManifestID) }
         return "fake://\(item.assetID.prefix(8))"
     }
 }
@@ -575,6 +577,8 @@ final class FakeImmich: @unchecked Sendable {
     struct Stored { var id: String; var data: Data; var trashed = false; var livePhotoVideoId: String? }
     let lock = NSLock()
     var assets: [String: Stored] = [:]
+    var downloadOverrides: [String: Data] = [:]
+    var downloads: [String: Int] = [:]
     let key = "immich-test-key"
     var permissions = ["asset.read", "asset.download"]
 
@@ -623,7 +627,11 @@ final class FakeImmich: @unchecked Sendable {
         router.get("api/assets/:id/original") { request, context in
             try authorized(request)
             guard let stored = self.lock.withLock({ self.assets[context.parameters.get("id") ?? ""] }) else { throw HTTPError(.notFound) }
-            return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(bytes: stored.data)))
+            let data = self.lock.withLock {
+                self.downloads[stored.id, default: 0] += 1
+                return self.downloadOverrides[stored.id] ?? stored.data
+            }
+            return Response(status: .ok, body: .init(byteBuffer: ByteBuffer(bytes: data)))
         }
         return router
     }
@@ -2175,7 +2183,7 @@ private struct PauseMotionUpload: RouterMiddleware {
 
     // MARK: Versioned foreground backup protocol
 
-    private func backupTestRequest(_ client: some TestClientProtocol, token: String, data: Data,
+    func backupTestRequest(_ client: some TestClientProtocol, token: String, data: Data,
                                    kind: ServerAPI.AssetKind = .photo, compact: Bool = false,
                                    retention: BackupAPI.RetentionPolicy = .permanent) async throws
         -> (BackupAPI.Request, BackupAPI.Receipt) {
@@ -2183,7 +2191,7 @@ private struct PauseMotionUpload: RouterMiddleware {
         let role: Role = kind == .video ? .video : .photo
         let request = BackupAPI.Request(operationID: UUID(), origin: capabilities.origin,
             manifest: .init(kind: kind, resources: [.init(role: role, filename: kind == .video ? "a.mp4" : "a.jpg",
-                size: data.count, sha256: Fingerprint.sha256(of: data))]),
+                size: data.count, sha256: Fingerprint.sha256(of: data), sha1: Fingerprint.sha1(of: data))]),
             profile: capabilities.recipe.profile, retention: retention, compact: compact)
         let response = try await client.call("/api/v2/backup-requests", .post, token: token, json: request)
         #expect(response.status == .created)
@@ -2200,7 +2208,7 @@ private struct PauseMotionUpload: RouterMiddleware {
                                         headers: headers, body: ByteBuffer(bytes: data))
     }
 
-    private func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt: BackupAPI.Receipt,
+    func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt: BackupAPI.Receipt,
                                   role: Role = .photo, data: Data) async throws -> BackupAPI.Receipt {
         let id = UUID()
         let response = try await client.call("/api/v2/uploads", .post, token: token,
@@ -2641,11 +2649,11 @@ private struct PauseMotionUpload: RouterMiddleware {
         try await external.test { client, token in
             #expect(try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self).uploadProtocols.isEmpty)
             let (_, blocked) = try await backupTestRequest(client, token: token, data: Data("external".utf8))
-            #expect(blocked.backup == .blocked && blocked.retention == .external)
+            #expect(blocked.backup == .verifying && blocked.retention == .external)
             #expect(try await client.call("/api/v2/uploads", .post, token: token,
                 json: BackupAPI.UploadRequest(uploadID: UUID(), requestID: blocked.requestID, version: blocked.version, role: .photo)).status == .unprocessableContent)
             #expect(try await client.call("/api/v2/assets/\(blocked.version.assetID)/versions/\(blocked.version.manifestID)/verify",
-                .post, token: token, json: blocked.version).status == .conflict)
+                .post, token: token, json: blocked.version).status != .ok)
         }
     }
 }

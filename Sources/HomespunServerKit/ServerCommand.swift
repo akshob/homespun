@@ -120,6 +120,7 @@ public enum ServerCommand {
                              ("HOMESPUN_PORT", String(configuration.port)), ("HOMESPUN_NAME", configuration.name),
                              ("HOMESPUN_PUBLIC_URL", configuration.publicURL),
                              ("HOMESPUN_ONEDRIVE_CLIENT_ID", configuration.onedriveClientID),
+                             ("HOMESPUN_WAKE_RELAY_URL", configuration.wakeRelayURL?.absoluteString),
                              ("HOMESPUN_PHOTO_WORKERS", String(configuration.photoWorkers)),
                              ("HOMESPUN_VIDEO_WORKERS", String(configuration.videoWorkers)),
                              ("HOMESPUN_MAX_STAGING_BYTES", String(configuration.maximumStagingBytes)),

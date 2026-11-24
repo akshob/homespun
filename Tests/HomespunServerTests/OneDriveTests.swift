@@ -42,7 +42,7 @@ final class FakeMicrosoft: @unchecked Sendable {
     var refreshTokens: Set<String> = []
     var refreshes = 0
     var files: [String: (data: Data, created: String?)] = [:]
-    var sessions: [String: (path: String, data: Data, created: String?)] = [:]
+    var sessions: [String: (path: String, data: Data, created: String?, immutable: Bool)] = [:]
     var uploads = 0
     var corrupt = false
 
@@ -126,11 +126,14 @@ final class FakeMicrosoft: @unchecked Sendable {
                 return json(["nextExpectedRanges": ["\(session.data.count)-"]], .accepted)
             }
             sessions[id] = nil
+            if session.immutable, files[session.path] != nil {
+                return json(["error": ["message": "immutable conflict"]], .conflict)
+            }
             uploads += 1
             var name = (session.path as NSString).lastPathComponent
             let folder = (session.path as NSString).deletingLastPathComponent
             var copy = 1
-            while files[folder + "/" + name] != nil {
+            while !session.immutable, files[folder + "/" + name] != nil {
                 let stem = ((session.path as NSString).lastPathComponent as NSString).deletingPathExtension
                 name = "\(stem) \(copy).\((session.path as NSString).pathExtension)"
                 copy += 1
@@ -151,12 +154,13 @@ final class FakeMicrosoft: @unchecked Sendable {
         if rest.hasSuffix(":/createUploadSession") {
             let itemPath = String(rest.dropLast(":/createUploadSession".count))
             let item = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["item"] as? [String: Any]
-            guard item?["@microsoft.graph.conflictBehavior"] as? String == "rename" else {
-                return json(["error": ["message": "expected rename"]], .badRequest)
+            let conflict = item?["@microsoft.graph.conflictBehavior"] as? String
+            guard conflict == "rename" || conflict == "fail" else {
+                return json(["error": ["message": "expected safe conflict behavior"]], .badRequest)
             }
             let created = (item?["fileSystemInfo"] as? [String: Any])?["createdDateTime"] as? String
             let id = UUID().uuidString
-            sessions[id] = (itemPath, Data(), created)
+            sessions[id] = (itemPath, Data(), created, conflict == "fail")
             return json(["uploadUrl": "\(base)/upload/\(id)"])
         }
         guard let file = files[rest] else { return json(["error": ["code": "itemNotFound", "message": "not found"]], .notFound) }

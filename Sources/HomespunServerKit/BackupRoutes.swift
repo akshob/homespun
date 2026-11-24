@@ -86,10 +86,37 @@ struct BackupRoutes: Sendable {
 
     func add(to router: Router<HomespunRequestContext>) {
         let api = router.group("api/v2").add(middleware: BackupErrorEnvelope()).add(middleware: DeviceAuthentication(catalog: catalog))
+        api.post("wake/enrollment") { request, context in
+            guard let relay = configuration.wakeRelayURL else {
+                throw APIError(.serviceUnavailable, code: "wake_unavailable", message: "An optional wake relay has not been configured by this server's owner.")
+            }
+            let bytes = try await request.body.collect(upTo: 4 << 10)
+            let data = Data(bytes.readableBytesView)
+            guard let keys = (try JSONSerialization.jsonObject(with: data) as? [String: Any]).map({ Set($0.keys) }),
+                  keys == ["route_id", "generation_id", "token"] else {
+                throw HTTPError(.badRequest, message: "Only an opaque route, generation and scoped sender token are accepted.")
+            }
+            let sender = try ServerAPI.decoder.decode(WakeRelayAPI.Sender.self, from: data)
+            try await catalog.enrollBackupWake(sender, principal: principal(context), relay: relay)
+            var headers = HTTPFields()
+            headers[.eTag] = "\"\(sender.generationID.uuidString.lowercased())\""
+            return Response(status: .noContent, headers: headers)
+        }
+        api.delete("wake/enrollment") { request, context in
+            guard let text = request.headers[.ifMatch],
+                  let generation = UUID(uuidString: text.trimmingCharacters(in: CharacterSet(charactersIn: "\""))) else {
+                throw HTTPError(.badRequest, message: "Send If-Match with the generation being retired.")
+            }
+            try await catalog.removeBackupWake(principal: principal(context), expectedGeneration: generation)
+            return Response(status: .noContent)
+        }
         api.get("capabilities") { _, _ in
-            try json(BackupAPI.Capabilities(origin: try await catalog.backupOrigin(),
+            let binding = await immich.backupBinding
+            try await catalog.configureBackupExternal(binding)
+            return try json(BackupAPI.Capabilities(origin: try await catalog.backupOrigin(),
                 uploadProtocols: await immich.mode == .files ? [.foregroundOffset] : [],
-                recipe: .init(profile: configuration.profile, backend: backend, pipelineVersion: 2)))
+                recipe: .init(profile: configuration.profile, backend: backend, pipelineVersion: 2),
+                externalVerification: binding == nil ? nil : .fullResourceScrub))
         }
         api.post("backup-requests") { request, context in
             let body = try await decode(BackupAPI.Request.self, request)
@@ -104,6 +131,8 @@ struct BackupRoutes: Sendable {
             }
             let selectedRecipe = try self.recipe(body.profile)
             let external = await immich.mode != .files
+            if external { try BackupExternal.validate(manifest) }
+            try await catalog.configureBackupExternal(await immich.backupBinding)
             let (receipt, created) = try await catalog.admitBackup(body, principal: principal(context), recipe: selectedRecipe,
                                                                    external: external)
             return try json(receipt, status: created ? .created : .ok)
@@ -116,6 +145,14 @@ struct BackupRoutes: Sendable {
         }
         api.get("backup-requests/:id") { _, context in
             try json(try await catalog.backupReceipt(uuid(context, "id"), principal: principal(context)))
+        }
+        api.get("backup-requests/:id/copies") { _, context in
+            let row = try await catalog.backupRequestRow(uuid(context, "id"), principal: principal(context))
+            var result: [String: ServerAPI.ConnectorCounts] = [:]
+            for connector in try await catalog.backupCopyConnectorIDs(row["manifest_id"]!.string!) {
+                result[connector] = try await catalog.versionedCopyCounts(connector: connector, manifest: row["manifest_id"]!.string!)
+            }
+            return try json(result)
         }
         api.post("backup-requests/:id/commands") { request, context in
             let body = try await decode(BackupAPI.Command.self, request)
@@ -166,7 +203,24 @@ struct BackupRoutes: Sendable {
                 throw APIError(.conflict, code: BackupAPI.ErrorCode.versionChanged, message: "The source version does not match this request.")
             }
             let source = try await catalog.backupRequestRow(id.uuidString.lowercased(), principal: principal)
-            guard source["source"]?.string == "files" else { throw unsupported("External Immich source downloads are unsupported.") }
+            if source["source"]?.string == "external" {
+                guard let client = await immich.client, let binding = await immich.backupBinding,
+                      source["source_binding"]?.string == binding else { throw HTTPError(.conflict) }
+                return try await budget.run(.externalFetch) {
+                    let manifest = try await catalog.backupManifest(version.manifestID)
+                    try externalSpace(manifest)
+                    let directory = storage.cache("external-fetch-" + UUID().uuidString.lowercased())
+                    do {
+                        let files = try await BackupExternal.fetch(manifest, client: client, directory: directory, roles: [role])
+                        guard await immich.backupBinding == binding, let file = files.first else { throw HTTPError(.conflict) }
+                        var response = try ranged(request, reader: OriginalReader(URL(fileURLWithPath: file.path), cleanupDirectory: directory),
+                                                  size: file.size, hash: file.sha256)
+                        response.headers[.contentType] = Routes.mediaType(file.filename)
+                        response.headers[.contentDisposition] = Routes.contentDisposition(file.filename)
+                        return response
+                    } catch { try? FileManager.default.removeItem(at: directory); throw error }
+                }
+            }
             return try await originals.place { root in
                 guard let object = try await catalog.backupObjects(version.manifestID).first(where: { $0.role == role }),
                       let path = object.path, let url = OriginalsStore.resolve(path, in: root),
@@ -187,6 +241,26 @@ struct BackupRoutes: Sendable {
             let asset = try context.parameters.require("asset"), manifest = try context.parameters.require("manifest")
             guard Validation.isSHA256(asset), Validation.isSHA256(manifest) else { throw HTTPError(.badRequest) }
             let principal = try self.principal(context)
+            guard expected.assetID == asset, expected.manifestID == manifest else {
+                throw APIError(.conflict, code: BackupAPI.ErrorCode.versionChanged, message: "The expected version and verification URL differ.")
+            }
+            if let client = await immich.client, let binding = await immich.backupBinding,
+               (try? await catalog.externalProofRequest(expected, principal: principal, binding: binding)) != nil {
+                return try await budget.run(.externalProof) {
+                    let definition = try await catalog.backupManifest(manifest)
+                    try externalSpace(definition)
+                    let directory = storage.cache("external-scrub-" + UUID().uuidString.lowercased())
+                    defer { try? FileManager.default.removeItem(at: directory) }
+                    let files = try await BackupExternal.fetch(definition, client: client, directory: directory)
+                    guard await immich.backupBinding == binding else { throw HTTPError(.conflict) }
+                    try await catalog.externalProofRequest(expected, principal: principal, binding: binding)
+                    return try json(BackupAPI.OriginalProof(version: expected, retention: .external, claimID: nil,
+                        verifiedAt: Date(), resources: files.map {
+                            .init(role: $0.role, sha256: $0.sha256, size: $0.size, state: .verified,
+                                  receivedBytes: $0.size, verifiedAt: Date())
+                        }))
+                }
+            }
             return try await budget.run(.verification) {
                 let claim = try await catalog.backupProofClaim(asset: asset, manifest: manifest, version: expected, principal: principal)
                 let resources = try await originals.place { root in
@@ -220,6 +294,14 @@ struct BackupRoutes: Sendable {
               profile.videoCRF >= configuration.profile.videoCRF,
               profile.audioBitrateKbps <= configuration.profile.audioBitrateKbps else {
             throw unsupported("The requested recipe exceeds this server's configured resource/quality limits.")
+        }
+
+        private func externalSpace(_ manifest: BackupAPI.Manifest) throws {
+            let bytes = try StorageBytes.sum(manifest.resources.map(\.size))
+            guard bytes <= configuration.maximumStagingBytes, let free = OriginalsStore.space(at: storage.root.path).free,
+                  free >= configuration.minimumFreeBytes, bytes <= free - configuration.minimumFreeBytes else {
+                throw APIError(.serviceUnavailable, code: "storage_backpressure", message: "Insufficient capacity for a full external byte scrub.")
+            }
         }
         return recipe
     }

@@ -261,6 +261,9 @@ public actor Catalog {
         CREATE INDEX resource_history_sha256 ON resource_history (sha256);
         """,
         backupMigration,
+        backupConnectorMigration,
+        backupExternalMigration,
+        backupWakeMigration,
     ]
 
     static func migrate(_ database: SQLiteDatabase) throws {
@@ -586,7 +589,7 @@ public actor Catalog {
         try database.execute("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
                              [.text(Timestamp.string()), .text(deviceID)])
         let changed = database.changes > 0
-        if changed { log("device_revoked", device: deviceID) }
+        if changed { try removeBackupWake(principal: deviceID); log("device_revoked", device: deviceID) }
         return changed
     }
 
@@ -1106,6 +1109,10 @@ public actor Catalog {
             default: counts.pending += n
             }
         }
+        let versioned = try versionedCopyCounts(connector: connector)
+        counts.copied += versioned.copied
+        counts.pending += versioned.pending
+        counts.failed += versioned.failed
         return counts
     }
 
