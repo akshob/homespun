@@ -28,6 +28,19 @@ be stopped if acquiring pidfd ownership itself failed). The `server-runtime-<wor
 the phase results. No credentials/environment values or real server data are captured. Remove this
 temporary instrumentation after the root cause has been established and validated.
 
+For the separate Apple-runtime investigation, macOS package tests build first, then run the
+unfiltered suite through `apple_runtime_diagnostics.py package` with a five-minute failing ceiling
+(the job still has its original 45-minute limit). An owned `xctest`/package-test child is sampled by
+`/usr/bin/sample <pid> 2 10` before cleanup; `package-results-<run>` keeps `package.log` and
+`ci-results/apple-runtime/package/`. On a failed `ui.sh` run only, before stopping the test server
+or deleting its data, `diagnostics.server` saves `<name>-server-failure/server-state.json`,
+`server.sample.txt` and `capture.json` with the normal UI failure artifacts. Captures require
+GitHub-hosted macOS, microsecond process birth/executable identities, owned ancestry and the
+registered synthetic server tree. The projection is read-only and column-allowlisted (no devices,
+tokens, settings, errors, paths, raw catalog, environment or Keychain); only known synthetic partial
+basenames and sizes are included. PID changes discard sample output. These are diagnostics, not
+proof that a particular native call caused the observed UI stall or that native transport is ready.
+
 Pushing a branch runs nothing: open a draft pull request for the build and unit tests, mark it ready
 for the quick checks, or use Run workflow.
 

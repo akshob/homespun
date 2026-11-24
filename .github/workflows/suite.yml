@@ -153,15 +153,21 @@ jobs:
           path: .build
           key: macos-test-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
           restore-keys: macos-test-${{ hashFiles('Package.resolved') }}-
-      - name: Package tests
-        run: swift test 2>&1 | tee package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
-        shell: zsh {0}
+      - name: Build package tests
+        run: swift build --build-tests
+      - name: Package tests (bounded owned-child Apple sample)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/apple_runtime_diagnostics.py package
       - name: Keep the complete package failure log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: package-results-${{ github.run_id }}
-          path: package.log
+          path: |
+            package.log
+            ci-results/apple-runtime
           retention-days: 5
 
   unit:
