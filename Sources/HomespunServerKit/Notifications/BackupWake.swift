@@ -99,7 +99,7 @@ extension Catalog {
     }
 
     func claimBackupWake(owner: String, relay: URL, now: Date = Date()) throws -> BackupWakeLease? {
-        try database.transaction {
+        return try database.transaction { () throws -> BackupWakeLease? in
             guard let row = try database.query("""
                 SELECT o.*, r.route_id, r.generation_id, r.token, r.revision AS route_revision
                 FROM backup_wake_outbox o JOIN backup_wake_routes r ON r.principal = o.principal
@@ -119,12 +119,12 @@ extension Catalog {
                 generationID: UUID(uuidString: row["generation_id"]!.string!)!, token: row["token"]!.string!),
                 routeRevision: Int64(row["route_revision"]!.int!), sequence: sequence, owner: owner, fence: fence, nonce: nonce)
         }
+    }
 
-        func releaseBackupWakeLeases() throws {
-            try database.execute("""
-                UPDATE backup_wake_outbox SET owner = NULL, expires_at = NULL, fence = fence + 1 WHERE owner IS NOT NULL
-                """)
-        }
+    func releaseBackupWakeLeases() throws {
+        try database.execute("""
+            UPDATE backup_wake_outbox SET owner = NULL, expires_at = NULL, fence = fence + 1 WHERE owner IS NOT NULL
+            """)
     }
 
     func completeBackupWake(_ job: BackupWakeLease, result: WakeHintResult, relay: URL, now: Date = Date()) throws {
