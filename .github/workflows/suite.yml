@@ -51,10 +51,14 @@ jobs:
       - name: Build
         run: swift build --build-tests
       - name: Test
+        shell: bash
         run: |
+          set -euo pipefail
           swift test --skip-build 2>&1 | tee test.log
           echo "### Server (Linux)" >> $GITHUB_STEP_SUMMARY
-          grep -E "Test run with|✘" test.log | tail -20 | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
+          if grep -E "Test run with|✘" test.log > test-summary.log; then
+            tail -20 test-summary.log | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+          fi
           ! grep -q "✘" test.log
       - name: TLS upload performance
         if: inputs.performance
