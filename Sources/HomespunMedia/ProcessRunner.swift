@@ -32,15 +32,17 @@ public final class MediaProcessCancellation: @unchecked Sendable {
         lock.lock()
         cancelled = true
         let running = process
-        if let running, running.isRunning { running.terminate() }
         lock.unlock()
+        if let running { terminate(running) }
+    }
+
+    private func terminate(_ running: Process) {
+        if running.isRunning { running.terminate() }
         // Escalation is only for cancellation, not a time limit on a legitimate long encode.
-        if let running {
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [self] in
-                lock.lock()
-                defer { lock.unlock() }
-                if process === running, running.isRunning { _ = kill(running.processIdentifier, SIGKILL) }
-            }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [self] in
+            lock.lock()
+            defer { lock.unlock() }
+            if process === running, running.isRunning { _ = kill(running.processIdentifier, SIGKILL) }
         }
     }
 
@@ -55,11 +57,15 @@ public final class MediaProcessCancellation: @unchecked Sendable {
     }
 
     fileprivate func start(_ process: Process) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        if cancelled { throw CancellationError() }
+        try check()
+        // Foundation's launch path can block. Cancellation must never wait for it while
+        // occupying a cooperative executor thread; a raced cancellation is applied below.
         try process.run()
+        lock.lock()
         self.process = process
+        let stop = cancelled
+        lock.unlock()
+        if stop { terminate(process) }
     }
 
     fileprivate func finish() {

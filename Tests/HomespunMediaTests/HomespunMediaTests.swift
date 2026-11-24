@@ -69,19 +69,37 @@ import Darwin
 @Test(.timeLimit(.minutes(1))) func processCancellationTerminatesAndReapsOnlyItsOwnedChild() async throws {
     let cancellation = MediaProcessCancellation()
     defer { cancellation.cancel() }
-    let work = Task.detached {
-        try cancellation.run { try ProcessRunner.run(["sh", "-c", "trap '' TERM; exec sleep 60"]) }
+    try await withThrowingTaskGroup(of: Int32?.self) { group in
+        group.addTask {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(with: Result {
+                        try cancellation.run {
+                            try ProcessRunner.run(["sh", "-c", "trap '' TERM; exec sleep 60"])
+                        }
+                        return ()
+                    })
+                }
+            }
+            return nil
+        }
+        group.addTask {
+            while cancellation.processID == nil { try await Task.sleep(for: .milliseconds(10)) }
+            return cancellation.processID
+        }
+        defer { group.cancelAll() }
+        // A failed launch or unexpectedly early exit finishes the first child instead of
+        // leaving an unstructured task and polling for a PID that will never appear.
+        let first = try await group.next()
+        let pid = try #require(first ?? nil)
+        cancellation.cancel()
+        do {
+            _ = try await group.next()
+            Issue.record("Cancellation must not succeed")
+        } catch is CancellationError {}
+        var status: Int32 = 0
+        #expect(waitpid(pid, &status, WNOHANG) == -1 && errno == ECHILD)
     }
-
-    while cancellation.processID == nil { try await Task.sleep(for: .milliseconds(10)) }
-    let pid = try #require(cancellation.processID)
-    cancellation.cancel()
-    do {
-        _ = try await work.value
-        Issue.record("Cancellation must not succeed")
-    } catch is CancellationError {}
-    var status: Int32 = 0
-    #expect(waitpid(pid, &status, WNOHANG) == -1 && errno == ECHILD)
     #expect(cancellation.processID == nil)
     #expect(throws: CancellationError.self) {
         try cancellation.run { try ProcessRunner.run(["sh", "-c", "exit 0"]) }
