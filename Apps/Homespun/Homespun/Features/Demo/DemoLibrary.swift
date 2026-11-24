@@ -435,9 +435,9 @@ final class DemoLibrary: ItemCatalog, Sendable {
                 } else {
                     state.removed.insert(id)
                 }
-                if !changed { throw CancellationError() }
             }
         }
+        if !changed { throw CancellationError() }
     }
 
     static func question(deleting items: [DemoItem]) -> Question {
