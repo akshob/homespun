@@ -39,7 +39,9 @@ enum PremiumFeature: String, Identifiable, CaseIterable {
     static var backupFeatures: [Self] { available.filter { $0 != .widgets } }
 
     static var purchaseDescription: String {
-        ReleaseFeatures.cloudCopies ? "Automatic Mode, Cloud Copies and widgets" : "Automatic Mode and widgets"
+        ReleaseFeatures.cloudCopies
+            ? "Automatic Mode, OneDrive Cloud Copies, widgets and Apple Watch"
+            : "Automatic Mode, widgets and Apple Watch"
     }
 
     var name: String {

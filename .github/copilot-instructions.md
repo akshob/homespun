@@ -23,9 +23,9 @@ and may not exist in other checkouts.
   (Release); Debug uses `photos.homespun.app.dev` so free Personal Teams never register
   the App Store ID. `Signing.xcconfig` includes the git-ignored `Local.xcconfig`, which
   holds `DEVELOPMENT_TEAM`. Never put a team ID in `project.yml`.
-  `ReleaseFeatures.xcconfig` is the single shipping feature switch (off in 1.0.0).
+  `ReleaseFeatures.xcconfig` is the single shipping feature switch (off in 1.0.0, on in 1.1.0).
   Generate with `scripts/generate-project.sh`; CI uses `--testing` to embed the retained widgets
-  and Watch targets, plus a Debug runtime opt-in. See README, "1.0.0 release scope".
+  and Watch targets, plus Debug runtime overrides. See README, "Release feature scope".
 - App sources (`Apps/Homespun/Homespun`) are grouped by layer; XcodeGen picks up any folder:
   - `App/`: entry point, `AppModel` (composition root), root and tab shell, settings, journey/tips.
   - `Features/<Library|Item|Activity|Server|Setup|Premium|Feedback|Demo>/`: screens and their controllers.

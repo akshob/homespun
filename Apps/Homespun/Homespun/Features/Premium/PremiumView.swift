@@ -53,8 +53,12 @@ struct PremiumView: View {
                 }
                 Divider().overlay(Theme.separator)
                 feature(PremiumFeature.widgets.symbol, "Widgets",
-                        "What's ready to free up, your last backup and your server at a glance, on your Home Screen, "
-                            + "Lock Screen and Apple Watch.")
+                        "What's ready to free up, your last backup and your server at a glance, on your Home Screen "
+                            + "and Lock Screen.")
+                Divider().overlay(Theme.separator)
+                feature("applewatch", "Apple Watch",
+                        "Your latest backup, server status and space ready to free up on your wrist, "
+                            + "with complications and the Smart Stack.")
             }
             .card()
             feature("checkmark.circle", "Always free",

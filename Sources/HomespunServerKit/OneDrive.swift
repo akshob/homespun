@@ -12,7 +12,7 @@ import NIOHTTP1
 /// refresh token in its catalog. Each upload is checked against OneDrive's QuickXorHash.
 struct OneDriveConnector: Connector {
     /// Homespun's Microsoft app registration (public client; not a secret).
-    static let defaultClientID = ""
+    static let defaultClientID = "f9367d8a-eb99-4b0a-9949-411707fad72e"
     static let scope = "Files.ReadWrite.AppFolder User.Read offline_access"
 
     let id = "onedrive"

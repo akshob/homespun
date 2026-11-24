@@ -27,16 +27,10 @@ BUILD=$(date +%Y%m%d%H%M)
 WORK=${HOMESPUN_ARCHIVE_WORK:-$PWD/../../ci-results/archive-$BUILD}
 mkdir -p "$WORK"
 ENABLED=$(sed -n 's/^HOMESPUN_RELEASE_FEATURES = //p' ReleaseFeatures.xcconfig)
+VERSION=$(sed -n 's/^    MARKETING_VERSION: "\([^"]*\)".*/\1/p' project.yml)
 
 check_app() {
-  if [[ $ENABLED == NO ]]; then
-    [[ ! -d "$1/Watch" ]] || { echo "Release must not embed Watch" >&2; return 1; }
-    local extensions=("$1"/PlugIns/*Widgets*.appex(N))
-    (( ${#extensions} == 0 )) || { echo "Release must not embed widgets" >&2; return 1; }
-    [[ $(/usr/libexec/PlistBuddy -c 'Print :HomespunReleaseFeatures' "$1/Info.plist") == NO ]] \
-      || { echo "Release feature setting mismatch" >&2; return 1; }
-    echo "Archive contents checked: no widgets, no Watch; release features OFF."
-  fi
+  python3 ../../ci/check_archive.py "$1" --features "$ENABLED" --version "$VERSION" --build "$BUILD"
 }
 
 zsh scripts/generate-project.sh
