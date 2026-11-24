@@ -451,9 +451,6 @@ final class BackupCoordinator {
         guard receipt.operationID == operation.id, receipt.version.origin == context.binding.origin,
               receipt.retention != .external || context.binding.mode == .immich else { throw BackupStore.Failure.invalidReceipt }
         _ = try await store.apply(receipt, operationID: operation.id, epoch: lease.epoch)
-        if operation.wantsCompact, operation.request?.compact == false, receipt.compact == .requested {
-            _ = try await store.enqueueCommand(operation.id, action: .compactNow)
-        }
         if receipt.backup == .retained {
             try await store.releaseOriginalSpools(operation.id)
             if let workspace { try await workspace.collectReleasedFiles() }
