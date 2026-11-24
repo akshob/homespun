@@ -12,38 +12,6 @@ pull request; the extended suite runs after the merge; everything runs every nig
 | `testflight.yml` | on demand, by the owner, who approves each run | only for a commit that passed the extended suite (`release-guard.py`); archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
 | `docker.yml` | `main` and version tags, when the server changes | the server's Docker image |
 
-While investigating the Linux runtime stall, `server_runtime_diagnostics.py` runs the three process
-regressions separately (45 seconds each), then the **unchanged, unfiltered** `swift test --skip-build`
-suite (five-minute diagnostic ceiling), even if a focused phase failed. A stall remains a failure.
-Before stopping only its owned descendants, it captures `/proc` thread/pipe/signal state and requests
-an LLDB stack-only dump followed by Swift's noninteractive, sanitized backtrace with SIGQUIT
-(the same shared 20-second capture window, then five seconds to reap). The hosted Linux test
-container temporarily has `SYS_PTRACE` for this dump, not a privileged container, host PID namespace
-or disabled seccomp. LLDB freezes a pidfd-owned target before attaching, prints no argument values,
-and is stopped/joined before the target resumes. Per-thread status/stat records expose signal masks
-and CPU time if the runtime crash handler cannot suspend other threads. Signals use acquired Linux
-pidfds, never process names or reusable numeric PIDs (only the parent's unreaped direct child can
-be stopped if acquiring pidfd ownership itself failed). The `server-runtime-<workflow id>` artifact
-(five days) includes every phase log, snapshots, resource limits and outcomes; the job summary lists
-the phase results. No credentials/environment values or real server data are captured. Remove this
-temporary instrumentation after the root cause has been established and validated.
-
-For the separate Apple-runtime investigation, macOS package tests build first, then run the
-unfiltered suite through `apple_runtime_diagnostics.py package` with a five-minute failing ceiling
-(the job still has its original 45-minute limit). An owned `xctest`/package-test child, including
-Swift Testing's `swiftpm-testing-helper` bundle loader, is sampled by
-`/usr/bin/sample <pid> 2 10` before cleanup; `package-results-<run>` keeps `package.log` and
-`ci-results/apple-runtime/package/`. `owned-processes.json` lists descendant PIDs and executable
-basenames (no arguments); `samples.json` explicitly distinguishes test-runner samples from the
-uninformative SwiftPM-parent fallback. On a failed `ui.sh` run only, before stopping the test server
-or deleting its data, `diagnostics.server` saves `<name>-server-failure/server-state.json`,
-`server.sample.txt` and `capture.json` with the normal UI failure artifacts. Captures require
-GitHub-hosted macOS, microsecond process birth/executable identities, owned ancestry and the
-registered synthetic server tree. The projection is read-only and column-allowlisted (no devices,
-tokens, settings, errors, paths, raw catalog, environment or Keychain); only known synthetic partial
-basenames and sizes are included. PID changes discard sample output. These are diagnostics, not
-proof that a particular native call caused the observed UI stall or that native transport is ready.
-
 Pushing a branch runs nothing: open a draft pull request for the build and unit tests, mark it ready
 for the quick checks, or use Run workflow.
 

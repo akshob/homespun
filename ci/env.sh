@@ -41,19 +41,6 @@ timed() {
     return $code
 }
 
-record_test_server() {
-    [[ $OSTYPE == darwin* && ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted ]] || return 0
-    python3 "$ROOT/ci/apple_runtime_diagnostics.py" record --owner "$1" --pid "$2" \
-        --data "$3" --record "$4" --binary "$SERVER_BIN" --state "$CI_STATE"
-}
-
-capture_test_server() {
-    [[ $OSTYPE == darwin* && ${GITHUB_ACTIONS:-} == true && ${RUNNER_ENVIRONMENT:-} == github-hosted ]] || return 0
-    [[ -f $3 ]] || { echo "No owned synthetic-server diagnostic record was established." >&2; return 1; }
-    python3 "$ROOT/ci/apple_runtime_diagnostics.py" capture --owner "$1" --data "$2" \
-        --record "$3" --output "$4" --state "$CI_STATE"
-}
-
 # The newest installed simulator runtime for a device type (iPhone Duo has a runtime of its own).
 runtime_for() {
     xcrun simctl list runtimes -j | python3 -c '

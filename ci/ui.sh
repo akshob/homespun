@@ -21,12 +21,7 @@ PIDFILE=$DATA/server.pid
 MOVEPORT=$(( PORT + 1000 ))
 SERVER="" STUB="" WATCH=""
 cleanup() {
-    local original_status=$?
     stamp cleanup.start
-    if (( original_status != 0 )) && [[ -z ${SERVERLESS:-} ]]; then
-        timed diagnostics.server capture_test_server "$$" "$DATA" "$DATA/server.diagnostic.json" \
-            "$RESULTS/$NAME-server-failure"
-    fi
     [[ -n $WATCH ]] && kill $WATCH 2>/dev/null
     [[ -n $SERVER ]] && kill $SERVER 2>/dev/null
     [[ -n $STUB ]] && kill $STUB 2>/dev/null
@@ -44,7 +39,6 @@ cleanup() {
     rm -rf $DATA
     stamp cleanup.end
     stamp segment.end
-    return $original_status
 }
 trap cleanup EXIT
 [[ -z ${SERVERLESS:-} ]] && timed simulator.privacy xcrun simctl privacy $SIM grant photos photos.homespun.app.dev
@@ -99,8 +93,7 @@ if [[ -z ${SERVERLESS:-} ]]; then
                 HOMESPUN_PORT=$currentPort HOMESPUN_PUBLIC_URL=127.0.0.1:$currentPort \
                 $SERVER_BIN serve >> $currentLog 2>&1 & child=$!
             print -r -- $child > $PIDFILE
-            HOMESPUN_DATA=$currentData wait_for_server $currentPort || return 1
-            record_test_server "$$" "$child" "$currentData" "$DATA/server.diagnostic.json"
+            HOMESPUN_DATA=$currentData wait_for_server $currentPort
         }
         trap stop_server EXIT
         trap 'exit 0' TERM INT

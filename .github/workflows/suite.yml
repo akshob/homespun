@@ -29,11 +29,7 @@ jobs:
     name: Server (Linux)
     if: inputs.server
     runs-on: ubuntu-24.04
-    container:
-      image: swift:6.3-noble
-      # Temporary diagnostic permission: only this hosted container's owned test process.
-      # Keep the default seccomp profile and PID namespace; never use --privileged.
-      options: --cap-add=SYS_PTRACE
+    container: swift:6.3-noble
     timeout-minutes: 45
     env:
       # The server notices it's in a container (/.dockerenv) and acts like a Docker install; the tests
@@ -46,7 +42,7 @@ jobs:
       - name: Libraries and tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libvips-dev libsqlite3-dev libheif-plugin-libde265 ffmpeg python3
+          apt-get install -y --no-install-recommends libvips-dev libsqlite3-dev libheif-plugin-libde265 ffmpeg
       - uses: actions/cache@v4
         with:
           path: .build
@@ -54,20 +50,16 @@ jobs:
           restore-keys: linux-build-${{ hashFiles('Package.resolved') }}-
       - name: Build
         run: swift build --build-tests
-      - name: Test (focused process diagnostics, then the full suite)
+      - name: Test
         shell: bash
         run: |
           set -euo pipefail
-          python3 ci/server_runtime_diagnostics.py
-      - name: Keep Linux runtime diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: server-runtime-${{ github.run_id }}
-          path: |
-            ci-results/server-runtime
-            test.log
-          retention-days: 5
+          swift test --skip-build 2>&1 | tee test.log
+          echo "### Server (Linux)" >> $GITHUB_STEP_SUMMARY
+          if grep -E "Test run with|✘" test.log > test-summary.log; then
+            tail -20 test-summary.log | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          ! grep -q "✘" test.log
       - name: TLS upload performance
         if: inputs.performance
         env:
@@ -153,21 +145,15 @@ jobs:
           path: .build
           key: macos-test-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
           restore-keys: macos-test-${{ hashFiles('Package.resolved') }}-
-      - name: Build package tests
-        run: swift build --build-tests
-      - name: Package tests (bounded owned-child Apple sample)
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 ci/apple_runtime_diagnostics.py package
+      - name: Package tests
+        run: swift test 2>&1 | tee package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
+        shell: zsh {0}
       - name: Keep the complete package failure log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: package-results-${{ github.run_id }}
-          path: |
-            package.log
-            ci-results/apple-runtime
+          path: package.log
           retention-days: 5
 
   unit:
