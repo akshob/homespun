@@ -4,7 +4,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { Budget, r2Put, withWrites } from "../src/budget";
 import { runRetention } from "../src/retention";
-import { installDigest, OBJECT_WRITE_WRITES, reserveWrite } from "../src/writes";
+import { cleanOwnWrite, installDigest, OBJECT_WRITE_WRITES, reserveWrite } from "../src/writes";
 import diagnosticPayload from "./fixtures/diagnostic-payload.json";
 import metricPayload from "./fixtures/metric-payload.json";
 import { APP, DEVICE, barrier, fakeMail, interceptDatabase, newInstall, objectText, post, rows, send, sendWith } from "./helpers";
@@ -161,27 +161,74 @@ describe("DELETE /v1/installs/<install>", () => {
 	});
 
 	it.each(["before", "after"] as const)("reconciles an interrupted writer %s PUT without forgetting its late-write pointer", async (boundary) => {
+		// Bindings are shared by this file's tests: earlier cases deliberately retain other
+		// installs. The global counter covers those content rows AND every unsettled pointer.
+		const [{ bytes: initialBytes }] = await rows<{ bytes: number }>(
+			`SELECT (SELECT coalesce(sum(size), 0) FROM payloads)
+				+ (SELECT coalesce(sum(size), 0) FROM reports)
+				+ (SELECT coalesce(sum(size), 0) FROM object_writes) AS bytes`,
+		);
+		const initialCounter = await rows<{ value: number }>("SELECT value FROM usage WHERE key = 'r2.bytes'");
+		expect(initialCounter[0]?.value ?? 0).toBe(initialBytes);
+		const expectStoredBytes = async (value: number) => {
+			expect(await rows("SELECT value FROM usage WHERE key = 'r2.bytes'")).toEqual([{ value }]);
+		};
+
+		// Keep known settled content even when this case runs alone, so a duplicate refund
+		// cannot hide behind max(0, ...). Its published row must replace, not add to, its pointer.
+		const kept = newInstall();
+		const keptBody = { install: kept, app: APP, device: DEVICE, payload: metricPayload };
+		const keptSize = new TextEncoder().encode(JSON.stringify(keptBody)).byteLength;
+		expect((await post("/v1/metrics", keptBody)).status).toBe(202);
+		const [keptKey] = await keysOf(kept);
+		const baselineBytes = initialBytes + keptSize;
+		await expectStoredBytes(baselineBytes);
+
 		const install = newInstall();
 		const now = new Date();
 		const key = `metrics/interrupted/${install}/${crypto.randomUUID()}.json`;
-		const size = 10;
+		const payload = "x".repeat(10);
+		const size = new TextEncoder().encode(payload).byteLength;
+		const reservedBytes = baselineBytes + size;
 		const budget = await Budget.load(env, now);
 		// Simulate process loss at a durable boundary: no catch/finally in the writer runs.
 		await env.DB.batch([
 			reserveWrite(env, key, install, size, now),
 			budget.add(env.DB, withWrites(r2Put(size), OBJECT_WRITE_WRITES + 4)),
 		]);
-		if (boundary === "after") await env.BUCKET.put(key, "x".repeat(size));
+		await expectStoredBytes(reservedBytes);
+		if (boundary === "after") await env.BUCKET.put(key, payload);
 		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
-		await runRetention(env, new Date(now.getTime() + 2 * 60 * 60 * 1000));
+		await expectStoredBytes(reservedBytes);
+		const firstSweep = await runRetention(env, new Date(now.getTime() + 2 * 60 * 60 * 1000));
+		expect(firstSweep.storedBytes).toBe(reservedBytes);
+		await expectStoredBytes(reservedBytes);
 		expect(await objectText(key)).toBeNull();
-		expect(await rows("SELECT state, settled FROM object_writes WHERE r2_key = ?1", key))
-			.toEqual([{ state: "cleanup", settled: 0 }]);
+		expect(await rows("SELECT state, settled, size FROM object_writes WHERE r2_key = ?1", key))
+			.toEqual([{ state: "cleanup", settled: 0, size }]);
 		// A PUT that was already issued may settle even after an erasure/sweep.
-		await env.BUCKET.put(key, "x".repeat(size));
-		await runRetention(env, new Date(now.getTime() + 26 * 60 * 60 * 1000));
+		await env.BUCKET.put(key, payload);
+		await expectStoredBytes(reservedBytes);
+		const secondSweep = await runRetention(env, new Date(now.getTime() + 26 * 60 * 60 * 1000));
+		expect(secondSweep.storedBytes).toBe(reservedBytes);
 		expect(await objectText(key)).toBeNull();
-		expect(await rows("SELECT value FROM usage WHERE key = 'r2.bytes'")).toEqual([{ value: size }]);
+		await expectStoredBytes(reservedBytes);
+		expect(await rows("SELECT state, settled, size FROM object_writes WHERE r2_key = ?1", key))
+			.toEqual([{ state: "cleanup", settled: 0, size }]);
+
+		// Only the writer's explicit settlement acknowledgement permits releasing these bytes.
+		// Repeated cleanup/erasure must not refund bytes belonging to other installs.
+		await cleanOwnWrite(env, key);
+		await expectStoredBytes(baselineBytes);
+		expect(await rows("SELECT r2_key FROM object_writes WHERE r2_key = ?1", key)).toEqual([]);
+		await cleanOwnWrite(env, key);
+		await expectStoredBytes(baselineBytes);
+		expect(await objectText(keptKey)).not.toBeNull();
+		expect((await send("DELETE", `/v1/installs/${kept}`)).status).toBe(204);
+		await expectStoredBytes(initialBytes);
+		expect(await objectText(keptKey)).toBeNull();
+		expect((await send("DELETE", `/v1/installs/${kept}`)).status).toBe(204);
+		await expectStoredBytes(initialBytes);
 	});
 
 	it("keeps erasure retryable when R2 deletion fails", async () => {
