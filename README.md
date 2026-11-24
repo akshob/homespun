@@ -497,7 +497,9 @@ requires that device's permanent local claim. No endpoint falls back to mutable 
 
 Versioned Immich acquisition/proof is explicitly unsupported: requests are blocked/external and no
 upload protocol is advertised in that mode. Existing v1 Immich remains read-only. Connector copies
-are not deletion proof. No relay or APNs credentials are part of this implementation.
+are not deletion proof. Versioned connector copy/status is not yet offered: existing legacy
+connector jobs remain independently bounded/fenced, and connector information warns that its
+counts cover legacy backups only. No relay or APNs credentials are part of this implementation.
 
 After an **offline, consistent catalog restore**, run `homespun-server resync-history` before
 restarting. It preserves the server ID and originals but advances the history epoch and requires

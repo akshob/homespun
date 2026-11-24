@@ -177,6 +177,7 @@ actor ConnectorHub {
     func info(_ id: String) async throws -> ServerAPI.ConnectorInfo? {
         guard let connector = connectors[id] else { return nil }
         let settings = try await context(id).settings()
+        let versioned = try await catalog.hasVersionedBackups()
         let fields = connector.fields.map { field in
             var field = field
             let value = settings[field.key]
@@ -187,7 +188,9 @@ actor ConnectorHub {
         return ServerAPI.ConnectorInfo(
             id: id, name: connector.name, summary: connector.summary, fields: fields, signsIn: connector.signsIn,
             account: settings[Self.accountKey], enabled: settings[Self.enabledKey] == "true",
-            message: settings[Self.messageKey], counts: try await catalog.copyCounts(connector: id))
+            message: settings[Self.messageKey] ?? (versioned
+                ? "Versioned backups are not copied to this connector yet; these copy counts cover legacy backups only." : nil),
+            counts: try await catalog.copyCounts(connector: id))
     }
 
     func all() async throws -> [ServerAPI.ConnectorInfo] {
