@@ -16,6 +16,8 @@ actor BackupStore {
         case invalidImport
         case incompatibleQueuedSettings
         case nativeTransferUnavailable
+        case storageClosed
+        case activeWork
 
         var errorDescription: String? {
             switch self {
@@ -31,6 +33,8 @@ actor BackupStore {
             case .invalidImport: "The compact copy has not passed complete-resource verification."
             case .incompatibleQueuedSettings: "This item is already queued with different quality settings. Finish or cancel that work first."
             case .nativeTransferUnavailable: "Native background transfers are not enabled for this connection."
+            case .storageClosed: "This backup workspace has been retired."
+            case .activeWork: "Backup work has not finished retiring yet."
             }
         }
     }
@@ -43,6 +47,7 @@ actor BackupStore {
         var keychainReference: String
         var mode: ServerAPI.StorageMode = .files
         var consumerID: String?
+        var externalVerification: BackupAPI.ExternalVerification?
         var retired = false
     }
 
@@ -79,6 +84,7 @@ actor BackupStore {
         var attention = false
         var problem: Problem?
         var bindingPaused: Bool?
+        var notBefore: Date?
         var createdAt: Date
         var updatedAt: Date
     }
@@ -96,7 +102,7 @@ actor BackupStore {
     }
 
     struct Resource: Codable, Equatable, Sendable {
-        enum Kind: String, Codable, Sendable { case original, compact, motion }
+        enum Kind: String, Codable, Sendable { case original, compact, motion, restoredOriginal }
         enum FileState: String, Codable, Sendable { case present, deleting, removed }
         var fileID: UUID
         var operationID: UUID
@@ -153,6 +159,7 @@ actor BackupStore {
     private let legacyNamespace: String
     private let processID: UUID
     private var database: BackupDatabase?
+    private var closed = false
     private static let currentProcessID = UUID()
     private static let applicationID: Int64 = 0x4853504E
 
@@ -303,6 +310,7 @@ actor BackupStore {
             guard operation.epoch < Int64.max else { throw Failure.unsupportedSchema }
             operation.desired = desired
             operation.bindingPaused = nil
+            operation.notBefore = nil
             operation.epoch += 1
             operation.lease = nil
             operation.updatedAt = Date()
@@ -486,7 +494,8 @@ actor BackupStore {
             let binding = try Self.decode(Binding.self, bindingRow.blob("body"))
             guard proof.retention != .external || binding.mode == .immich,
                   receipt.retention != .permanent || proof.retention == .permanent else { throw Failure.invalidReceipt }
-            let retained = proof.retention == .permanent || (proof.retention == .external && binding.mode == .immich)
+            let retained = proof.retention == .permanent
+                || (proof.retention == .external && binding.mode == .immich && binding.externalVerification == .fullResourceScrub)
             if current, operation.desired == .active, !binding.retired, retained, originalBytes > compactBytes {
                 try Self.enqueue(.init(id: UUID(), operationID: operation.id, bindingID: operation.bindingID,
                                        kind: .readyNotification, payload: Data()), connection)
@@ -561,7 +570,24 @@ actor BackupStore {
         try db().transaction(body)
     }
 
+    func close() throws {
+        if let database {
+            try database.read { connection in
+                guard try connection.rows("""
+                    SELECT 1 FROM operations WHERE json_extract(CAST(body AS TEXT), '$.lease') IS NOT NULL LIMIT 1
+                    """).isEmpty,
+                      try connection.rows("SELECT 1 FROM imports WHERE json_extract(CAST(body AS TEXT), '$.phase') = 'mutating' LIMIT 1").isEmpty,
+                      try connection.rows("SELECT 1 FROM photo_effects WHERE phase = 'mutating' LIMIT 1").isEmpty else {
+                    throw Failure.activeWork
+                }
+            }
+        }
+        closed = true
+        database = nil
+    }
+
     private func db() throws -> BackupDatabase {
+        guard !closed else { throw Failure.storageClosed }
         if let database { return database }
         try files.prepare()
         try files.protectDatabase()
@@ -855,6 +881,7 @@ extension BackupStore.Operation {
         attention = try values.decodeIfPresent(Bool.self, forKey: .attention) ?? false
         problem = try values.decodeIfPresent(BackupStore.Problem.self, forKey: .problem)
         bindingPaused = try values.decodeIfPresent(Bool.self, forKey: .bindingPaused)
+        notBefore = try values.decodeIfPresent(Date.self, forKey: .notBefore)
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
     }
