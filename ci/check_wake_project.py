@@ -11,6 +11,8 @@ def check(info, project, *, wake_url):
     expected_modes = ["processing", "remote-notification"] if wake_url else ["processing"]
     if info.get("HomespunWakeRelayURL") != wake_url or info.get("UIBackgroundModes") != expected_modes:
         raise ValueError("Wake Info.plist does not match the explicitly selected build scope.")
+    if info.get("HomespunWakePushEnvironment") != ("$(HOMESPUN_APNS_ENVIRONMENT)" if wake_url else ""):
+        raise ValueError("Wake environment must come from the same setting as the signed entitlement.")
     objects = project["objects"]
     targets = [value for value in objects.values()
                if value.get("isa") == "PBXNativeTarget" and value.get("name") == "Homespun"]

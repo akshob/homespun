@@ -19,6 +19,7 @@ class WakeProjectTests(unittest.TestCase):
 
     def test_explicit_overlay_requires_remote_mode_and_matching_push_environments(self):
         info = {"HomespunWakeRelayURL": "https://wake.example.invalid",
+                "HomespunWakePushEnvironment": "$(HOMESPUN_APNS_ENVIRONMENT)",
                 "UIBackgroundModes": ["processing", "remote-notification"]}
         project = self.project(True)
         check(info, project, wake_url=info["HomespunWakeRelayURL"])
@@ -28,7 +29,7 @@ class WakeProjectTests(unittest.TestCase):
             check(info, wrong, wake_url=info["HomespunWakeRelayURL"])
 
     def test_returning_to_default_cannot_leave_the_relay_or_push_entitlements_enabled(self):
-        info = {"HomespunWakeRelayURL": "", "UIBackgroundModes": ["processing"]}
+        info = {"HomespunWakeRelayURL": "", "HomespunWakePushEnvironment": "", "UIBackgroundModes": ["processing"]}
         check(info, self.project(False), wake_url="")
         with self.assertRaises(ValueError):
             check(info, self.project(True), wake_url="")
