@@ -441,7 +441,7 @@ import UIKit
         #expect(draft.name == "An unfinished name" && draft.device == device && draft.wantsFocus)
     }
 
-    private final class MemoryItem: LibraryItem {
+    private final class MemoryItem: Homespun.LibraryItem {
         let localIdentifier: String
         let picture: UIImage
         let creationDate: Date? = nil
