@@ -42,7 +42,7 @@ extension BackupStore {
         }
     }
 
-    func needsResultDiscovery(bindingID: UUID, namespace: String, now: Date = Date()) throws -> Bool {
+    func needsResultDiscovery(bindingID: UUID, namespace: String) throws -> Bool {
         try readState { connection in
             try !connection.rows("""
                 SELECT 1 FROM operations o JOIN lineages l ON l.current_operation = o.id
@@ -57,11 +57,8 @@ extension BackupStore {
                 SELECT 1 FROM outbox x JOIN operations o ON o.id = x.operation
                 JOIN bindings b ON b.id = o.binding
                 WHERE o.namespace = ? AND json_extract(CAST(x.body AS TEXT),'$.bindingID') = ? AND b.retired = 0
-                AND (json_extract(CAST(x.body AS TEXT),'$.nextAttempt') IS NULL
-                     OR json_extract(CAST(x.body AS TEXT),'$.nextAttempt') <= ?)
                 LIMIT 1
-                """, [.text(namespace), .text(bindingID.uuidString), .text(namespace), .text(bindingID.uuidString),
-                       .real(now.timeIntervalSinceReferenceDate)]).isEmpty
+                """, [.text(namespace), .text(bindingID.uuidString), .text(namespace), .text(bindingID.uuidString)]).isEmpty
         }
     }
 

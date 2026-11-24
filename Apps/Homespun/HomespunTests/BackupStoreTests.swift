@@ -73,7 +73,16 @@ private struct BackupStoreFixture {
     try await store.importCreated(intent.id, identifier: "synthetic-import")
     _ = try await store.finishImport(intent.id, actual: [fixture.compact], proof: fixture.proof)
     #expect(try await store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
-    for item in try await store.outbox(bindingID: fixture.binding.id) { try await store.acknowledgeOutbox(item.id) }
+    let pending = try await store.outbox(bindingID: fixture.binding.id)
+    let acknowledgement = try #require(pending.first { $0.kind == .deliveryAcknowledgement })
+    for item in pending where item.id != acknowledgement.id { try await store.acknowledgeOutbox(item.id) }
+    let retry = Date().addingTimeInterval(120)
+    try await store.retryOutbox(acknowledgement.id, after: retry)
+    #expect(try await store.outbox(bindingID: fixture.binding.id, now: retry.addingTimeInterval(-1)).isEmpty)
+    #expect(try await store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
+    let due = try await store.outbox(bindingID: fixture.binding.id, now: retry.addingTimeInterval(1))
+    #expect(due.map(\.id) == [acknowledgement.id])
+    try await store.acknowledgeOutbox(acknowledgement.id)
     #expect(try await !store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
 }
 
