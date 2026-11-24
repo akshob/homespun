@@ -259,15 +259,7 @@ struct NotificationsView: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        if ReleaseFeatures.automaticMode {
-            content
-        } else {
-            List {
-                Text("Backup results are in Activity. Homespun doesn't send notifications in this version.")
-            }
-            .homespunList()
-            .navigationTitle("Notifications")
-        }
+        content
     }
 
     private var content: some View {
@@ -276,10 +268,9 @@ struct NotificationsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     Image(systemName: "bell").font(.largeTitle).foregroundStyle(Theme.accent).accessibilityHidden(true)
                     Text("Homespun tells you when space is ready").displayTitle().accessibilityAddTraits(.isHeader)
-                    promise("iphone", "Only when space is ready",
-                            "At most once a day, after a night of backing up: “1.2 GB ready to free up.”")
-                    promise("exclamationmark.triangle", "Or when something needs you",
-                            "Only if backing up has failed for 3 nights in a row.")
+                    promise("iphone", "When space is ready",
+                            "A grouped alert after compact copies are saved and verified. Manual backups don't need Premium.")
+                    promise("hand.tap", "Review before removing", "An alert opens Free Up Space. It never removes an original.")
                     promise("hand.raised", "Nothing else", "No tips, no offers, no streaks.")
                 }
                 .padding(.vertical, 8)
@@ -316,8 +307,7 @@ struct NotificationsView: View {
                     EmptyView()
                 default:
                     InlineNotice(tone: .success, title: "Notifications are on",
-                                 message: model.automatic.enabled ? nil
-                                    : "They come after automatic mode backs up overnight, so they start once it's on.")
+                                 message: "Ready alerts don't require Automatic Mode. Background Wakeups is a separate, optional setting.")
                 }
             }
             .listRowBackground(Color.clear)
@@ -342,6 +332,7 @@ struct NotificationsView: View {
     }
 
     private func load() async {
+        guard !model.settings.isDemo else { return }
         status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
 }

@@ -159,7 +159,7 @@ import UniformTypeIdentifiers
             == ["2009", "2011", "same", "2018", "undated"])
 }
 
-@Test func gridShowsCompactCopiesWithWhereTheOriginalIs() {
+@Test func legacyGridRelationshipsDoNotPretendToHaveCurrentServerProof() {
     func entry(_ compact: String, server: Bool) -> CompactLedger.Entry {
         .init(compactIdentifier: compact, originalBytes: 100, compactBytes: 10, savedAt: Date(),
               serverAssetID: server ? "sha-\(compact)" : nil)
@@ -177,18 +177,18 @@ import UniformTypeIdentifiers
     // copy doesn't hide its original, which can still be backed up.
     #expect(state.cells.map(\.id) == ["copy-kept", "copy-removed", "orig-device", "copy-device", "orig-gone", "album-only",
                                       "plain", "busy", "broken"])
-    #expect(badges == ["copy-kept": .originalOnPhone, "copy-removed": .backedUp, "orig-device": .none,
+    #expect(badges == ["copy-kept": .recovery, "copy-removed": .recovery, "orig-device": .none,
                        "copy-device": .compactCopy, "orig-gone": .none, "album-only": .compactCopy, "plain": .none,
                        "busy": .working, "broken": .failed])
     let kept = state.cells[0], device = state.cells[2]
-    #expect(kept.canFree && kept.original == "orig-kept" && device.canCompact && !device.canFree)
+    #expect(!kept.canFree && !kept.canRestore && kept.original == "orig-kept" && device.canCompact && !device.canFree)
     // The Filter menu: needing attention is its own filter, and copies with no known original
     // show only under All Items.
     #expect(state.cells(.notBackedUp).map(\.id) == ["orig-device", "orig-gone", "plain", "busy"])
-    #expect(state.cells(.readyToFree).map(\.id) == ["copy-kept"])
-    #expect(state.cells(.atHome).map(\.id) == ["copy-removed"])
-    #expect(state.cells(.needsAttention).map(\.id) == ["broken"])
-    #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 0, 1, 1, 1])
+    #expect(state.cells(.readyToFree).isEmpty)
+    #expect(state.cells(.atHome).isEmpty)
+    #expect(state.cells(.needsAttention).map(\.id) == ["copy-kept", "copy-removed", "broken"])
+    #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 0, 0, 0, 3])
 }
 
 

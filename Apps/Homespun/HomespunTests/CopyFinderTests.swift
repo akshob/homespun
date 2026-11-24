@@ -81,7 +81,7 @@ import Testing
         #expect(asked.value != nil && !summary.stopped && finder.error == nil)
         #expect(summary.found >= 3 && summary.readyToFree >= 1 && summary.needsAttention >= 1)
 
-        let entries = await ledger.snapshot()
+        let entries = try await ledger.snapshot()
         #expect(entries[CompactLedger.elsewhere(copy)]?.serverAssetID == String(repeating: "a", count: 64))
         #expect(entries[CompactLedger.elsewhere(live)]?.serverAssetID == String(repeating: "b", count: 64))
         // The original still here is paired with its copy: ready to free up, not a second record.
@@ -91,10 +91,10 @@ import Testing
         let album = PhotoLibrary.albumMembers()
         #expect(album.isSuperset(of: [copy, live, itsCopy]) && !album.contains(partial) && !album.contains(original))
 
-        // The grid shows them backed up; the original whose copy was found can be freed.
+        // Legacy lookup finds relationships, not versioned proof or a trustworthy historical origin.
         let state = LibraryState(library: [copy, live, itsCopy, original, partial], ledger: entries, album: album, job: [:])
         let badges = Dictionary(uniqueKeysWithValues: state.cells(.all).map { ($0.id, $0.badge) })
-        #expect(badges[copy] == .backedUp && badges[live] == .backedUp && badges[itsCopy] == .originalOnPhone)
+        #expect(badges[copy] == .recovery && badges[live] == .recovery && badges[itsCopy] == .recovery)
         #expect(badges[original] == nil && badges[partial] == Badge.none)
 
         #expect(entries[CompactLedger.elsewhere(eCopy)] != nil && entries[fOriginal] == nil)
@@ -107,7 +107,7 @@ import Testing
         await finder.run(lookup: lookup, ledger: ledger)
         #expect(finder.total < first && (finder.summary?.needsAttention ?? 0) >= 1)
         #expect(finder.summary?.readyToFree == 2 && finder.summary?.alreadyAtHome == 0)
-        let later = await ledger.snapshot()
+        let later = try await ledger.snapshot()
         #expect(later[eOriginal]?.compactIdentifier == eCopy && later[CompactLedger.elsewhere(eCopy)] == nil)
         #expect(later[fOriginal]?.compactIdentifier == fCopy && later[CompactLedger.elsewhere(fCopy)] == nil)
         let reloaded = CopyFinder(url: directory.appendingPathComponent("finder.json"))

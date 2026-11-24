@@ -10,11 +10,11 @@ struct ServerTab: View {
 
     enum Route: Hashable {
         case check, originals, existingLibrary, immich, automatic, connectors, compactCopies, devices, addDevice
-        case notifications, premium, help, analytics, deviceName
+        case notifications, wake, premium, help, analytics, deviceName
 
         var isAvailable: Bool {
             switch self {
-            case .automatic, .notifications: ReleaseFeatures.automaticMode
+            case .automatic: ReleaseFeatures.automaticMode
             case .connectors: ReleaseFeatures.cloudCopies
             case .premium: ReleaseFeatures.premium
             default: true
@@ -285,13 +285,17 @@ struct ServerTab: View {
                 .accessibilityIdentifier("settings.deviceName")
                 .sidebarRow(Route.deviceName)
             }
-            if ReleaseFeatures.automaticMode {
-                NavigationLink(value: Route.notifications) {
-                    ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
-                }
-                .accessibilityIdentifier("settings.notifications")
-                .sidebarRow(Route.notifications)
+            NavigationLink(value: Route.notifications) {
+                ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
             }
+            .accessibilityIdentifier("settings.notifications")
+            .sidebarRow(Route.notifications)
+            NavigationLink(value: Route.wake) {
+                ServerRow(title: "Background Wakeups", symbol: "antenna.radiowaves.left.and.right",
+                          value: model.settings.isDemo ? "Off in the demo" : nil)
+            }
+            .accessibilityIdentifier("settings.wake")
+            .sidebarRow(Route.wake)
             NavigationLink(value: Route.analytics) {
                 ServerRow(title: "Share Analytics", symbol: "chart.bar",
                           value: model.settings.isDemo ? "Off in the demo" : Telemetry.shared.isSharing ? "On" : "Off")
@@ -336,6 +340,7 @@ struct ServerTab: View {
         }
         case .addDevice: AddDeviceView(settings: settings)
         case .notifications: NotificationsView(model: model)
+        case .wake: WakeSettingsView(enrollment: WakeSystem.enrollment, demo: settings.isDemo)
         case .premium:
             if ReleaseFeatures.premium { PremiumView(premium: model.premium, model: model) }
         case .help: HelpAboutView(model: model)
@@ -411,7 +416,7 @@ struct ServerTab: View {
     }
 
     private func loadNotifications() async {
-        guard ReleaseFeatures.automaticMode else { return }
+        guard !model.settings.isDemo else { return }
         // Off the main thread: the first call sets up the notification framework.
         notifications = await Task.detached(priority: .userInitiated) {
             await UNUserNotificationCenter.current().notificationSettings().authorizationStatus

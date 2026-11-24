@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import HomespunCore
 import Observation
 import UIKit
 
@@ -16,6 +17,7 @@ final class CompactJob {
         case failed(String)
         /// Backed up; its compact copy comes later (a recent item, automatic mode).
         case backedUp(originalBytes: Int)
+        case processing(String)
 
         /// Waiting or being worked on.
         var isOpen: Bool { if case .waiting = self { true } else if case .working = self { true } else { false } }
@@ -30,11 +32,12 @@ final class CompactJob {
             case .notYet: .notYet
             case .failed: .failed
             case .backedUp: .backedUp
+            case .processing: .processing
             }
         }
     }
 
-    enum Phase: Equatable { case waiting, working, saved, unchanged, notYet, failed, backedUp }
+    enum Phase: Equatable { case waiting, working, saved, unchanged, notYet, failed, backedUp, processing }
 
     struct Item: Identifiable {
         let id = UUID()
@@ -91,6 +94,7 @@ final class CompactJob {
     @ObservationIgnored private var current: (id: UUID, index: Int)?
     @ObservationIgnored private var runner: Task<Void, Never>?
     @ObservationIgnored private var retired = false
+    @ObservationIgnored private var suspended = false
     @ObservationIgnored private var preparationWaiters: [CheckedContinuation<Void, Never>] = []
     private(set) var isRunning = false
     /// Paused between items: the item being worked on finishes, the rest wait (Activity 2.1).
@@ -104,11 +108,351 @@ final class CompactJob {
     let settings: AppSettings
     let ledger: CompactLedger
     private let suppliedCompactor: (any Compacting)?
+    @ObservationIgnored private(set) var coordinator: BackupCoordinator
+    @ObservationIgnored private var contextWork: Task<Void, Error>?
+    @ObservationIgnored private var controlWork: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var projected: [UUID: BackupStore.Operation] = [:]
+    @ObservationIgnored private var positions: [UUID: Int] = [:]
+    @ObservationIgnored private var projectionWork: Task<Void, Never>?
+    @ObservationIgnored private var pendingProjection = Set<UUID>()
+    @ObservationIgnored private var reloadProjection = false
+    @ObservationIgnored private var historyWork: Task<Void, Never>?
+    @ObservationIgnored private var pendingHistory = Set<UUID>()
+    @ObservationIgnored private var recordedHistory: Set<UUID>?
+    @ObservationIgnored private var currentOperationByItem: [String: UUID] = [:]
+    @ObservationIgnored private var retainedIDs = Set<UUID>()
+    @ObservationIgnored private var remoteIDs = Set<UUID>()
+    @ObservationIgnored private var pausedIDs = Set<UUID>()
+    private(set) var pausedCount = 0
+    private(set) var queueProblem: String?
+    private(set) var queueLoaded = false
+    private(set) var remoteCount = 0
+    private(set) var retainedCount = 0
+    var activeOrigin: BackupAPI.Origin? { coordinator.context?.binding.origin }
+    var bindingContext: BackupBindingContext? { coordinator.context }
+    var canAdmitOffline: Bool { coordinator.context.map { settings.matchesBackupBinding($0.binding) } ?? false }
 
     init(settings: AppSettings, ledger: CompactLedger = CompactLedger(), compactor: (any Compacting)? = nil) {
         self.settings = settings
         self.ledger = ledger
         suppliedCompactor = compactor
+        coordinator = BackupCoordinator(store: ledger.store, photos: settings.photos, namespace: ledger.namespace)
+        coordinator.changed = { [weak self] ids in self?.project(ids) }
+        coordinator.progress = { [weak self] id, message in self?.stageProgress(id, message: message) }
+        coordinator.localWork = { [weak self] count in
+            guard let self, !self.retired else { return }
+            let wasRunning = self.isRunning
+            self.isRunning = count > 0
+            if !wasRunning, self.isRunning, !self.settings.isDemo {
+                _ = LongRun.shared.begin(items: self.runProgress.total, server: self.settings.server?.name ?? "your server")
+            }
+        }
+        coordinator.failed = { [weak self] error in self?.showQueueProblem(error) }
+        coordinator.notifyReady = { [weak self] context in
+            guard let self, !self.settings.isDemo, !self.retired, !self.suspended else { return false }
+            return try await BackupReadyAlerts.post(context: context, ledger: self.ledger, photos: self.settings.photos,
+                current: { !self.retired && !self.suspended && self.settings.matchesBackupBinding(context.binding) })
+        }
+        settings.backupBindingChanged = { [weak self] in self?.invalidateBinding() }
+    }
+
+    func showQueueProblem(_ error: Error) {
+        guard !retired else { return }
+        queueProblem = error.localizedDescription
+    }
+
+    private func project(_ ids: Set<UUID>) {
+        if ids.isEmpty { reloadProjection = true } else { pendingProjection.formUnion(ids) }
+        guard projectionWork == nil, !retired else { return }
+        projectionWork = Task {
+            defer { projectionWork = nil }
+            do {
+                repeat {
+                    if reloadProjection || !queueLoaded {
+                        reloadProjection = false
+                        pendingProjection = []
+                        var cursor: Int64 = 0
+                        repeat {
+                            let page = try await ledger.store.operationPage(namespace: ledger.namespace, after: cursor)
+                            cursor = page.cursor
+                            try await applyProjection(page.operations)
+                            if !page.hasMore { break }
+                            await Task.yield()
+                        } while !Task.isCancelled
+                        queueLoaded = true
+                    } else {
+                        let requested = pendingProjection
+                        pendingProjection = []
+                        var operations: [BackupStore.Operation] = []
+                        for id in requested {
+                            if let operation = try await ledger.store.operation(id) { operations.append(operation) }
+                        }
+                        try await applyProjection(operations)
+                    }
+                } while reloadProjection || !pendingProjection.isEmpty
+            } catch { showQueueProblem(error) }
+        }
+    }
+
+    private func applyProjection(_ operations: [BackupStore.Operation]) async throws {
+        let kept = try await ledger.decisions()
+        let current = try await ledger.store.currentOperations(Array(Set(operations.map(\.itemID))), namespace: ledger.namespace)
+        let unknown = current.filter { positions[$0.id] == nil }.map(\.itemID)
+        let photos = settings.photos
+        let descriptions = await Task.detached {
+            Dictionary(Self.prepare(unknown, trigger: .manual, backUpOnly: [], photos: photos).map { ($0.assetIdentifier, $0) },
+                       uniquingKeysWith: { first, _ in first })
+        }.value
+        var progress = runProgress
+        var terminal = false
+        for operation in current {
+            if let oldID = currentOperationByItem[operation.itemID], oldID != operation.id {
+                retainedIDs.remove(oldID); remoteIDs.remove(oldID); pausedIDs.remove(oldID)
+                if let index = positions[oldID] {
+                    let old = items[index].state, superseded = State.notYet("An earlier request is preserved; a newer selection owns this item.")
+                    updateProgress(&progress, old: old, new: superseded)
+                    items[index].state = superseded
+                }
+            }
+            currentOperationByItem[operation.itemID] = operation.id
+            projected[operation.id] = operation
+            var state = Self.project(operation, kept: kept.contains(operation.itemID))
+            if case .saved(let original, _) = state, let intent = try await ledger.store.importIntent(operation.id) {
+                state = .saved(originalBytes: original, compactBytes: intent.expected.reduce(0) { $0 + $1.size })
+            }
+            let index: Int
+            if let old = positions[operation.id] {
+                index = old
+                let before = items[index].state
+                updateProgress(&progress, old: before, new: state)
+                items[index].state = state
+                states[operation.itemID] = state
+                if before.phase != state.phase {
+                    noteChange(operation.itemID, state)
+                    if state.phase == .saved { terminal = true }
+                }
+            } else {
+                let description = descriptions[operation.itemID]
+                let item = Item(assetIdentifier: operation.itemID, name: description?.name ?? "Item",
+                                symbol: description?.symbol ?? "photo", state: state,
+                                trigger: try await ledger.store.admissionInformation(operation.id)?.trigger ?? .manual,
+                                backUpOnly: !operation.wantsCompact)
+                index = items.count
+                items.append(item)
+                runIDs.append(item.id)
+                updateProgress(&progress, old: nil, new: state)
+                positions[operation.id] = index
+                states[operation.itemID] = state
+                noteChange(operation.itemID, state)
+            }
+            retainedIDs.remove(operation.id); remoteIDs.remove(operation.id); pausedIDs.remove(operation.id)
+            if operation.origin == activeOrigin {
+                if operation.backup == .retained { retainedIDs.insert(operation.id) }
+                if operation.wantsCompact, operation.backup == .retained,
+                   [.requested, .queued, .processing].contains(operation.compact), operation.delivery != .importedVerified {
+                    remoteIDs.insert(operation.id)
+                }
+                if operation.desired == .paused, operation.delivery != .importedVerified { pausedIDs.insert(operation.id) }
+            }
+            if operation.delivery == .importedVerified || operation.attention
+                || operation.compact == .held || (operation.backup == .retained && !operation.wantsCompact) {
+                pendingHistory.insert(operation.id)
+            }
+        }
+        remoteCount = remoteIDs.count
+        retainedCount = retainedIDs.count
+        pausedCount = pausedIDs.count
+        progress.total = items.count
+        runProgress = progress
+        if isRunning, !settings.isDemo {
+            _ = LongRun.shared.begin(items: progress.total, server: settings.server?.name ?? "your server")
+        }
+        if terminal { onRunFinished?() }
+        scheduleHistory()
+    }
+
+    private func updateProgress(_ progress: inout RunProgress, old: State?, new: State) {
+        if let old, !old.isOpen { progress.done -= 1 }
+        if !new.isOpen { progress.done += 1 }
+        func adding(_ value: Int, _ delta: Int) -> Int {
+            let (next, overflow) = value.addingReportingOverflow(delta)
+            return overflow ? (delta >= 0 ? Int.max : 0) : max(0, next)
+        }
+        if case .saved(let original, let compact)? = old {
+            progress.originalBytes = adding(progress.originalBytes, -original)
+            progress.compactBytes = adding(progress.compactBytes, -compact)
+        }
+        if case .saved(let original, let compact) = new {
+            progress.originalBytes = adding(progress.originalBytes, original)
+            progress.compactBytes = adding(progress.compactBytes, compact)
+        }
+    }
+
+    static func project(_ operation: BackupStore.Operation, kept: Bool) -> State {
+        if operation.delivery == .importedVerified, let manifest = operation.manifest {
+            return .saved(originalBytes: manifest.resources.reduce(0) { $0 + $1.size },
+                          compactBytes: operation.receipt?.derivative?.resources.reduce(0) { $0 + $1.size } ?? 0)
+        }
+        if kept { return .unchanged(AutomaticMode.keptAsIsReason) }
+        if operation.attention { return .failed(operation.problem?.message ?? "The previous Photos action needs reconciliation before continuing.") }
+        if operation.desired == .paused { return .notYet("Paused. This selection is saved and resumes when you choose Resume.") }
+        if operation.desired == .cancelled { return .unchanged("Processing was cancelled. Verified originals remain retained.") }
+        if operation.lease != nil { return .working(operation.problem?.message ?? "Working") }
+        if operation.backup == .retained {
+            if operation.compact == .held { return .unchanged(operation.receipt?.message ?? "Kept as is; the original is backed up.") }
+            if operation.compact == .failed { return .failed(operation.receipt?.message ?? "The server couldn't make the compact copy. Its original backup remains.") }
+            if !operation.wantsCompact { return .backedUp(originalBytes: operation.manifest?.resources.reduce(0) { $0 + $1.size } ?? 0) }
+            if operation.compact != .ready { return .processing("Original backed up; compact copy processing on the server.") }
+            return .waiting
+        }
+        if operation.backup == .blocked || operation.backup == .failed { return .failed(operation.problem?.message ?? "This backup needs attention.") }
+        return .waiting
+    }
+
+    private func stageProgress(_ id: UUID, message: String) {
+        guard !retired, let index = positions[id], let operation = projected[id],
+              currentOperationByItem[operation.itemID] == id else { return }
+        let state = State.working(message)
+        if items[index].state.phase != .working { noteChange(operation.itemID, state) }
+        items[index].state = state
+        states[operation.itemID] = state
+        currentMessage = message
+        runProgress.current = .init(asset: operation.itemID, name: items[index].name)
+    }
+
+    func refreshQueue() async {
+        guard !retired, !suspended, suppliedCompactor == nil else { return }
+        do {
+            try await ensureContext()
+            try await coordinator.reconcile()
+            project([])
+        } catch { showQueueProblem(error) }
+    }
+
+    private func ensureContext() async throws {
+        guard !retired, !suspended else { throw CancellationError() }
+        if let context = coordinator.context, settings.matchesBackupBinding(context.binding) { return }
+        if let contextWork { try await contextWork.value; return }
+        let work = Task {
+            let context: BackupBindingContext
+            if let cached = try await settings.cachedBackupContext(store: ledger.store, namespace: ledger.namespace) {
+                context = cached
+            } else {
+                context = try await settings.backupContext(store: ledger.store, namespace: ledger.namespace)
+            }
+            let policy = try await settings.backupSpacePolicy(store: ledger.store)
+            guard !retired, !suspended, !Task.isCancelled, settings.matchesBackupBinding(context.binding) else { throw CancellationError() }
+            try await coordinator.activate(context, policy: policy)
+            if !settings.isDemo {
+                control { [weak self] in
+                    guard let self, !self.retired, !self.suspended, self.settings.matchesBackupBinding(context.binding),
+                          self.coordinator.context?.binding.id == context.binding.id else { return }
+                    do {
+                        try await WakeSystem.enrollment.configure(.init(bindingID: context.binding.id,
+                            enroll: { sender in try await context.remote.enrollWake(sender) },
+                            reconcile: { [weak self] in
+                                guard let self, !self.retired, !self.suspended,
+                                      self.settings.matchesBackupBinding(context.binding) else { return false }
+                                let changed = try await self.coordinator.reconcileHint(bindingID: context.binding.id)
+                                if changed { AppModel.schedulePendingBackup() }
+                                return changed
+                            }))
+                        WakeSystem.updateRegistration()
+                    } catch { WakeSystem.enrollment.enrollmentFailed() }
+                }
+            }
+            queueProblem = nil
+        }
+        contextWork = work
+        defer { contextWork = nil }
+        try await work.value
+    }
+
+    func runOpportunity() async throws {
+        try await ensureContext()
+        try await coordinator.runOpportunity()
+    }
+
+    func setVisible(_ visible: Bool) { coordinator.setVisible(visible) }
+
+    func suspendAndWait() async {
+        suspended = true
+        contextWork?.cancel()
+        coordinator.suspend()
+        _ = try? await contextWork?.value
+        do { try await coordinator.suspendAndWait() } catch { showQueueProblem(error) }
+        if preparing > 0 { await withCheckedContinuation { preparationWaiters.append($0) } }
+    }
+
+    func resumeExecution() {
+        guard !retired else { return }
+        suspended = false
+        coordinator.resumeExecution()
+    }
+
+    func invalidateBinding() {
+        guard !retired, coordinator.context != nil || contextWork != nil else { return }
+        contextWork?.cancel()
+        coordinator.suspend()
+        control { [self] in
+            _ = try? await contextWork?.value
+            try await coordinator.detach()
+            remoteIDs = []; retainedIDs = []; pausedIDs = []
+            remoteCount = 0; retainedCount = 0; pausedCount = 0
+            if !settings.isDemo { try await WakeSystem.enrollment.configure(nil); WakeSystem.updateRegistration() }
+            if !suspended, settings.isPaired { await refreshQueue() }
+        }
+    }
+
+    func remover() -> DurableOriginalRemover? {
+        guard let context = coordinator.context, settings.matchesBackupBinding(context.binding) else { return nil }
+        let settings = settings
+        return .init(context: context, ledger: ledger, photos: settings.photos,
+                     current: { settings.matchesBackupBinding(context.binding) })
+    }
+
+    func restorer() -> DurableOriginalRestorer? {
+        guard let context = coordinator.context, settings.matchesBackupBinding(context.binding),
+              let workspace = coordinator.currentWorkspace else { return nil }
+        return .init(context: context, ledger: ledger, photos: settings.photos, workspace: workspace)
+    }
+
+    private func control(_ operation: @escaping @MainActor () async throws -> Void) {
+        let id = UUID()
+        controlWork[id] = Task {
+            defer { controlWork[id] = nil }
+            do { try await operation() } catch { showQueueProblem(error) }
+        }
+    }
+
+    private func scheduleHistory() {
+        guard !pendingHistory.isEmpty, historyWork == nil, !retired else { return }
+        historyWork = Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            do { try await flushHistory() } catch { showQueueProblem(error) }
+            historyWork = nil
+        }
+    }
+
+    private func flushHistory() async throws {
+        guard let history else { return }
+        await history.load()
+        if recordedHistory == nil { recordedHistory = Set(history.runs.flatMap { $0.items.map(\.id) }) }
+        let pending = pendingHistory
+        pendingHistory = []
+        var records: [RunHistory.Item] = []
+        for id in pending where recordedHistory?.contains(id) != true {
+            guard let operation = projected[id], let index = positions[id],
+                  operation.updatedAt >= Date().addingTimeInterval(-90 * 86_400) else { continue }
+            var item = Self.historyItem(items[index])
+            item.id = operation.id
+            records.append(item)
+            recordedHistory?.insert(id)
+        }
+        if !records.isEmpty {
+            history.record(.init(kind: .backUp, trigger: .manual, start: runStarted ?? Date(), end: Date(), items: records))
+        }
     }
 
     /// The items whose phase changed since the last call (nil: no longer in the job), latest state each.
@@ -174,7 +518,7 @@ final class CompactJob {
         return index
     }
 
-    var hasWaiting: Bool { waitingIndex() != nil }
+    var hasWaiting: Bool { suppliedCompactor != nil && waitingIndex() != nil }
 
     var savedOriginalBytes: Int { items.reduce(0) { if case .saved(let o, _) = $1.state { $0 + o } else { $0 } } }
     var savedCompactBytes: Int { items.reduce(0) { if case .saved(_, let c) = $1.state { $0 + c } else { $0 } } }
@@ -190,7 +534,47 @@ final class CompactJob {
     /// thousands of items. File names are filled in as each starts.
     /// Without a `trigger`, items picked during setup count as the first task, later ones as manual.
     /// `backUpOnly`: of these, the recent items automatic mode backs up now and compacts later.
-    func enqueue(_ assetIdentifiers: [String], trigger: RunHistory.Trigger? = nil, backUpOnly: Set<String> = []) async {
+    @discardableResult
+    func enqueue(_ assetIdentifiers: [String], trigger: RunHistory.Trigger? = nil, backUpOnly: Set<String> = [],
+                 authorized: @MainActor () -> Bool = { true }) async -> Set<String> {
+        if suppliedCompactor != nil {
+            await enqueueStandIn(assetIdentifiers, trigger: trigger, backUpOnly: backUpOnly)
+            return Set(assetIdentifiers.filter { states[$0] != nil })
+        }
+        guard !retired, !suspended, !assetIdentifiers.isEmpty, authorized() else { return [] }
+        preparing += 1
+        defer {
+            preparing -= 1
+            if preparing == 0 {
+                let waiters = preparationWaiters
+                preparationWaiters = []
+                waiters.forEach { $0.resume() }
+            }
+        }
+        var accepted = Set<String>()
+        do {
+            try await ensureContext()
+            guard !retired, !suspended, authorized(), !Task.isCancelled else { return [] }
+            let trigger = trigger ?? (settings.onboardingComplete ? .manual : .firstTask)
+            runStarted = runStarted ?? Date()
+            let immediate = assetIdentifiers.filter { !backUpOnly.contains($0) }
+            let deferred = assetIdentifiers.filter { backUpOnly.contains($0) }
+            if !immediate.isEmpty {
+                _ = try await coordinator.admit(immediate, compact: true, trigger: trigger, authorized: authorized)
+                accepted.formUnion(immediate)
+            }
+            if !deferred.isEmpty {
+                _ = try await coordinator.admit(deferred, compact: false, trigger: trigger, authorized: authorized)
+                accepted.formUnion(deferred)
+            }
+            queueProblem = nil
+            if !accepted.isEmpty, !settings.isDemo { AppModel.schedulePendingBackup() }
+        } catch { showQueueProblem(error) }
+        return accepted
+    }
+
+    private func enqueueStandIn(_ assetIdentifiers: [String], trigger: RunHistory.Trigger? = nil,
+                                backUpOnly: Set<String> = []) async {
         guard !retired else { return }
         let trigger = trigger ?? (settings.onboardingComplete ? .manual : .firstTask)
         let wanted = assetIdentifiers.filter { states[$0]?.isOpen != true }
@@ -259,6 +643,14 @@ final class CompactJob {
     /// Drops these items if they haven't started (when iOS ends a background run); an item
     /// being worked on finishes, and items the user queued are left alone.
     func stopWaiting(_ identifiers: Set<String>) {
+        if suppliedCompactor == nil {
+            control { [self] in
+                for operation in projected.values where identifiers.contains(operation.itemID) && operation.lease != nil {
+                    if let lease = operation.lease { try await ledger.store.deferLease(lease) }
+                }
+            }
+            return
+        }
         if preparing > 0 { droppedWhilePreparing.formUnion(identifiers) }
         let dropped = items.filter { $0.state == .waiting && identifiers.contains($0.assetIdentifier) }
         guard !dropped.isEmpty else { return }
@@ -272,6 +664,11 @@ final class CompactJob {
     /// Stops after the item being worked on: items waiting are dropped, and everything already
     /// backed up stays backed up.
     func stop() {
+        if suppliedCompactor == nil {
+            isPaused = true
+            control { [self] in try await coordinator.pause(); project([]) }
+            return
+        }
         if preparing > 0 { stoppedWhilePreparing = true }
         let dropped = items.filter { $0.state == .waiting }.map(\.assetIdentifier)
         items.removeAll { $0.state == .waiting }
@@ -286,17 +683,28 @@ final class CompactJob {
     /// Rejects new work immediately. The current item finishes its admitted side effects.
     func retire() {
         retired = true
-        stop()
+        coordinator.retire()
+        contextWork?.cancel()
+        historyWork?.cancel()
+        if suppliedCompactor != nil { stop() }
     }
 
     /// A lifetime boundary, unlike Stop: no admitted writer remains when this returns.
     func stopAndWait() async {
         retire()
+        _ = try? await contextWork?.value
+        let controls = controlWork.values
+        for control in controls { await control.value }
+        do { try await coordinator.stopAndWait() } catch { queueProblem = error.localizedDescription }
+        await projectionWork?.value
+        await historyWork?.value
+        do { try await flushHistory() } catch { queueProblem = error.localizedDescription }
         await runner?.value
         if preparing > 0 { await withCheckedContinuation { preparationWaiters.append($0) } }
     }
 
     func pause() {
+        if suppliedCompactor == nil { stop(); return }
         guard isRunning else { return }
         isPaused = true
         UIApplication.shared.isIdleTimerDisabled = false
@@ -304,12 +712,18 @@ final class CompactJob {
     }
 
     func resume() {
+        if suppliedCompactor == nil {
+            isPaused = false
+            control { [self] in try await coordinator.resume(); project([]) }
+            return
+        }
         guard isPaused else { return }
         isPaused = false
         UIApplication.shared.isIdleTimerDisabled = true
     }
 
     func clearFinished() {
+        if suppliedCompactor == nil { return }
         items.removeAll { item in
             switch item.state {
             case .waiting, .working: false
@@ -326,6 +740,11 @@ final class CompactJob {
               let index = items.lastIndex(where: { $0.assetIdentifier == identifier }) else { return false }
         setState(index, .unchanged(AutomaticMode.keptAsIsReason))
         return true
+    }
+
+    func keepAsIs(_ identifier: String) async throws {
+        try await ledger.store.setKeptDecision([identifier], namespace: ledger.namespace, kept: true)
+        project([])
     }
 
     private func run() async {
@@ -420,6 +839,9 @@ final class CompactJob {
         case .backedUp(let original):
             entry.result = .backedUp
             entry.originalBytes = original
+        case .processing(let reason):
+            entry.result = .backedUp
+            entry.reason = reason
         }
         return entry
     }

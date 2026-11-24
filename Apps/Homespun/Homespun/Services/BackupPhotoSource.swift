@@ -89,6 +89,12 @@ extension PhotoSource {
     func sourceGeneration(_ id: String) throws -> PhotoGeneration {
         throw PhotoLibrary.Failure.unsupported("This library cannot reconcile a Photos generation.")
     }
+    func backupMetadata(_ id: String) throws -> BackupPhotoMetadata {
+        throw PhotoLibrary.Failure.unsupported("This library cannot capture authoritative metadata.")
+    }
+    func applyBackupMetadata(_ id: String, metadata: BackupPhotoMetadata) async throws {
+        throw PhotoLibrary.Failure.unsupported("This library cannot reconcile saved metadata.")
+    }
     func observePhotosEffect(restoring: Bool) throws -> PhotosObservation {
         throw PhotoLibrary.Failure.unsupported("This library cannot journal a Photos effect.")
     }
@@ -104,6 +110,9 @@ extension PhotoSource {
     }
     func removeApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult {
         throw PhotoLibrary.Failure.unsupported("This library cannot reconcile original removal.")
+    }
+    func keepApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult {
+        throw PhotoLibrary.Failure.unsupported("This library cannot reconcile keeping originals.")
     }
 }
 
@@ -139,7 +148,7 @@ extension PhotoKitSource {
                                                                 maximumBytes: try Self.bytes(resource))
                 resources.append(.init(fileID: fileID, url: file, descriptor: .init(
                     role: PhotoLibrary.role(of: resource.type), filename: resource.originalFilename,
-                    size: result.bytes, sha256: result.sha256)))
+                    size: result.bytes, sha256: result.sha256, sha1: result.sha1)))
             }
             guard try sourceGeneration(id) == generation else {
                 throw PhotoLibrary.Failure.unsupported("This item changed while it was being prepared. It will need a fresh backup.")
@@ -165,7 +174,7 @@ extension PhotoKitSource {
         for resource in resources {
             let result = try await PhotoResourceReader.read(resource, file: nil, maximumBytes: try Self.bytes(resource))
             fingerprints.append(.init(role: PhotoLibrary.role(of: resource.type), filename: resource.originalFilename,
-                                      size: result.bytes, sha256: result.sha256))
+                                      size: result.bytes, sha256: result.sha256, sha1: result.sha1))
         }
         guard try sourceGeneration(id) == before else {
             throw PhotoLibrary.Failure.verificationFailed("the item's resources changed while they were checked")
@@ -179,10 +188,26 @@ extension PhotoKitSource {
         guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: options).firstObject else {
             throw PhotoLibrary.Failure.notFound
         }
+
         return .init(identifier: id, modified: asset.modificationDate, width: asset.pixelWidth, height: asset.pixelHeight,
                      resources: PHAssetResource.assetResources(for: asset).map {
                          .init(role: PhotoLibrary.role(of: $0.type), name: $0.originalFilename, bytes: try? Self.bytes($0))
                      }.sorted { $0.role.rawValue < $1.role.rawValue })
+    }
+
+    func backupMetadata(_ id: String) throws -> BackupPhotoMetadata {
+        let options = PHFetchOptions()
+        options.includeHiddenAssets = true
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: options).firstObject,
+              let kind = PhotoLibrary.kind(of: asset) else { throw PhotoLibrary.Failure.notFound }
+        return .init(sourceID: id, kind: kind.api, creationDate: asset.creationDate,
+            locationArchive: try asset.location.map { try NSKeyedArchiver.archivedData(withRootObject: $0, requiringSecureCoding: true) },
+            favorite: asset.isFavorite, hidden: asset.isHidden, albums: PhotoLibrary.userAlbums(containing: asset),
+            generation: try sourceGeneration(id))
+    }
+
+    func applyBackupMetadata(_ id: String, metadata: BackupPhotoMetadata) async throws {
+        try await Self.applyMetadata(id, metadata: metadata)
     }
 
     func observePhotosEffect(restoring: Bool) throws -> PhotosObservation {
@@ -244,10 +269,20 @@ extension PhotoKitSource {
         try await PhotoLibrary.restore(files.map { ($0.descriptor.role, $0.url) }, favorite: metadata.favorite,
                                        hidden: metadata.hidden, albums: metadata.albums,
                                        metadata: .library(creationDate: metadata.creationDate, location: try metadata.location()),
-                                       filenames: Dictionary(uniqueKeysWithValues: files.map { ($0.url, $0.descriptor.filename) }))
+                                       filenames: Dictionary(uniqueKeysWithValues: files.map { ($0.url, $0.descriptor.filename) }),
+                                       shouldMoveFile: false)
     }
 
     func removeApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult {
+        try await deleteApproved(approvals, compact: false)
+    }
+
+    func keepApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult {
+        try await deleteApproved(approvals, compact: true)
+    }
+
+    private func deleteApproved(_ approvals: [PhotosRemovalApproval], compact: Bool) async throws -> PhotosRemovalResult {
+        try Task.checkCancellation()
         var valid: [PHAsset] = [], invalid = Set<String>()
         let originals = PHFetchOptions()
         originals.includeHiddenAssets = false
@@ -255,7 +290,9 @@ extension PhotoKitSource {
             let id = approval.original.identifier
             guard (try? sourceGeneration(id)) == approval.original,
                   (try? sourceGeneration(approval.compact.identifier)) == approval.compact,
-                  let asset = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: originals).firstObject else {
+                  PHAsset.fetchAssets(withLocalIdentifiers: [id], options: originals).firstObject != nil,
+                  let asset = PHAsset.fetchAssets(withLocalIdentifiers: [compact ? approval.compact.identifier : id],
+                                                   options: nil).firstObject else {
                 invalid.insert(id)
                 continue
             }
@@ -263,11 +300,13 @@ extension PhotoKitSource {
         }
         guard !valid.isEmpty else { return .init(submitted: [], invalidated: invalid) }
         let ids = Set(valid.map(\.localIdentifier)), assets = Assets(assets: valid as NSArray)
+        try Task.checkCancellation()
         try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets.assets) }
         return .init(submitted: ids, invalidated: invalid)
     }
 
     private struct Assets: @unchecked Sendable { let assets: NSArray }
+    private struct Albums: @unchecked Sendable { let values: PHFetchResult<PHAssetCollection> }
 
     private static func applyMetadata(_ id: String, metadata: BackupPhotoMetadata) async throws {
         let options = PHFetchOptions()
@@ -276,12 +315,16 @@ extension PhotoKitSource {
             throw PhotoLibrary.Failure.notFound
         }
         let held = Unchecked(value: asset), location = Unchecked(value: try metadata.location())
+        let albums = Albums(values: PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: metadata.albums, options: nil))
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetChangeRequest(for: held.value)
             request.creationDate = metadata.creationDate
             request.location = location.value
             request.isFavorite = metadata.favorite
             request.isHidden = metadata.hidden
+            albums.values.enumerateObjects { album, _, _ in
+                PHAssetCollectionChangeRequest(for: album)?.addAssets([held.value] as NSArray)
+            }
         }
     }
 
@@ -314,10 +357,11 @@ extension PhotoKitSource {
 /// PhotoKit's resource request is owned until one terminal result; both export growth and memory
 /// are bounded, and cancellation closes the writer before its task can be joined.
 private final class PhotoResourceReader: @unchecked Sendable {
-    struct Digest: Sendable { var bytes: Int; var sha256: String }
+    struct Digest: Sendable { var bytes: Int; var sha256: String; var sha1: String }
     private let lock = NSLock()
     private let maximum: Int
     private var hash = SHA256()
+    private var legacyHash = Insecure.SHA1()
     private var bytes = 0
     private var handle: FileHandle?
     private var pending: CheckedContinuation<Digest, Error>?
@@ -377,6 +421,7 @@ private final class PhotoResourceReader: @unchecked Sendable {
             guard data.count <= maximum - bytes else { throw BackupAPI.ValidationError.invalidManifest }
             try handle?.write(contentsOf: data)
             hash.update(data: data)
+            legacyHash.update(data: data)
             bytes += data.count
             lock.unlock()
         } catch {
@@ -396,7 +441,8 @@ private final class PhotoResourceReader: @unchecked Sendable {
         let pending = pending, request = request, failure = failure
         self.pending = nil
         self.request = nil
-        let digest = Digest(bytes: bytes, sha256: hash.finalize().map { String(format: "%02x", $0) }.joined())
+        let digest = Digest(bytes: bytes, sha256: hash.finalize().map { String(format: "%02x", $0) }.joined(),
+                            sha1: legacyHash.finalize().map { String(format: "%02x", $0) }.joined())
         lock.unlock()
         if let failure {
             if let request { PHAssetResourceManager.default().cancelDataRequest(request) }

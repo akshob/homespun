@@ -18,7 +18,7 @@ struct DemoCompactor: Compacting {
                  progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome {
         guard let item = library.demoItem(localIdentifier) else { throw PhotoLibrary.Failure.notFound }
         if library.isCopy(localIdentifier) { return .unchanged("This is a Homespun compact copy") }
-        if let entry = await ledger.entry(for: localIdentifier), entry.serverAssetID != nil,
+        if let entry = try await ledger.entry(for: localIdentifier), entry.serverAssetID != nil,
            library.demoItem(entry.compactIdentifier) != nil {
             return .unchanged("Already has a compact copy")
         }
@@ -95,8 +95,8 @@ struct DemoRemover: RemovingOriginals {
     let library: DemoLibrary
     let ledger: CompactLedger
 
-    func candidates(only: Set<String>?) async -> [(original: String, entry: CompactLedger.Entry)] {
-        let backed = await ledger.serverBacked().filter { only?.contains($0.original) ?? true }
+    func candidates(only: Set<String>?) async throws -> [(original: String, entry: CompactLedger.Entry)] {
+        let backed = try await ledger.serverBacked().filter { only?.contains($0.original) ?? true }
         let present = library.existing(backed.map(\.original), includeHidden: false)
         return backed.filter { present.contains($0.original) }
     }
@@ -105,7 +105,7 @@ struct DemoRemover: RemovingOriginals {
                         progress: @escaping @Sendable (String) -> Void) async throws -> OriginalRemover.Report {
         var report = OriginalRemover.Report()
         var approved: [(id: String, name: String, bytes: Int)] = []
-        let candidates = Array(await candidates(only: only).prefix(limit ?? .max))
+        let candidates = Array(try await candidates(only: only).prefix(limit ?? .max))
         for (index, candidate) in candidates.enumerated() {
             guard let item = library.demoItem(candidate.original), let assetID = candidate.entry.serverAssetID else { continue }
             progress("Checking \(index + 1) of \(candidates.count)")
@@ -178,9 +178,11 @@ struct DemoRestorer: RestoringOriginals {
             deleted = false
             report.copiesKept = true
         }
-        let entries = await ledger.snapshot()
-        try? await ledger.restored(done.compactMap { pair in entries[pair.item.key].map { (pair.item.key, pair.restored, $0) } },
-                                   copiesDeleted: deleted)
+        do {
+            let entries = try await ledger.snapshot()
+            try await ledger.restored(done.compactMap { pair in entries[pair.item.key].map { (pair.item.key, pair.restored, $0) } },
+                                      copiesDeleted: deleted)
+        } catch { report.problems.append("The demo changed, but its restored mapping could not be saved: \(error.localizedDescription)") }
         return report
     }
 

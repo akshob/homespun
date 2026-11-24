@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Observation
+import HomespunCore
 import Photos
 import SwiftUI
 
@@ -13,7 +14,7 @@ enum Badge: Equatable, Sendable {
     case originalOnPhone
     /// A Homespun compact copy whose original this iPhone knows nothing more about.
     case compactCopy
-    case waiting, working, kept, failed
+    case waiting, working, kept, failed, processing, recovery
     /// Backed up; its compact copy comes when it's old enough (automatic mode keeps recent items).
     case copyLater
 
@@ -29,6 +30,8 @@ enum Badge: Equatable, Sendable {
         case .kept: "Kept as is"
         case .failed: "Needs attention"
         case .copyLater: "Backed up"
+        case .processing: "Processing on server"
+        case .recovery: "Backup needs recovery"
         }
     }
 
@@ -42,6 +45,8 @@ enum Badge: Equatable, Sendable {
         case .working: "Being backed up."
         case .kept: "Kept as is: the original stays on this iPhone. See Details for why."
         case .failed: "Something needs your attention. See Activity."
+        case .processing: "The original is backed up. Its compact copy is still processing on the server."
+        case .recovery: "Reconnect the known original server or recover the earlier mapping. This item is not ready to remove."
         case .copyLater: "The original is safe at home. Its compact copy comes once it's older, so photos you delete "
             + "before then never come back."
         }
@@ -58,13 +63,16 @@ enum Badge: Equatable, Sendable {
         case .working: "arrow.up.circle"
         case .kept: "equal.circle"
         case .failed: "exclamationmark.triangle.fill"
+        case .processing: "gearshape.2"
+        case .recovery: "questionmark.folder"
         case .copyLater: "checkmark.circle"
         }
     }
 
     var color: Color {
         switch self {
-        case .backedUp, .copyLater: Theme.BadgeColor.teal
+        case .backedUp, .copyLater, .processing: Theme.BadgeColor.teal
+        case .recovery: Theme.BadgeColor.amber
         case .originalOnPhone: Theme.BadgeColor.amber
         case .failed: Theme.BadgeColor.red
         case .working: Theme.BadgeColor.accent
@@ -89,6 +97,8 @@ struct LibraryState: Equatable, Sendable {
         /// When automatic mode makes the compact copy of an item backed up without one (`.copyLater`);
         /// nil for a favorite that keeps its original.
         var compactAfter: Date? = nil
+        var serverName: String? = nil
+        var serverOrigin: BackupAPI.Origin? = nil
     }
 
     /// The Filter menu's states (DESIGN 02·1.2); its symbols match the badges.
@@ -156,9 +166,10 @@ struct LibraryState: Equatable, Sendable {
     /// needs backing up.)
     /// `backedUp`: items backed up without a compact copy yet, with when it's due (nil: never, a kept favorite).
     init(library: [String], ledger: [String: CompactLedger.Entry], album: Set<String>, job: [String: CompactJob.State],
-         backedUp: [String: Date?] = [:]) {
+         backedUp: [String: Date?] = [:], origin: BackupAPI.Origin? = nil, recovering: Set<String> = []) {
         let present = Set(library)
         var originalOf: [String: String] = [:]
+        var records: [String: CompactLedger.Entry] = [:]
         var hidden = Set<String>(), unbackedCopies = Set<String>()
         for (original, entry) in ledger where present.contains(entry.compactIdentifier) {
             guard entry.serverAssetID != nil else {
@@ -166,18 +177,24 @@ struct LibraryState: Equatable, Sendable {
                 continue
             }
             originalOf[entry.compactIdentifier] = original
+            records[entry.compactIdentifier] = entry
             hidden.insert(original)
         }
         var cells: [Cell] = []
         cells.reserveCapacity(library.count)
         for id in library where !hidden.contains(id) {
             if let original = originalOf[id] {
-                cells.append(Cell(id: id, badge: present.contains(original) ? .originalOnPhone : .backedUp, original: original,
-                                  canFree: present.contains(original)))
+                let entry = records[id]!
+                let accessible = entry.verifiedCompact && origin != nil && entry.origin == origin
+                cells.append(Cell(id: id, badge: accessible ? (present.contains(original) ? .originalOnPhone : .backedUp) : .recovery,
+                                  original: original, canFree: accessible && present.contains(original),
+                                  serverName: entry.serverName, serverOrigin: entry.origin))
             } else if album.contains(id) || unbackedCopies.contains(id) {
                 cells.append(Cell(id: id, badge: .compactCopy, original: nil, canFree: false))
             } else {
-                cells.append(Cell(id: id, badge: Self.badge(job: job[id], backedUp: backedUp[id] != nil), original: nil,
+                let badge = recovering.contains(id) && job[id]?.isOpen != true ? Badge.recovery
+                    : Self.badge(job: job[id], backedUp: backedUp[id] != nil)
+                cells.append(Cell(id: id, badge: badge, original: nil,
                                   canFree: false, compactAfter: backedUp[id] ?? nil))
             }
         }
@@ -195,6 +212,7 @@ struct LibraryState: Equatable, Sendable {
         case .unchanged?: .kept
         case .notYet?: .none
         case .backedUp?: .copyLater
+        case .processing?: .processing
         case .saved?, nil: backedUp ? .copyLater : .none
         }
     }
@@ -253,7 +271,7 @@ extension LibraryState.Cell {
         switch badge {
         case .none, .waiting, .working, .kept, .failed: true
         case .originalOnPhone: !canFree
-        case .backedUp, .compactCopy, .copyLater: false
+        case .backedUp, .compactCopy, .copyLater, .processing, .recovery: false
         }
     }
 
@@ -266,7 +284,7 @@ extension LibraryState.Cell {
         case .notBackedUp: isNotBackedUp && badge != .failed
         case .readyToFree: canFree
         case .atHome: badge == .backedUp
-        case .needsAttention: badge == .failed
+        case .needsAttention: badge == .failed || badge == .recovery
         case .copyLater: badge == .copyLater
         }
     }
@@ -462,6 +480,8 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         var ledger: [String: CompactLedger.Entry] = [:]
         var job: [String: CompactJob.State] = [:]
         var backedUp: [String: Date?] = [:]
+        var origin: BackupAPI.Origin?
+        var recovering: Set<String> = []
     }
 
     /// Set by the screen to recompute badges after the library changed.
@@ -655,8 +675,9 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private var snapshotSave: Task<Void, Never>?
 
     /// Works out the badges again (after the ledger or the job changed), in the background.
-    func update(ledger: [String: CompactLedger.Entry], job: [String: CompactJob.State], backedUp: [String: Date?] = [:]) async {
-        inputs = Inputs(ledger: ledger, job: job, backedUp: backedUp)
+    func update(ledger: [String: CompactLedger.Entry], job: [String: CompactJob.State], backedUp: [String: Date?] = [:],
+                origin: BackupAPI.Origin? = nil, recovering: Set<String> = []) async {
+        inputs = Inputs(ledger: ledger, job: job, backedUp: backedUp, origin: origin, recovering: recovering)
         await rebuild()
     }
 
@@ -669,7 +690,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         RenderProbe.count("library.buildState")
         let built = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?)? in
             var new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
-                                   backedUp: inputs.backedUp)
+                                   backedUp: inputs.backedUp, origin: inputs.origin, recovering: inputs.recovering)
             guard new != previous else { return nil }
             new.follow(previous)
             return (new, new.changedIDs(from: previous))

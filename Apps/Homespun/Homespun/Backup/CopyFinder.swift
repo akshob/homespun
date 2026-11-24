@@ -114,7 +114,9 @@ final class CopyFinder {
             settled = []
             atHome = [:]
         }
-        let snapshot = await ledger.snapshot()
+        let snapshot: [String: CompactLedger.Entry]
+        do { snapshot = try await ledger.snapshot() }
+        catch { self.error = error.localizedDescription; return }
         let known = Self.known(snapshot)
         let todo = photos.allIdentifiers().filter { !known.contains($0) && !settled.contains($0) }
         total = todo.count

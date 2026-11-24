@@ -190,10 +190,20 @@ import UIKit
         await model.history.load()
         await model.library.library.reload()
         let id = try sample(fixture.session.library, "photo").id
-        // No pairing: this manual attempt fails without contacting any server.
-        await model.job.enqueue([id])
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        await model.job.refreshQueue()
+        let context = try #require(model.job.bindingContext)
+        let batch = try await model.job.ledger.store.admit([id], namespace: model.job.ledger.namespace,
+            bindingID: context.binding.id, profile: .standard, compact: true)
+        let operation = try #require(batch.operationIDs.first)
+        let lease = try #require(try await model.job.ledger.store.claim(operation, stage: .preparation))
+        try await model.job.ledger.store.fail(lease, code: "test_failure", message: "Synthetic attention")
+        await model.job.refreshQueue()
         let deadline = ContinuousClock.now + .seconds(10)
-        while model.job.isRunning, ContinuousClock.now < deadline { await Task.yield() }
+        while model.job.states[id]?.phase != .failed, ContinuousClock.now < deadline { await Task.yield() }
         try #require(!model.job.isRunning)
         await model.library.refreshGrid()
         #expect(model.job.states[id]?.phase == .failed && ActivityTab.attention(model).count == 1)
@@ -203,16 +213,19 @@ import UIKit
 
         let reopened = AutomaticMode(url: fixture.folder.appendingPathComponent("automatic.json"),
                                     photos: fixture.session.library, system: false)
+        reopened.useCanonicalDecisions(try await model.job.ledger.decisions())
         #expect(reopened.keptAsIs == [id])
         await reopened.enable(existing: true)
         #expect(reopened.keptAsIs == [id], "Turning Automatic Mode on must not discard an explicit user decision")
-        reopened.retryKept([id])
+        try await reopened.retryKept([id], ledger: model.job.ledger)
         #expect(reopened.keptAsIs.isEmpty && !reopened.state.settled.contains(id))
         let blocked = fixture.folder.appendingPathComponent("not-a-directory")
         try Data().write(to: blocked)
         let unwritable = AutomaticMode(url: blocked.appendingPathComponent("automatic.json"),
                                        photos: fixture.session.library, system: false)
-        #expect(!unwritable.keepAsIs(id) && unwritable.keptAsIs.isEmpty)
+        let blockedLedger = CompactLedger(url: blocked.appendingPathComponent("ledger.json"))
+        await #expect(throws: Error.self) { try await unwritable.keepAsIs(id, ledger: blockedLedger) }
+        #expect(unwritable.keptAsIs.isEmpty)
         await model.library.stopAndWait()
     }
 
@@ -223,15 +236,17 @@ import UIKit
         try model.settings.finishPairing(serverURL: DemoServer.baseURL,
                                         response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
                                         pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
-        let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: model.job.ledger,
-                                      pollInterval: .zero)
         let photos = Array(fixture.session.library.samples.filter { $0.kind == "photo" }.prefix(12))
         try #require(photos.count == 12)
-        for photo in photos.prefix(11) { _ = try await compactor.compact(photo.id, compactNow: true) { _ in } }
+        #expect(await model.job.enqueue(photos.prefix(11).map(\.id)).count == 11)
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
         await model.library.refreshReady()
         #expect(!model.settings.trialConfirmed && model.library.nextRemovalCount == 11)
         let approved = Set(model.library.ready.originals)
-        _ = try await compactor.compact(photos[11].id, compactNow: true) { _ in }
+        #expect(await model.job.enqueue([photos[11].id]) == [photos[11].id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
         await model.library.refreshReady()
         // The review's explicit They Look Right approval, scoped to what it displayed.
         model.settings.trialConfirmed = true
@@ -319,7 +334,7 @@ import UIKit
             }
             #expect(compactBytes > 0 && compactBytes < originalBytes, "\(kind): \(compactBytes) of \(originalBytes)")
             #expect(library.isCopy(copy) && library.demoItem(copy)?.creationDate == original.created)
-            let entry = try #require(await fixture.ledger.entry(for: original.id))
+            let entry = try #require(try await fixture.ledger.entry(for: original.id))
             #expect(entry.compactIdentifier == copy && entry.serverAssetID != nil)
             // Again: it already has its compact copy.
             #expect(try await compactor.compact(original.id, compactNow: true) { _ in } == .unchanged("Already has a compact copy"))
@@ -344,28 +359,37 @@ import UIKit
         let photos = library.samples.filter { $0.kind == "photo" }.prefix(3)
         for photo in photos { _ = try await compactor.compact(photo.id, compactNow: true) { _ in } }
         let remover = DemoRemover(client: client, library: library, ledger: fixture.ledger)
-        #expect(await remover.candidates().count == 3)
+        #expect(try await remover.candidates().isEmpty, "Unversioned legacy records must require recovery")
+        #expect(try await remover.removeEligible(limit: nil, only: nil) { _ in }.removed.isEmpty)
+    }
+
+    @Test func legacyRestorationPreservesTheOriginalBytesWithoutManufacturingProvenance() async throws {
+        let fixture = try await Fixture.make()
+        let library = fixture.session.library
+        let client = try await fixture.pairedClient()
+        let compactor = DemoCompactor(client: client, library: library, ledger: fixture.ledger, pollInterval: .zero)
+        let photos = Array(library.samples.filter { $0.kind == "photo" }.prefix(3))
+        for photo in photos { _ = try await compactor.compact(photo.id, compactNow: true) { _ in } }
 
         fixture.asked.answer = false
-        let declined = try await remover.removeEligible(limit: nil, only: nil) { _ in }
-        #expect(declined.cancelled && declined.removed.isEmpty && library.existing(photos.map(\.id), includeHidden: true).count == 3)
+        do { try await library.delete(photos.map(\.id)) } catch {}
+        #expect(library.existing(photos.map(\.id), includeHidden: true).count == 3)
 
         fixture.asked.answer = true
-        let report = try await remover.removeEligible(limit: 2, only: nil) { _ in }
-        #expect(report.removed.count == 2 && report.blocked.isEmpty && report.freedBytes > 0)
+        try await library.delete(Array(photos.prefix(2).map(\.id)))
         #expect(fixture.asked.all.last?.message.contains("nothing is deleted") == true)
         #expect(library.existing(photos.map(\.id), includeHidden: true).count == 1)
         // The drawn originals are still there: only the demo's record changed.
         #expect(photos.allSatisfy { FileManager.default.fileExists(atPath: fixture.media.appendingPathComponent($0.files["photo"]!).path) })
 
         let freed = try #require(photos.first { !library.existing([$0.id], includeHidden: true).contains($0.id) })
-        let entry = try #require(await fixture.ledger.entry(for: freed.id))
+        let entry = try #require(try await fixture.ledger.entry(for: freed.id))
         let restorer = DemoRestorer(client: client, library: library, ledger: fixture.ledger)
         let restored = await restorer.restore([.init(key: freed.id, compact: entry.compactIdentifier,
                                                       serverAssetID: entry.serverAssetID!, originalBytes: entry.originalBytes)]) { _ in }
         #expect(restored.restored == [freed.id] && restored.problems.isEmpty && !restored.copiesKept)
         #expect(library.demoItem(freed.id) != nil && library.demoItem(entry.compactIdentifier) == nil)
-        #expect(await fixture.ledger.backedUpSnapshot()[freed.id]?.kept == true)
+        #expect(try await fixture.ledger.backedUpSnapshot()[freed.id]?.kept == true)
     }
 
     /// The same backup gives the same files and fingerprints every time (no randomness in what's shown).
@@ -558,7 +582,7 @@ import UIKit
         let original = try sample(fixture.session.library, "photo")
         let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: fixture.ledger, pollInterval: .zero)
         _ = try await compactor.compact(original.id, compactNow: true) { _ in }
-        let entry = try #require(await fixture.ledger.entry(for: original.id))
+        let entry = try #require(try await fixture.ledger.entry(for: original.id))
         let asset = try #require(entry.serverAssetID)
         let file = try await CompareModel.fetch(client, assetID: asset, role: .photo,
                                                 to: fixture.folder.appendingPathComponent("compare"), name: "original.jpg") { _, _ in }

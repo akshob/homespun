@@ -59,6 +59,8 @@ final class CompareModel {
     private(set) var compactFacts = MediaFacts()
     private(set) var server = "your server"
     @ObservationIgnored private var client: ServerClient?
+    @ObservationIgnored private var preview: BackupPreview?
+    @ObservationIgnored private var previewFile: BackupPreview.File?
     @ObservationIgnored private var download: Task<Void, Never>?
     @ObservationIgnored private var folder: URL?
     @ObservationIgnored let pair = VideoPair()
@@ -108,16 +110,27 @@ final class CompareModel {
         kind = asset.itemKind ?? .photo
         pair.active = isVideo && mode == .sideBySide
         compactFacts = asset.mediaFacts().main
-        let match = await model.job.ledger.snapshot().first { $0.value.compactIdentifier == compactIdentifier }
+        let match: Dictionary<String, CompactLedger.Entry>.Element?
+        do { match = try await model.job.ledger.snapshot().first { $0.value.compactIdentifier == compactIdentifier } }
+        catch { status = .failed(error.localizedDescription); return }
         guard !Task.isCancelled, generation == mine else { return }
         let originalAsset = match.flatMap { photos.item($0.key) }
+        preview = nil
+        if let entry = match?.value, let context = model.job.bindingContext,
+           model.settings.matchesBackupBinding(context.binding), entry.origin == context.binding.origin,
+           entry.version != nil, entry.requestID != nil, let workspace = model.job.coordinator.currentWorkspace {
+            preview = .init(context: context, workspace: workspace, entry: entry)
+            server = entry.serverName ?? context.information.name
+        }
         source = OriginalSource.choose(original: match?.key, onPhone: originalAsset != nil,
-                                       serverAssetID: match?.value.serverAssetID, mode: model.settings.server?.mode)
+                                       serverAssetID: preview == nil ? nil : match?.value.serverAssetID,
+                                       mode: model.settings.server?.mode)
         switch source {
         case .phone: if let originalAsset { originalFacts = originalAsset.mediaFacts().main }
         case .server: fetchOriginal()
         case .immich: status = .inImmich
-        case .unknown: status = .noOriginal
+        case .unknown: status = match == nil ? .noOriginal
+            : .failed("Reconnect the known original server and recover this versioned mapping before downloading its original.")
         }
         if isVideo {
             let player = await asset.player()
@@ -146,28 +159,20 @@ final class CompareModel {
 
     /// Downloads the original from the server (again, after Cancel), with progress.
     func fetchOriginal() {
-        guard case .server(let assetID) = source, let client, download == nil else { return }
-        let folder: URL
-        do {
-            folder = try self.folder ?? PhotoLibrary.workDirectory()
-        } catch {
-            status = .failed(error.localizedDescription)
-            return
-        }
-        self.folder = folder
+        guard case .server = source, let preview, download == nil else { return }
         let kind = kind
         let mine = generation
         status = .downloading(received: 0, expected: 0)
         Announce.say("Getting the original from \(server).")
         download = Task {
             do {
-                let url = try await Self.fetch(client, assetID: assetID, role: OriginalSource.role(for: kind), to: folder,
-                                               name: OriginalSource.fileName(for: kind)) { received, expected in
-                    Task { @MainActor in
-                        guard self.generation == mine, case .downloading = self.status else { return }
-                        self.status = .downloading(received: received, expected: expected)
-                    }
+                let file = try await preview.fetch(video: kind == .video)
+                guard generation == mine else {
+                    try await preview.release(file)
+                    return
                 }
+                previewFile = file
+                let url = file.url
                 try Task.checkCancellation()
                 guard generation == mine else { return }
                 if kind == .video {
@@ -214,6 +219,9 @@ final class CompareModel {
         generation &+= 1
         identifier = nil
         let loading = loading, download = download, folder = folder
+        let preview = preview, previewFile = previewFile
+        self.preview = nil
+        self.previewFile = nil
         loading?.cancel()
         self.loading = nil
         videoSwitch += 1
@@ -226,11 +234,12 @@ final class CompareModel {
         zoom.reset()
         zoomed = false
         holding = false
-        if loading != nil || download != nil || folder != nil {
+        if loading != nil || download != nil || folder != nil || previewFile != nil {
             let id = UUID()
             retiring[id] = Task {
                 await loading?.value
                 await download?.value
+                if let preview, let previewFile { try? await preview.release(previewFile) }
                 if let folder { try? FileManager.default.removeItem(at: folder) }
                 retiring[id] = nil
             }

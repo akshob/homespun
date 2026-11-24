@@ -80,12 +80,15 @@ protocol PhotoSource: Sendable {
                        progress: @escaping @Sendable (String) -> Void) async throws -> PreparedPhoto
     func resourceFingerprints(_ id: String) async throws -> [ServerAPI.ResourceDescriptor]
     func sourceGeneration(_ id: String) throws -> PhotoGeneration
+    func backupMetadata(_ id: String) throws -> BackupPhotoMetadata
+    func applyBackupMetadata(_ id: String, metadata: BackupPhotoMetadata) async throws
     func observePhotosEffect(restoring: Bool) throws -> PhotosObservation
     func reconcilePhotosEffect(expected: [ServerAPI.ResourceDescriptor], observation: PhotosObservation,
                                createdIdentifier: String?) async throws -> PhotosReconciliation
     func importCompact(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String
     func restoreResources(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String
     func removeApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult
+    func keepApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult
 
     // Automatic mode: where the library's history is now, and what changed since.
     func changeToken() -> Data?
@@ -141,13 +144,13 @@ struct LibraryContents: Sendable {
 
 /// Free Up Space: checks originals again and removes them (`OriginalRemover`).
 protocol RemovingOriginals: Sendable {
-    func candidates(only: Set<String>?) async -> [(original: String, entry: CompactLedger.Entry)]
+    func candidates(only: Set<String>?) async throws -> [(original: String, entry: CompactLedger.Entry)]
     func removeEligible(limit: Int?, only: Set<String>?,
                         progress: @escaping @Sendable (String) -> Void) async throws -> OriginalRemover.Report
 }
 
 extension RemovingOriginals {
-    func candidates() async -> [(original: String, entry: CompactLedger.Entry)] { await candidates(only: nil) }
+    func candidates() async throws -> [(original: String, entry: CompactLedger.Entry)] { try await candidates(only: nil) }
 }
 
 /// Restore Original: brings originals back from the server (`OriginalRestorer`).

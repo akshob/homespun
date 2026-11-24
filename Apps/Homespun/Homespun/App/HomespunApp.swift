@@ -3,10 +3,12 @@ import SwiftUI
 
 @main
 struct HomespunApp: App {
+    @UIApplicationDelegateAdaptor(WakeAppDelegate.self) private var wakeDelegate
     init() {
         PerfMonitor.mainStarted = CACurrentMediaTime()
         Task.detached(priority: .utility) { Keychain.removeLegacyReviewCode() }
         AppModel.registerBackgroundRun()
+        BackupAlertDelegate.install()
         Journey.configureTips()
         MetricsReceiver.shared.start()
         _ = SessionMarker.shared

@@ -158,7 +158,9 @@ struct FreeUpSpaceScreen: View {
     /// Each original's compact copy, from the ledger.
     private func loadPairs() async {
         let wanted = originals
-        let ledger = await controller.job.ledger.snapshot()
+        let ledger: [String: CompactLedger.Entry]
+        do { ledger = try await controller.job.ledger.snapshot() }
+        catch { controller.job.showQueueProblem(error); return }
         guard !Task.isCancelled else { return }
         let found = wanted.compactMap { original in
             ledger[original].map { FreeUpPair(original: original, compact: $0.compactIdentifier) }
@@ -197,6 +199,9 @@ struct KeepOriginalButton: View {
             .accessibilityIdentifier("remove.keepOriginal")
             Text("Keeps this one full size here; its compact copy is deleted.")
                 .font(.footnote).foregroundStyle(Theme.secondaryLabel).multilineTextAlignment(.center)
+            if let problem = controller.keepProblem {
+                Text(problem).font(.footnote).foregroundStyle(Theme.red).accessibilityIdentifier("remove.keepProblem")
+            }
         }
     }
 }
