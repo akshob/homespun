@@ -137,7 +137,7 @@ enum ProcessRunner {
             do {
                 var bytes = [UInt8](repeating: 0, count: 64 << 10)
                 while true {
-                    let count = bytes.withUnsafeMutableBytes { buffer in
+                    let count = bytes.withUnsafeMutableBufferPointer { buffer in
                         #if os(Linux)
                         Glibc.read(handle.fileDescriptor, buffer.baseAddress!, buffer.count)
                         #else
@@ -172,9 +172,13 @@ enum ProcessRunner {
     static func run(_ arguments: [String], outputLimit: Int = maximumOutputBytes, progressTimeout: TimeInterval? = nil) throws -> Data {
         try Task.checkCancellation()
         let process = Process()
+        #if os(macOS)
         process.qualityOfService = .utility
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = arguments
+        #endif
+        let nice = "/usr/bin/nice"
+        let deprioritize = FileManager.default.isExecutableFile(atPath: nice)
+        process.executableURL = URL(fileURLWithPath: deprioritize ? nice : "/usr/bin/env")
+        process.arguments = (deprioritize ? ["-n", "10", "/usr/bin/env"] : []) + arguments
         let output = Pipe(), errors = Pipe()
         process.standardOutput = output
         process.standardError = errors
