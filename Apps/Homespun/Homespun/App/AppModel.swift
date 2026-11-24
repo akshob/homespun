@@ -63,13 +63,13 @@ final class AppModel {
 
     func suspendForDemo() async {
         automatic.suspendAdmissions()
-        await job.suspendAndWait()
+        await library.suspendAndWait()
         await WakeSystem.enrollment.pauseAndWait()
         WakeSystem.updateRegistration()
     }
 
     func resumeAfterDemo() async {
-        job.resumeExecution()
+        library.resumeExecution()
         automatic.resumeAdmissions()
         do { try await WakeSystem.resume() } catch { WakeSystem.enrollment.enrollmentFailed() }
     }

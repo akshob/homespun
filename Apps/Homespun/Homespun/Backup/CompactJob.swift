@@ -77,6 +77,7 @@ final class CompactJob {
     private(set) var currentMessage = ""
     @ObservationIgnored var onPhaseChange: (@MainActor () -> Void)?
     @ObservationIgnored var onRunFinished: (@MainActor () -> Void)?
+    @ObservationIgnored var onBindingChanged: (@MainActor () -> Void)?
     @ObservationIgnored private var phaseNoticePending = false
     /// Items before this one aren't waiting (items are appended, and never go back to waiting).
     @ObservationIgnored private var nextWaiting = 0
@@ -128,7 +129,10 @@ final class CompactJob {
     private(set) var queueLoaded = false
     private(set) var remoteCount = 0
     private(set) var retainedCount = 0
-    var activeOrigin: BackupAPI.Origin? { coordinator.context?.binding.origin }
+    var activeOrigin: BackupAPI.Origin? {
+        guard let context = coordinator.context, settings.matchesBackupBinding(context.binding) else { return nil }
+        return context.binding.origin
+    }
     var bindingContext: BackupBindingContext? { coordinator.context }
     var canAdmitOffline: Bool { coordinator.context.map { settings.matchesBackupBinding($0.binding) } ?? false }
 
@@ -310,7 +314,7 @@ final class CompactJob {
     }
 
     private func stageProgress(_ id: UUID, message: String) {
-        guard !retired, let index = positions[id], let operation = projected[id],
+        guard !retired, !suspended, let index = positions[id], let operation = projected[id],
               currentOperationByItem[operation.itemID] == id else { return }
         let state = State.working(message)
         if items[index].state.phase != .working { noteChange(operation.itemID, state) }
@@ -381,6 +385,12 @@ final class CompactJob {
         coordinator.suspend()
         _ = try? await contextWork?.value
         do { try await coordinator.suspendAndWait() } catch { showQueueProblem(error) }
+        let controls = Array(controlWork.values)
+        for control in controls { await control.value }
+        await projectionWork?.value
+        historyWork?.cancel()
+        await historyWork?.value
+        do { try await flushHistory() } catch { showQueueProblem(error) }
         if preparing > 0 { await withCheckedContinuation { preparationWaiters.append($0) } }
     }
 
@@ -388,12 +398,14 @@ final class CompactJob {
         guard !retired else { return }
         suspended = false
         coordinator.resumeExecution()
+        project([])
     }
 
     func invalidateBinding() {
         guard !retired, coordinator.context != nil || contextWork != nil else { return }
         contextWork?.cancel()
         coordinator.suspend()
+        onBindingChanged?()
         control { [self] in
             _ = try? await contextWork?.value
             try await coordinator.detach()
@@ -401,6 +413,7 @@ final class CompactJob {
             remoteCount = 0; retainedCount = 0; pausedCount = 0
             if !settings.isDemo { try await WakeSystem.enrollment.configure(nil); WakeSystem.updateRegistration() }
             if !suspended, settings.isPaired { await refreshQueue() }
+            onBindingChanged?()
         }
     }
 
@@ -542,6 +555,10 @@ final class CompactJob {
             return Set(assetIdentifiers.filter { states[$0] != nil })
         }
         guard !retired, !suspended, !assetIdentifiers.isEmpty, authorized() else { return [] }
+        guard settings.backupAdmissionsEnabled else {
+            queueProblem = "New backup selections are paused. Previously saved work still reconciles and can be recovered."
+            return []
+        }
         preparing += 1
         defer {
             preparing -= 1
@@ -554,17 +571,19 @@ final class CompactJob {
         var accepted = Set<String>()
         do {
             try await ensureContext()
-            guard !retired, !suspended, authorized(), !Task.isCancelled else { return [] }
+            guard !retired, !suspended, authorized(), settings.backupAdmissionsEnabled, !Task.isCancelled else { return [] }
             let trigger = trigger ?? (settings.onboardingComplete ? .manual : .firstTask)
             runStarted = runStarted ?? Date()
             let immediate = assetIdentifiers.filter { !backUpOnly.contains($0) }
             let deferred = assetIdentifiers.filter { backUpOnly.contains($0) }
             if !immediate.isEmpty {
-                _ = try await coordinator.admit(immediate, compact: true, trigger: trigger, authorized: authorized)
+                _ = try await coordinator.admit(immediate, compact: true, trigger: trigger,
+                    authorized: { authorized() && settings.backupAdmissionsEnabled && !suspended })
                 accepted.formUnion(immediate)
             }
             if !deferred.isEmpty {
-                _ = try await coordinator.admit(deferred, compact: false, trigger: trigger, authorized: authorized)
+                _ = try await coordinator.admit(deferred, compact: false, trigger: trigger,
+                    authorized: { authorized() && settings.backupAdmissionsEnabled && !suspended })
                 accepted.formUnion(deferred)
             }
             queueProblem = nil

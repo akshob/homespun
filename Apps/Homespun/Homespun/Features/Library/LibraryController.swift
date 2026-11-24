@@ -59,6 +59,7 @@ final class LibraryController {
     /// Keep the running accessory until the finished/ready facts have arrived, without a hide/show.
     private var finishingBackups = 0
     private var retired = false
+    private var suspended = false
     private var operations = 0
     private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
     private var localRetirements: [UUID: @MainActor () async -> Void] = [:]
@@ -73,7 +74,7 @@ final class LibraryController {
     }
 
     private func admit() -> Bool {
-        guard !retired else { return false }
+        guard !retired, !suspended else { return false }
         operations += 1
         return true
     }
@@ -91,6 +92,7 @@ final class LibraryController {
         retired = true
         job.onPhaseChange = nil
         job.onRunFinished = nil
+        job.onBindingChanged = nil
         library.onChange = nil
         library.stopObserving()
         pendingRebuild?.cancel()
@@ -113,6 +115,26 @@ final class LibraryController {
         await job.history?.flush()
     }
 
+    func suspendAndWait() async {
+        suspended = true
+        pendingRebuild?.cancel()
+        restoreTask?.cancel()
+        await job.suspendAndWait()
+        await restoreTask?.value
+        await copyFinder.suspendAndWait()
+        await pendingRebuild?.value
+        if operations > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
+        await job.history?.flush()
+    }
+
+    func resumeExecution() {
+        guard !retired else { return }
+        suspended = false
+        copyFinder.resume()
+        job.resumeExecution()
+        scheduleRefreshGrid()
+    }
+
     init(settings: AppSettings, job: CompactJob, premium: Premium, automatic: AutomaticMode, copyFinder: CopyFinder) {
         self.settings = settings
         self.job = job
@@ -124,6 +146,13 @@ final class LibraryController {
         journey = JourneyLog(defaults: settings.defaults, tips: !settings.isDemo)
         access = settings.photos.authorization()
         job.onPhaseChange = { [weak self] in self?.jobChanged() }
+        job.onBindingChanged = { [weak self] in
+            guard let self, !self.retired else { return }
+            self.ready = Ready()
+            self.readyChecked = false
+            self.finished = nil
+            self.scheduleRefreshGrid()
+        }
         job.onRunFinished = { [weak self] in
             self?.finishingBackups += 1
             Task { [weak self] in
@@ -149,6 +178,7 @@ final class LibraryController {
 
     /// Why Back Up can't start now, if it can't.
     var backUpBlockedReason: String? {
+        guard settings.backupAdmissionsEnabled else { return "New backup selections are paused; saved work remains recoverable." }
         guard settings.isPaired else { return "Set up your home computer first." }
         if case .blocked(let reason) = settings.connectionTrust { return reason }
         if case .unreachable = settings.serverStatus, !job.canAdmitOffline { return "Can't reach \(serverName)." }
@@ -202,7 +232,7 @@ final class LibraryController {
     }
 
     func refreshGrid() async {
-        guard !retired else { return }
+        guard !retired, !suspended else { return }
         do {
         let kept = try await job.ledger.decisions()
         let backed = try await job.ledger.backedUpSnapshot()
@@ -281,6 +311,7 @@ final class LibraryController {
     }
 
     func refreshReady() async {
+        guard !retired, !suspended else { return }
         if job.bindingContext == nil, settings.isPaired { await job.refreshQueue() }
         guard let remover = job.remover() else {
             ready = Ready()
@@ -328,7 +359,7 @@ final class LibraryController {
     /// The job changed: the items it touched change badge at once; an item that finished (its
     /// compact copy is in the ledger now) brings a full rebuild once things settle.
     func jobChanged() {
-        guard !retired else { return }
+        guard !retired, !suspended else { return }
         let changes = job.takePhaseChanges()
         library.apply(job: changes)
         let finished = changes.values.contains { state in
@@ -342,7 +373,7 @@ final class LibraryController {
     }
 
     private func scheduleRefreshGrid() {
-        guard !retired else { return }
+        guard !retired, !suspended else { return }
         pendingRebuild?.cancel()
         pendingRebuild = Task {
             try? await Task.sleep(for: .milliseconds(400))
@@ -398,7 +429,7 @@ final class LibraryController {
     func runAutomatic() async {
         guard admit() else { return }
         defer { finishedOperation() }
-        guard automatic.enabled, premium.isUnlocked, !job.isRunning, !isRemoving, settings.onboardingComplete else { return }
+        guard automatic.enabled, premium.isUnlocked, !isRemoving, settings.onboardingComplete else { return }
         await automatic.run(settings: settings, job: job, premium: premium, notify: false)
         await refreshReady()
         await refreshGrid()
@@ -488,7 +519,7 @@ final class LibraryController {
 
     /// Restores these originals (see `OriginalRestorer`); `restoring` follows it.
     func restore(_ items: [OriginalRestorer.Item]) {
-        guard !retired, !isRestoring, !items.isEmpty, let restorer = job.restorer() else { return }
+        guard !retired, !suspended, !isRestoring, !items.isEmpty, let restorer = job.restorer() else { return }
         restoring = .running(.init(done: 0, total: items.count, message: "Getting ready"))
         Announce.say(items.count == 1 ? "Restoring the original." : "Restoring \(items.count) originals.")
         restoreTask = Task {

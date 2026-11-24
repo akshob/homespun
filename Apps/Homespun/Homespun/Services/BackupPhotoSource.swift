@@ -52,6 +52,7 @@ struct PhotosObservation: Codable, Equatable, Sendable {
     var token: Data?
     var baseline: Set<String>
     var restoring: Bool
+    var requiresKnownIdentifier: Bool?
 }
 
 enum PhotosReconciliation: Sendable, Equatable {
@@ -212,7 +213,8 @@ extension PhotoKitSource {
 
     func observePhotosEffect(restoring: Bool) throws -> PhotosObservation {
         guard authorization().allowsReading else { throw PhotoLibrary.Failure.notFound }
-        return .init(token: changeToken(), baseline: restoring ? Set(allIdentifiers()) : albumMembers(), restoring: restoring)
+        let token = authorization() == .authorized ? changeToken() : nil
+        return .init(token: token, baseline: [], restoring: restoring, requiresKnownIdentifier: token == nil)
     }
 
     func reconcilePhotosEffect(expected: [ServerAPI.ResourceDescriptor], observation: PhotosObservation,
@@ -230,8 +232,17 @@ extension PhotoKitSource {
         guard authorization() == .authorized else {
             return .blocked("Full Photos access is needed to reconcile an import whose identifier wasn't recorded.")
         }
-        var candidates = (observation.restoring ? Set(allIdentifiers()) : albumMembers()).subtracting(observation.baseline)
-        if let token = observation.token { candidates.formUnion(inserted(since: token).ids) }
+        guard observation.requiresKnownIdentifier != true else {
+            return .blocked("Photos history wasn't available for this creation. Its outcome needs guided recovery; no duplicate was imported.")
+        }
+        let candidates: Set<String>
+        if let token = observation.token {
+            let changes = inserted(since: token)
+            guard changes.read else { return .blocked("Photos history couldn't be read. The earlier creation needs recovery.") }
+            candidates = changes.ids
+        } else {
+            candidates = (observation.restoring ? Set(allIdentifiers()) : albumMembers()).subtracting(observation.baseline)
+        }
         var matches: [(String, [ServerAPI.ResourceDescriptor])] = []
         for id in candidates.sorted() {
             try Task.checkCancellation()

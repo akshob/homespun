@@ -254,9 +254,13 @@ final class AutomaticMode {
         guard enabled, premium.isUnlocked, !running else { return summary }
         running = true
         let mine = admissionGeneration
+        let selectedURL = settings.serverURL, selectedToken = settings.client?.token
+        let selectedTrust = settings.connectionTrust, selectedMode = settings.server?.mode
         defer { running = false }
         func authorized() -> Bool {
             enabled && premium.isUnlocked && admissionGeneration == mine && !Task.isCancelled && !settings.isRetired
+                && settings.serverURL == selectedURL && settings.client?.token == selectedToken
+                && settings.connectionTrust == selectedTrust && settings.server?.mode == selectedMode
         }
         let photos = photos
         guard photos.authorization() == .authorized else {
@@ -288,6 +292,8 @@ final class AutomaticMode {
         canonicalKept = kept
         var snapshot = state
         snapshot.keptAsIs = kept
+        snapshot.settled.formUnion(try await job.ledger.store.automaticExclusions(namespace: job.ledger.namespace))
+        guard authorized() else { return summary }
         let backsUp = settings.server?.mode != .immich
         let plan = await Task.detached(priority: .utility) {
             Self.plan(snapshot, ledger: planLedger, backedUp: planBackedUp, added: snapshot.pending, backsUp: backsUp, photos: photos)

@@ -71,6 +71,7 @@ enum ItemAction: Equatable {
         case .none: return .backUp
         case .failed: return .tryAgain
         case .copyLater: return .compactNow
+        case .recovery: return cell.original == nil ? .backUp : .none
         default: return .none
         }
     }

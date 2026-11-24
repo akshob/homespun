@@ -276,7 +276,7 @@ extension LibraryState.Cell {
     }
 
     /// Can be selected to back up (for an item backed up without a compact copy: to make it now).
-    var canCompact: Bool { [.none, .kept, .failed, .copyLater].contains(badge) }
+    var canCompact: Bool { [.none, .kept, .failed, .copyLater].contains(badge) || badge == .recovery && original == nil }
 
     func matches(_ filter: LibraryState.Filter) -> Bool {
         switch filter {

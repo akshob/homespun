@@ -164,6 +164,16 @@ struct BackupFinalizer: Sendable {
             guard BackupValidation.retained(proof, manifest: manifest, context: context, policy: request.retention) else {
                 throw BackupStageFailure.blocked("The exact original resource set lacks the required retained-origin proof.")
             }
+            if photos.existing([operation.itemID], includeHidden: true).contains(operation.itemID) {
+                let latest = try photos.backupMetadata(operation.itemID)
+                if latest.generation != metadata.generation {
+                    let actual = try await photos.resourceFingerprints(operation.itemID)
+                    guard BackupValidation.matches(manifest.resources, actual) else {
+                        throw BackupStageFailure.sourceChanged("The original changed before its compact copy could be saved. The earlier backup is preserved.")
+                    }
+                }
+                metadata = latest
+            }
             let observation = try photos.observePhotosEffect(restoring: false)
             let intent = try await store.planImport(lease, expected: files.map(\.descriptor))
             _ = try await store.prepareImportContext(intent, metadata: metadata, observation: observation)

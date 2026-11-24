@@ -39,8 +39,8 @@ private struct AppRoot: View {
                 Theme.background.ignoresSafeArea()
             } else {
                 RootView(model: .shared)
-                    .accessibilityHidden(demo.preparation != nil)
-                    .allowsHitTesting(demo.preparation == nil)
+                    .accessibilityHidden(demo.preparation != nil || demo.settling)
+                    .allowsHitTesting(demo.preparation == nil && !demo.settling)
             }
             // Both start points are in the root window. A future sheet needs its own full-screen cover.
             if demo.preparation != nil {

@@ -109,6 +109,16 @@ extension BackupStore {
         }
     }
 
+    func effectMetadata(_ id: UUID, metadata: BackupPhotoMetadata) throws {
+        try mutateState { connection in
+            guard var effect = try Self.effect(id, connection), effect.kind == .restore, effect.phase == .planned else {
+                throw Failure.importNeedsReconciliation
+            }
+            effect.metadata = metadata
+            try Self.writeEffect(effect, connection)
+        }
+    }
+
     func startEffect(_ id: UUID) throws {
         try mutateState { connection in
             guard var effect = try Self.effect(id, connection), effect.phase == .planned else {
