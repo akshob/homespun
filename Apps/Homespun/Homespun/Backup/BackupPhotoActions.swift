@@ -15,6 +15,8 @@ struct DurableOriginalRemover: RemovingOriginals {
         guard await current(), photos.authorization().allowsReading else { throw BackupStore.Failure.retiredBinding }
         let all = try await ledger.snapshot().filter {
             $0.value.origin == context.binding.origin && $0.value.verifiedCompact && (only?.contains($0.key) ?? true)
+                && (context.binding.mode == .files ? $0.value.retention == .permanent
+                    : $0.value.retention == .external && context.information.capabilities.externalVerification == .fullResourceScrub)
         }
         let kept = try await ledger.decisions()
         let originals = photos.existing(Array(all.keys), includeHidden: false)
@@ -329,16 +331,19 @@ struct DurableOriginalRestorer: RestoringOriginals {
         var permit = try await workspace.finalize(operation, bytes: space)
         do {
             var files: [PreparedPhotoResource] = []
+            var resources: [BackupStore.Resource] = []
             for expected in manifest.resources {
                 try Task.checkCancellation()
                 let transfer = BackupStore.Transfer(id: UUID(), operationID: operationID, epoch: operation.epoch,
                     sessionID: context.session.id, kind: .originalDownload, version: version, expected: expected)
                 let resource = try await workspace.downloadOriginal(transfer, requestID: requestID, remote: context.remote, preReserved: true)
+                resources.append(resource)
                 files.append(.init(fileID: resource.fileID,
                     url: ledger.store.files.stagedFile(operationID: operationID, fileID: resource.fileID), descriptor: expected))
                 permit = try await workspace.consume(permit, bytes: expected.size)
             }
             try Task.checkCancellation()
+            try await ledger.store.effectResources(id, resources: resources)
             try await ledger.store.startEffect(id)
             let identifier: String
             do {

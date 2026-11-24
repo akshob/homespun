@@ -28,13 +28,15 @@ struct BackupPreview: Sendable {
         BackupExecutionSessions.claim(session.id)
         let transfer = BackupStore.Transfer(id: UUID(), operationID: operationID, epoch: operation.epoch,
             sessionID: session.id, kind: .originalDownload, version: version, expected: expected)
-        try await store.saveMetadata("preview-transfer:" + transfer.id.uuidString, value: true)
         do {
+            try await store.saveMetadata("preview-transfer:" + transfer.id.uuidString, value: true)
             let resource = try await workspace.downloadOriginal(transfer, requestID: requestID, remote: context.remote)
             return .init(url: store.files.stagedFile(operationID: operationID, fileID: resource.fileID),
                          transferID: transfer.id, sessionID: session.id)
         } catch {
             BackupExecutionSessions.release(session.id)
+            try await store.releasePreviewTransfer(transfer.id)
+            try await workspace.collectReleasedFiles()
             throw error
         }
     }

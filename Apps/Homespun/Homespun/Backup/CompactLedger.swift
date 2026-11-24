@@ -43,6 +43,7 @@ actor CompactLedger {
     static let compactEvery = 1_000
     nonisolated let store: BackupStore
     nonisolated let namespace: String
+    private var cached: (revision: BackupStore.ProjectionRevision, projection: BackupStore.LedgerProjection)?
 
     static var defaultURL: URL { URL.applicationSupportDirectory.appendingPathComponent("Homespun/ledger.json") }
 
@@ -58,7 +59,15 @@ actor CompactLedger {
     }
 
     func snapshot() async throws -> [String: Entry] {
-        try await store.ledgerProjection(namespace: namespace).entries
+        try await projection().entries
+    }
+
+    private func projection() async throws -> BackupStore.LedgerProjection {
+        let revision = try await store.projectionRevision()
+        if let cached, cached.revision == revision { return cached.projection }
+        let result = try await store.ledgerProjection(namespace: namespace)
+        cached = (revision, result)
+        return result
     }
 
     func entry(for original: String) async throws -> Entry? { try await snapshot()[original] }
@@ -73,10 +82,10 @@ actor CompactLedger {
     }
 
     func backedUpSnapshot() async throws -> [String: BackedUp] {
-        try await store.ledgerProjection(namespace: namespace).backedUp
+        try await projection().backedUp
     }
 
-    func decisions() async throws -> Set<String> { try await store.ledgerProjection(namespace: namespace).kept }
+    func decisions() async throws -> Set<String> { try await store.keptDecisions(namespace: namespace) }
 
     func record(original: String, compact: String, originalBytes: Int, compactBytes: Int,
                 serverAssetID: String? = nil) async throws {

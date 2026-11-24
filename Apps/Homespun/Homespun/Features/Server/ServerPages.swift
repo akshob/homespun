@@ -186,8 +186,8 @@ struct AutomaticModeView: View {
             Text(shown == 0
                  ? "Each new photo or video gets its compact copy as soon as it's backed up."
                  : "New photos and videos are backed up right away, and get their compact copies once they're older "
-                    + "than this. Delete one before then and it never comes back as a compact copy; \(model.library.serverName) "
-                    + "keeps its original in its trash for 30 days.")
+                    + "than this. Deleting one before then doesn't schedule a compact copy. Versioned original backups "
+                    + "are retained conservatively; Homespun doesn't promise automatic 30-day server cleanup.")
         }
         .disabled(!enabled)
         .listRowBackground(Theme.card)

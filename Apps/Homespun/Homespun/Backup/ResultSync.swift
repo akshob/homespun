@@ -47,7 +47,11 @@ final class ResultSync {
             try Task.checkCancellation()
             try await drainOutbox(context)
             if try await store.snapshotRun(bindingID: context.binding.id) != nil {
-                try await recoverSnapshot(context)
+                do { try await recoverSnapshot(context) }
+                catch let failure as ServerClient.Failure where failure.code == BackupAPI.ErrorCode.snapshotRequired {
+                    _ = try await store.beginSnapshot(bindingID: context.binding.id)
+                    try await recoverSnapshot(context)
+                }
             } else {
                 do {
                     for _ in 0..<8 {
@@ -57,7 +61,7 @@ final class ResultSync {
                         guard page.origin == context.binding.origin else { throw BackupStore.Failure.invalidReceipt }
                         try Task.checkCancellation()
                         _ = try await store.applyChanges(page, bindingID: context.binding.id)
-                        if !retired, mine == generation {
+                        if !retired, mine == generation, !page.changes.isEmpty {
                             await committed(context, Set(page.changes.map(\.receipt.operationID)))
                         }
                         if !page.hasMore { break }

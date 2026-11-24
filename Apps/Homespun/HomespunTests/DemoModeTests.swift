@@ -32,12 +32,15 @@ import UIKit
             var all: [DemoLibrary.Question] { lock.withLock { questions } }
         }
 
-        static func make() async throws -> Fixture { Fixture(media: try await DemoTestMedia.ready.value) }
+        static func make(processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil) async throws -> Fixture {
+            Fixture(media: try await DemoTestMedia.ready.value, processingDelay: processingDelay)
+        }
 
-        init(media: URL) {
+        init(media: URL, processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil) {
             self.media = media
             let asked = asked
-            session = DemoSession(folder: folder, defaults: UserDefaults(suiteName: settingsName)!, pace: 0, media: media) { asked.ask($0) }
+            session = DemoSession(folder: folder, defaults: UserDefaults(suiteName: settingsName)!, pace: 0,
+                                  media: media, processingDelay: processingDelay) { asked.ask($0) }
             ledger = CompactLedger(url: folder.appendingPathComponent("ledger.json"))
             DemoServer.running.withLock { $0 = session.server }
             // Setup's pages reach it through the shared session, as while the demo is on.
@@ -258,6 +261,59 @@ import UIKit
 
     private func sample(_ library: DemoLibrary, _ kind: String) throws -> DemoSample {
         try #require(library.samples.first { $0.kind == kind })
+    }
+
+    @Test func slowServerVideoDoesNotBlockALaterPhotoOrOwnLocalExecution() async throws {
+        let fixture = try await Fixture.make(processingDelay: { $0 == .video ? 3_600 : 0 })
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let video = try sample(fixture.session.library, "video"), photo = try sample(fixture.session.library, "photo")
+        #expect(await model.job.enqueue([video.id, photo.id]) == [video.id, photo.id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let operations = try await model.job.ledger.store.currentOperations([video.id, photo.id], namespace: model.job.ledger.namespace)
+        let held = try #require(operations.first { $0.itemID == video.id })
+        let finished = try #require(operations.first { $0.itemID == photo.id })
+        #expect(held.backup == .retained && held.compact == .processing)
+        #expect(finished.delivery == .importedVerified)
+        #expect(!model.job.isRunning && !model.premium.isUnlocked)
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
+    @Test func queuedManualWorkSurvivesJoinedRetirementWithoutPremiumOrBlindReimport() async throws {
+        let fixture = try await Fixture.make()
+        let first = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try first.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await first.job.enqueue([photo.id]) == [photo.id])
+        try await first.job.runOpportunity()
+        let before = try #require(try await first.job.ledger.store.currentOperations([photo.id], namespace: first.job.ledger.namespace).first)
+        await first.library.stopAndWait()
+        try await first.closeDemoStore()
+        await #expect(throws: BackupStore.Failure.storageClosed) { try await first.job.ledger.snapshot() }
+        let resumed = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        try await resumed.job.runOpportunity()
+        let after = try #require(try await resumed.job.ledger.store.currentOperations([photo.id], namespace: resumed.job.ledger.namespace).first)
+        #expect(before.id == after.id && after.delivery == .importedVerified)
+        let copies = fixture.session.library.albumMembers()
+        try await resumed.job.runOpportunity()
+        #expect(fixture.session.library.albumMembers() == copies && copies.count == 1)
+        let receipt = try #require(after.receipt), context = try #require(resumed.job.bindingContext)
+        let cancel = BackupAPI.Command(operationID: UUID(), version: receipt.version, action: .cancel)
+        let accepted = try await context.remote.command(requestID: receipt.requestID, cancel)
+        let retry = try await context.remote.command(requestID: receipt.requestID,
+            .init(operationID: UUID(), version: receipt.version, action: .retry))
+        let replay = try await context.remote.command(requestID: receipt.requestID, cancel)
+        #expect(replay == accepted && retry.revision > accepted.revision)
+        await resumed.library.stopAndWait()
+        try await resumed.closeDemoStore()
     }
 
     @Test func durablePreparationIsBoundedAndUncertainImportsRequireAUniqueCompleteMatch() async throws {

@@ -126,14 +126,16 @@ actor DemoServer {
     /// main file's SHA-256.
     private let bundledCompact: @Sendable (String) -> [ServerAPI.ResourceRole: URL]?
 
-    init(folder: URL, pace: Double = 1, bundledCompact: @escaping @Sendable (String) -> [ServerAPI.ResourceRole: URL]?) {
+    init(folder: URL, pace: Double = 1, processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil,
+         bundledCompact: @escaping @Sendable (String) -> [ServerAPI.ResourceRole: URL]?) {
         self.folder = folder
         let generation = UUID().uuidString
         self.generation = generation
         clientSession = Self.makeSession(generation: generation)
         self.pace = pace
         self.bundledCompact = bundledCompact
-        backup = DemoBackupServer(folder: folder.appendingPathComponent("v2"), pace: pace, bundled: bundledCompact)
+        backup = DemoBackupServer(folder: folder.appendingPathComponent("v2"), pace: pace,
+                                  processingDelay: processingDelay, bundled: bundledCompact)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         state = (try? decoder.decode(State.self, from: Data(contentsOf: folder.appendingPathComponent("state.json")))) ?? State()

@@ -201,6 +201,7 @@ struct FirstTaskPage: View {
     private func isOpen(_ state: CompactJob.State?) -> Bool {
         guard let state else { return true }
         if case .working = state { return true }
+        if case .processing = state { return true }
         return state == .waiting
     }
 
@@ -240,14 +241,14 @@ struct FirstTaskPage: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(status).font(.body.monospacedDigit()).foregroundStyle(Theme.label)
                     .accessibilityIdentifier("first.status")
-                Text("Usually under a minute").font(.footnote).foregroundStyle(Theme.secondaryLabel)
+                Text("Originals and compact copies progress independently.").font(.footnote).foregroundStyle(Theme.secondaryLabel)
             }
             if finished, saved.isEmpty {
-                InlineNotice(tone: .error, title: "Nothing was backed up",
+                InlineNotice(tone: .info, title: "No compact copies are ready yet",
                              message: firstProblem ?? "Check that \(name) is on and on this Wi‑Fi, then try again.")
             } else {
                 Label {
-                    Text("Keep Homespun open while it works; the screen stays on.")
+                    Text("Your selection is saved. Return to Homespun to resume; iOS may also allow a run while charging.")
                         .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
                 } icon: {
                     Image(systemName: "iphone").foregroundStyle(Theme.accent)
@@ -294,7 +295,7 @@ struct FirstTaskPage: View {
     }
 
     private var status: String {
-        if finished, saved.isEmpty { return "Backed up · 0 of \(ids.count)" }
+        if finished, saved.isEmpty { return "Compact copies · 0 of \(ids.count)" }
         let (original, compact) = bytes
         var text = "Backing up · \(min(done + (finished ? 0 : 1), ids.count)) of \(ids.count)"
         if original > 0 { text += " · \(SetupAdvisor.roughBytes(original)) → \(SetupAdvisor.roughBytes(compact)) so far" }
@@ -337,6 +338,7 @@ struct FirstTaskPage: View {
             // Stopped: the ones that never started are no longer part of the task.
             flow.taskIDs = ids.filter { states[$0] != nil }
             stopping = false
+            if saved.isEmpty { flow.finish(); return }
         }
         flow.taskFinished = Date()
         if !saved.isEmpty {

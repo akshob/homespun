@@ -37,12 +37,17 @@ actor DemoBackupServer {
         var expires: Date
     }
 
+    private struct AcceptedCommand: Codable, Sendable {
+        var command: BackupAPI.Command
+        var receipt: BackupAPI.Receipt
+    }
+
     private struct State: Codable, Sendable {
         var origin = BackupAPI.Origin(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
         var records: [UUID: Record] = [:]
         var uploads: [UUID: Upload] = [:]
         var changes: [BackupAPI.Change] = []
-        var commands: [UUID: BackupAPI.Command] = [:]
+        var commands: [UUID: AcceptedCommand] = [:]
         var acknowledgements: [UUID: BackupAPI.DeliveryAcknowledgement] = [:]
         var snapshots: [UUID: FrozenSnapshot] = [:]
         var sequence: Int64 = 0
@@ -51,6 +56,7 @@ actor DemoBackupServer {
 
     private let folder: URL
     private let pace: Double
+    private let processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)?
     private let bundled: @Sendable (String) -> [ServerAPI.ResourceRole: URL]?
     private var state: State
     private var unreadable = false
@@ -62,9 +68,11 @@ actor DemoBackupServer {
     private var stateFile: URL { folder.appendingPathComponent("state.json") }
     private var recipe: BackupAPI.Recipe { .init(profile: .standard, backend: "demo-imageio", pipelineVersion: 2) }
 
-    init(folder: URL, pace: Double, bundled: @escaping @Sendable (String) -> [ServerAPI.ResourceRole: URL]?) {
+    init(folder: URL, pace: Double, processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil,
+         bundled: @escaping @Sendable (String) -> [ServerAPI.ResourceRole: URL]?) {
         self.folder = folder
         self.pace = pace
+        self.processingDelay = processingDelay
         self.bundled = bundled
         let file = folder.appendingPathComponent("state.json")
         if FileManager.default.fileExists(atPath: file.path) {
@@ -322,7 +330,8 @@ actor DemoBackupServer {
     private func schedule(_ record: inout Record) {
         if record.complete, record.wantsCompact, !record.paused, !record.cancelled, record.derivative == nil {
             record.compact = .queued
-            record.readyAfter = record.readyAfter ?? Date().addingTimeInterval((record.request.manifest.kind == .video ? 3 : 0.1) * pace)
+            let delay = processingDelay?(record.request.manifest.kind) ?? (record.request.manifest.kind == .video ? 3 : 0.1) * pace
+            record.readyAfter = record.readyAfter ?? Date().addingTimeInterval(delay)
         }
     }
 
@@ -332,13 +341,18 @@ actor DemoBackupServer {
         for var record in records where record.compact == .queued || record.compact == .processing {
             if record.compact == .queued { record.compact = .processing; try publish(record) }
             guard record.readyAfter.map({ $0 <= Date() }) == true else { continue }
-            let generation = UUID(), resources = try makeCompact(record, generation: generation)
-            if resources.reduce(0, { $0 + $1.size }) >= record.request.manifest.resources.reduce(0, { $0 + $1.size }) {
-                record.compact = .held
-                record.message = "Already compact. The byte-identical original stays on the server."
-            } else {
-                record.compact = .ready
-                record.derivative = .init(generationID: generation, version: record.version, resources: resources)
+            do {
+                let generation = UUID(), resources = try makeCompact(record, generation: generation)
+                if resources.reduce(0, { $0 + $1.size }) >= record.request.manifest.resources.reduce(0, { $0 + $1.size }) {
+                    record.compact = .held
+                    record.message = "Already compact. The byte-identical original stays on the server."
+                } else {
+                    record.compact = .ready
+                    record.derivative = .init(generationID: generation, version: record.version, resources: resources)
+                }
+            } catch {
+                record.compact = .failed
+                record.message = "This demo compact copy could not be made. The verified original remains retained."
             }
             try publish(record)
         }
@@ -369,8 +383,8 @@ actor DemoBackupServer {
     private func command(_ command: BackupAPI.Command, record supplied: Record) throws -> BackupAPI.Receipt {
         guard command.version == supplied.version else { throw conflict() }
         if let old = state.commands[command.operationID] {
-            guard old == command else { throw conflict() }
-            return receipt(supplied)
+            guard old.command == command else { throw conflict() }
+            return old.receipt
         }
         var record = supplied
         switch command.action {
@@ -386,9 +400,11 @@ actor DemoBackupServer {
             record.paused = false; record.cancelled = false
             schedule(&record)
         }
-        state.commands[command.operationID] = command
-        try publish(record)
-        return receipt(state.records[record.id]!)
+        try publish(record, persist: false)
+        let accepted = receipt(state.records[record.id]!)
+        state.commands[command.operationID] = .init(command: command, receipt: accepted)
+        try save()
+        return accepted
     }
 
     private func proof(_ record: Record) throws -> BackupAPI.OriginalProof {
@@ -458,7 +474,7 @@ actor DemoBackupServer {
               originals: record.originals, derivative: record.derivative, message: record.message)
     }
 
-    private func publish(_ supplied: Record) throws {
+    private func publish(_ supplied: Record, persist: Bool = true) throws {
         var record = supplied
         if let old = state.records[record.id] {
             guard old.revision < Int64.max else { throw conflict() }
@@ -468,7 +484,7 @@ actor DemoBackupServer {
         state.sequence += 1
         state.records[record.id] = record
         state.changes.append(.init(sequence: state.sequence, receipt: receipt(record)))
-        try save()
+        if persist { try save() }
     }
 
     private func record(_ id: UUID, owner: String) throws -> Record {
