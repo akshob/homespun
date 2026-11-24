@@ -66,6 +66,20 @@ import Darwin
     }
 }
 
+@Test(.timeLimit(.minutes(1))) func processPipeDrainsProgressWhenCooperativeWorkersAreOccupied() async throws {
+    let workers = min(8, max(4, ProcessInfo.processInfo.activeProcessorCount))
+    try await withThrowingTaskGroup(of: Data.self) { group in
+        for _ in 0..<workers {
+            group.addTask {
+                try ProcessRunner.run(["sh", "-c", "printf drained; printf diagnostic >&2"])
+            }
+        }
+        for try await output in group {
+            #expect(String(decoding: output, as: UTF8.self) == "drained")
+        }
+    }
+}
+
 @Test(.timeLimit(.minutes(1))) func processCancellationTerminatesAndReapsOnlyItsOwnedChild() async throws {
     let cancellation = MediaProcessCancellation()
     defer { cancellation.cancel() }
