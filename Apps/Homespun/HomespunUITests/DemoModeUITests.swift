@@ -12,6 +12,32 @@ final class DemoModeUITests: XCTestCase {
     private var app: XCUIApplication!
     @MainActor private var springboard: XCUIApplication { XCUIApplication(bundleIdentifier: "com.apple.springboard") }
 
+    @MainActor func testPairingNeverPresentsTheServersCommandForCopying() throws {
+        app = XCUIApplication()
+        app.launchArguments += ["-hideTips", "-resetDemo", "-testUntrustedPairingAdvice"]
+        app.launchWithFeatures()
+        let demo = app.buttons["setup.demo"]
+        XCTAssertTrue(demo.waitForExistence(timeout: 20))
+        demo.tap()
+        waitForPreparing()
+        let use = app.buttons["found.use"]
+        XCTAssertTrue(use.waitForExistence(timeout: 30))
+        use.tap()
+        XCTAssertTrue(app.textFields["pair.code"].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts["homespun-server pair"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Copy command"].exists)
+        for untrusted in ["UNTRUSTED_PAIR_COMMAND", "/untrusted/server-path"] {
+            XCTAssertFalse(app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", untrusted)).firstMatch.exists,
+                "Unauthenticated server advice became actionable UI")
+        }
+        nothingAsked("untrusted pairing advice")
+        app.buttons["demo.menu"].firstMatch.tap()
+        leave(app.buttons["demo.leave"].firstMatch)
+        XCTAssertTrue(demo.waitForExistence(timeout: 20))
+        XCTAssertTrue(demo.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+    }
+
     @MainActor func testDemoFromWelcomeToLeaving() throws {
         app = XCUIApplication()
         app.launchArguments += ["-hideTips", "-resetDemo"]

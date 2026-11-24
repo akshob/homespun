@@ -207,6 +207,15 @@ actor DemoServer {
         // Before pairing.
         if on("GET", "health") != nil { return try Self.json(ServerAPI.Health(tls: true)) }
         if on("GET", "pair/options") != nil {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-testUntrustedPairingAdvice") {
+                return try Self.json(ServerAPI.PairingOptions(
+                    serverName: Self.name, canApprove: false,
+                    pairCommand: "UNTRUSTED_PAIR_COMMAND /untrusted/server-path",
+                    platform: Self.platform, hardware: Self.hardware, freeBytes: Self.folders[0].free,
+                    pairingVersion: 2, encrypted: true))
+            }
+            #endif
             return try Self.json(ServerAPI.PairingOptions(serverName: Self.name, canApprove: true, pairCommand: "homespun-server pair",
                                                           platform: Self.platform, hardware: Self.hardware,
                                                           freeBytes: Self.folders[0].free, pairingVersion: 2, encrypted: true))

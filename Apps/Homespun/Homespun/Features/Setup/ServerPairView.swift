@@ -44,7 +44,7 @@ struct PairPage: View {
             } else if let loadError {
                 unreachable(loadError)
             } else if let options {
-                if options.canApprove, !useCode { approvalPage } else { codePage(options) }
+                if options.canApprove, !useCode { approvalPage } else { codePage }
             } else {
                 SetupScaffold(title: "Contacting \(name)…", subtitle: target.address) {
                     ProgressView().frame(maxWidth: .infinity).padding(.top, 24)
@@ -208,9 +208,11 @@ struct PairPage: View {
 
     // MARK: 2.1 Pair with a code · 8.4 That code didn't work
 
-    private func codePage(_ options: ServerAPI.PairingOptions) -> some View {
-        SetupScaffold(title: "Get a code from \(name)", subtitle: "On \(name), run this. It shows a code and a QR code.") {
-            CommandBox(command: options.pairCommand)
+    private var codePage: some View {
+        SetupScaffold(title: "Get a code from \(name)",
+                      subtitle: "On the computer where you installed Homespun Server, run this. It shows a code and a QR code.") {
+            // Pairing metadata is not authenticated yet; executable advice must be client-owned.
+            CommandBox(command: "homespun-server pair")
                 .accessibilityIdentifier("pair.command")
             SetupField(label: "Pairing code", error: codeError != nil, focused: codeFocused) {
                 TextField("Pairing code", text: $code, prompt: Text(verbatim: "XXXX-XXXX"))
