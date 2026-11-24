@@ -125,8 +125,8 @@ describe("crash emails", () => {
 		const today = usageKeys(new Date());
 		expect(await usage(today.dayEmails)).toBe(1);
 		expect(await usage(today.dayCrashEmails)).toBe(1);
-		// The row and its indexes, plus 7 counters.
-		expect(await usage(today.dayWrites)).toBe(4 + 7);
+		// Row/indexes, journal reservation, and seven counters.
+		expect(await usage(today.dayWrites)).toBe(4 + 12 + 7);
 	});
 
 	it("fall back to the request's app and device, and show the Objective-C exception", async () => {

@@ -48,7 +48,8 @@ async function cron(overrides: Record<string, unknown> = {}, mail = fakeMail()) 
 }
 
 beforeEach(async () => {
-	await env.DB.batch(["usage", "events", "payloads", "reports"].map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
+	await env.DB.batch(["usage", "events", "payloads", "reports", "object_writes", "erased_installs"]
+		.map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
 });
 
 afterEach(() => {
@@ -89,8 +90,8 @@ describe("metrics and diagnostics", () => {
 		expect(await usage(keys.monthPuts)).toBe(1);
 		expect(await usage(keys.dayPuts)).toBe(1);
 		expect(await usage(keys.dayBytes)).toBe(size);
-		// The row and its 3 indexes, plus 5 counters.
-		expect(await usage(keys.dayWrites)).toBe(9);
+		// Row/indexes, durable write-journal reservation, and five counters.
+		expect(await usage(keys.dayWrites)).toBe(21);
 	});
 
 	it.each([
@@ -101,7 +102,7 @@ describe("metrics and diagnostics", () => {
 		["D1 writes", "dayWrites", "D1_MAX_WRITES_DAY", 1000],
 	] as const)("are refused past 90%% of the %s cap", async (_, counter, variable, cap) => {
 		const body = metrics();
-		const delta = { storedBytes: bytesOf(body), monthPuts: 1, dayPuts: 1, dayBytes: bytesOf(body), dayWrites: 9 }[counter];
+		const delta = { storedBytes: bytesOf(body), monthPuts: 1, dayPuts: 1, dayBytes: bytesOf(body), dayWrites: 21 }[counter];
 		const caps = { [variable]: String(cap) };
 		const key = today()[counter];
 
@@ -227,12 +228,13 @@ describe("reports", () => {
 			put: async () => {
 				throw new Error("R2 unavailable");
 			},
+			delete: (keys: string | string[]) => env.BUCKET.delete(keys),
 		};
 		const response = await sendWith({ BUCKET: bucket, MAIL: mail.binding }, "POST", "/v1/reports", report());
 		expect(response.status).toBe(201);
 		const { id } = await response.json<{ id: string }>();
 		expect(await rows("SELECT r2_key, size FROM reports WHERE id = ?1", id)).toEqual([{ r2_key: "", size: 0 }]);
-		expect(await usage(today().storedBytes)).toBeUndefined();
+		expect(await usage(today().storedBytes)).toBe(0);
 		expect(mail.sent[0].text).toContain("D1 only, without the diagnostics (the R2 write failed)");
 	});
 
@@ -258,12 +260,12 @@ describe("reports", () => {
 
 	it("may use the D1 write budget up to 100%, then answer 503", async () => {
 		const caps = { D1_MAX_WRITES_DAY: "1000" };
-		// Worst case for a report: the row (4), a fallback update (1) and 6 counters.
-		await setUsage({ [today().dayWrites]: 1000 - 11 });
+		// Row, journal reservation, a fallback update, and six counters.
+		await setUsage({ [today().dayWrites]: 1000 - 23 });
 		expect((await sendWith({ ...caps, MAIL: fakeMail().binding }, "POST", "/v1/reports", report())).status).toBe(201);
 		expect((await sendWith(caps, "POST", "/v1/events", batch(1))).status).toBe(503);
 
-		await setUsage({ [today().dayWrites]: 1000 - 10 });
+		await setUsage({ [today().dayWrites]: 1000 - 22 });
 		const busy = await sendWith({ ...caps, MAIL: fakeMail().binding }, "POST", "/v1/reports", report());
 		expect(busy.status).toBe(503);
 		expect(await busy.json()).toEqual({ error: "busy" });
@@ -287,8 +289,8 @@ describe("deletes", () => {
 
 		expect((await sendWith({}, "DELETE", `/v1/installs/${gone}`)).status).toBe(204);
 		expect(await usage(today().storedBytes)).toBe(total! - bytes);
-		// 2 rows with 3 indexes each, r2.bytes, and the writes counter.
-		expect(await usage(today().dayWrites)).toBe(writes + 2 * 4 + 2);
+		// Row/index deletion + byte/write counters + the durable tombstone transaction.
+		expect(await usage(today().dayWrites)).toBe(writes + 2 * 4 + 2 + 3);
 
 		await setUsage({ [today().storedBytes]: 5 });
 		expect((await sendWith({}, "DELETE", `/v1/installs/${kept}`)).status).toBe(204);

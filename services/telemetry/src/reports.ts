@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import { Budget, busy, r2Put, WRITES_PER_ROW, withWrites, type Deltas } from "./budget";
-import { badRequest, isObject, json, type JsonBody } from "./http";
+import { Budget, busy, r2Put, WRITES_PER_ROW, withWrites } from "./budget";
+import { badRequest, HttpError, isObject, json, type JsonBody } from "./http";
 import { isInstall, onlyKeys, parseApp, parseDevice, type AppInfo, type DeviceInfo } from "./validate";
+import { assertInstallLive, cleanOwnWrite, OBJECT_WRITE_WRITES, reserveWrite } from "./writes";
 
 /** Unambiguous symbols for report ids: no 0/O, 1/I/L. */
 export const REPORT_ID_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -53,11 +54,12 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 	const email = parseEmail(value.email);
 	const diagnostics = value.diagnostics ?? null;
 	if (diagnostics !== null && !isObject(diagnostics)) badRequest("diagnostics: must be an object");
+	await assertInstallLive(env, install);
 
 	const now = new Date();
 	const budget = await Budget.load(env, now);
 	// Worst case: the row, a fallback update, and the R2 and email counters.
-	const mostWrites = withWrites({ ...r2Put(body.bytes), dayEmails: 1 }, WRITES_PER_ROW + 1).dayWrites!;
+	const mostWrites = withWrites({ ...r2Put(body.bytes), dayEmails: 1 }, WRITES_PER_ROW + OBJECT_WRITE_WRITES + 1).dayWrites!;
 	if (!budget.allows({ dayWrites: mostWrites })) {
 		await budget.markRefused(env.DB, ["d1"]);
 		throw busy(now);
@@ -65,7 +67,7 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 	const useR2 = budget.allows(r2Put(body.bytes));
 
 	const received = now.toISOString();
-	const id = await insertWithUniqueId(env, (candidate) =>
+	const id = await insertWithUniqueId(env, (candidate) => [
 		env.DB.prepare(INSERT_REPORT).bind(
 			candidate,
 			install,
@@ -77,24 +79,37 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 			device.os,
 			email,
 			message,
-			useR2 ? reportKey(candidate) : "",
-			useR2 ? body.bytes : 0,
+			"",
+			0,
 		),
-	);
+		...(useR2 ? [reserveWrite(env, reportKey(candidate), install, body.bytes, now)] : []),
+		budget.add(env.DB, withWrites(useR2 ? r2Put(body.bytes) : {}, WRITES_PER_ROW + (useR2 ? OBJECT_WRITE_WRITES : 0))),
+	]);
 
 	const updates: D1PreparedStatement[] = [];
-	const deltas: Deltas = {};
 	let r2Key = "";
 	let notInR2: string | undefined;
 	if (useR2) {
 		try {
 			await env.BUCKET.put(reportKey(id), body.text, { httpMetadata: { contentType: "application/json" } });
 			r2Key = reportKey(id);
-			Object.assign(deltas, r2Put(body.bytes));
 		} catch (error) {
 			console.error(`report ${id}: R2 write failed, keeping it in D1 only: ${describe(error)}`);
 			notInR2 = "the R2 write failed";
-			updates.push(env.DB.prepare("UPDATE reports SET r2_key = '', size = 0 WHERE id = ?1").bind(id));
+			try { await cleanOwnWrite(env, reportKey(id)); }
+			catch (cleanupError) { console.error(`report ${id}: cleanup deferred: ${describe(cleanupError)}`); }
+		}
+		if (r2Key) {
+			const [published] = await env.DB.batch([
+				env.DB.prepare(`UPDATE reports SET r2_key = ?2, size = ?3 WHERE id = ?1
+					AND EXISTS (SELECT 1 FROM object_writes WHERE r2_key = ?2 AND state = 'pending')`).bind(id, r2Key, body.bytes),
+				env.DB.prepare(`DELETE FROM object_writes WHERE r2_key = ?2
+					AND EXISTS (SELECT 1 FROM reports WHERE id = ?1 AND r2_key = ?2)`).bind(id, r2Key),
+			]);
+			if (published.meta.changes === 0) {
+				await cleanOwnWrite(env, r2Key);
+				throw new HttpError(410, "write retired");
+			}
 		}
 	} else {
 		console.warn(`report ${id}: R2 budget reached, keeping it in D1 only`);
@@ -102,15 +117,19 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 		updates.push(...budget.flag(env.DB, ["r2"]));
 	}
 
+	await assertInstallLive(env, install);
+	let emailed = false;
 	if (budget.allows({ dayEmails: 1 })) {
 		const report = { id, received, r2Key, notInR2, install, app, device, message, email, diagnostics };
-		if (await sendReportEmail(env, report)) deltas.dayEmails = 1;
+		emailed = await sendReportEmail(env, report);
 	} else {
 		console.warn(`report ${id}: not emailed, the daily cap of ${budget.cap("dayEmails")} report emails is reached`);
 	}
 
 	try {
-		await env.DB.batch([...updates, budget.add(env.DB, withWrites(deltas, WRITES_PER_ROW + updates.length))]);
+		if (emailed) updates.push(budget.add(env.DB, withWrites({ dayEmails: 1 }, updates.length)));
+		else if (updates.length > 0) updates.push(budget.add(env.DB, withWrites({}, updates.length)));
+		if (updates.length > 0) await env.DB.batch(updates);
 	} catch (error) {
 		// The report is stored (and maybe emailed); a retry by the app would only duplicate it.
 		console.error(`report ${id}: usage update failed: ${describe(error)}`);
@@ -139,11 +158,11 @@ export function newReportId(): string {
 }
 
 /** Inserts with fresh ids until one is unused, so a collision never overwrites another report. */
-async function insertWithUniqueId(env: Env, statement: (id: string) => D1PreparedStatement): Promise<string> {
+async function insertWithUniqueId(env: Env, statements: (id: string) => D1PreparedStatement[]): Promise<string> {
 	for (let attempt = 1; ; attempt++) {
 		const id = newReportId();
 		try {
-			await statement(id).run();
+			await env.DB.batch(statements(id));
 			return id;
 		} catch (error) {
 			if (attempt >= ID_ATTEMPTS || !String(error).includes("UNIQUE")) throw error;
