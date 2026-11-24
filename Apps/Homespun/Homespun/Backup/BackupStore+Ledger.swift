@@ -42,6 +42,29 @@ extension BackupStore {
         }
     }
 
+    func needsResultDiscovery(bindingID: UUID, namespace: String, now: Date = Date()) throws -> Bool {
+        try readState { connection in
+            try !connection.rows("""
+                SELECT 1 FROM operations o JOIN lineages l ON l.current_operation = o.id
+                JOIN bindings b ON b.id = o.binding
+                WHERE l.namespace = ? AND o.binding = ? AND b.retired = 0 AND o.desired = 'active'
+                AND coalesce(json_extract(CAST(o.body AS TEXT),'$.attention'),0) = 0
+                AND (o.backup NOT IN ('retained','blocked','failed')
+                     OR (coalesce(json_extract(CAST(o.body AS TEXT),'$.wantsCompact'),0) = 1
+                         AND json_extract(CAST(o.body AS TEXT),'$.compact') NOT IN ('held','failed')
+                         AND o.delivery != 'imported_verified'))
+                UNION ALL
+                SELECT 1 FROM outbox x JOIN operations o ON o.id = x.operation
+                JOIN bindings b ON b.id = o.binding
+                WHERE o.namespace = ? AND json_extract(CAST(x.body AS TEXT),'$.bindingID') = ? AND b.retired = 0
+                AND (json_extract(CAST(x.body AS TEXT),'$.nextAttempt') IS NULL
+                     OR json_extract(CAST(x.body AS TEXT),'$.nextAttempt') <= ?)
+                LIMIT 1
+                """, [.text(namespace), .text(bindingID.uuidString), .text(namespace), .text(bindingID.uuidString),
+                       .real(now.timeIntervalSinceReferenceDate)]).isEmpty
+        }
+    }
+
     struct BindingInformation: Codable, Equatable, Sendable {
         var capabilities: BackupAPI.Capabilities
         var name: String

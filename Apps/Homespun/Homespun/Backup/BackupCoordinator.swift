@@ -14,6 +14,10 @@ final class BackupCoordinator {
         var stage: BackupStore.Stage
         var task: Task<Void, Never>
     }
+    private struct Discovery {
+        var id: UUID
+        var task: Task<Void, Never>
+    }
 
     let store: BackupStore
     let photos: any PhotoSource
@@ -22,7 +26,9 @@ final class BackupCoordinator {
     private var workspace: BackupWorkspace?
     private var active: [UUID: Work] = [:]
     private var driver: Task<Void, Never>?
-    private var discovery: Task<Void, Never>?
+    private var discovery: Discovery?
+    private var discoveryAgain = false
+    private let discoverySleep: @Sendable (Duration) async throws -> Void
     private var resultSync: ResultSync
     private var driveAgain = false
     private var retired = false
@@ -41,10 +47,12 @@ final class BackupCoordinator {
     var failed: @MainActor (Error) -> Void = { _ in }
     var notifyReady: @MainActor (BackupBindingContext) async throws -> Bool = { _ in false }
 
-    init(store: BackupStore, photos: any PhotoSource, namespace: String) {
+    init(store: BackupStore, photos: any PhotoSource, namespace: String,
+         discoverySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.store = store
         self.photos = photos
         self.namespace = namespace
+        self.discoverySleep = discoverySleep
         resultSync = ResultSync(store: store)
         configureSync()
     }
@@ -72,7 +80,8 @@ final class BackupCoordinator {
         generation &+= 1
         let mine = generation, old = self.context
         self.context = nil
-        discovery?.cancel()
+        discovery?.task.cancel()
+        let previousDiscovery = discovery
         driver?.cancel()
         let previousDriver = driver
         driver = nil
@@ -80,6 +89,7 @@ final class BackupCoordinator {
         if let old { try await store.retireBinding(old.binding.id) }
         await resultSync.stopAndWait()
         await previousDriver?.value
+        await previousDiscovery?.task.value
         let previous = active.values.map(\.task)
         for task in previous { await task.value }
         if let old { BackupExecutionSessions.release(old.session.id) }
@@ -193,7 +203,7 @@ final class BackupCoordinator {
 
     func setVisible(_ visible: Bool) {
         self.visible = visible
-        if !visible { discovery?.cancel(); discovery = nil }
+        if !visible { discovery?.task.cancel() }
         else { drive(); scheduleDiscovery() }
     }
 
@@ -458,23 +468,54 @@ final class BackupCoordinator {
     }
 
     private func scheduleDiscovery() {
-        guard visible, !retired, !suspended, discovery == nil, context != nil else { return }
-        let mine = generation
-        discovery = Task {
-            defer { discovery = nil }
-            for delay in [1, 2, 4, 8, 15, 30] {
-                do {
-                    try await Task.sleep(for: .seconds(delay))
-                    guard !retired, visible, generation == mine, let context else { return }
-                    try await resultSync.synchronize(context)
-                    drive()
-                } catch {
-                    if error is CancellationError { return }
-                    failed(error)
-                    if let failure = error as? ServerClient.Failure, failure.code == BackupAPI.ErrorCode.historyChanged { return }
+        guard visible, !retired, !suspended, context != nil else { return }
+        guard discovery == nil else { discoveryAgain = true; return }
+        let mine = generation, id = UUID()
+        discoveryAgain = false
+        let task = Task {
+            var restart = true
+            defer {
+                if discovery?.id == id {
+                    discovery = nil
+                    if restart, discoveryAgain, visible, !retired, !suspended, generation == mine { scheduleDiscovery() }
                 }
             }
+            let delays = [1, 2, 4, 8, 15, 30]
+            var attempt = 0
+            while !retired, visible, !suspended, generation == mine {
+                do {
+                    try Task.checkCancellation()
+                    discoveryAgain = false
+                    guard let context else { return }
+                    let sync = resultSync
+                    let pending = try await store.needsResultDiscovery(bindingID: context.binding.id, namespace: namespace)
+                    if !pending {
+                        if discoveryAgain { continue }
+                        return
+                    }
+                    try await discoverySleep(.seconds(delays[min(attempt, delays.count - 1)]))
+                    guard !retired, visible, !suspended, generation == mine,
+                          self.context?.binding.id == context.binding.id else { return }
+                    try await sync.synchronize(context)
+                    drive()
+                } catch {
+                    if Task.isCancelled { return }
+                    if error is CancellationError { continue }
+                    failed(error)
+                    if let failure = error as? ServerClient.Failure, failure.code == BackupAPI.ErrorCode.historyChanged {
+                        restart = false
+                        return
+                    }
+                    if error is BackupDatabase.Failure || error is BackupDatabase.RollbackFailure
+                        || (error as? BackupStore.Failure) == .storageClosed {
+                        restart = false
+                        return
+                    }
+                }
+                attempt = min(attempt + 1, delays.count - 1)
+            }
         }
+        discovery = .init(id: id, task: task)
     }
 
     func pause(only ids: Set<String>? = nil) async throws {
@@ -527,7 +568,7 @@ final class BackupCoordinator {
         schedulingPaused = true
         generation &+= 1
         driver?.cancel()
-        discovery?.cancel()
+        discovery?.task.cancel()
         resultSync.retire()
         for work in active.values { work.task.cancel() }
     }
@@ -535,7 +576,7 @@ final class BackupCoordinator {
     func stopAndWait() async throws {
         retire()
         await driver?.value
-        await discovery?.value
+        await discovery?.task.value
         await resultSync.stopAndWait()
         let tasks = active.values.map(\.task)
         for task in tasks { await task.value }
@@ -547,7 +588,7 @@ final class BackupCoordinator {
         suspended = true
         generation &+= 1
         driver?.cancel()
-        discovery?.cancel()
+        discovery?.task.cancel()
         resultSync.retire()
         for work in active.values { work.task.cancel() }
     }
@@ -555,7 +596,7 @@ final class BackupCoordinator {
     func suspendAndWait() async throws {
         suspend()
         await driver?.value
-        await discovery?.value
+        await discovery?.task.value
         await resultSync.stopAndWait()
         let tasks = active.values.map(\.task)
         for task in tasks { await task.value }

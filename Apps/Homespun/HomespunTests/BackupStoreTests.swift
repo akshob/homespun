@@ -58,6 +58,25 @@ private struct BackupStoreFixture {
     }
 }
 
+@Test func resultDiscoveryTracksCurrentWorkAndStopsAfterTerminalOutboxesAreDrained() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let store = fixture.store
+    #expect(try await store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
+    #expect(try await !store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "other"))
+    try await store.setDesired(.paused, operationID: fixture.operationID)
+    #expect(try await !store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
+    try await store.setDesired(.active, operationID: fixture.operationID)
+    let lease = try #require(try await store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await store.planImport(lease, expected: [fixture.compact])
+    try await store.startImport(intent.id, lease: lease)
+    try await store.importCreated(intent.id, identifier: "synthetic-import")
+    _ = try await store.finishImport(intent.id, actual: [fixture.compact], proof: fixture.proof)
+    #expect(try await store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
+    for item in try await store.outbox(bindingID: fixture.binding.id) { try await store.acknowledgeOutbox(item.id) }
+    #expect(try await !store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
+}
+
 @Test func durableAdmissionDeduplicatesAndSurvivesReopening() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

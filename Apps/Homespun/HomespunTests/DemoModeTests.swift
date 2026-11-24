@@ -61,6 +61,143 @@ import UIKit
         }
     }
 
+    private actor DiscoveryClock {
+        private var pending: [UUID: CheckedContinuation<Void, Error>] = [:]
+        private(set) var intervals: [Duration] = []
+        var waiting: Int { pending.count }
+
+        func sleep(_ duration: Duration) async throws {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                    else {
+                        intervals.append(duration)
+                        pending[id] = continuation
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancel(id) }
+            }
+        }
+
+        func advance() -> Bool {
+            guard let id = pending.keys.first, let continuation = pending.removeValue(forKey: id) else { return false }
+            continuation.resume()
+            return true
+        }
+
+        private func cancel(_ id: UUID) { pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
+    }
+
+    private actor DelayedReadyRemote: BackupRemote {
+        nonisolated let baseURL: URL
+        private let base: any BackupRemote
+        private var released = false
+        private(set) var held = 0
+
+        init(_ base: any BackupRemote) { self.base = base; baseURL = base.baseURL }
+        func release() { released = true }
+        func changes(after cursor: Int64, epoch: String) async throws -> BackupAPI.Changes {
+            let page = try await base.changes(after: cursor, epoch: epoch)
+            if !released, page.changes.contains(where: { $0.receipt.compact == .ready }) {
+                held += 1
+                return .init(origin: page.origin, cursor: cursor, hasMore: false, changes: [])
+            }
+            return page
+        }
+        func capabilities() async throws -> BackupAPI.Capabilities { try await base.capabilities() }
+        func submit(_ request: BackupAPI.Request) async throws -> BackupAPI.Receipt { try await base.submit(request) }
+        func lookup(operationID: UUID) async throws -> [BackupAPI.Receipt] { try await base.lookup(operationID: operationID) }
+        func status(_ requestID: UUID) async throws -> BackupAPI.Receipt { try await base.status(requestID) }
+        func command(requestID: UUID, _ command: BackupAPI.Command) async throws -> BackupAPI.Receipt {
+            try await base.command(requestID: requestID, command)
+        }
+        func admitUpload(_ request: BackupAPI.UploadRequest) async throws -> BackupAPI.UploadAdmission { try await base.admitUpload(request) }
+        func uploadPosition(_ uploadID: UUID) async throws -> BackupUploadPosition { try await base.uploadPosition(uploadID) }
+        func append(_ bytes: Data, uploadID: UUID, offset: Int64) async throws -> Int64 { try await base.append(bytes, uploadID: uploadID, offset: offset) }
+        func completeUpload(_ uploadID: UUID) async throws -> BackupAPI.Receipt { try await base.completeUpload(uploadID) }
+        func snapshot(continuation: String?) async throws -> BackupAPI.Snapshot { try await base.snapshot(continuation: continuation) }
+        func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws -> HTTPURLResponse {
+            try await base.download(generation: generation, resource: resource, to: file)
+        }
+        func downloadOriginal(version: BackupAPI.Version, requestID: UUID,
+                              resource: ServerAPI.ResourceDescriptor, to file: URL) async throws -> HTTPURLResponse {
+            try await base.downloadOriginal(version: version, requestID: requestID, resource: resource, to: file)
+        }
+        func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof { try await base.verify(version) }
+        func acknowledge(_ acknowledgement: BackupAPI.DeliveryAcknowledgement) async throws { try await base.acknowledge(acknowledgement) }
+    }
+
+    private func eventually(_ condition: @MainActor () async throws -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            if try await condition() { return }
+            await Task.yield()
+        }
+        try #require(try await condition(), "The synthetic delivery did not reach its expected state")
+    }
+
+    @Test func foregroundDiscoveryDeliversAfterItsInitialBackoffAndPublishesTheFreeUpOffer() async throws {
+        let fixture = try await Fixture.make(), clock = DiscoveryClock()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let job = CompactJob(settings: settings, ledger: fixture.ledger,
+                             discoverySleep: { try await clock.sleep($0) })
+        let automatic = AutomaticMode(url: fixture.folder.appendingPathComponent("automatic.json"),
+                                      photos: fixture.session.library, system: false)
+        let finder = CopyFinder(url: fixture.folder.appendingPathComponent("finder.json"), photos: fixture.session.library)
+        let controller = LibraryController(settings: settings, job: job,
+            premium: Premium(ownBuild: false, listens: false), automatic: automatic, copyFinder: finder)
+        do {
+            let client = try await fixture.pairedClient()
+            try settings.finishPairing(serverURL: DemoServer.baseURL,
+                response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+            var context = try await settings.backupContext(store: job.ledger.store, namespace: job.ledger.namespace)
+            let remote = DelayedReadyRemote(context.remote)
+            context.remote = remote
+            let policy = try await settings.backupSpacePolicy(store: job.ledger.store)
+            try await job.coordinator.activate(context, policy: policy)
+            await controller.library.reload()
+            job.setVisible(true)
+            let photo = try sample(fixture.session.library, "photo")
+            controller.backUp([photo.id])
+            try await eventually {
+                let operation = try await job.ledger.store.currentOperations([photo.id], namespace: job.ledger.namespace).first
+                return operation?.backup == .retained && !job.isRunning
+            }
+            for attempt in 1...7 {
+                try await eventually { await clock.waiting == 1 }
+                #expect(await clock.advance())
+                try await eventually { await remote.held == attempt }
+                #expect(!job.isRunning && controller.ready.count == 0 && controller.finished == nil)
+            }
+            try await eventually { await clock.waiting == 1 }
+            let sleeps = await clock.intervals.count
+            job.setVisible(false)
+            job.setVisible(true)
+            try await eventually {
+                let count = await clock.intervals.count, waiting = await clock.waiting
+                return count > sleeps && waiting == 1
+            }
+            await remote.release()
+            #expect(await clock.advance())
+            try await eventually { controller.finished?.originals == [photo.id] && controller.ready.count == 1 }
+            let entry = try #require(try await job.ledger.entry(for: photo.id))
+            #expect(entry.verifiedCompact && fixture.session.library.isCopy(entry.compactIdentifier))
+            #expect(!job.isRunning && job.queueProblem == nil)
+        } catch let failure {
+            await controller.stopAndWait()
+            do { try await job.ledger.store.close() } catch { Issue.record(error) }
+            throw failure
+        }
+        await controller.stopAndWait()
+        try await job.ledger.store.close()
+        #expect(await clock.waiting == 0)
+    }
+
     @Test func catalogObservationCancelsAndDoesNotRetainTheCatalog() async throws {
         let fixture = try await Fixture.make()
         var catalog: DemoLibrary? = DemoLibrary(folder: fixture.folder.appendingPathComponent("observed"),

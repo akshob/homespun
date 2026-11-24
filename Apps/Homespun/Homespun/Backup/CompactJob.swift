@@ -136,11 +136,13 @@ final class CompactJob {
     var bindingContext: BackupBindingContext? { coordinator.context }
     var canAdmitOffline: Bool { coordinator.context.map { settings.matchesBackupBinding($0.binding) } ?? false }
 
-    init(settings: AppSettings, ledger: CompactLedger = CompactLedger(), compactor: (any Compacting)? = nil) {
+    init(settings: AppSettings, ledger: CompactLedger = CompactLedger(), compactor: (any Compacting)? = nil,
+         discoverySleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.settings = settings
         self.ledger = ledger
         suppliedCompactor = compactor
-        coordinator = BackupCoordinator(store: ledger.store, photos: settings.photos, namespace: ledger.namespace)
+        coordinator = BackupCoordinator(store: ledger.store, photos: settings.photos, namespace: ledger.namespace,
+                                        discoverySleep: discoverySleep)
         coordinator.changed = { [weak self] ids in self?.project(ids) }
         coordinator.progress = { [weak self] id, message in self?.stageProgress(id, message: message) }
         coordinator.localWork = { [weak self] count in
@@ -248,6 +250,7 @@ final class CompactJob {
                 positions[operation.id] = index
                 states[operation.itemID] = state
                 noteChange(operation.itemID, state)
+                if state.phase == .saved { terminal = true }
             }
             retainedIDs.remove(operation.id); remoteIDs.remove(operation.id); pausedIDs.remove(operation.id)
             if operation.origin == activeOrigin {
