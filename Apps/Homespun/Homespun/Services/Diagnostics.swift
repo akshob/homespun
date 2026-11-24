@@ -9,24 +9,98 @@ import os
 /// the developer only if the person shares analytics; the latest diagnostics also stay on this
 /// iPhone for a problem report.
 final class MetricsReceiver: NSObject, MXMetricManagerSubscriber, @unchecked Sendable {
-    static let shared = MetricsReceiver()
+    @MainActor static let shared = MetricsReceiver()
+    private let telemetry: Telemetry
+    private let store: DiagnosticsStore
+
+    @MainActor init(telemetry: Telemetry = .shared, store: DiagnosticsStore = .shared) {
+        self.telemetry = telemetry
+        self.store = store
+        super.init()
+    }
 
     func start() { MXMetricManager.shared.add(self) }
 
     func didReceive(_ payloads: [MXMetricPayload]) {
-        let payloads = payloads.map { $0.jsonRepresentation() }
+        let payloads = payloads.map { ($0.jsonRepresentation(), $0.timeStampBegin, $0.timeStampEnd) }
         Task { @MainActor in
-            for payload in payloads { await Telemetry.shared.upload(payload: payload, kind: "metrics") }
+            for (data, begin, end) in payloads {
+                await receive(data, begin: begin, end: end, kind: "metrics")
+            }
         }
     }
 
     func didReceive(_ payloads: [MXDiagnosticPayload]) {
-        let payloads = payloads.map { $0.jsonRepresentation() }
+        let payloads = payloads.map { ($0.jsonRepresentation(), $0.timeStampBegin, $0.timeStampEnd) }
         Task { @MainActor in
-            for payload in payloads {
-                DiagnosticsStore.shared.keep(payload)
-                await Telemetry.shared.upload(payload: payload, kind: "diagnostics")
+            for (data, begin, end) in payloads {
+                await receive(data, begin: begin, end: end, kind: "diagnostics")
             }
+        }
+    }
+
+    /// Also used by tests without manufacturing system-owned MetricKit payloads.
+    @MainActor func receive(_ data: Data, begin: Date, end: Date, kind: String) async {
+        guard !telemetry.paused, telemetry.diagnosticPolicy.allows(begin: begin, end: end) else { return }
+        if kind == "diagnostics" { store.keep(data, begin: begin, end: end) }
+        await telemetry.upload(payload: data, kind: kind, begin: begin, end: end)
+    }
+}
+
+/// MetricKit aggregates can arrive days later and cover both namespaces. Drop the *whole*
+/// overlapping payload, even its real-use portion. Intervals survive relaunch; an interrupted
+/// demo stays open until a real launch/leave resolves it. Before this policy existed attribution
+/// was unknown, so historical payloads are conservatively excluded too.
+@MainActor
+final class DiagnosticPolicy {
+    private struct Interval: Codable {
+        var begin: Date
+        var end: Date?
+    }
+    private struct History: Codable {
+        var since: Date
+        var intervals: [Interval]
+    }
+    private let defaults: UserDefaults
+    private let now: () -> Date
+    private var history: History
+    private static let key = "diagnostics.demoIntervals"
+
+    init(defaults: UserDefaults, now: @escaping () -> Date = Date.init) {
+        self.defaults = defaults
+        self.now = now
+        if let data = defaults.data(forKey: Self.key) {
+            // Corrupt attribution history is not permission to collect.
+            history = (try? JSONDecoder().decode(History.self, from: data))
+                ?? History(since: .distantFuture, intervals: [])
+        } else {
+            history = History(since: now(), intervals: [])
+            persist()
+        }
+    }
+
+    func setDemo(_ on: Bool) {
+        if on {
+            if history.intervals.last?.end != nil || history.intervals.isEmpty {
+                history.intervals.append(Interval(begin: now()))
+            }
+        } else if let last = history.intervals.indices.last, history.intervals[last].end == nil {
+            history.intervals[last].end = now()
+        }
+        persist()
+    }
+
+    func allows(begin: Date, end: Date) -> Bool {
+        guard begin >= history.since, begin <= end, end <= now() else { return false }
+        return !history.intervals.contains { begin <= ($0.end ?? .distantFuture) && end >= $0.begin }
+    }
+
+    private func persist() {
+        // History contains only finite Dates and is always JSON encodable.
+        do { defaults.set(try JSONEncoder().encode(history), forKey: Self.key) }
+        catch {
+            history.since = .distantFuture
+            Logger(subsystem: "photos.homespun.app", category: "Diagnostics").error("Diagnostic attribution unavailable.")
         }
     }
 }
@@ -38,22 +112,44 @@ final class DiagnosticsStore {
     static let kept = 3
 
     private let folder: URL
-
-    init(folder: URL = URL.applicationSupportDirectory.appendingPathComponent("Homespun/diagnostics")) {
-        self.folder = folder
+    private let isPaused: () -> Bool
+    private struct Stored: Codable {
+        var begin: Date
+        var end: Date
+        var payload: Data
     }
 
-    func keep(_ payload: Data) {
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let name = "\(Int(Date().timeIntervalSince1970 * 1000)).json"
-        try? payload.write(to: folder.appendingPathComponent(name), options: .atomic)
-        for old in files().dropFirst(Self.kept) { try? FileManager.default.removeItem(at: old) }
+    init(folder: URL = URL.applicationSupportDirectory.appendingPathComponent("Homespun/diagnostics"),
+         isPaused: @escaping () -> Bool = { Telemetry.shared.paused }) {
+        self.folder = folder
+        self.isPaused = isPaused
+    }
+
+    func keep(_ payload: Data, begin: Date, end: Date) {
+        guard !isPaused() else { return }
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let name = "\(Int(Date().timeIntervalSince1970 * 1000)).json"
+            let stored = Stored(begin: begin, end: end, payload: payload)
+            try JSONEncoder().encode(stored).write(to: folder.appendingPathComponent(name), options: .atomic)
+            for old in files().dropFirst(Self.kept) { try FileManager.default.removeItem(at: old) }
+        } catch {
+            Logger(subsystem: "photos.homespun.app", category: "Diagnostics").error("Could not retain diagnostics on this device.")
+        }
     }
 
     /// The newest payload, decoded (nil if there is none).
     func latest() -> [String: Any]? {
-        guard let file = files().first, let data = try? Data(contentsOf: file) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard !isPaused() else { return nil }
+        for file in files() {
+            // Old raw caches predate trustworthy demo attribution and must not enter a report.
+            guard let data = try? Data(contentsOf: file),
+                  let stored = try? JSONDecoder().decode(Stored.self, from: data),
+                  stored.begin <= stored.end,
+                  let payload = try? JSONSerialization.jsonObject(with: stored.payload) as? [String: Any] else { continue }
+            return payload
+        }
+        return nil
     }
 
     /// Newest first (names are millisecond timestamps).
@@ -91,13 +187,15 @@ final class SessionMarker {
     /// Show the "quit unexpectedly" question (once per such ending).
     var offersReport = false
     private let defaults: UserDefaults
+    private let telemetry: Telemetry
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, telemetry: Telemetry = .shared) {
         self.defaults = defaults
-        endedUnexpectedly = defaults.bool(forKey: "session.foreground") || Self.simulated(defaults)
+        self.telemetry = telemetry
+        endedUnexpectedly = !telemetry.paused && (defaults.bool(forKey: "session.foreground") || Self.simulated(defaults))
         defaults.set(false, forKey: "session.foreground")
         if endedUnexpectedly {
-            Telemetry.shared.record(.crashMarker())
+            telemetry.record(.crashMarker())
             offersReport = Self.asks(defaults)
         }
     }
@@ -121,6 +219,6 @@ final class SessionMarker {
         #endif
     }
 
-    func active() { defaults.set(true, forKey: "session.foreground") }
+    func active() { defaults.set(!telemetry.paused, forKey: "session.foreground") }
     func background() { defaults.set(false, forKey: "session.foreground") }
 }

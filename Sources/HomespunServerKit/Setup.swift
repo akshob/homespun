@@ -232,7 +232,8 @@ enum ServiceInstaller {
         let keys = environment.keys.sorted()
         switch os {
         case .linux:
-            let lines = keys.map { "Environment=\"\($0)=\(environment[$0]!.replacingOccurrences(of: "\"", with: "\\\""))\"" }
+            let lines = keys.map { "Environment=\(systemdQuoted("\($0)=\(environment[$0]!)"))" }
+            // ':' keeps dollar signs literal in both the executable path and argv[0].
             let unit = """
                 [Unit]
                 Description=Homespun Server
@@ -240,7 +241,7 @@ enum ServiceInstaller {
                 Wants=network-online.target
 
                 [Service]
-                ExecStart=\(executable) serve
+                ExecStart=:\(systemdQuoted(executable)) serve
                 \(lines.joined(separator: "\n"))
                 Restart=on-failure
                 RestartSec=5
@@ -286,6 +287,24 @@ enum ServiceInstaller {
             return Plan(path: path, contents: plist, prepare: [["launchctl", "bootout", "gui/\(userID)/\(label)"]],
                         commands: [["launchctl", "bootstrap", "gui/\(userID)", path.path]])
         }
+    }
+
+    private static func systemdQuoted(_ value: String) -> String {
+        var result = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "\\": result += "\\\\"
+            case "\"": result += "\\\""
+            case "%": result += "%%"
+            case "\n": result += "\\n"
+            case "\r": result += "\\r"
+            case "\t": result += "\\t"
+            case _ where scalar.value < 32 || scalar.value == 127:
+                result += String(format: "\\x%02x", scalar.value)
+            default: result.unicodeScalars.append(scalar)
+            }
+        }
+        return result + "\""
     }
 }
 

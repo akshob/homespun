@@ -88,3 +88,39 @@ export function fakeMail(options: { fail?: boolean } = {}) {
 		},
 	};
 }
+
+/** Deterministic suspension at a storage boundary; no timers or live endpoints. */
+export function barrier() {
+	let enter!: () => void;
+	let release!: () => void;
+	const reached = new Promise<void>((resolve) => { enter = resolve; });
+	const released = new Promise<void>((resolve) => { release = resolve; });
+	return { reached, release, async hold() { enter(); await released; } };
+}
+
+/** Keep real D1 transactions, but intercept a selected batch before/after its atomic commit. */
+export function interceptDatabase(intercept: (sql: string[], commit: () => Promise<D1Result<unknown>[]>) =>
+	Promise<D1Result<unknown>[]>): D1Database {
+	const statements = new WeakMap<D1PreparedStatement, { raw: D1PreparedStatement; sql: string }>();
+	const wrap = (raw: D1PreparedStatement, sql: string): D1PreparedStatement => {
+		const proxy = new Proxy(raw, {
+			get(target, property) {
+				if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values), sql);
+				const value = Reflect.get(target, property);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		statements.set(proxy, { raw, sql });
+		return proxy;
+	};
+	return new Proxy(env.DB, {
+		get(target, property) {
+			if (property === "prepare") return (sql: string) => wrap(target.prepare(sql), sql);
+			if (property === "batch") return (batch: D1PreparedStatement[]) =>
+				intercept(batch.map((stmt) => statements.get(stmt)!.sql),
+					() => target.batch(batch.map((stmt) => statements.get(stmt)!.raw)));
+			const value = Reflect.get(target, property);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}

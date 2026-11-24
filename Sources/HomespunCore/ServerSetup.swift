@@ -133,12 +133,11 @@ public enum ServerSetup {
     /// The freshly built server, before it is installed.
     static let builtCommand = "~/homespun/.build/release/homespun-server"
 
-    /// Steps to build and start the server from source. (Packages come later, once the
-    /// repository is public.)
+    /// Steps to build and start the server from its public source.
     public static func installSteps(for os: OperatingSystem, packageManager: PackageManager? = nil) -> [Step] {
         let build = Step(
             title: "Download and build Homespun Server",
-            detail: "This takes a few minutes. The repository is private for now, so sign in to GitHub first if asked.",
+            detail: "This takes a few minutes. The source is public; no GitHub account is needed to download it.",
             commands: ["git clone \(repository) ~/homespun",
                        "cd ~/homespun && swift build -c release --product homespun-server"])
         let service = Step(

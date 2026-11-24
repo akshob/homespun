@@ -17,7 +17,7 @@ final class LongRun {
     /// Shorter runs finish while the person watches; they don't need the system's progress.
     static let minimumItems = 10
 
-    private var running = false
+    private var runID: UUID?
 
     /// Asks iOS to keep this run going in the background, if it's long enough to need it. Never
     /// stops the run: if iOS says no (or raises), the run simply carries on while Homespun is open.
@@ -28,14 +28,15 @@ final class LongRun {
 
     @discardableResult
     func begin(items: Int, server: String) -> Outcome {
-        guard items >= Self.minimumItems, !running else { return .notNeeded }
-        let identifier = Self.prefix + "." + UUID().uuidString.prefix(8).lowercased()
+        guard items >= Self.minimumItems, runID == nil else { return .notNeeded }
+        let runID = UUID()
+        let identifier = Self.prefix + "." + runID.uuidString.prefix(8).lowercased()
         var registered = false
         var failure: NSError?
         do {
             try HSObjC.catching {
                 registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil,
-                                                             launchHandler: Self.launchHandler())
+                                                             launchHandler: Self.launchHandler(runID: runID))
             }
         } catch {
             failure = error as NSError
@@ -62,7 +63,7 @@ final class LongRun {
             Self.unavailable("submit", failure)
             return .unavailable("submit: " + failure.localizedDescription)
         }
-        running = true
+        self.runID = runID
         return .started
     }
 
@@ -70,22 +71,29 @@ final class LongRun {
     /// main-actor class would be main-actor code, and Swift stops the app when it runs elsewhere
     /// (0.1.0 (202611151655) ended this way on a phone, as the system started the task). Made here,
     /// outside the main actor, they hop to it themselves.
-    nonisolated private static func launchHandler() -> @Sendable (BGTask) -> Void {
+    nonisolated private static func launchHandler(runID: UUID) -> @Sendable (BGTask) -> Void {
         { task in
             guard let task = task as? BGContinuedProcessingTask else {
                 task.setTaskCompleted(success: false)
                 return
             }
             let box = TaskBox(task: task)
-            Task { @MainActor in await LongRun.shared.follow(box, job: AppModel.shared.job) }
+            Task { @MainActor in
+                guard LongRun.shared.runID == runID else {
+                    box.task.setTaskCompleted(success: false)
+                    return
+                }
+                await LongRun.shared.follow(box, job: AppModel.shared.job, runID: runID)
+            }
         }
     }
 
-    nonisolated private static func expirationHandler(_ box: TaskBox, expiry: ExpiryBox, job: CompactJob)
+    nonisolated private static func expirationHandler(completion: Completion, job: CompactJob, runID: UUID)
         -> @Sendable () -> Void {
         {
-            expiry.expired = true
+            guard completion.finish(success: false) else { return }
             Task { @MainActor in
+                guard LongRun.shared.runID == runID else { return }
                 // Open on screen, the run simply carries on (it doesn't need the system's time). In
                 // the background, what hasn't started is dropped, or iOS ends the app.
                 guard UIApplication.shared.applicationState != .active else {
@@ -94,7 +102,6 @@ final class LongRun {
                 }
                 job.stopWaiting(Set(job.items.filter { $0.state == .waiting }.map(\.assetIdentifier)))
             }
-            box.task.setTaskCompleted(success: false)
         }
     }
 
@@ -127,16 +134,19 @@ final class LongRun {
 
     /// Reports the job's progress to the system until it ends; Stop from the system drops what
     /// hasn't started (items already backed up stay backed up).
-    private func follow(_ box: TaskBox, job: CompactJob) async {
+    private func follow(_ box: TaskBox, job: CompactJob, runID: UUID) async {
         let task = box.task
-        let expiry = ExpiryBox()
+        let completion = Completion { success in
+            if success { box.task.progress.completedUnitCount = box.task.progress.totalUnitCount }
+            box.task.setTaskCompleted(success: success)
+        }
         // iOS ended it (Stop on the Lock Screen, or out of time): drop what hasn't started and say
         // so at once, or iOS ends the app. The item in progress finishes when the app runs again.
-        task.expirationHandler = Self.expirationHandler(box, expiry: expiry, job: job)
-        defer { running = false }
+        task.expirationHandler = Self.expirationHandler(completion: completion, job: job, runID: runID)
+        defer { if self.runID == runID { self.runID = nil } }
         // Hundredths of an item, never going backwards.
         var reported: Int64 = 0, step = "", stepStarted = Date()
-        while !expiry.expired, job.isRunning || job.hasWaiting {
+        while completion.result == nil, job.isRunning || job.hasWaiting {
             let progress = job.runProgress
             let current = progress.current.map { "\($0.asset) \(job.currentMessage)" } ?? ""
             if current != step {
@@ -151,13 +161,26 @@ final class LongRun {
             task.updateTitle(task.title, subtitle: "\(progress.done) of \(progress.total)")
             try? await Task.sleep(for: .seconds(1))
         }
-        guard !expiry.expired else { return }
-        task.progress.completedUnitCount = task.progress.totalUnitCount
-        task.setTaskCompleted(success: true)
+        completion.finish(success: true)
     }
 
-    private final class ExpiryBox: @unchecked Sendable {
-        var expired = false
+    final class Completion: Sendable {
+        private let state = OSAllocatedUnfairLock<Bool?>(initialState: nil)
+        private let onFinish: @Sendable (Bool) -> Void
+
+        init(onFinish: @escaping @Sendable (Bool) -> Void) { self.onFinish = onFinish }
+        var result: Bool? { state.withLock { $0 } }
+
+        @discardableResult
+        func finish(success: Bool) -> Bool {
+            let first = state.withLock { result in
+                guard result == nil else { return false }
+                result = success
+                return true
+            }
+            if first { onFinish(success) }
+            return first
+        }
     }
 
     private final class TaskBox: @unchecked Sendable {
