@@ -266,6 +266,46 @@ import UIKit
         try #require(library.samples.first { $0.kind == kind })
     }
 
+    @Test func versionedLookupUsesTheServersNotFoundAndSingleReceiptWireContract() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await model.job.enqueue([photo.id]) == [photo.id])
+        let operations = try await model.job.ledger.store.currentOperations([photo.id], namespace: model.job.ledger.namespace)
+        let operation = try #require(operations.first)
+        let missingID = UUID()
+        let missingRequest = try client.request("backup-requests", apiVersion: 2,
+            query: [.init(name: "operation_id", value: missingID.uuidString)])
+        let remote = ServerClientV2(client)
+        let (_, missing) = try await client.data(for: missingRequest)
+        #expect((missing as? HTTPURLResponse)?.statusCode == 404)
+        #expect(try await remote.lookup(operationID: missingID).isEmpty)
+
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let request = try client.request("backup-requests", apiVersion: 2,
+            query: [.init(name: "operation_id", value: operation.id.uuidString)])
+        let (data, found) = try await client.data(for: request)
+        #expect((found as? HTTPURLResponse)?.statusCode == 200)
+        let receipt = try ServerAPI.decoder.decode(BackupAPI.Receipt.self, from: data)
+        #expect(receipt.operationID == operation.id)
+        #expect(try await remote.lookup(operationID: operation.id) == [receipt])
+
+        let unpaired = ServerClientV2(ServerClient(baseURL: DemoServer.baseURL, trust: .demo))
+        do {
+            _ = try await unpaired.lookup(operationID: operation.id)
+            Issue.record("An authorization failure must not look like a missing request")
+        } catch let failure as ServerClient.Failure {
+            #expect(failure.status == 401)
+        }
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
     @Test func slowServerVideoDoesNotBlockALaterPhotoOrOwnLocalExecution() async throws {
         let fixture = try await Fixture.make(processingDelay: { $0 == .video ? 3_600 : 0 })
         let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))

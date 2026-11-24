@@ -82,7 +82,14 @@ struct ServerClientV2: BackupRemote {
     }
 
     func lookup(operationID: UUID) async throws -> [BackupAPI.Receipt] {
-        try await json("backup-requests", query: [.init(name: "operation_id", value: operationID.uuidString)])
+        let receipt: BackupAPI.Receipt
+        do {
+            receipt = try await json("backup-requests", query: [.init(name: "operation_id", value: operationID.uuidString)])
+        } catch let failure as ServerClient.Failure where failure.status == 404 {
+            return []
+        }
+        guard receipt.operationID == operationID else { throw BackupStore.Failure.invalidReceipt }
+        return [receipt]
     }
 
     func status(_ requestID: UUID) async throws -> BackupAPI.Receipt {
@@ -233,7 +240,7 @@ struct ServerClientV2: BackupRemote {
         let (data, response) = try await transport.data(for: request)
         _ = try transport.check(data, response, accepting: [204])
         guard let response = response as? HTTPURLResponse,
-              response.value(forHTTPHeaderField: "ETag") == "\"\(sender.generationID.uuidString)\"" else {
+              response.value(forHTTPHeaderField: "ETag") == "\"\(sender.generationID.uuidString.lowercased())\"" else {
             throw BackupStore.Failure.invalidReceipt
         }
     }

@@ -469,6 +469,7 @@ without automatic expiry; they do not authorize a permanent deletion proof.
 Create an idempotent request at `POST /api/v2/backup-requests`, then use its request ID or
 `GET /api/v2/backup-requests?operation_id=<UUID>` after a lost response. Every receipt has a
 per-request monotonic `revision`; the change feed's `sequence` is a separate global cursor.
+An operation lookup returns one receipt, or HTTP 404 if it has not been admitted, never an array.
 Commands use `POST /api/v2/backup-requests/<id>/commands` with the exact expected version.
 Server-side photo and video lanes progress independently within shared codec/storage limits.
 Versioned originals keep their phone/capture-month folders and readable names, with an immutable

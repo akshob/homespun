@@ -139,7 +139,10 @@ actor DemoBackupServer {
                 return try json(register(decode(BackupAPI.Request.self), owner: owner), status: 201)
             }
             if method == "GET", let operation = value("operation_id").flatMap(UUID.init(uuidString:)) {
-                return try json(state.records.values.filter { $0.owner == owner && $0.request.operationID == operation }.map(receipt))
+                guard let record = state.records.values.first(where: { $0.owner == owner && $0.request.operationID == operation }) else {
+                    throw DemoServer.Failure(status: 404, message: "This backup request has not been admitted.")
+                }
+                return try json(receipt(record))
             }
         }
         if path.count >= 2, path[0] == "backup-requests", let id = UUID(uuidString: path[1]) {
