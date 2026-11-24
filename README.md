@@ -411,7 +411,7 @@ If processing fails in files mode, "Try Again" re-registers the item and retries
 using originals the server already holds and has verified; they don't need to be uploaded again.
 
 Originals go in a folder per phone, by capture month: `<originals>/<phone name>/YYYY/MM/`
-(the phone's name when it paired; renaming the phone later keeps the folder). The originals
+(the phone's chosen name; renaming it from the app moves its folder). The originals
 folder is `<data>/originals` unless `install-service --originals DIR` (or `HOMESPUN_ORIGINALS`)
 says otherwise, so the catalog and originals can live apart: for example `--data
 /Volumes/Homespun/.homespun --originals /Volumes/Homespun` on a Mac with a Homespun volume
@@ -420,7 +420,66 @@ server never creates a folder whose parent is missing, so a disk that isn't conn
 silently replaced by a folder on the startup disk; the self-check says so instead. To change
 the folder later, use the app (Server › Originals Folder › Change Folder): the server copies
 every original there, checks each one, holds new backups for a moment while it switches, and
-only then removes the old copies. A move interrupted by a restart picks up where it left off.
+switches the catalog to the new folder. Previous good copies remain pending safe cleanup;
+their old roots are recorded in the catalog. A move interrupted by a restart keeps its plan.
+
+### Versioned foreground backups
+
+The authenticated `/api/v2` API separates original retention, processing, and delivery.
+Capabilities advertise only `foreground_offset`: this is **not native/background resumable
+upload support**. Manual/permanent claims survive cancellation and missing import acknowledgements;
+`compact: false` can still request permanent original retention. Existing ambiguous trash is retained
+after migration, not given a new expiry. Versioned deferred claims are explicit and currently retained
+without automatic expiry; they do not authorize a permanent deletion proof.
+
+Create an idempotent request at `POST /api/v2/backup-requests`, then use its request ID or
+`GET /api/v2/backup-requests?operation_id=<UUID>` after a lost response. Every receipt has a
+per-request monotonic `revision`; the change feed's `sequence` is a separate global cursor.
+Commands use `POST /api/v2/backup-requests/<id>/commands` with the exact expected version.
+Server-side photo and video lanes progress independently within shared codec/storage limits.
+Versioned originals keep their phone/capture-month folders and readable names, with an immutable
+manifest-qualified directory for each complete resource set.
+Legacy managed/imported originals are only reuse candidates: the server freshly copies and hashes
+them into the immutable local version before issuing its retained receipt. Explicit permanent
+consumers also protect matching legacy temporary copies from automatic expiry.
+
+`POST /api/v2/uploads` admits a bounded foreground transfer. `HEAD /api/v2/uploads/<id>` returns
+`Upload-Offset`, `Upload-Length`, and `Upload-Max-Chunk`, without a body. `PATCH` requires the integer
+`Upload-Offset` and `Content-Type: application/offset+octet-stream`; successful durable writes return
+204 and the new offset. A conflicting offset requires HEAD, not blind appending. Complete with
+`POST /api/v2/uploads/<id>/complete`; size, SHA-256, durable publication and catalog commitment precede
+a retained receipt. Failed/unfinished publication keeps a recovery journal. Storage pressure is
+explicit backpressure, never permission to delete originals.
+
+Use `/api/v2/changes?after=<cursor>&epoch=<historyEpoch>` or `/api/v2/snapshot` to reconcile results.
+Snapshot continuation tokens are opaque, expiring, and bound to the authenticated device.
+Immutable `/api/v2/derivatives/<generation>/resources/<role>` downloads provide exact lengths,
+strong ETags, and single Range/If-Range support. Version-qualified source resources are available at
+`/api/v2/assets/<asset>/versions/<manifest>/resources/<role>?request_id=<request>`; Linux Live Photo
+motion still requires AVFoundation on the phone, never FFmpeg pairing. Delivery acknowledgement IDs
+are client-generated UUIDs posted to `/api/v2/deliveries/<id>/ack`; acknowledgements only account for
+delivery. Fresh `/api/v2/assets/<asset>/versions/<manifest>/verify` accepts `BackupAPI.Version` and
+requires that device's permanent local claim. No endpoint falls back to mutable v1 proof.
+
+Versioned Immich acquisition/proof is explicitly unsupported: requests are blocked/external and no
+upload protocol is advertised in that mode. Existing v1 Immich remains read-only. Connector copies
+are not deletion proof. No relay or APNs credentials are part of this implementation.
+
+After an **offline, consistent catalog restore**, run `homespun-server resync-history` before
+restarting. It preserves the server ID and originals but advances the history epoch and requires
+client snapshots. Silent database replacement within one epoch is unsupported. Older binaries
+refuse the newer schema; a downgrade must preserve newer files and use a deliberate recovery path.
+
+Conservative defaults are one photo slot, one video slot, two verification slots, two bounded
+chunk writers, one connector slot, 128 active upload records, a 64 GiB staging reservation limit
+and a 1 GiB free-space floor.
+`HOMESPUN_PHOTO_WORKERS`/`HOMESPUN_VIDEO_WORKERS` allow 1–2 shared slots;
+`HOMESPUN_MAX_STAGING_BYTES` and `HOMESPUN_MIN_FREE_BYTES` configure storage limits.
+FFmpeg/x265 and libvips thread use is bounded; FFmpeg limits individual allocations, not total
+process RSS. FFmpeg output is bounded to twice its source while deciding whether to keep the
+original, and processing reserves space for the input snapshot plus working output. An encoder
+may run for hours while its frame/media-time counter advances; only
+30 minutes without progress triggers the stalled-work watchdog. No energy improvement is claimed.
 
 ### Run on a NAS with Docker
 
@@ -578,6 +637,10 @@ about them so the app recognises those copies instead of backing them up as orig
 homespun-server import library.jsonl --dry-run   # checks the files, records nothing
 homespun-server import library.jsonl             # hashes the originals and records them
 ```
+
+Stop the serving process before a mutating import, including in-place linking. Imports require
+exclusive catalog ownership and refuse to race a live service or an unfinished originals move.
+`--dry-run` remains read-only and can run alongside the service.
 
 It runs beside a running server, and running it again is safe (finished items are skipped).
 By default the originals stay where they are: Homespun reads them, never moves, changes, or

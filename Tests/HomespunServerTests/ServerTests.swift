@@ -2172,4 +2172,460 @@ private struct PauseMotionUpload: RouterMiddleware {
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == [plan.from])
         try FileManager.default.removeItem(at: root.appendingPathComponent(plan.from))
     }
+
+    // MARK: Versioned foreground backup protocol
+
+    private func backupTestRequest(_ client: some TestClientProtocol, token: String, data: Data,
+                                   kind: ServerAPI.AssetKind = .photo, compact: Bool = false,
+                                   retention: BackupAPI.RetentionPolicy = .permanent) async throws
+        -> (BackupAPI.Request, BackupAPI.Receipt) {
+        let capabilities = try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self)
+        let role: Role = kind == .video ? .video : .photo
+        let request = BackupAPI.Request(operationID: UUID(), origin: capabilities.origin,
+            manifest: .init(kind: kind, resources: [.init(role: role, filename: kind == .video ? "a.mp4" : "a.jpg",
+                size: data.count, sha256: Fingerprint.sha256(of: data))]),
+            profile: capabilities.recipe.profile, retention: retention, compact: compact)
+        let response = try await client.call("/api/v2/backup-requests", .post, token: token, json: request)
+        #expect(response.status == .created)
+        return (request, try response.decode(BackupAPI.Receipt.self))
+    }
+
+    private func backupTestPatch(_ client: some TestClientProtocol, token: String, upload: UUID, offset: Int,
+                                 data: Data) async throws -> TestResponse {
+        var headers = HTTPFields()
+        headers[.authorization] = "Bearer \(token)"
+        headers[.contentType] = "application/offset+octet-stream"
+        headers[BackupRoutes.offset] = String(offset)
+        return try await client.execute(uri: "/api/v2/uploads/\(upload.uuidString)", method: .patch,
+                                        headers: headers, body: ByteBuffer(bytes: data))
+    }
+
+    private func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt: BackupAPI.Receipt,
+                                  role: Role = .photo, data: Data) async throws -> BackupAPI.Receipt {
+        let id = UUID()
+        let response = try await client.call("/api/v2/uploads", .post, token: token,
+            json: BackupAPI.UploadRequest(uploadID: id, requestID: receipt.requestID, version: receipt.version, role: role))
+        #expect(response.status == .created)
+        let admission = try response.decode(BackupAPI.UploadAdmission.self)
+        #expect(admission.uploadProtocol == .foregroundOffset)
+        for offset in stride(from: 0, to: data.count, by: Int(admission.maximumChunkBytes)) {
+            let end = min(data.count, offset + Int(admission.maximumChunkBytes))
+            #expect(try await backupTestPatch(client, token: token, upload: id, offset: offset, data: data[offset..<end]).status == .noContent)
+        }
+        let completed = try await client.call("/api/v2/uploads/\(id.uuidString)/complete", .post, token: token)
+        #expect(completed.status == .ok)
+        return try completed.decode(BackupAPI.Receipt.self)
+    }
+
+    @Test func versionedAdmissionIsIdempotentPrincipalScopedAndRetainsBeforeCompact() async throws {
+        let fixture = try await Fixture()
+        try await fixture.test { client, token in
+            #expect(try await client.call("/api/v2/capabilities").status == .unauthorized)
+            let caps = try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self)
+            #expect(caps.uploadProtocols == [.foregroundOffset])
+            let (request, first) = try await backupTestRequest(client, token: token, data: Data("original".utf8))
+            #expect(first.revision > 0 && first.retention == .pending && first.backup == .uploading)
+            let replay = try await client.call("/api/v2/backup-requests", .post, token: token, json: request)
+            #expect(replay.status == .ok && (try replay.decode(BackupAPI.Receipt.self)) == first)
+            var different = request
+            different.compact = true
+            let conflict = try await client.call("/api/v2/backup-requests", .post, token: token, json: different)
+            #expect(conflict.status == .conflict)
+            #expect(try conflict.decode(ServerAPI.ErrorBody.self).error.code == BackupAPI.ErrorCode.idempotencyConflict)
+            #expect(try await client.call("/api/v2/backup-requests?operation_id=\(request.operationID)", token: token)
+                .decode(BackupAPI.Receipt.self) == first)
+            let other = try await fixture.pair(client)
+            #expect(try await client.call("/api/v2/backup-requests/\(first.requestID)", token: other).status == .notFound)
+            #expect(try await client.call("/api/v2/uploads", .post, token: other,
+                json: BackupAPI.UploadRequest(uploadID: UUID(), requestID: first.requestID, version: first.version, role: .photo)).status == .notFound)
+            let second = try await client.call("/api/v2/backup-requests", .post, token: other, json: request)
+                .decode(BackupAPI.Receipt.self)
+            #expect(second.requestID != first.requestID && second.operationID == first.operationID && second.version == first.version)
+            let retained = try await backupTestUpload(client, token: token, receipt: first, data: Data("original".utf8))
+            #expect(retained.backup == .retained && retained.retention == .permanent && retained.derivative == nil)
+            #expect(retained.revision > first.revision && retained.compact == .requested)
+            let cancelled = try await client.call("/api/v2/backup-requests/\(first.requestID)/commands", .post, token: token,
+                json: BackupAPI.Command(operationID: UUID(), version: first.version, action: .cancel)).decode(BackupAPI.Receipt.self)
+            #expect(cancelled.backup == .retained && cancelled.retention == .permanent)
+            let proof = try await client.call("/api/v2/assets/\(first.version.assetID)/versions/\(first.version.manifestID)/verify",
+                .post, token: token, json: first.version).decode(BackupAPI.OriginalProof.self)
+            #expect(proof.version == first.version && proof.claimID != nil && proof.retention == .permanent)
+            #expect(try await client.call("/api/v1/assets/\(first.version.assetID)/verify", .post, token: token).status == .notFound)
+        }
+    }
+
+    @Test func versionedOffsetsReconcileAfterRestartAndBadBytesNeverBecomeRetained() async throws {
+        let fixture = try await Fixture()
+        try await fixture.test { client, token in
+            let bytes = Data("durable-original-bytes".utf8)
+            let (_, receipt) = try await backupTestRequest(client, token: token, data: bytes)
+            let uploadID = UUID(), id = uploadID.uuidString.lowercased()
+            let admission = try await client.call("/api/v2/uploads", .post, token: token,
+                json: BackupAPI.UploadRequest(uploadID: uploadID, requestID: receipt.requestID, version: receipt.version, role: .photo))
+                .decode(BackupAPI.UploadAdmission.self)
+            #expect(admission.maximumChunkBytes == Int64(fixture.server.configuration.maximumChunkBytes))
+            #expect(try await backupTestPatch(client, token: token, upload: uploadID, offset: 0, data: bytes.prefix(4)).status == .noContent)
+            let partial = BackupPublication.partial(id, storage: fixture.server.storage)
+            let handle = try FileHandle(forWritingTo: partial)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data("unacknowledged-tail".utf8))
+            try handle.close()
+            let restarted = try await Fixture(directory: fixture.directory)
+            try await Application(router: restarted.server.testRouter()).test(.router) { live in
+                let head = try await live.call("/api/v2/uploads/\(uploadID)", .head, token: token)
+                #expect(head.status == .noContent && head.data.isEmpty)
+                #expect(head.headers[BackupRoutes.offset] == "4" && head.headers[BackupRoutes.length] == String(bytes.count))
+                #expect(try JobRunner.size(of: partial) == 4)
+                #expect(try await backupTestPatch(live, token: token, upload: uploadID, offset: 0, data: bytes).status == .conflict)
+                #expect(try await backupTestPatch(live, token: token, upload: uploadID, offset: 4, data: bytes.dropFirst(4)).status == .noContent)
+                let complete = try await live.call("/api/v2/uploads/\(uploadID)/complete", .post, token: token).decode(BackupAPI.Receipt.self)
+                #expect(complete.backup == .retained && complete.retention == .permanent)
+                #expect(try await live.call("/api/v2/uploads/\(uploadID)/complete", .post, token: token)
+                    .decode(BackupAPI.Receipt.self) == complete)
+            }
+            let bad = Data("different-original".utf8)
+            let (_, attempt) = try await backupTestRequest(client, token: token, data: bad)
+            let badUpload = UUID()
+            _ = try await client.call("/api/v2/uploads", .post, token: token,
+                json: BackupAPI.UploadRequest(uploadID: badUpload, requestID: attempt.requestID, version: attempt.version, role: .photo))
+            _ = try await backupTestPatch(client, token: token, upload: badUpload, offset: 0, data: Data(repeating: 0, count: bad.count))
+            #expect(try await client.call("/api/v2/uploads/\(badUpload)/complete", .post, token: token).status == .unprocessableContent)
+            #expect(try await client.call("/api/v2/assets/\(attempt.version.assetID)/versions/\(attempt.version.manifestID)/verify",
+                .post, token: token, json: attempt.version).status == .conflict)
+            #expect(try await client.call("/api/v2/backup-requests/\(attempt.requestID)", token: token)
+                .decode(BackupAPI.Receipt.self).retention == .pending)
+            #expect(try await backupTestUpload(client, token: token, receipt: attempt, data: bad).retention == .permanent)
+        }
+    }
+
+    @Test func versionedFeedSnapshotsAreConsistentAndReceiptRevisionsNeverRegress() async throws {
+        let fixture = try await Fixture()
+        try await fixture.test { client, token in
+            var receipts: [BackupAPI.Receipt] = []
+            for value in ["one", "two", "three"] {
+                let (_, receipt) = try await backupTestRequest(client, token: token, data: Data(value.utf8))
+                receipts.append(receipt)
+            }
+            let principal = try #require(try await fixture.server.catalog.device(tokenHash: Pairing.hash(token))).id
+            let first = try await fixture.server.catalog.backupSnapshot(principal: principal, continuation: nil, limit: 1)
+            let changed = try #require(receipts.first { $0.requestID != first.receipts.first?.requestID })
+            let command = BackupAPI.Command(operationID: UUID(), version: changed.version, action: .pause)
+            let newest = try await client.call("/api/v2/backup-requests/\(changed.requestID)/commands", .post, token: token, json: command)
+                .decode(BackupAPI.Receipt.self)
+            #expect(newest.revision > changed.revision)
+            #expect(try await client.call("/api/v2/backup-requests/\(changed.requestID)/commands", .post, token: token, json: command)
+                .decode(BackupAPI.Receipt.self) == newest)
+            var snapshot = first.receipts, continuation = first.continuation
+            while let page = continuation {
+                let next = try await fixture.server.catalog.backupSnapshot(principal: principal, continuation: page, limit: 1)
+                #expect(next.cursor == first.cursor)
+                snapshot += next.receipts
+                continuation = next.continuation
+            }
+            #expect(snapshot.first { $0.requestID == changed.requestID } == changed)
+            let changes = try await fixture.server.catalog.backupChanges(principal: principal, after: first.cursor,
+                epoch: changed.version.origin.historyEpoch, limit: 200)
+            #expect(changes.changes.last?.receipt == newest && !changes.hasMore)
+            #expect(try await client.call("/api/v2/backup-requests/\(changed.requestID)", token: token)
+                .decode(BackupAPI.Receipt.self) == newest)
+            let other = try await fixture.pair(client)
+            let escaped = try await client.call("/api/v2/snapshot?continuation=\(try #require(first.continuation))", token: other)
+            #expect(escaped.status == .conflict)
+            let wakes = try await fixture.server.catalog.pendingBackupWakes()
+            let wake = try #require(wakes.first { $0.principal == principal })
+            try await fixture.server.catalog.acknowledgeBackupWake(principal: principal, sequence: wake.sequence - 1)
+            #expect(try await fixture.server.catalog.pendingBackupWakes().contains { $0.principal == principal })
+            try await fixture.server.catalog.acknowledgeBackupWake(principal: principal, sequence: wake.sequence)
+            #expect(try await !fixture.server.catalog.pendingBackupWakes().contains { $0.principal == principal })
+            let newOrigin = try await fixture.server.rotateBackupHistoryAfterRestore()
+            #expect(newOrigin.serverID == changed.version.origin.serverID && newOrigin.historyEpoch != changed.version.origin.historyEpoch)
+            #expect(try await client.call("/api/v2/changes?after=0&epoch=\(changed.version.origin.historyEpoch)", token: token).status == .conflict)
+            #expect(try await client.call("/api/v2/backup-requests/\(changed.requestID)", token: token)
+                .decode(BackupAPI.Receipt.self).revision > newest.revision)
+        }
+    }
+
+    @Test func versionedPublicationRecoversAndOldManifestsSurviveMovesAndV1Edits() async throws {
+        let fixture = try await Fixture()
+        try await fixture.test { client, token in
+            let bytes = Data("journaled-original".utf8)
+            let (_, receipt) = try await backupTestRequest(client, token: token, data: bytes)
+            let uploadID = UUID()
+            _ = try await client.call("/api/v2/uploads", .post, token: token,
+                json: BackupAPI.UploadRequest(uploadID: uploadID, requestID: receipt.requestID, version: receipt.version, role: .photo))
+            _ = try await backupTestPatch(client, token: token, upload: uploadID, offset: 0, data: bytes)
+            let principal = try #require(try await fixture.server.catalog.device(tokenHash: Pairing.hash(token))).id
+            let upload = try await fixture.server.catalog.backupUpload(uploadID.uuidString.lowercased(), principal: principal)
+            let root = await fixture.server.originals.root
+            let path = "Test iPhone/versions/\(receipt.version.assetID)/\(receipt.version.manifestID)/photo-a.jpg"
+            try await fixture.server.catalog.prepareBackupPublication(upload, path: path)
+            let away = fixture.directory.appendingPathComponent("away")
+            try FileManager.default.moveItem(at: root, to: away)
+            let restarted = try await Fixture(directory: fixture.directory)
+            #expect(!FileManager.default.fileExists(atPath: root.path))
+            await #expect(throws: (any Error).self) { try await restarted.server.drainJobs() }
+            #expect(try await restarted.server.catalog.hasBackupPublications())
+            try FileManager.default.moveItem(at: away, to: root)
+            try await restarted.server.drainJobs()
+            #expect(try await !restarted.server.catalog.hasBackupPublications())
+            #expect(try await restarted.server.catalog.backupReceipt(receipt.requestID.uuidString.lowercased(), principal: principal).retention == .permanent)
+            let primary = ServerAPI.ResourceDescriptor(role: .photo, filename: "a.jpg", size: bytes.count, sha256: receipt.version.assetID)
+            var edited = BackupAPI.Request(operationID: UUID(), origin: receipt.version.origin,
+                manifest: .init(kind: .photo, resources: [primary,
+                    .init(role: .alternatePhoto, filename: "edit.jpg", size: 3, sha256: Fingerprint.sha256(of: Data("new".utf8)))]),
+                profile: testProfile, compact: false)
+            let second = try await client.call("/api/v2/backup-requests", .post, token: token, json: edited).decode(BackupAPI.Receipt.self)
+            #expect(second.version.manifestID != receipt.version.manifestID
+                && second.version.descriptorGeneration > receipt.version.descriptorGeneration)
+            _ = try await backupTestUpload(client, token: token, receipt: second, data: bytes)
+            _ = try await backupTestUpload(client, token: token, receipt: second, role: .alternatePhoto, data: Data("new".utf8))
+            edited.manifest.resources.removeLast()
+            _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+                kind: .photo, captureDate: nil, resources: edited.manifest.resources, compact: false))
+            let device = try #require(try await fixture.server.catalog.devices().first)
+            #expect(try await client.call("/api/v1/devices/\(device.id)", .patch, token: token,
+                json: ServerAPI.RenameDeviceRequest(name: "Versioned Phone")).status == .ok)
+            let moved = fixture.directory.appendingPathComponent("Moved")
+            try await fixture.server.mover.start(to: moved.path)
+            await fixture.server.mover.wait()
+            #expect(await fixture.server.mover.status?.state == .done)
+            for version in [receipt.version, second.version] {
+                let proof = try await client.call("/api/v2/assets/\(version.assetID)/versions/\(version.manifestID)/verify",
+                    .post, token: token, json: version).decode(BackupAPI.OriginalProof.self)
+                #expect(proof.retention == .permanent && proof.version == version)
+            }
+            let source = try await client.call("/api/v2/assets/\(receipt.version.assetID)/versions/\(receipt.version.manifestID)/resources/photo?request_id=\(receipt.requestID)",
+                                               token: token)
+            #expect(source.status == .ok && source.data == bytes && source.headers[.eTag] == "\"\(receipt.version.assetID)\"")
+            #expect(try await fixture.server.catalog.storedOriginals().count == 3)
+        }
+    }
+
+    @Test(.enabled(if: ffmpegAvailable), .timeLimit(.minutes(2)))
+    func versionedPhotoProgressesDuringVideoAndStaleWorkersCannotPublishOrAckAnotherConsumer() async throws {
+        let fixture = try await Fixture()
+        let media = try await Media.make(in: fixture.directory)
+        try await fixture.test { client, token in
+            let (_, photo) = try await backupTestRequest(client, token: token, data: Data(contentsOf: media.photo), compact: true)
+            _ = try await backupTestUpload(client, token: token, receipt: photo, data: Data(contentsOf: media.photo))
+            let (_, video) = try await backupTestRequest(client, token: token, data: Data(contentsOf: media.movie), kind: .video, compact: true)
+            _ = try await backupTestUpload(client, token: token, receipt: video, role: .video, data: Data(contentsOf: media.movie))
+            let old = try #require(try await fixture.server.catalog.claimBackupJob(lane: "video", owner: "old-video", lease: 90))
+            let entered = StorageTestGate(), resume = StorageTestGate()
+            let encoding = Task {
+                try await fixture.server.budget.run(.video) {
+                    await entered.open()
+                    try await resume.wait()
+                }
+            }
+            try await entered.wait()
+            #expect(try await fixture.server.backupPhoto.runNext())
+            let ready = try await client.call("/api/v2/backup-requests/\(photo.requestID)", token: token).decode(BackupAPI.Receipt.self)
+            let derivative = try #require(ready.derivative), resource = try #require(derivative.resources.first)
+            #expect(ready.compact == .ready)
+            let uri = "/api/v2/derivatives/\(derivative.generationID)/resources/\(resource.role.rawValue)"
+            var headers = HTTPFields()
+            headers[.authorization] = "Bearer \(token)"
+            headers[.range] = "bytes=0-9"
+            let part = try await client.execute(uri: uri, method: .get, headers: headers)
+            #expect(part.status == .partialContent && part.data.count == 10 && part.headers[.contentLength] == "10")
+            #expect(part.headers[.eTag] == "\"\(resource.sha256)\"")
+            headers[.ifRange] = "\"another-generation\""
+            #expect(try await client.execute(uri: uri, method: .get, headers: headers).status == .ok)
+            headers[.ifRange] = part.headers[.eTag]
+            headers[.range] = "bytes=\(resource.size)-"
+            #expect(try await client.execute(uri: uri, method: .get, headers: headers).status == .rangeNotSatisfiable)
+            let other = try await fixture.pair(client)
+            #expect(try await client.call(uri, token: other).status == .notFound)
+            let ack = BackupAPI.DeliveryAcknowledgement(deliveryID: UUID(), requestID: photo.requestID,
+                generationID: derivative.generationID, version: photo.version)
+            #expect(try await client.call("/api/v2/deliveries/\(ack.deliveryID)/ack", .post, token: other, json: ack).status == .notFound)
+            let accounted = try await client.call("/api/v2/deliveries/\(ack.deliveryID)/ack", .post, token: token, json: ack)
+                .decode(BackupAPI.Receipt.self)
+            #expect(accounted.revision > ready.revision && accounted.retention == .permanent)
+            #expect(try await client.call("/api/v2/deliveries/\(ack.deliveryID)/ack", .post, token: token, json: ack)
+                .decode(BackupAPI.Receipt.self) == accounted)
+            _ = try await client.call("/api/v2/backup-requests/\(video.requestID)/commands", .post, token: token,
+                json: BackupAPI.Command(operationID: UUID(), version: video.version, action: .cancel))
+            #expect(try await !fixture.server.catalog.heartbeatBackupJob(old))
+            await #expect(throws: CancellationError.self) {
+                try await fixture.server.catalog.publishBackupJob(old, outcome: .init(files: [], deviceCompresses: [], state: .held, message: nil),
+                                                                  storage: fixture.server.storage)
+            }
+            await resume.open()
+            try await encoding.value
+            #expect(try await client.call("/api/v2/backup-requests/\(video.requestID)", token: token)
+                .decode(BackupAPI.Receipt.self).retention == .permanent)
+        }
+    }
+
+    @Test func versionedDeferredAndImmichRequestsNeverIssuePermanentProofs() async throws {
+        let local = try await Fixture()
+        try await local.test { client, token in
+            let (_, deferred) = try await backupTestRequest(client, token: token, data: Data("deferred".utf8), retention: .deferred)
+            let complete = try await backupTestUpload(client, token: token, receipt: deferred, data: Data("deferred".utf8))
+            #expect(complete.backup == .retained && complete.retention == .deferred)
+            #expect(try await client.call("/api/v2/assets/\(deferred.version.assetID)/versions/\(deferred.version.manifestID)/verify",
+                .post, token: token, json: deferred.version).status == .conflict)
+        }
+
+        extension Catalog {
+            func expireBackupLeaseForTest(_ job: BackupJob) throws {
+                try database.execute("UPDATE backup_jobs SET expires_at = '2000-01-01T00:00:00Z' WHERE id = ?", [.text(job.id)])
+            }
+
+            func expireLegacyLeaseForTest(_ job: Job) throws {
+                try database.execute("UPDATE jobs SET lease_expires_at = '2000-01-01T00:00:00Z' WHERE id = ?", [.integer(Int64(job.id))])
+            }
+        }
+
+        @Test func reclaimedWorkerFencesRejectEveryStaleTransitionWithoutLosingRetention() async throws {
+            let fixture = try await Fixture()
+            try await fixture.test { client, token in
+                let bytes = Data("fenced".utf8)
+                let (_, receipt) = try await backupTestRequest(client, token: token, data: bytes, compact: true)
+                _ = try await backupTestUpload(client, token: token, receipt: receipt, data: bytes)
+                let catalog = fixture.server.catalog
+                let old = try #require(try await catalog.claimBackupJob(lane: "photo", owner: "first"))
+                try await catalog.expireBackupLeaseForTest(old)
+                let replacement = try #require(try await catalog.claimBackupJob(lane: "photo", owner: "second"))
+                #expect(replacement.fence > old.fence && replacement.output != old.output)
+                #expect(try await !catalog.heartbeatBackupJob(old))
+                try await catalog.failBackupJob(old, message: "stale", permanent: true)
+                await #expect(throws: CancellationError.self) { try await catalog.postponeBackupJob(old) }
+                await #expect(throws: CancellationError.self) {
+                    try await catalog.publishBackupJob(old, outcome: .init(files: [], deviceCompresses: [], state: .held, message: "stale"),
+                                                       storage: fixture.server.storage)
+                }
+                #expect(try await catalog.backupJobCurrent(replacement))
+                try await catalog.publishBackupJob(replacement, outcome: .init(files: [], deviceCompresses: [], state: .held, message: "held"),
+                                                   storage: fixture.server.storage)
+                #expect(try await client.call("/api/v2/backup-requests/\(receipt.requestID)", token: token)
+                    .decode(BackupAPI.Receipt.self).retention == .permanent)
+                let descriptor = ServerAPI.ResourceDescriptor(role: .photo, filename: "legacy.jpg", size: bytes.count,
+                                                               sha256: Fingerprint.sha256(of: bytes))
+                _ = try await client.call("/api/v1/assets", .post, token: token,
+                    json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [descriptor]))
+                _ = try await client.call("/api/v1/assets/\(descriptor.sha256)/resources/photo?offset=0", .put, token: token, body: bytes)
+                let first = try #require(try await catalog.claim(owner: "legacy-first", lease: 90))
+                try await catalog.expireLegacyLeaseForTest(first)
+                let second = try #require(try await catalog.claim(owner: "legacy-second", lease: 90))
+                #expect(second.fence > first.fence)
+                #expect(try await !catalog.heartbeatLegacyJob(first))
+                await #expect(throws: CancellationError.self) { try await catalog.finish(first) }
+                await #expect(throws: CancellationError.self) { try await catalog.fail(first, error: "stale") }
+                await #expect(throws: CancellationError.self) { try await catalog.postpone(first, by: 1, reason: "stale") }
+                await #expect(throws: CancellationError.self) {
+                    try await catalog.storeCompact(first.assetID, [], deviceCompresses: [], state: .held, message: "stale", job: first)
+                }
+                #expect(try await catalog.legacyJobCurrent(second))
+            }
+        }
+
+        @Test func versionedUploadAdmissionBackpressuresBeforeAllocatingOversizedResources() async throws {
+            let fixture = try await Fixture()
+            try await fixture.test { client, token in
+                let caps = try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self)
+                let request = BackupAPI.Request(operationID: UUID(), origin: caps.origin,
+                    manifest: .init(kind: .video, resources: [.init(role: .video, filename: "large.mp4",
+                        size: Int(fixture.server.configuration.maximumStagingBytes + 1), sha256: String(repeating: "a", count: 64))]),
+                    profile: caps.recipe.profile, compact: false)
+                let receipt = try await client.call("/api/v2/backup-requests", .post, token: token, json: request)
+                    .decode(BackupAPI.Receipt.self)
+                let upload = try await client.call("/api/v2/uploads", .post, token: token, json: BackupAPI.UploadRequest(
+                    uploadID: UUID(), requestID: receipt.requestID, version: receipt.version, role: .video))
+                #expect(upload.status == .serviceUnavailable)
+                #expect(try upload.decode(ServerAPI.ErrorBody.self).error.code == "storage_backpressure")
+                #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.server.storage.staging.path).isEmpty)
+            }
+
+            @Test func rootMutationCannotMoveItsOwnCatalogAndOwnershipFile() async throws {
+                let fixture = try await Fixture(originals: ".")
+                try await fixture.test { client, _ in
+                    let code = try await fixture.server.newPairingCode()
+                    let device = try await client.call("/api/v1/pair", .post,
+                        json: ServerAPI.PairRequest(code: code, deviceName: "data")).decode(ServerAPI.PairResponse.self)
+                    let response = try await client.call("/api/v1/devices/\(device.deviceID)", .patch, token: device.token,
+                                                         json: ServerAPI.RenameDeviceRequest(name: "Other"))
+                    #expect(response.status == .serviceUnavailable)
+                    #expect(FileManager.default.fileExists(atPath: fixture.server.storage.catalog.path))
+                    #expect(try await fixture.server.catalog.setting(DeviceRename.journal) == nil)
+                }
+
+                @Test func versionedAdmissionProtectsAndReverifiesLegacyCandidatesInsteadOfTrustingV1Status() async throws {
+                    let fixture = try await Fixture()
+                    try await fixture.test { client, token in
+                        let bytes = Data("legacy-reuse".utf8), hash = Fingerprint.sha256(of: bytes)
+                        let descriptor = ServerAPI.ResourceDescriptor(role: .photo, filename: "old.jpg", size: bytes.count, sha256: hash)
+                        _ = try await client.call("/api/v1/assets", .post, token: token,
+                            json: ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [descriptor], compact: false))
+                        _ = try await client.call("/api/v1/assets/\(hash)/resources/photo?offset=0", .put, token: token, body: bytes)
+                        #expect(try await fixture.server.catalog.asset(hash)?.permanent == false)
+                        let (_, receipt) = try await backupTestRequest(client, token: token, data: bytes)
+                        #expect(receipt.backup == .uploading)
+                        #expect(try await fixture.server.catalog.asset(hash)?.permanent == true)
+                        #expect(try await client.call("/api/v1/assets/\(hash)/removed", .post, token: token).status == .conflict)
+                        let adoption = BackupAdoption(catalog: fixture.server.catalog, storage: fixture.server.storage,
+                            originals: fixture.server.originals, budget: fixture.server.budget, configuration: fixture.server.configuration)
+                        let legacy = try #require(try await fixture.server.catalog.resources(hash).first?.storedPath)
+                        let url = try #require(await fixture.server.originals.url(legacy))
+                        try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: url.path)
+                        try Data(repeating: 0, count: bytes.count).write(to: url)
+                        await #expect(throws: (any Error).self) { try await adoption.runNext() }
+                        #expect(try await client.call("/api/v2/backup-requests/\(receipt.requestID)", token: token)
+                            .decode(BackupAPI.Receipt.self).retention == .pending)
+                        let retained = try await backupTestUpload(client, token: token, receipt: receipt, data: bytes)
+                        #expect(retained.retention == .permanent && retained.backup == .retained)
+                        #expect(try await fixture.server.catalog.storedOriginals().count == 2)
+                        let proof = try await client.call("/api/v2/assets/\(receipt.version.assetID)/versions/\(receipt.version.manifestID)/verify",
+                            .post, token: token, json: receipt.version).decode(BackupAPI.OriginalProof.self)
+                        #expect(proof.retention == .permanent && proof.version == receipt.version)
+                    }
+                }
+
+                @Test func serverStorageAccountingRejectsOverflowInsteadOfWrapping() throws {
+                    #expect(try StorageBytes.sum([10, 20, 30]) == 60)
+                    #expect(throws: APIError.self) { try StorageBytes.sum([Int.max, 1]) }
+                    #expect(throws: APIError.self) { try StorageBytes.add(Int64.max, 1) }
+                }
+
+                @Test func permanentVersionedClaimQuarantinesAPlannedLegacyTrashMoveWithoutExpiry() async throws {
+                    let fixture = try await Fixture()
+                    try await fixture.test { client, token in
+                        let bytes = Data("permanent-before-trash-commit".utf8), hash = Fingerprint.sha256(of: bytes)
+                        _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+                            kind: .photo, captureDate: nil, resources: [.init(role: .photo, filename: "a.jpg", size: bytes.count, sha256: hash)],
+                            compact: false))
+                        _ = try await client.call("/api/v1/assets/\(hash)/resources/photo?offset=0", .put, token: token, body: bytes)
+                        let path = try #require(try await fixture.server.catalog.resources(hash).first?.storedPath)
+                        let plan = Trash.Plan(asset: hash, generation: 0, action: .remove,
+                            entries: [.init(role: .photo, from: path, to: Trash.trashed(path, assetID: hash), sha256: hash, size: bytes.count, copy: false)],
+                            at: Timestamp.string())
+                        try await fixture.server.catalog.saveTrashMutation(hash, generation: 0, action: .remove,
+                            text: String(decoding: try JSONEncoder().encode(plan), as: UTF8.self))
+                        let (_, receipt) = try await backupTestRequest(client, token: token, data: bytes)
+                        #expect(try await fixture.server.emptyTrash(now: Date().addingTimeInterval(31 * 86_400)) == 0)
+                        let legacy = try #require(try await fixture.server.catalog.asset(hash))
+                        #expect(legacy.state == .trashed && legacy.permanent && legacy.trashedAt == nil)
+                        #expect(try await fixture.server.catalog.setting(Trash.journal(hash)) == nil)
+                        let adoption = BackupAdoption(catalog: fixture.server.catalog, storage: fixture.server.storage,
+                            originals: fixture.server.originals, budget: fixture.server.budget, configuration: fixture.server.configuration)
+                        #expect(try await adoption.runNext())
+                        #expect(try await client.call("/api/v2/backup-requests/\(receipt.requestID)", token: token)
+                            .decode(BackupAPI.Receipt.self).retention == .permanent)
+                    }
+                }
+            }
+        }
+        let external = try await Fixture(immich: .init(url: URL(string: "http://127.0.0.1:1")!, apiKey: "synthetic-unused-key"))
+        try await external.test { client, token in
+            #expect(try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self).uploadProtocols.isEmpty)
+            let (_, blocked) = try await backupTestRequest(client, token: token, data: Data("external".utf8))
+            #expect(blocked.backup == .blocked && blocked.retention == .external)
+            #expect(try await client.call("/api/v2/uploads", .post, token: token,
+                json: BackupAPI.UploadRequest(uploadID: UUID(), requestID: blocked.requestID, version: blocked.version, role: .photo)).status == .unprocessableContent)
+            #expect(try await client.call("/api/v2/assets/\(blocked.version.assetID)/versions/\(blocked.version.manifestID)/verify",
+                .post, token: token, json: blocked.version).status == .conflict)
+        }
+    }
 }

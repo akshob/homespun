@@ -198,6 +198,9 @@ struct LibraryImport: Sendable {
                     let name = (file.original.path as NSString).lastPathComponent
                     let destination = OriginalsStore.destination(root: root, folder: folder, filename: name,
                                                                   sha256: file.sha256, captureDate: item.captureDate)
+                    guard OriginalsStore.resolve(OriginalsStore.relative(destination, to: root), in: root) != nil else {
+                        throw Problem(description: "The import destination escapes the configured originals root.")
+                    }
                     try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try FileManager.default.moveItem(at: file.partial, to: destination)
                     placed.append(destination)

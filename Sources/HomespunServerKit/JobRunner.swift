@@ -23,9 +23,12 @@ public final class JobRunner: Service, Sendable {
     let owner = UUID().uuidString
     let pollInterval: Duration
     let connectors: Bool
+    let budget: ServerWorkBudget
+    let legacyLane: String?
 
     init(catalog: Catalog, storage: Storage, originals: OriginalsStore, compactor: Compactor, immichState: ImmichState,
-         hub: ConnectorHub, logger: Logger, pollInterval: Duration = .seconds(1), connectors: Bool = false) {
+         hub: ConnectorHub, logger: Logger, pollInterval: Duration = .seconds(1), connectors: Bool = false,
+         budget: ServerWorkBudget = ServerWorkBudget(), legacyLane: String? = nil) {
         self.catalog = catalog
         self.storage = storage
         self.originals = originals
@@ -35,6 +38,8 @@ public final class JobRunner: Service, Sendable {
         self.logger = logger
         self.pollInterval = pollInterval
         self.connectors = connectors
+        self.budget = budget
+        self.legacyLane = legacyLane
     }
 
     public func run() async throws {
@@ -56,11 +61,26 @@ public final class JobRunner: Service, Sendable {
     /// Runs one ready job. Returns false when none is ready.
     @discardableResult
     func runNext() async throws -> Bool {
-        guard let job = try await catalog.claim(owner: owner, lease: 3600, connectors: connectors) else { return false }
-        return try await catalog.mutations.withClaim(job.assetID) {
-            try await self.runClaimed(job)
-            return true
+        guard let job = try await catalog.claim(owner: owner, lease: 90, connectors: connectors, lane: legacyLane) else { return false }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await self.catalog.mutations.withClaim(job.assetID) {
+                    try await self.budget.run(self.connectors ? .connector : self.legacyLane == "photo" ? .photo : .video) {
+                        guard try await self.catalog.legacyJobCurrent(job) else { throw CancellationError() }
+                        try await self.runClaimed(job)
+                    }
+                }
+            }
+            group.addTask {
+                while true {
+                    try await Task.sleep(for: .seconds(20))
+                    guard try await self.catalog.heartbeatLegacyJob(job) else { throw CancellationError() }
+                }
+            }
+            _ = try await group.next()
+            group.cancelAll()
         }
+        return true
     }
 
     private func runClaimed(_ job: Job) async throws {
@@ -70,22 +90,20 @@ public final class JobRunner: Service, Sendable {
         }
         do {
             switch job.type {
-            case Self.compress: try await compressStored(job.assetID)
-            case Self.immich: try await processFromImmich(job.assetID)
+            case Self.compress: try await compressStored(job)
+            case Self.immich: try await processFromImmich(job)
             default: throw Compactor.Unprocessable(description: "unknown job \(job.type)")
             }
             try await catalog.finish(job)
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as Compactor.Unprocessable {
-            logger.warning("asset \(job.assetID): \(error)")
-            try await catalog.setState(job.assetID, .failed, message: error.description)
+            logger.warning("legacy processing: media validation failed")
+            try await catalog.setState(job.assetID, .failed, message: error.description, job: job)
             try await catalog.finish(job)
         } catch {
-            logger.error("job \(job.type) for \(job.assetID) failed: \(error)")
-            if try await !catalog.fail(job, error: "\(error)") {
-                try await catalog.setState(job.assetID, .failed, message: "Gave up after repeated errors: \(error)")
-            }
+            logger.error("legacy processing: retryable worker failure")
+            _ = try await catalog.fail(job, error: "processing_retryable")
         }
     }
 
@@ -94,7 +112,8 @@ public final class JobRunner: Service, Sendable {
         while try await runNext() {}
     }
 
-    private func compressStored(_ assetID: String) async throws {
+    private func compressStored(_ job: Job) async throws {
+        let assetID = job.assetID
         guard let asset = try await catalog.asset(assetID) else { return }
         let resources = try await catalog.resources(assetID)
         guard asset.permanent, asset.state != .trashed, !asset.purging,
@@ -104,7 +123,7 @@ public final class JobRunner: Service, Sendable {
         let cache = storage.cache(assetID + "-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: cache) }
         let sources = try await stage(resources, assetID: assetID, into: cache)
-        try await compactAndStore(asset, resources: resources, sources: sources)
+        try await compactAndStore(asset, resources: resources, sources: sources, job: job)
     }
 
     /// Root readers hold a lease only while taking a checked local snapshot, never throughout
@@ -145,25 +164,27 @@ public final class JobRunner: Service, Sendable {
         let cache = storage.cache(job.assetID + "-" + Storage.sanitized(connector))
         defer { try? FileManager.default.removeItem(at: cache) }
         do {
-            try await hub.copy(connector, assetID: job.assetID) { asset, resources in
+            try await hub.copy(connector, assetID: job.assetID, job: job) { asset, resources in
                 try await self.originals(asset, resources, cache: cache)
             }
             try await catalog.finish(job)
         } catch is CancellationError {
             throw CancellationError()
         } catch ConnectorError.failed(let message) {
-            logger.warning("copy of \(job.assetID) to \(connector) failed: \(message)")
-            try await hub.copyFailed(connector, assetID: job.assetID, message: message, final: true)
+            logger.warning("connector copy: rejected")
+            try await hub.copyFailed(connector, assetID: job.assetID, message: message, final: true, job: job)
             try await catalog.finish(job)
         } catch ConnectorError.retryLater(let message, let delay) {
-            logger.notice("copy of \(job.assetID) to \(connector) waits: \(message)")
-            try await hub.copyFailed(connector, assetID: job.assetID, message: message, final: false)
+            logger.notice("connector copy: deferred")
+            try await hub.copyFailed(connector, assetID: job.assetID, message: message, final: false, job: job)
             try await catalog.postpone(job, by: delay, reason: message)
         } catch {
-            logger.error("copy of \(job.assetID) to \(connector) failed: \(error)")
-            let retrying = try await catalog.fail(job, error: "\(error)")
+            logger.error("connector copy: retryable worker failure")
+            let retrying = job.attempts < Catalog.maximumAttempts
             try await hub.copyFailed(connector, assetID: job.assetID,
-                                     message: retrying ? "\(error)" : "Gave up after repeated errors: \(error)", final: !retrying)
+                                     message: retrying ? "Copy waiting for a retry." : "Copy failed after repeated errors.",
+                                     final: !retrying, job: job)
+            _ = try await catalog.fail(job, error: "connector_copy_failed")
         }
     }
 
@@ -195,13 +216,14 @@ public final class JobRunner: Service, Sendable {
         return urls
     }
 
-    private func processFromImmich(_ assetID: String) async throws {
+    private func processFromImmich(_ job: Job) async throws {
+        let assetID = job.assetID
         guard let asset = try await catalog.asset(assetID) else { return }
         guard let immich = await immichState.client else {
             throw Compactor.Unprocessable(description: "Immich is not connected to this server any more.")
         }
         let resources = try await catalog.resources(assetID)
-        try await catalog.setState(assetID, .verifying)
+        try await catalog.setState(assetID, .verifying, job: job)
 
         // Find each original in Immich. Motion is reached through its still, because Immich
         // hides Live Photo motion from search.
@@ -227,10 +249,10 @@ public final class JobRunner: Service, Sendable {
         }
         if !missing.isEmpty {
             for resource in resources where located[resource.role] == nil {
-                try await catalog.markResource(assetID, role: resource.role, state: .notInImmich)
+                try await catalog.markResource(assetID, role: resource.role, state: .notInImmich, job: job)
             }
             try await catalog.setState(assetID, .waitingForImmich,
-                                       message: "Not in Immich yet: " + missing.joined(separator: ", "))
+                                       message: "Not in Immich yet: " + missing.joined(separator: ", "), job: job)
             return
         }
 
@@ -246,21 +268,22 @@ public final class JobRunner: Service, Sendable {
             try await immich.downloadOriginal(id: immichID, to: file)
             let (sha256, size) = try await detached { (try Fingerprint.sha256(of: file), try Self.size(of: file)) }
             guard sha256 == resource.sha256, size == resource.size else {
-                try await catalog.markResource(assetID, role: resource.role, state: .mismatch, immichAssetID: immichID)
+                try await catalog.markResource(assetID, role: resource.role, state: .mismatch, immichAssetID: immichID, job: job)
                 throw Compactor.Unprocessable(description: "Immich's copy of \(resource.role.rawValue) differs from the iPhone original")
             }
-            try await catalog.markResource(assetID, role: resource.role, state: .verified, immichAssetID: immichID)
+            try await catalog.markResource(assetID, role: resource.role, state: .verified, immichAssetID: immichID, job: job)
             sources[resource.role] = file
         }
-        try await hub.originalsVerified(assetID)
-        try await compactAndStore(asset, resources: resources, sources: sources)
+        try await hub.originalsVerified(assetID, job: job)
+        try await compactAndStore(asset, resources: resources, sources: sources, job: job)
     }
 
-    private func compactAndStore(_ asset: AssetRecord, resources: [ResourceRecord], sources: [Role: URL]) async throws {
-        try await catalog.setState(asset.id, .compressing)
+    private func compactAndStore(_ asset: AssetRecord, resources: [ResourceRecord], sources: [Role: URL], job: Job) async throws {
+        try await catalog.setState(asset.id, .compressing, job: job)
         let base = resources.first { $0.role == (asset.kind == .video ? .video : .photo) }?.filename ?? asset.id
         // A previous output can still be downloading. Never erase it to publish a new result.
         let directory = storage.compact(asset.id + "-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let outcome = try await compactor.compact(kind: asset.kind, sources: sources, baseName: base, into: directory)
         var files: [CompactRecord] = []
         for file in outcome.files {
@@ -269,8 +292,13 @@ public final class JobRunner: Service, Sendable {
             record.path = storage.relative(URL(fileURLWithPath: file.path))
             files.append(record)
         }
+        for file in files {
+            guard let url = storage.resolve(file.path) else { throw Compactor.Unprocessable(description: "Invalid derivative path.") }
+            try BackupDurability.publish(url, root: storage.root)
+            try FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: url.path)
+        }
         try await catalog.storeCompact(asset.id, files, deviceCompresses: outcome.deviceCompresses,
-                                       state: outcome.state, message: outcome.message)
+                                       state: outcome.state, message: outcome.message, job: job)
     }
 
     static func size(of url: URL) throws -> Int {
@@ -287,7 +315,6 @@ extension Storage {
 
     /// A catalog path resolved inside the data directory; nil if it would escape it.
     func resolve(_ relative: String) -> URL? {
-        let url = root.appendingPathComponent(relative).standardizedFileURL
-        return url.path.hasPrefix(root.standardizedFileURL.path + "/") ? url : nil
+        OriginalsStore.resolve(relative, in: root)
     }
 }

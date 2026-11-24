@@ -16,6 +16,10 @@ public struct HomespunServer: Sendable {
     let storage: Storage
     let runner: JobRunner
     let copier: JobRunner
+    let videoRunner: JobRunner
+    let budget: ServerWorkBudget
+    let backupPhoto: BackupWorker
+    let backupVideo: BackupWorker
     let hub: ConnectorHub
     let routes: Routes
     let immichState: ImmichState
@@ -33,6 +37,11 @@ public struct HomespunServer: Sendable {
     init(configuration: ServerConfiguration, connectors: [any Connector] = [], logger: Logger = Logger(label: "homespun"),
          approver: (any PairingApprover)?, approvalPause: TimeInterval = 5, builtIn: [any Connector]? = nil,
          codeRounds: Int = PairingCrypto.codeRounds, challengeInterval: TimeInterval = 1) async throws {
+        guard (1...2).contains(configuration.photoWorkers), (1...2).contains(configuration.videoWorkers),
+              configuration.maximumChunkBytes > 0, configuration.maximumStagingBytes > 0,
+              configuration.minimumFreeBytes >= (256 << 20) else {
+            throw ServerConfiguration.Failure.invalid("Invalid server worker or storage budget.")
+        }
         self.configuration = configuration
         self.logger = logger
         storage = Storage(root: configuration.dataDirectory)
@@ -64,7 +73,8 @@ public struct HomespunServer: Sendable {
         }
         let renamePending = try await catalog.setting(DeviceRename.journal) != nil
         let trashPending = try await !catalog.trashJournals().isEmpty
-        let recoveryPending = renamePending || trashPending
+        let publicationPending = try await catalog.hasBackupPublications()
+        let recoveryPending = renamePending || trashPending || publicationPending
         if initialization != nil, !recoveryPending, try !Storage.prepareOriginals(root) {
             logger.error("the originals folder \(root.path) isn't available (is its disk connected?)")
         }
@@ -74,15 +84,22 @@ public struct HomespunServer: Sendable {
         hub = ConnectorHub(connectors: (builtIn ?? Self.builtInConnectors(configuration)) + connectors,
                            catalog: catalog, storage: storage)
         let compactor = Compactor(profile: configuration.profile)
+        budget = ServerWorkBudget(photos: configuration.photoWorkers, videos: configuration.videoWorkers)
         runner = JobRunner(catalog: catalog, storage: storage, originals: originals, compactor: compactor,
-                           immichState: immichState, hub: hub, logger: logger)
+                           immichState: immichState, hub: hub, logger: logger, budget: budget, legacyLane: "photo")
+        videoRunner = JobRunner(catalog: catalog, storage: storage, originals: originals, compactor: compactor,
+                               immichState: immichState, hub: hub, logger: logger, budget: budget, legacyLane: "video")
         copier = JobRunner(catalog: catalog, storage: storage, originals: originals, compactor: compactor,
-                           immichState: immichState, hub: hub, logger: logger, pollInterval: .seconds(2), connectors: true)
+                           immichState: immichState, hub: hub, logger: logger, pollInterval: .seconds(2), connectors: true, budget: budget)
+        backupPhoto = BackupWorker(lane: "photo", catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                   logger: logger, minimumFreeBytes: configuration.minimumFreeBytes)
+        backupVideo = BackupWorker(lane: "video", catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                   logger: logger, minimumFreeBytes: configuration.minimumFreeBytes)
         routes = Routes(configuration: configuration, catalog: catalog, storage: storage, originals: originals, mover: mover,
                         immichState: immichState,
                         approvals: PairingApprovals(approver: approver, serverName: configuration.name, pause: approvalPause),
                         connectors: hub, identity: identity,
-                        codeChallenges: CodeChallenges(catalog: catalog, rounds: codeRounds, minimumInterval: challengeInterval))
+                        codeChallenges: CodeChallenges(catalog: catalog, rounds: codeRounds, minimumInterval: challengeInterval), budget: budget)
     }
 
     /// The originals folder, saved in the catalog because stored paths are relative to it: once
@@ -101,7 +118,8 @@ public struct HomespunServer: Sendable {
             let renamePending = try await catalog.setting(DeviceRename.journal) != nil
             let movePending = try await catalog.setting(OriginalsMover.setting) != nil
             let trashPending = try await !catalog.trashJournals().isEmpty
-            if try await catalog.storedOriginalCount() == 0, !renamePending, !movePending, !trashPending {
+            let publicationPending = try await catalog.hasBackupPublications()
+            if try await catalog.storedOriginalCount() == 0, !renamePending, !movePending, !trashPending, !publicationPending {
                 root = configured
             } else {
                 logger.notice("originals are in \(root.path); ignoring --originals \(configured.path) (move them from the app)")
@@ -142,8 +160,22 @@ public struct HomespunServer: Sendable {
     public func application(logger: Logger = Logger(label: "homespun")) -> some ApplicationProtocol {
         // The idle timeout closes uploads that stall (a phone leaving Wi-Fi), releasing their lock.
         let startup = ServingStartup()
-        let workers: [any Service] = [runner, copier, TLSMaintenance(data: configuration.dataDirectory, identity: identity, logger: logger)]
+        var workers: [any Service] = [runner, videoRunner, copier, backupPhoto, backupVideo,
+                                    BackupAdoption(catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                                   configuration: configuration, lane: "photo"),
+                                    BackupAdoption(catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                                   configuration: configuration, lane: "video"),
+                                    BackupMaintenance(catalog: catalog, storage: storage),
+                                    TLSMaintenance(data: configuration.dataDirectory, identity: identity, logger: logger)]
             + advertiser()
+        if configuration.photoWorkers > 1 {
+            workers.append(BackupWorker(lane: "photo", catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                        logger: logger, minimumFreeBytes: configuration.minimumFreeBytes))
+        }
+        if configuration.videoWorkers > 1 {
+            workers.append(BackupWorker(lane: "video", catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                        logger: logger, minimumFreeBytes: configuration.minimumFreeBytes))
+        }
         var application = Application(router: router(startup: startup), server: transport,
                     configuration: .init(address: .hostname(configuration.host, port: configuration.port),
                                          serverName: "homespun"),
@@ -194,6 +226,10 @@ public struct HomespunServer: Sendable {
             "HOMESPUN_HOST": configuration.host,
             "HOMESPUN_PORT": String(configuration.port),
             "HOMESPUN_NAME": configuration.name,
+            "HOMESPUN_PHOTO_WORKERS": String(configuration.photoWorkers),
+            "HOMESPUN_VIDEO_WORKERS": String(configuration.videoWorkers),
+            "HOMESPUN_MAX_STAGING_BYTES": String(configuration.maximumStagingBytes),
+            "HOMESPUN_MIN_FREE_BYTES": String(configuration.minimumFreeBytes),
         ]
         if let originals = configuration.originalsDirectory { environment["HOMESPUN_ORIGINALS"] = originals.path }
         if let publicURL = configuration.publicURL { environment["HOMESPUN_PUBLIC_URL"] = publicURL }
@@ -244,8 +280,33 @@ public struct HomespunServer: Sendable {
         try await originals.refreshRoot(catalog: catalog)
         try await DeviceRename.recover(catalog: catalog, root: await originals.root)
         try await Trash(catalog: catalog, originals: originals, storage: storage).recover()
-        try await runner.drain()
+        try await BackupPublication.recover(catalog: catalog, storage: storage, originals: originals)
+        try await catalog.releaseLeases()
+        try await catalog.releaseBackupLeases()
+        let adoption = BackupAdoption(catalog: catalog, storage: storage, originals: originals, budget: budget, configuration: configuration)
+        while try await catalog.nextBackupAdoption() != nil {
+            do { _ = try await adoption.runNext() }
+            catch is CancellationError { throw CancellationError() }
+            catch let failure as SQLiteError { throw failure }
+            catch { continue }
+        }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await runner.drain() }
+            group.addTask { try await videoRunner.drain() }
+            group.addTask { try await copier.drain() }
+            group.addTask { while try await backupPhoto.runNext() {} }
+            group.addTask { while try await backupVideo.runNext() {} }
+            try await group.waitForAll()
+        }
         try await copier.drain()
+    }
+
+    /// Call after an offline catalog restore, before starting this server. Existing immutable
+    /// originals remain retained; clients must recover a new snapshot/epoch.
+    public func rotateBackupHistoryAfterRestore() async throws -> HomespunCore.BackupAPI.Origin {
+        let ownership = try ServerOwnership(dataDirectory: configuration.dataDirectory)
+        defer { withExtendedLifetime(ownership) {} }
+        return try await catalog.rotateBackupHistory()
     }
 
     /// Deletes what has been in the trash for 30 days (the job runner does this hourly).

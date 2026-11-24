@@ -90,6 +90,11 @@ struct DeviceRename: Sendable {
         let fileManager = FileManager.default
         let source = root.appendingPathComponent(from, isDirectory: true)
         let target = root.appendingPathComponent(folder, isDirectory: true)
+        let data = catalog.dataDirectory.resolvingSymlinksInPath().standardizedFileURL.path
+        let moving = source.resolvingSymlinksInPath().standardizedFileURL.path
+        guard data != moving, !data.hasPrefix(moving + "/") else {
+            throw Failure.unavailable("That phone folder contains the server's data directory; it cannot be renamed.")
+        }
         let caseOnly = from.lowercased() == folder.lowercased()
         let hasFolder = fileManager.fileExists(atPath: source.path)
         if !fileManager.fileExists(atPath: root.path), try await catalog.storedOriginalCount() > 0 {

@@ -35,7 +35,7 @@ struct DeviceAuthentication: RouterMiddleware {
 }
 
 /// Open under the short root read lease; the descriptor survives a rename, move or unlink.
-private final class OriginalReader: @unchecked Sendable {
+final class OriginalReader: @unchecked Sendable {
     let handle: FileHandle
     private let lock = NSLock()
     init(_ url: URL) throws { handle = try FileHandle(forReadingFrom: url) }
@@ -74,6 +74,7 @@ struct Routes: Sendable {
     let connectors: ConnectorHub
     let identity: TLSIdentityBox
     let codeChallenges: CodeChallenges
+    let budget: ServerWorkBudget
     let identityLimit = IdentityProofLimit()
     var trash: Trash { Trash(catalog: catalog, originals: originals, storage: storage) }
 
@@ -86,6 +87,8 @@ struct Routes: Sendable {
     }
 
     func add(to router: Router<HomespunRequestContext>) {
+        BackupRoutes(configuration: configuration, catalog: catalog, storage: storage, originals: originals,
+                     immich: immichState, budget: budget).add(to: router)
         let api = router.group("api/v1")
         api.get("health") { _, _ in try json(ServerAPI.Health(tls: true)) }
         api.post("tls/verify") { request, context in try await verifyIdentity(request, context) }
@@ -451,11 +454,15 @@ struct Routes: Sendable {
         if body.kind == .livePhoto, !roles.contains(.pairedVideo) {
             throw HTTPError(.badRequest, message: "A Live Photo needs its paired video.")
         }
+        var total = 0
         for resource in body.resources {
             guard Validation.isSHA256(resource.sha256) else { throw HTTPError(.badRequest, message: "Bad SHA-256.") }
             guard resource.size > 0 else {
                 throw HTTPError(.unprocessableContent, message: "\(resource.role.rawValue) is empty; zero-byte originals are not accepted.")
             }
+            let (next, overflow) = total.addingReportingOverflow(resource.size)
+            guard !overflow else { throw HTTPError(.badRequest, message: "The aggregate resource size exceeds supported bounds.") }
+            total = next
             guard !resource.filename.isEmpty, resource.filename.utf8.count <= 255 else {
                 throw HTTPError(.badRequest, message: "Bad filename.")
             }
@@ -525,28 +532,37 @@ struct Routes: Sendable {
         if present != resource.receivedBytes { try await catalog.setReceived(assetID, role: role, bytes: present) }
         guard offset == present else { return try json(try await resourceStatus(assetID, role), status: .conflict) }
 
-        let handle = try FileHandle(forWritingTo: partial)
-        var written = present
-        do {
-            defer { try? handle.close() }
-            try handle.seek(toOffset: UInt64(present))
-            for try await buffer in request.body {
-                written += buffer.readableBytes
-                guard written <= resource.size, written - present <= configuration.maximumChunkBytes else {
-                    try handle.truncate(atOffset: UInt64(present))
-                    throw HTTPError(.contentTooLarge, message: "More bytes than declared, or chunk too large.")
-                }
-                try handle.write(contentsOf: Data(buffer.readableBytesView))
-            }
-            try handle.synchronize()
+        let written = try await budget.run(.transfer) {
+            try await receiveChunk(request, into: partial, present: present, size: resource.size)
         }
         try await catalog.setReceived(assetID, role: role, bytes: written)
         if written == resource.size { try await finishUpload(asset, resource, partial) }
         return try json(try await resourceStatus(assetID, role))
     }
 
+    private func receiveChunk(_ request: Request, into partial: URL, present: Int, size: Int) async throws -> Int {
+        guard present >= 0, present <= size else { throw HTTPError(.conflict, message: "The staging offset exceeds its resource descriptor.") }
+        let handle = try FileHandle(forWritingTo: partial)
+        var written = present
+        do {
+            defer { try? handle.close() }
+            try handle.seek(toOffset: UInt64(present))
+            for try await buffer in request.body {
+                guard buffer.readableBytes <= size - written,
+                      buffer.readableBytes <= configuration.maximumChunkBytes - (written - present) else {
+                    try handle.truncate(atOffset: UInt64(present))
+                    throw HTTPError(.contentTooLarge, message: "More bytes than declared, or chunk too large.")
+                }
+                written += buffer.readableBytes
+                try handle.write(contentsOf: Data(buffer.readableBytesView))
+            }
+            try handle.synchronize()
+        }
+        return written
+    }
+
     private func finishUpload(_ asset: AssetRecord, _ resource: ResourceRecord, _ partial: URL) async throws {
-        let sha256 = try await detached { try Fingerprint.sha256(of: partial) }
+        let sha256 = try await budget.run(.verification) { try await detached { try Fingerprint.sha256(of: partial) } }
         guard sha256 == resource.sha256 else {
             try? FileManager.default.removeItem(at: partial)
             try await catalog.markResource(asset.id, role: resource.role, state: .mismatch,
@@ -562,6 +578,9 @@ struct Routes: Sendable {
             }
             let destination = OriginalsStore.destination(root: root, folder: folder, filename: resource.filename, sha256: sha256,
                                                          captureDate: Timestamp.date(asset.captureDate))
+            guard OriginalsStore.resolve(OriginalsStore.relative(destination, to: root), in: root) != nil else {
+                throw HTTPError(.conflict, message: "The original destination escapes the configured root.")
+            }
             try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.moveItem(at: partial, to: destination)
             try? FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: destination.path)
@@ -708,7 +727,7 @@ struct Routes: Sendable {
         return ServerAPI.StorageInfo(
             originalsFolder: root.path, deviceFolder: folder.map { root.appendingPathComponent($0).path },
             freeBytes: space.free, capacityBytes: space.capacity, storedCount: stored.count,
-            storedBytes: stored.reduce(Int64(0)) { $0 + Int64($1.size) }, move: await mover.status,
+            storedBytes: try StorageBytes.sum(stored.map(\.size)), move: await mover.status,
             trashCount: trashed.count, trashBytes: trashed.bytes)
     }
 
@@ -758,7 +777,7 @@ struct Routes: Sendable {
         let assetID = try assetID(context)
         guard try await catalog.asset(assetID) != nil else { throw HTTPError(.notFound, message: "Unknown asset.") }
         return try await catalog.mutations.withClaim(assetID) {
-            try await verifyClaimed(assetID)
+            try await budget.run(.verification) { try await verifyClaimed(assetID) }
         }
     }
 

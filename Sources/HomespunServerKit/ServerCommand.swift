@@ -5,7 +5,7 @@ import Foundation
 /// `ServerCommand.run(connectors:)` from its own `main`.
 public enum ServerCommand {
     static let usage = """
-        usage: homespun-server [serve | pair | certificate | install-service | devices | revoke <device-id> | import <manifest>] [options]
+        usage: homespun-server [serve | pair | certificate | install-service | devices | revoke <device-id> | import <manifest> | resync-history] [options]
 
           serve              Run the server (default).
           pair               Show a QR code and link to pair the Homespun app (one use, 10 minutes;
@@ -16,6 +16,8 @@ public enum ServerCommand {
           certificate        Show the server's key fingerprint. --renew renews the certificate;
                              --new-key replaces the key and keeps the previous identity in tls/.
           revoke <id>        Stop a device from using the server.
+          resync-history     After an offline catalog restore, advance its backup history epoch
+                             before restarting. Refuses while serving. Originals are retained.
           import <manifest>  Record originals already kept elsewhere, and the compact copies made from
                              them before Homespun, so the app recognises those copies. The originals
                              are only read, never changed. One JSON object per line (see the README).
@@ -117,7 +119,11 @@ public enum ServerCommand {
                              ("HOMESPUN_ORIGINALS", configuration.originalsDirectory?.path), ("HOMESPUN_HOST", configuration.host),
                              ("HOMESPUN_PORT", String(configuration.port)), ("HOMESPUN_NAME", configuration.name),
                              ("HOMESPUN_PUBLIC_URL", configuration.publicURL),
-                             ("HOMESPUN_ONEDRIVE_CLIENT_ID", configuration.onedriveClientID)]
+                             ("HOMESPUN_ONEDRIVE_CLIENT_ID", configuration.onedriveClientID),
+                             ("HOMESPUN_PHOTO_WORKERS", String(configuration.photoWorkers)),
+                             ("HOMESPUN_VIDEO_WORKERS", String(configuration.videoWorkers)),
+                             ("HOMESPUN_MAX_STAGING_BYTES", String(configuration.maximumStagingBytes)),
+                             ("HOMESPUN_MIN_FREE_BYTES", String(configuration.minimumFreeBytes))]
                     .compactMap { key, value in value.map { "\(key)=\($0)" } }.joined(separator: "\n") + "\n"
                 try FileManager.default.createDirectory(at: settingsFile.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try saved.write(to: settingsFile, atomically: true, encoding: .utf8)
@@ -133,6 +139,9 @@ public enum ServerCommand {
                     print("\(device.id)  \(device.name)  paired \(device.createdAt)  last seen \(device.lastSeenAt ?? "never")"
                           + (device.revokedAt.map { "  REVOKED \($0)" } ?? ""))
                 }
+            case "resync-history" where arguments.count == 1:
+                let origin = try await server.rotateBackupHistoryAfterRestore()
+                print("Backup history advanced to \(origin.historyEpoch). Devices must reconcile a new snapshot; originals were retained.")
             case "import":
                 var rest = Array(arguments.dropFirst()), jobs = 4
                 let dryRun = rest.contains("--dry-run"), copy = rest.contains("--copy")

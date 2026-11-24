@@ -25,7 +25,9 @@ actor OriginalsStore {
 
     static func resolve(_ relative: String, in root: URL) -> URL? {
         let url = root.appendingPathComponent(relative).standardizedFileURL
-        return url.path.hasPrefix(root.standardizedFileURL.path + "/") ? url : nil
+        let realRoot = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let realPath = url.resolvingSymlinksInPath().standardizedFileURL.path
+        return url.path.hasPrefix(root.standardizedFileURL.path + "/") && realPath.hasPrefix(realRoot + "/") ? url : nil
     }
 
     static func relative(_ url: URL, to root: URL) -> String {
@@ -184,14 +186,14 @@ actor OriginalsMover {
                 }
             }
             let originals = try await catalog.storedOriginals()
-            let needed = originals.reduce(Int64(0)) { $0 + Int64($1.size) }
+            let needed = try StorageBytes.sum(originals.map(\.size))
             // On the same APFS disk copies are clones and take no space; elsewhere they need room.
             #if os(macOS)
             let clones = OriginalsStore.device(of: from.path) == OriginalsStore.device(of: target.path)
             #else
             let clones = false
             #endif
-            if !clones, let free = OriginalsStore.space(at: target.path).free, free < needed + (1 << 30) {
+            if !clones, let free = OriginalsStore.space(at: target.path).free, free < (try StorageBytes.add(needed, 1 << 30)) {
                 throw Failure(description: "That disk has \(Self.bytes(free)) free; the originals need \(Self.bytes(needed)) plus room to spare.")
             }
             do {
@@ -291,7 +293,7 @@ actor OriginalsMover {
         -> [(assetID: String, role: ServerAPI.ResourceRole, path: String, size: Int, sha256: String)] {
         let all = try await catalog.storedOriginals()
         status?.total = all.count
-        status?.totalBytes = all.reduce(Int64(0)) { $0 + Int64($1.size) }
+        status?.totalBytes = try StorageBytes.sum(all.map(\.size))
         return all.filter { !copied.contains($0.path) }
     }
 
@@ -306,7 +308,8 @@ actor OriginalsMover {
             try await detached { try Self.copyChecked(source, to: target, root: to, sha256: original.sha256, size: original.size) }
             copied.insert(original.path)
             status?.copied = copied.count
-            status?.copiedBytes += Int64(original.size)
+            let previouslyCopied = status?.copiedBytes ?? 0
+            status?.copiedBytes = try StorageBytes.add(previouslyCopied, Int64(original.size))
         }
     }
 
