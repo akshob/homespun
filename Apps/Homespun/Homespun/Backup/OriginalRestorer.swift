@@ -105,7 +105,8 @@ struct OriginalRestorer: Sendable {
         }
         let copy = PhotoLibrary.asset(item.compact)
         let identifier = try await PhotoLibrary.restore(files, favorite: copy?.isFavorite ?? false, hidden: copy?.isHidden ?? false,
-                                                        albums: copy.map(PhotoLibrary.userAlbums) ?? [])
+                                                        albums: copy.map(PhotoLibrary.userAlbums) ?? [],
+                                                        metadata: .init(compact: copy))
         // What Photos holds now must be the server's original, byte for byte.
         guard let restored = PhotoLibrary.asset(identifier) else { throw Failure("Photos didn't keep the original.") }
         let check = try PhotoLibrary.workDirectory()

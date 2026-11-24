@@ -22,6 +22,7 @@ final class GridThumbnails {
     private(set) var prefetched = Set<String>()
     private var order: [String] = []
     private let images = NSCache<NSString, UIImage>()
+    private var revisions: [String: Int] = [:]
 
     init(manager: PHCachingImageManager, source: @escaping () -> AssetSource, catalog: (any ItemCatalog)? = nil) {
         self.manager = manager
@@ -32,9 +33,16 @@ final class GridThumbnails {
         images.countLimit = 200
     }
 
-    private func key(_ id: String, pixels: CGFloat) -> NSString { "\(id)@\(Int(pixels))" as NSString }
+    private func key(_ id: String, pixels: CGFloat) -> NSString { "\(id)@\(Int(pixels))#\(revisions[id, default: 0])" as NSString }
+
+    func invalidate(_ ids: Set<String>) {
+        for id in ids { revisions[id, default: 0] &+= 1 }
+        let warm = Set(order[window.clamped(to: 0..<order.count)]).union(prefetched).intersection(ids)
+        cache(start: Array(warm), stop: Array(warm))
+    }
 
     func cached(_ id: String, pixels: CGFloat) -> UIImage? { images.object(forKey: key(id, pixels: pixels)) }
+    func revision(_ id: String) -> Int { revisions[id, default: 0] }
 
     private func remember(_ image: UIImage, id: String, pixels: CGFloat) {
         images.setObject(image, forKey: key(id, pixels: pixels),
@@ -62,18 +70,20 @@ final class GridThumbnails {
     func request(_ id: String, pixels: CGFloat,
                  handler: @escaping @MainActor (UIImage, _ final: Bool) -> Void) -> Request? {
         RenderProbe.count("grid.thumbRequests")
+        let revision = revisions[id, default: 0]
         if let catalog {
             return .catalog(Task {
                 guard let image = await catalog.thumbnail(id, side: pixels), !Task.isCancelled else { return }
                 let prepared = await image.byPreparingForDisplay() ?? image
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, revisions[id, default: 0] == revision else { return }
                 remember(prepared, id: id, pixels: pixels)
                 handler(prepared, true)
             })
         }
         guard let asset = source().asset(id) else { return nil }
         let deliver = Delivery { [weak self] image, final in
-            if final { self?.remember(image, id: id, pixels: pixels) }
+            guard let self, self.revisions[id, default: 0] == revision else { return }
+            if final { self.remember(image, id: id, pixels: pixels) }
             handler(image, final)
         }
         return .photos(manager.requestImage(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: .aspectFill,

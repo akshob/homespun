@@ -22,6 +22,7 @@ final class PhotoPageCell: ItemPageCell {
     private var current = false
     /// The full-size image or the Live Photo is in.
     private var sharp = false
+    private var revision = 0
     private var loading: Task<Void, Never>?
     private var loaded: (id: String, current: Bool)?
     private weak var images: ItemImages?
@@ -38,14 +39,28 @@ final class PhotoPageCell: ItemPageCell {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    func invalidate(_ id: String) {
+        guard self.id == id else { return }
+        loading?.cancel()
+        loading = nil
+        loaded = nil
+        self.id = nil
+        item = nil
+        sharp = false
+        content.image = nil
+        content.livePhoto = nil
+    }
+
     /// Shows an item (or the same one again, current or not, with new words).
     func show(id: String, item: () -> (any LibraryItem)?, current: Bool, label: String, placeholder: UIImage?,
               images: ItemImages, onZoom: @escaping (Bool) -> Void) {
-        if id != self.id {
+        let revision = images.revision(id)
+        if id != self.id || revision != self.revision {
             loading?.cancel()
             loading = nil
             loaded = nil
             self.id = id
+            self.revision = revision
             self.item = item()
             sharp = false
             content.image = nil
@@ -158,6 +173,7 @@ final class VideoPageCell: ItemPageCell {
     private let spinner = UIActivityIndicatorView(style: .large)
     private let failure = UILabel()
     private var id: String?
+    private var revision = 0
     private var item: (any LibraryItem)?
     private var current = false
     private weak var playback: VideoPlayback?
@@ -225,13 +241,20 @@ final class VideoPageCell: ItemPageCell {
 
     func endDisplaying() { detach() }
 
+    func invalidate(_ id: String) {
+        guard self.id == id else { return }
+        prepareForReuse()
+    }
+
     func show(id: String, item: () -> (any LibraryItem)?, current: Bool, label: String, placeholder: UIImage?,
               images: ItemImages, playback: VideoPlayback) {
-        if self.id != id {
+        let revision = images.revision(id)
+        if self.id != id || self.revision != revision {
             detach()
             loading?.cancel()
             loading = nil
             self.id = id
+            self.revision = revision
             self.item = item()
             poster.image = nil
         }

@@ -43,6 +43,7 @@ struct PairingScanner: UIViewControllerRepresentable {
 
 /// Scan QR code (DESIGN 01·6.3): the viewfinder with one line of help, or how to allow the camera.
 struct ScanPage: View {
+    var permissionsAllowed = true
     let found: (PairingLink) -> Void
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
@@ -51,7 +52,10 @@ struct ScanPage: View {
     var body: some View {
         NavigationStack {
             Group {
-                if camera == .denied || camera == .restricted {
+                if !permissionsAllowed {
+                    ContentUnavailableView("The demo doesn't use the camera", systemImage: "qrcode.viewfinder",
+                                           description: Text("Use the demo's pairing code instead."))
+                } else if camera == .denied || camera == .restricted {
                     ContentUnavailableView {
                         Label("Homespun can't use the camera", systemImage: "camera")
                     } description: {
@@ -85,7 +89,7 @@ struct ScanPage: View {
             }
         }
         .task {
-            if camera == .notDetermined {
+            if permissionsAllowed, camera == .notDetermined {
                 _ = await AVCaptureDevice.requestAccess(for: .video)
                 camera = AVCaptureDevice.authorizationStatus(for: .video)
             }

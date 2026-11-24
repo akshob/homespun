@@ -176,7 +176,7 @@ struct FreeUpTip: Tip {
     var server: String
     var title: Text { Text("Checked before anything goes") }
     var message: Text? {
-        Text("\(server) checks each original again before iOS asks you. The first time, 10 at most.")
+        Text("Review the compact copies and the exact count first. \(server) checks each original again before iOS asks you.")
     }
     var image: Image? { Image(systemName: "checkmark.shield") }
     var rules: [Rule] {

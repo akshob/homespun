@@ -58,6 +58,60 @@ final class LibraryController {
     private var started = false
     /// Keep the running accessory until the finished/ready facts have arrived, without a hide/show.
     private var finishingBackups = 0
+    private var retired = false
+    private var operations = 0
+    private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
+    private var localRetirements: [UUID: @MainActor () async -> Void] = [:]
+
+    func observeRetirement(_ retire: @escaping @MainActor () async -> Void) -> CatalogObservation? {
+        guard !retired else { return nil }
+        let id = UUID()
+        localRetirements[id] = retire
+        return CatalogObservation { [weak self] in
+            Task { @MainActor [weak self] in self?.localRetirements[id] = nil }
+        }
+    }
+
+    private func admit() -> Bool {
+        guard !retired else { return false }
+        operations += 1
+        return true
+    }
+
+    private func finishedOperation() {
+        operations -= 1
+        if operations == 0 {
+            let waiters = retirementWaiters
+            retirementWaiters = []
+            waiters.forEach { $0.resume() }
+        }
+    }
+
+    func retire() {
+        retired = true
+        job.onPhaseChange = nil
+        job.onRunFinished = nil
+        library.onChange = nil
+        library.stopObserving()
+        pendingRebuild?.cancel()
+        restoreTask?.cancel()
+        job.retire()
+        copyFinder.retire()
+    }
+
+    func stopAndWait() async {
+        retire()
+        let local = Array(localRetirements.values)
+        localRetirements = [:]
+        for retire in local { await retire() }
+        await job.stopAndWait()
+        await restoreTask?.value
+        await copyFinder.stopAndWait()
+        await pendingRebuild?.value
+        if operations > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
+        await job.history?.load()
+        await job.history?.flush()
+    }
 
     init(settings: AppSettings, job: CompactJob, premium: Premium, automatic: AutomaticMode, copyFinder: CopyFinder) {
         self.settings = settings
@@ -73,25 +127,22 @@ final class LibraryController {
         job.onRunFinished = { [weak self] in
             self?.finishingBackups += 1
             Task { [weak self] in
-                await self?.jobFinished()
-                self?.finishingBackups -= 1
-                await Telemetry.shared.flush()
+                guard let self, self.admit() else { return }
+                defer { self.finishedOperation() }
+                await self.jobFinished()
+                self.finishingBackups -= 1
+                if !self.settings.isDemo { await Telemetry.shared.flush() }
             }
         }
     }
 
     var isRemoving: Bool { if case .checking = removal { true } else { false } }
 
-    /// How many the next Free Up Space removes: at most 10 until the user says copies look right.
-    var nextRemovalCount: Int {
-        settings.trialConfirmed ? ready.count : min(ready.count, AppSettings.trialLimit)
-    }
+    /// The review shows this exact count before the person approves removal.
+    var nextRemovalCount: Int { ready.count }
 
     /// The bytes the next Free Up Space frees.
-    var nextRemovalBytes: Int {
-        guard !settings.trialConfirmed, ready.count > AppSettings.trialLimit else { return ready.bytes }
-        return Array(ready.originals.prefix(AppSettings.trialLimit)).reduce(0) { $0 + (readySizes[$1] ?? 0) }
-    }
+    var nextRemovalBytes: Int { ready.bytes }
 
     /// Each ready original's size, for what a scoped Free Up Space frees.
     private(set) var readySizes: [String: Int] = [:]
@@ -111,6 +162,8 @@ final class LibraryController {
     /// Called once when the main screen appears. `loaded`: once what's ready to free up and Premium are
     /// known, before automatic mode catches up (which can take a while).
     func start(loaded: () -> Void = {}) async {
+        guard admit() else { return }
+        defer { finishedOperation() }
         guard !started else { return }
         started = true
         library.onChange = { @MainActor [weak self] in self?.scheduleRefreshGrid() }
@@ -122,6 +175,8 @@ final class LibraryController {
     }
 
     func refresh() async {
+        guard admit() else { return }
+        defer { finishedOperation() }
         let now = settings.photos.authorization()
         // The whole library is read at launch and when access changes; after that Photos' change
         // observer keeps it current (re-reading 35,000 items on every return to the app is slow).
@@ -140,13 +195,18 @@ final class LibraryController {
     }
 
     func requestAccess() async {
+        guard admit() else { return }
+        defer { finishedOperation() }
         // `refresh` sees the new status (against `access`) and reads the library.
         _ = await settings.photos.requestAuthorization()
         await refresh()
     }
 
     func refreshGrid() async {
-        await library.update(ledger: await job.ledger.snapshot(), job: job.states, backedUp: await backedUpDue())
+        guard !retired else { return }
+        var states = job.states
+        for id in automatic.keptAsIs where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
+        await library.update(ledger: await job.ledger.snapshot(), job: states, backedUp: await backedUpDue())
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
@@ -234,7 +294,8 @@ final class LibraryController {
     /// Starts backing up these items (oldest first). Each original goes home, then its compact
     /// copy comes back to Photos.
     func backUp(_ identifiers: [String]) {
-        guard !identifiers.isEmpty else { return }
+        guard !retired, !identifiers.isEmpty else { return }
+        automatic.retryKept(identifiers)
         finished = nil
         if case .done = removal { removal = .idle }
         batch.formUnion(identifiers)
@@ -243,6 +304,8 @@ final class LibraryController {
         // Picked now: the first task while setup is still going (it finishes setup right after).
         let trigger: RunHistory.Trigger = settings.onboardingComplete ? .manual : .firstTask
         Task {
+            guard admit() else { return }
+            defer { finishedOperation() }
             await job.enqueue(identifiers, trigger: trigger)
             // Once the items are queued, so the system's progress follows them from the start. (The demo's
             // runs are short and stay on screen.)
@@ -253,6 +316,7 @@ final class LibraryController {
     /// The job changed: the items it touched change badge at once; an item that finished (its
     /// compact copy is in the ledger now) brings a full rebuild once things settle.
     func jobChanged() {
+        guard !retired else { return }
         let changes = job.takePhaseChanges()
         library.apply(job: changes)
         let finished = changes.values.contains { state in
@@ -266,6 +330,7 @@ final class LibraryController {
     }
 
     private func scheduleRefreshGrid() {
+        guard !retired else { return }
         pendingRebuild?.cancel()
         pendingRebuild = Task {
             try? await Task.sleep(for: .milliseconds(400))
@@ -277,6 +342,7 @@ final class LibraryController {
     @ObservationIgnored private var pendingRebuild: Task<Void, Never>?
 
     func jobFinished() async {
+        guard !retired else { return }
         jobChanged()
         journey.backupFinished()
         await refreshReady()
@@ -292,8 +358,29 @@ final class LibraryController {
 
     func dismissFinished() { finished = nil }
 
+    @discardableResult
+    func keepAsIs(_ id: String) async -> Bool {
+        guard admit() else { return false }
+        defer { finishedOperation() }
+        keepProblem = nil
+        guard case .failed? = job.states[id] else { return false }
+        guard automatic.keepAsIs(id) else {
+            keepProblem = "Couldn't save this choice. The item still needs attention. Try again."
+            return false
+        }
+        guard job.resolveFailure(id) else { return false }
+        await refreshGrid()
+        return true
+    }
+
+    private(set) var keepProblem: String?
+
+    static let keptAsIsReason = AutomaticMode.keptAsIsReason
+
     /// Automatic mode catches up whenever the app opens (unless something is already running).
     func runAutomatic() async {
+        guard admit() else { return }
+        defer { finishedOperation() }
         guard automatic.enabled, premium.isUnlocked, !job.isRunning, !isRemoving, settings.onboardingComplete else { return }
         await automatic.run(settings: settings, job: job, premium: premium, notify: false)
         await refreshReady()
@@ -304,6 +391,8 @@ final class LibraryController {
 
     /// Checks each original with the server again, then iOS asks; `only` limits it to these.
     func freeUp(only scope: Set<String>? = nil) async {
+        guard admit() else { return }
+        defer { finishedOperation() }
         guard !isRemoving, let remover = settings.remover(ledger: job.ledger) else { return }
         journey.used(.freeUp)
         removal = .checking("Checking with \(serverName)")
@@ -370,7 +459,7 @@ final class LibraryController {
 
     /// Restores these originals (see `OriginalRestorer`); `restoring` follows it.
     func restore(_ items: [OriginalRestorer.Item]) {
-        guard !isRestoring, !items.isEmpty, let restorer = settings.restorer(ledger: job.ledger) else { return }
+        guard !retired, !isRestoring, !items.isEmpty, let restorer = settings.restorer(ledger: job.ledger) else { return }
         restoring = .running(.init(done: 0, total: items.count, message: "Getting ready"))
         Announce.say(items.count == 1 ? "Restoring the original." : "Restoring \(items.count) originals.")
         restoreTask = Task {
@@ -397,6 +486,8 @@ final class LibraryController {
     /// on this iPhone, kept full size. False if nothing changed (cancelled, or nothing to keep).
     @discardableResult
     func keepOriginals(_ originals: [String]) async -> Bool {
+        guard admit() else { return false }
+        defer { finishedOperation() }
         let ledger = job.ledger
         var items: [(original: String, serverAssetID: String, originalBytes: Int)] = []
         var compacts: [String] = []

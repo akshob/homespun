@@ -209,6 +209,16 @@ final class DuoLayoutUITests: XCTestCase {
             let sound = app.buttons["compare.sound"], heard = app.buttons["compare.sound"].value as? String
             sound.tap()
             XCTAssertNotEqual(sound.value as? String, heard, "Sound didn't switch sides")
+            if name == "landscape" {
+                let paused = position.value as? String, selectedSound = sound.value as? String
+                pose("portrait", file: poses)
+                XCTAssertTrue(app.wait(wide: false))
+                XCTAssertEqual(app.buttons["compare.play"].label, "Play both", "rotation resumed paused videos")
+                XCTAssertEqual(app.sliders["compare.position"].value as? String, paused, "rotation lost the playback position")
+                XCTAssertEqual(app.buttons["compare.sound"].value as? String, selectedSound, "rotation changed the chosen sound")
+                pose("landscape", file: poses)
+                XCTAssertTrue(app.wait(wide: true))
+            }
             let close = app.buttons["remove.close"]
             close.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
             XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10))
@@ -223,6 +233,83 @@ final class DuoLayoutUITests: XCTestCase {
             XCTAssertTrue(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 10))
         }
         app.choose("grid.filter", "Photos and Videos")
+    }
+
+    @MainActor func testNonFirstComparisonSurvivesUnfoldRotationAndFold() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let poses = environment["DUO_POSE_FILE"], let address = environment["HOMESPUN_SERVER"],
+              let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Needs the iPhone Duo pose driver and a test server.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        pose("landscape", file: poses)
+        app.launchWithFeatures()
+        app.pair(address: address, code: code)
+        app.choose("grid.filter", "Photos")
+        if app.gridItems("Ready to free up").count < 3 { _ = app.compactOldestOnScreen(3) }
+        let offer = app.buttons["accessory.action"]
+        XCTAssertTrue(offer.waitForExistence(timeout: 20))
+        offer.tap()
+        let second = app.buttons.matching(identifier: "remove.compare").element(boundBy: 1)
+        XCTAssertTrue(second.waitForExistence(timeout: 10), "no non-first compact copy")
+        let identity = second.value as? String
+        XCTAssertTrue(identity?.contains("item 2 of") == true)
+        for _ in 0..<4 where second.frame.maxY > app.frame.maxY - 200 { app.swipeUpInContent() }
+        second.tap()
+        XCTAssertTrue(app.buttons["remove.keepOriginal"].waitForExistence(timeout: 20))
+        app.segmentedControls["compare.mode"].buttons["Original"].tap()
+        for name in ["portrait", "folded", "landscape"] {
+            pose(name, file: poses)
+            if name == "folded" {
+                XCTAssertTrue(app.wait(width: 0..<500))
+                XCTAssertTrue(app.buttons["remove.keepOriginal"].waitForExistence(timeout: 15))
+            } else {
+                XCTAssertTrue(app.wait(wide: name == "landscape"))
+                let selected = app.buttons.matching(identifier: "remove.compare")
+                    .matching(NSPredicate(format: "value == %@", identity ?? "")).firstMatch
+                XCTAssertTrue(selected.waitForExistence(timeout: 15) && selected.isSelected, "adaptation selected another item")
+            }
+            XCTAssertTrue(app.segmentedControls["compare.mode"].buttons["Original"].isSelected, "adaptation reset Compare")
+        }
+        pose("folded", file: poses)
+        XCTAssertTrue(app.wait(width: 0..<500))
+        XCTAssertTrue(app.buttons["remove.keepOriginal"].waitForExistence(timeout: 15), "folding left the active comparison")
+        XCTAssertTrue(app.segmentedControls["compare.mode"].buttons["Original"].isSelected)
+        app.goBack()
+        app.buttons["remove.close"].tap()
+        app.choose("grid.filter", "Photos and Videos")
+    }
+
+    @MainActor func testUnfinishedNameAndFocusSurviveAdaptiveNavigation() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let poses = environment["DUO_POSE_FILE"], let address = environment["HOMESPUN_SERVER"],
+              let code = environment["HOMESPUN_PAIRING_CODE"] else {
+            throw XCTSkip("Needs the iPhone Duo pose driver and a test server.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"]
+        pose("folded", file: poses)
+        app.launchWithFeatures()
+        app.pair(address: address, code: code)
+        app.openTab("Server")
+        let row = app.buttons["settings.deviceName"]
+        XCTAssertTrue(app.reveal(row))
+        row.tap()
+        let field = app.textFields["device.name"]
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        let old = field.value as? String ?? ""
+        field.tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + "Unfinished family phone")
+        for name in ["landscape", "portrait", "folded"] {
+            pose(name, file: poses)
+            XCTAssertTrue(field.waitForExistence(timeout: 15), "the Name editor closed in \(name)")
+            XCTAssertEqual(field.value as? String, "Unfinished family phone", "the draft was replaced in \(name)")
+            XCTAssertTrue(app.buttons["device.name.save"].isEnabled)
+        }
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "focus didn't return to the editor")
+        // Back abandons the draft; ordinary nonediting pages keep their fold-to-list policy.
+        app.goBack()
     }
 
     @MainActor func testLibraryFillsTheOpenDisplayOnLaunchAndUnfold() throws {

@@ -3,6 +3,7 @@ import Foundation
 import HomespunCore
 import Photos
 import Testing
+import UIKit
 @testable import Homespun
 
 /// Try the Demo's pretend server and sample library: the whole backup, free up and restore cycle runs
@@ -55,6 +56,189 @@ import Testing
                 deviceName: "Test iPhone", installID: try DefaultsInstallation(defaults: session.defaults).load().id)
             return ServerClient(baseURL: DemoServer.baseURL, token: pairing.response.token, trust: .demo)
         }
+    }
+
+    @Test func catalogObservationCancelsAndDoesNotRetainTheCatalog() async throws {
+        let fixture = try await Fixture.make()
+        var catalog: DemoLibrary? = DemoLibrary(folder: fixture.folder.appendingPathComponent("observed"),
+                                                media: fixture.media, ask: { _ in true })
+        weak var weakCatalog = catalog
+        var model: LibraryModel? = LibraryModel(catalog: catalog!)
+        weak var weakModel = model
+        await model?.reload()
+        model = nil
+        catalog = nil
+        #expect(weakModel == nil && weakCatalog == nil)
+
+        let messages = ObservationCount()
+        let observation = fixture.session.library.observe { messages.add() }
+        let photo = try sample(fixture.session.library, "photo")
+        _ = fixture.session.library.restore(photo.id)
+        observation.cancel()
+        observation.cancel()
+        _ = fixture.session.library.restore(photo.id)
+        #expect(messages.count == 1)
+    }
+
+    private final class ObservationCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func add() { lock.withLock { value += 1 } }
+        var count: Int { lock.withLock { value } }
+    }
+
+    @Test func freeUpThumbnailsHaveItemIdentityAndKeepTheirActivationOverride() async throws {
+        let fixture = try await Fixture.make()
+        let library = LibraryModel(catalog: fixture.session.library)
+        await library.reload()
+        let samples = Array(fixture.session.library.samples.prefix(2))
+        let pairs = samples.map { FreeUpPair(original: "original-\($0.id)", compact: $0.id) }
+        let items = FreeUpThumbnails.items(pairs, selected: pairs[1])
+        let spoken = FreeUpThumbnails.accessibility(library: library, count: pairs.count)
+        #expect(spoken(items[0], 0).label.contains(samples[0].itemKind.name))
+        #expect(spoken(items[0], 0).value == "Compact copy, item 1 of 2")
+        #expect(spoken(items[1], 1).value == "Compact copy, item 2 of 2")
+        let collection = ThumbnailCollection()
+        let view = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
+        collection.attach(to: view, library: library, side: 72, scale: 1)
+        var activated: Int?
+        collection.update(items: items, accessibility: (FreeUpThumbnails.label, FreeUpThumbnails.identifier),
+                          itemAccessibility: spoken) { activated = $0 }
+        let cell = ThumbnailCell(frame: CGRect(x: 0, y: 0, width: 72, height: 72))
+        collection.configure(cell, at: 1)
+        let element = try #require(cell.contentView.subviews.first { $0.isAccessibilityElement })
+        #expect(element.accessibilityLabel == spoken(items[1], 1).label)
+        #expect(element.accessibilityHint?.contains("Compare with the original") == true)
+        #expect(element.accessibilityTraits.contains(.selected))
+        #expect(element.accessibilityActivate() && activated == 1)
+    }
+
+    private actor HeldCompactor: Compacting {
+        let marker: URL
+        private var entered = false
+        private var release: CheckedContinuation<Void, Never>?
+        private var startWaiter: CheckedContinuation<Void, Never>?
+
+        init(marker: URL) { self.marker = marker }
+
+        func compact(_ localIdentifier: String, compactNow: Bool,
+                     progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome {
+            entered = true
+            startWaiter?.resume()
+            startWaiter = nil
+            await withCheckedContinuation { release = $0 }
+            try FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("finished".utf8).write(to: marker)
+            return .unchanged("Synthetic completion")
+        }
+
+        func waitForStart() async {
+            if entered { return }
+            await withCheckedContinuation { startWaiter = $0 }
+        }
+
+        func finish() { release?.resume(); release = nil }
+    }
+
+    @Test func retirementJoinsTheAdmittedWriterAndRejectsNewWork() async throws {
+        let fixture = try await Fixture.make()
+        let marker = fixture.folder.appendingPathComponent("writer-finished")
+        let held = HeldCompactor(marker: marker)
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+                                   tokens: fixture.session.tokens, isDemo: true)
+        let job = CompactJob(settings: settings, ledger: fixture.ledger, compactor: held)
+        let ids = fixture.session.library.samples.prefix(2).map(\.id)
+        await job.enqueue([ids[0]])
+        await held.waitForStart()
+        job.retire()
+        var joined = false
+        let retirement = Task {
+            await job.stopAndWait()
+            joined = true
+        }
+        await Task.yield()
+        #expect(!joined && !FileManager.default.fileExists(atPath: marker.path))
+        await job.enqueue([ids[1]])
+        #expect(job.items.count == 1)
+        await held.finish()
+        await retirement.value
+        #expect(joined && !job.isRunning && FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @Test func retiredDemoCannotWriteOrRouteAnOldClientIntoANewSession() async throws {
+        let fixture = try await Fixture.make()
+        let oldClient = try await fixture.pairedClient()
+        fixture.session.library.retire()
+        await fixture.session.server.stopAndWait()
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(fixture.session.library.restore(photo.id) == nil)
+        await #expect(throws: CancellationError.self) { try await fixture.session.library.delete([photo.id]) }
+        #expect(fixture.asked.all.isEmpty)
+        #expect(throws: CancellationError.self) { try fixture.session.tokens.setToken("late", for: "old") }
+
+        let next = DemoServer(folder: fixture.folder.appendingPathComponent("next-server"), pace: 0, bundledCompact: { _ in nil })
+        DemoServer.running.withLock { $0 = next }
+        await #expect(throws: ServerClient.Failure.self) { try await oldClient.info() }
+        let current = ServerClient(baseURL: DemoServer.baseURL, trust: .demo)
+        #expect(try await current.info().name == DemoServer.name)
+        #expect(await next.snapshot.assets.isEmpty)
+    }
+
+    @Test func keepAsIsResolvesCurrentAttentionAndSurvivesReopeningUntilManualRetry() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: true, listens: false))
+        await model.history.load()
+        await model.library.library.reload()
+        let id = try sample(fixture.session.library, "photo").id
+        // No pairing: this manual attempt fails without contacting any server.
+        await model.job.enqueue([id])
+        let deadline = ContinuousClock.now + .seconds(10)
+        while model.job.isRunning, ContinuousClock.now < deadline { await Task.yield() }
+        try #require(!model.job.isRunning)
+        await model.library.refreshGrid()
+        #expect(model.job.states[id]?.phase == .failed && ActivityTab.attention(model).count == 1)
+        #expect(await model.library.keepAsIs(id))
+        #expect(model.library.library.state.cell(id)?.badge == .kept)
+        #expect(ActivityTab.attention(model).isEmpty)
+
+        let reopened = AutomaticMode(url: fixture.folder.appendingPathComponent("automatic.json"),
+                                    photos: fixture.session.library, system: false)
+        #expect(reopened.keptAsIs == [id])
+        await reopened.enable(existing: true)
+        #expect(reopened.keptAsIs == [id], "Turning Automatic Mode on must not discard an explicit user decision")
+        reopened.retryKept([id])
+        #expect(reopened.keptAsIs.isEmpty && !reopened.state.settled.contains(id))
+        let blocked = fixture.folder.appendingPathComponent("not-a-directory")
+        try Data().write(to: blocked)
+        let unwritable = AutomaticMode(url: blocked.appendingPathComponent("automatic.json"),
+                                       photos: fixture.session.library, system: false)
+        #expect(!unwritable.keepAsIs(id) && unwritable.keptAsIs.isEmpty)
+        await model.library.stopAndWait()
+    }
+
+    @Test func firstReviewUsesTheExactApprovedCountRatherThanAnObsoleteTenItemPromise() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: true, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+                                        response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                                        pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: model.job.ledger,
+                                      pollInterval: .zero)
+        let photos = Array(fixture.session.library.samples.filter { $0.kind == "photo" }.prefix(12))
+        try #require(photos.count == 12)
+        for photo in photos.prefix(11) { _ = try await compactor.compact(photo.id, compactNow: true) { _ in } }
+        await model.library.refreshReady()
+        #expect(!model.settings.trialConfirmed && model.library.nextRemovalCount == 11)
+        let approved = Set(model.library.ready.originals)
+        _ = try await compactor.compact(photos[11].id, compactNow: true) { _ in }
+        await model.library.refreshReady()
+        // The review's explicit They Look Right approval, scoped to what it displayed.
+        model.settings.trialConfirmed = true
+        await model.library.freeUp(only: approved)
+        #expect(fixture.session.library.existing(Array(approved), includeHidden: true).isEmpty)
+        #expect(fixture.session.library.demoItem(photos[11].id) != nil)
+        await model.library.stopAndWait()
     }
 
     private func sample(_ library: DemoLibrary, _ kind: String) throws -> DemoSample {

@@ -16,6 +16,8 @@ final class AutomaticMode {
     nonisolated static let batch = 200
     /// A failing item is tried this many times, then left for the user to pick.
     nonisolated static let maximumAttempts = 3
+    nonisolated static let keptAsIsReason =
+        "You chose to keep this item as is. No compact copy is ready to free up space. Make Compact Copy can try again."
 
     struct State: Codable, Equatable {
         var enabled = false
@@ -26,6 +28,8 @@ final class AutomaticMode {
         var attempts: [String: Int] = [:]
         /// Kept as is (for example, already compact); not tried again.
         var settled: Set<String> = []
+        /// Explicit user decisions, also projected into Library and Activity.
+        var keptAsIs: Set<String> = []
         var lastRun: Date?
         var lastSummary: String?
         /// Items Photos reported as added (possibly with older dates) and not handled yet, so
@@ -54,6 +58,7 @@ final class AutomaticMode {
             token = try values.decodeIfPresent(Data.self, forKey: .token)
             attempts = try values.decodeIfPresent([String: Int].self, forKey: .attempts) ?? [:]
             settled = try values.decodeIfPresent(Set<String>.self, forKey: .settled) ?? []
+            keptAsIs = try values.decodeIfPresent(Set<String>.self, forKey: .keptAsIs) ?? []
             lastRun = try values.decodeIfPresent(Date.self, forKey: .lastRun)
             lastSummary = try values.decodeIfPresent(String.self, forKey: .lastSummary)
             pending = try values.decodeIfPresent(Set<String>.self, forKey: .pending) ?? []
@@ -74,6 +79,7 @@ final class AutomaticMode {
     private let system: Bool
 
     var enabled: Bool { ReleaseFeatures.automaticMode && state.enabled }
+    var keptAsIs: Set<String> { state.keptAsIs }
     /// Backs up everything not backed up yet, not only items added since it was turned on.
     var backsUpEverything: Bool { state.since == .distantPast }
 
@@ -85,9 +91,14 @@ final class AutomaticMode {
         state = (try? JSONDecoder().decode(State.self, from: Data(contentsOf: url))) ?? State()
     }
 
-    private func save() {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? JSONEncoder().encode(state).write(to: url, options: .atomic)
+    @discardableResult private func save() -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(state).write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: Turning it on and off
@@ -147,8 +158,20 @@ final class AutomaticMode {
     }
 
     /// The user chose Keep As Is for an item that couldn't be backed up: it isn't tried again.
-    func keepAsIs(_ id: String) {
+    @discardableResult func keepAsIs(_ id: String) -> Bool {
+        let previous = state
+        state.keptAsIs.insert(id)
         state.settled.insert(id)
+        guard save() else { state = previous; return false }
+        return true
+    }
+
+    func retryKept(_ ids: [String]) {
+        let retrying = state.keptAsIs.intersection(ids)
+        guard !retrying.isEmpty else { return }
+        state.keptAsIs.subtract(retrying)
+        state.settled.subtract(retrying)
+        for id in retrying { state.attempts[id] = nil }
         save()
     }
 
@@ -189,7 +212,7 @@ final class AutomaticMode {
         let assets = photos.candidates(since: state.since, also: Array(added.union(backedUp.keys)))
         let eligible = Set(Self.pick(assets.map { ($0.id, $0.created) }, since: state.since,
                                      added: added.union(backedUp.keys), ledger: ledger, album: photos.albumMembers(),
-                                     attempts: state.attempts, settled: state.settled, limit: .max))
+                                     attempts: state.attempts, settled: state.settled.union(state.keptAsIs), limit: .max))
         // Kept full size (Keep Original): never compacted automatically.
         let kept = Set(backedUp.filter { $0.value.kept == true }.keys)
         return AutomaticPlan.make(assets.filter { eligible.contains($0.id) && !kept.contains($0.id) }, backedUp: Set(backedUp.keys),
@@ -328,7 +351,8 @@ final class AutomaticMode {
         }.value
         state.pending = state.pending.filter { id in
             existing.contains(id) && ledger[id]?.serverAssetID == nil && backedUp[id] == nil && !copies.contains(id)
-                && !album.contains(id) && !state.settled.contains(id) && (state.attempts[id] ?? 0) < Self.maximumAttempts
+                && !album.contains(id) && !state.settled.contains(id) && !state.keptAsIs.contains(id)
+                && (state.attempts[id] ?? 0) < Self.maximumAttempts
         }
         // First-seen dates matter only until the compact copy (and never beyond the longest cutoff).
         let oldest = now.addingTimeInterval(-Double((CompactSchedule.stops.last ?? 90) + 10) * 86_400)

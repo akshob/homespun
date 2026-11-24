@@ -7,12 +7,6 @@ import UIKit
 /// Reads an item's media from PhotoKit and from downloaded files, for the viewer, Details and
 /// Compare.
 enum ItemMedia {
-    /// Holds a value that isn't `Sendable` while it crosses from PhotoKit's queue to the main actor.
-    private final class Box<Value>: @unchecked Sendable {
-        let value: Value
-        init(_ value: Value) { self.value = value }
-    }
-
     /// The main resource (the photo, or the video) and the Live Photo motion, current versions.
     static func resources(_ asset: PHAsset) -> (main: PHAssetResource?, motion: PHAssetResource?) {
         let resources = PHAssetResource.assetResources(for: asset)
@@ -41,12 +35,16 @@ enum ItemMedia {
         options.resizeMode = fast ? .fast : .exact
         options.isNetworkAccessAllowed = !fast
         let target = size ?? PHImageManagerMaximumSize
-        let image: UIImage? = await withCheckedContinuation { continuation in
-            PHImageManager.default().requestImage(for: asset, targetSize: target, contentMode: .aspectFit,
-                                                  options: options) { image, _ in
-                continuation.resume(returning: image)
+        let manager = Unchecked(value: PHImageManager.default())
+        let image = await PhotoRequest<Unchecked<UIImage?>>.value(cancelled: Unchecked(value: nil),
+                                                                 cancel: { manager.value.cancelImageRequest($0) }) { finish in
+            manager.value.requestImage(for: asset, targetSize: target, contentMode: .aspectFit,
+                                 options: options) { image, info in
+                if !fast, info?[PHImageResultIsDegradedKey] as? Bool == true { return }
+                finish(Unchecked(value: image))
             }
-        }
+        }.value
+        guard !Task.isCancelled else { return nil }
         return await image?.byPreparingForDisplay() ?? image
     }
 
@@ -54,10 +52,13 @@ enum ItemMedia {
         let options = PHLivePhotoRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
-        let box: Box<PHLivePhoto?> = await withCheckedContinuation { continuation in
-            PHImageManager.default().requestLivePhoto(for: asset, targetSize: size, contentMode: .aspectFit,
-                                                      options: options) { photo, _ in
-                continuation.resume(returning: Box(photo))
+        let manager = Unchecked(value: PHImageManager.default())
+        let box = await PhotoRequest<Unchecked<PHLivePhoto?>>.value(cancelled: Unchecked(value: nil),
+                                                                   cancel: { manager.value.cancelImageRequest($0) }) { finish in
+            manager.value.requestLivePhoto(for: asset, targetSize: size, contentMode: .aspectFit,
+                                     options: options) { photo, info in
+                if info?[PHImageResultIsDegradedKey] as? Bool == true { return }
+                finish(Unchecked(value: photo))
             }
         }
         return box.value
@@ -67,8 +68,11 @@ enum ItemMedia {
         let options = PHVideoRequestOptions()
         options.deliveryMode = .automatic
         options.isNetworkAccessAllowed = true
-        let box: Box<Result<AVPlayerItem, Error>> = await withCheckedContinuation { continuation in
-            PHImageManager.default().requestPlayerItem(forVideo: asset, options: options) { item, info in
+        let manager = Unchecked(value: PHImageManager.default())
+        let box = await PhotoRequest<Unchecked<Result<AVPlayerItem, Error>>>.value(
+            cancelled: Unchecked(value: .failure(CancellationError())), cancel: { manager.value.cancelImageRequest($0) }
+        ) { finish in
+            manager.value.requestPlayerItem(forVideo: asset, options: options) { item, info in
                 let result: Result<AVPlayerItem, Error>
                 if let item {
                     result = .success(item)
@@ -76,10 +80,78 @@ enum ItemMedia {
                     result = .failure(info?[PHImageErrorKey] as? Error
                         ?? PhotoLibrary.Failure.unsupported("This video can't be played here."))
                 }
-                continuation.resume(returning: Box(result))
+                finish(Unchecked(value: result))
             }
         }
         return box.value
+    }
+
+    /// PhotoKit may call back before returning its request ID, or after cancellation.
+    final class PhotoRequest<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Value, Never>?
+        private var request: PHImageRequestID?
+        private var finished = false
+        private var cancelled = false
+        private let cancelledValue: Value
+        private let cancelRequest: @Sendable (PHImageRequestID) -> Void
+
+        init(cancelled: Value, cancel: @escaping @Sendable (PHImageRequestID) -> Void) {
+            cancelledValue = cancelled
+            cancelRequest = cancel
+        }
+
+        @MainActor static func value(cancelled: Value, cancel: @escaping @Sendable (PHImageRequestID) -> Void,
+                                     start: (@escaping @Sendable (Value) -> Void) -> PHImageRequestID) async -> Value {
+            let pending = PhotoRequest(cancelled: cancelled, cancel: cancel)
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    guard pending.begin(continuation) else { return }
+                    pending.install(start { pending.finish($0) })
+                }
+            } onCancel: { pending.cancel() }
+        }
+
+        func begin(_ continuation: CheckedContinuation<Value, Never>) -> Bool {
+            lock.lock()
+            let cancelled = cancelled
+            if !cancelled { self.continuation = continuation }
+            lock.unlock()
+            if cancelled { continuation.resume(returning: cancelledValue) }
+            return !cancelled
+        }
+
+        func install(_ request: PHImageRequestID) {
+            lock.lock()
+            let cancelled = cancelled
+            if !finished { self.request = request }
+            lock.unlock()
+            if cancelled { cancelRequest(request) }
+        }
+
+        func finish(_ value: Value) {
+            lock.lock()
+            guard !finished else { lock.unlock(); return }
+            finished = true
+            let continuation = continuation
+            self.continuation = nil
+            request = nil
+            lock.unlock()
+            continuation?.resume(returning: value)
+        }
+
+        func cancel() {
+            lock.lock()
+            guard !finished else { lock.unlock(); return }
+            cancelled = true
+            finished = true
+            let continuation = continuation, request = request
+            self.continuation = nil
+            self.request = nil
+            lock.unlock()
+            if let request { cancelRequest(request) }
+            continuation?.resume(returning: cancelledValue)
+        }
     }
 
     @MainActor static func player(_ asset: PHAsset) async -> AVPlayer? {

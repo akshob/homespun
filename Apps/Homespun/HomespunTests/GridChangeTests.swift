@@ -68,4 +68,30 @@ struct GridChangeTests {
         #expect(counts.version == version + 1)
         #expect(counts.changedSections == [0])
     }
+
+    @Test @MainActor func photosContentChangesAreSeparateFromBadgeAndStructureChanges() async {
+        let library = LibraryModel()
+        let old = library.state
+        library.invalidateContent(["edited"])
+        #expect(library.changedContent(since: 0) == ["edited"])
+        let version = library.contentVersion
+        library.apply(job: ["other": .working("Uploading")])
+        #expect(library.contentVersion == version && library.state == old)
+        library.invalidateContent(["another"])
+        #expect(library.changedContent(since: version) == ["another"])
+        #expect(library.changedContent(since: 0) == ["edited", "another"])
+
+        let images = ItemImages()
+        images.invalidate(["edited"])
+        #expect(images.revision("edited") == 1 && images.revision("untouched") == 0)
+    }
+
+    @Test @MainActor func connectionProblemChangesTheMeasuredNoticeIdentity() {
+        let clear = LibraryView.noticeKey(problem: nil, limited: false, paired: true)
+        let blocked = LibraryView.noticeKey(problem: "Key changed", limited: false, paired: true)
+        let updated = LibraryView.noticeKey(problem: "Update the server", limited: false, paired: true)
+        #expect(clear != blocked && blocked != updated)
+        #expect(LibraryView.noticeKey(problem: "Key changed", limited: true, paired: false) == blocked)
+        #expect(LibraryView.noticeKey(problem: nil, limited: true, paired: false) == "limited")
+    }
 }
