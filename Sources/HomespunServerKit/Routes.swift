@@ -34,11 +34,33 @@ struct DeviceAuthentication: RouterMiddleware {
     }
 }
 
-/// One upload at a time per resource.
-actor UploadLocks {
-    private var held: Set<String> = []
-    func acquire(_ key: String) -> Bool { held.insert(key).inserted }
-    func release(_ key: String) { held.remove(key) }
+/// Open under the short root read lease; the descriptor survives a rename, move or unlink.
+private final class OriginalReader: @unchecked Sendable {
+    let handle: FileHandle
+    private let lock = NSLock()
+    init(_ url: URL) throws { handle = try FileHandle(forReadingFrom: url) }
+    deinit { try? handle.close() }
+
+    func read(offset: Int, count: Int) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        try handle.seek(toOffset: UInt64(offset))
+        return try handle.read(upToCount: count) ?? Data()
+    }
+
+    func body(range: ClosedRange<Int>) -> ResponseBody {
+        ResponseBody(contentLength: range.count) { writer in
+            var offset = range.lowerBound
+            while offset <= range.upperBound {
+                let position = offset, count = min(128 << 10, range.upperBound - offset + 1)
+                let data = try await detached { try self.read(offset: position, count: count) }
+                guard !data.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+                try await writer.write(ByteBuffer(bytes: data))
+                offset += data.count
+            }
+            try await writer.finish(nil)
+        }
+    }
 }
 
 struct Routes: Sendable {
@@ -53,7 +75,6 @@ struct Routes: Sendable {
     let identity: TLSIdentityBox
     let codeChallenges: CodeChallenges
     let identityLimit = IdentityProofLimit()
-    let locks = UploadLocks()
     var trash: Trash { Trash(catalog: catalog, originals: originals, storage: storage) }
 
     func info(deviceID: String? = nil) async -> ServerAPI.ServerInfo {
@@ -346,29 +367,54 @@ struct Routes: Sendable {
             }
         }
         let assetID = body.assetID!
+        return try await catalog.mutations.withClaim(assetID) {
+            do { return try await registerClaimed(body, assetID: assetID, device: context.deviceID ?? "", mode: mode) }
+            catch {
+                let pending: Bool
+                do { pending = try await catalog.setting(Trash.journal(assetID)) != nil }
+                catch { pending = true }
+                if pending {
+                    await originals.requireRecovery("An interrupted trash restoration needs server recovery.")
+                }
+                if let failure = error as? OriginalsMover.Failure {
+                    throw HTTPError(.serviceUnavailable, message: failure.description)
+                }
+                throw error
+            }
+        }
+    }
+
+    private func registerClaimed(_ body: ServerAPI.RegisterAssetRequest, assetID: String, device: String,
+                                 mode: ServerAPI.StorageMode) async throws -> Response {
+        guard try await catalog.setting(Trash.journal(assetID)) == nil else {
+            throw HTTPError(.serviceUnavailable, message: "This item's interrupted trash change needs server recovery.")
+        }
+        // Establish retention at admission, before restoration/verification/worker callbacks.
+        if body.wantsCompact { try await catalog.retainPermanently(assetID) }
         // Backed up again after it was removed on the phone (recovered from Recently Deleted): its
         // files come out of the trash first, so files that changed meanwhile are handled like any edit.
         if mode == .files, let trashed = try await catalog.asset(assetID) {
             let inTrash = try await catalog.resources(assetID).contains { $0.storedPath.flatMap(Trash.restored) != nil }
-            if trashed.state == .trashed || inTrash { try await trash.restore(trashed) }
+            if trashed.state == .trashed || inTrash { try await trash.restoreClaimed(assetID) }
         }
-        let outcome = try await catalog.register(body, assetID: assetID, device: context.deviceID ?? "",
+        let previous = try await catalog.resources(assetID)
+        let outcome = try await catalog.register(body, assetID: assetID, device: device,
                                                  initialState: mode == .files ? .receiving : .verifying)
-        guard var asset = try await catalog.asset(assetID) else { throw HTTPError(.internalServerError) }
-        if mode == .files {
-            try await catalog.setHoldCompact(assetID, !body.wantsCompact)
-            asset = try await catalog.asset(assetID) ?? asset
+        for old in previous where !body.resources.contains(where: {
+            $0.role == old.role && $0.size == old.size && $0.sha256.lowercased() == old.sha256
+        }) {
+            let partial = storage.partial(assetID, old.role)
+            if FileManager.default.fileExists(atPath: partial.path) { try FileManager.default.removeItem(at: partial) }
         }
+        guard let asset = try await catalog.asset(assetID) else { throw HTTPError(.internalServerError) }
         let resources = try await catalog.resources(assetID)
         switch mode {
         case .files:
             // A server restart during verification leaves a complete partial file; finish it now.
             for resource in resources where resource.state != .verified {
                 let partial = storage.partial(assetID, resource.role)
-                let key = "\(assetID)/\(resource.role.rawValue)"
-                if (try? JobRunner.size(of: partial)) == resource.size, await locks.acquire(key) {
-                    try? await finishUpload(asset, resource, partial)
-                    await locks.release(key)
+                if (try? JobRunner.size(of: partial)) == resource.size {
+                    try await finishUpload(asset, resource, partial)
                 }
             }
             let resources = try await catalog.resources(assetID)
@@ -447,25 +493,25 @@ struct Routes: Sendable {
             throw HTTPError(.conflict, message: "This server reads originals from Immich; nothing is uploaded.")
         }
         let assetID = try assetID(context), role = try role(context)
+        return try await catalog.mutations.withClaim(assetID) {
+            try await uploadClaimed(request, assetID: assetID, role: role)
+        }
+    }
+
+    private func uploadClaimed(_ request: Request, assetID: String, role: Role) async throws -> Response {
         guard let asset = try await catalog.asset(assetID),
               let resource = try await catalog.resources(assetID).first(where: { $0.role == role }) else {
             throw HTTPError(.notFound, message: "Register the asset first.")
+        }
+        guard asset.state != .trashed, !asset.purging, try await catalog.setting(Trash.journal(assetID)) == nil else {
+            throw HTTPError(.conflict, message: "Restore this item's server trash before uploading.")
         }
         guard let offset = request.uri.queryParameters.get("offset", as: Int.self), offset >= 0 else {
             throw HTTPError(.badRequest, message: "Missing ?offset=.")
         }
         if resource.state == .verified { return try json(try await resourceStatus(assetID, role)) }
 
-        let key = "\(assetID)/\(role.rawValue)"
-        guard await locks.acquire(key) else { throw HTTPError(.conflict, message: "This resource is already uploading.") }
-        do {
-            let response = try await receive(request, asset: asset, resource: resource, offset: offset)
-            await locks.release(key)
-            return response
-        } catch {
-            await locks.release(key)
-            throw error
-        }
+        return try await receive(request, asset: asset, resource: resource, offset: offset)
     }
 
     private func receive(_ request: Request, asset: AssetRecord, resource: ResourceRecord, offset: Int) async throws
@@ -503,7 +549,8 @@ struct Routes: Sendable {
         let sha256 = try await detached { try Fingerprint.sha256(of: partial) }
         guard sha256 == resource.sha256 else {
             try? FileManager.default.removeItem(at: partial)
-            try await catalog.markResource(asset.id, role: resource.role, state: .mismatch)
+            try await catalog.markResource(asset.id, role: resource.role, state: .mismatch,
+                                           expected: resource, assetGeneration: asset.generation)
             throw HTTPError(.unprocessableContent, message: "SHA-256 mismatch; upload \(resource.role.rawValue) again.")
         }
         let catalog = catalog
@@ -519,7 +566,8 @@ struct Routes: Sendable {
             try FileManager.default.moveItem(at: partial, to: destination)
             try? FileManager.default.setAttributes([.posixPermissions: 0o440], ofItemAtPath: destination.path)
             try await catalog.markResource(asset.id, role: resource.role, state: .verified,
-                                           storedPath: OriginalsStore.relative(destination, to: root))
+                                           storedPath: OriginalsStore.relative(destination, to: root),
+                                           expected: resource, assetGeneration: asset.generation)
         }
         if try await catalog.resources(asset.id).allSatisfy({ $0.state == .verified }) {
             try await originalsComplete(try await catalog.asset(asset.id) ?? asset, copyToConnectors: true)
@@ -571,12 +619,21 @@ struct Routes: Sendable {
     /// after it left the phone). Supports one `Range`, so a video can be streamed.
     func original(_ request: Request, _ context: HomespunRequestContext) async throws -> Response {
         let assetID = try assetID(context), role = try role(context)
+        return try await catalog.mutations.withClaim(assetID) {
+            try await originals.place { root in
+                try await originalClaimed(request, context, assetID: assetID, role: role, root: root)
+            }
+        }
+    }
+
+    private func originalClaimed(_ request: Request, _ context: HomespunRequestContext,
+                                 assetID: String, role: Role, root: URL) async throws -> Response {
         guard let resource = try await catalog.resources(assetID).first(where: { $0.role == role }),
               resource.state == .verified else { throw HTTPError(.notFound, message: "No such original.") }
         let url: URL
         if let path = resource.externalPath {
             url = URL(fileURLWithPath: path)
-        } else if let stored = resource.storedPath, let resolved = await originals.url(stored) {
+        } else if let stored = resource.storedPath, let resolved = OriginalsStore.resolve(stored, in: root) {
             url = resolved
         } else {
             throw HTTPError(.notFound, message: "This original is in Immich; open it there.")
@@ -584,6 +641,7 @@ struct Routes: Sendable {
         guard (try? JobRunner.size(of: url)) == resource.size else {
             throw HTTPError(.notFound, message: "The original is missing or changed on the server.")
         }
+        let reader = try OriginalReader(url)
         var headers = HTTPFields()
         headers[.contentType] = Self.mediaType(resource.filename)
         headers[.acceptRanges] = "bytes"
@@ -597,10 +655,10 @@ struct Routes: Sendable {
             headers[.contentRange] = "bytes \(range.lowerBound)-\(range.upperBound)/\(resource.size)"
             headers[.contentLength] = String(range.count)
             return Response(status: .partialContent, headers: headers,
-                            body: try await FileIO().loadFile(path: url.path, range: range, context: context))
+                            body: reader.body(range: range))
         }
         headers[.contentLength] = String(resource.size)
-        return Response(status: .ok, headers: headers, body: try await FileIO().loadFile(path: url.path, context: context))
+        return Response(status: .ok, headers: headers, body: reader.body(range: 0...(resource.size - 1)))
     }
 
     /// `attachment` with the file's name: plain for ASCII, and RFC 5987's `filename*` for the rest.
@@ -680,13 +738,16 @@ struct Routes: Sendable {
                 throw HTTPError(.badRequest, message: "Bad hash.")
             }
         }
-        guard try await catalog.markImported(assetID, device: context.deviceID ?? "") else {
-            throw HTTPError(.conflict, message: "The compact copy is not ready.")
+        let importedCopies = copies
+        return try await catalog.mutations.withClaim(assetID) {
+            guard try await catalog.markImported(assetID, device: context.deviceID ?? "") else {
+                throw HTTPError(.conflict, message: "The compact copy is not ready.")
+            }
+            // Only files the server left to the phone; anything else it made itself.
+            let deviceMade = Set(try await catalog.asset(assetID)?.deviceCompresses ?? [])
+            try await catalog.rememberCopies(assetID, importedCopies.filter { deviceMade.contains($0.role) })
+            return try json(try await status(context))
         }
-        // Only files the server left to the phone; anything else it made itself.
-        let deviceMade = Set(try await catalog.asset(assetID)?.deviceCompresses ?? [])
-        try await catalog.rememberCopies(assetID, copies.filter { deviceMade.contains($0.role) })
-        return try json(try await status(context))
     }
 
     // MARK: Verification
@@ -696,6 +757,16 @@ struct Routes: Sendable {
     func verify(_ context: HomespunRequestContext) async throws -> ServerAPI.Verification {
         let assetID = try assetID(context)
         guard try await catalog.asset(assetID) != nil else { throw HTTPError(.notFound, message: "Unknown asset.") }
+        return try await catalog.mutations.withClaim(assetID) {
+            try await verifyClaimed(assetID)
+        }
+    }
+
+    private func verifyClaimed(_ assetID: String) async throws -> ServerAPI.Verification {
+        guard try await catalog.proofEligible(assetID) else {
+            throw HTTPError(.conflict, message: "This item is not a permanent, non-trash backup. Request its backup before freeing space.")
+        }
+        let generation = try await catalog.asset(assetID)?.generation
         var results: [ServerAPI.Verification.Resource] = []
         for resource in try await catalog.resources(assetID) {
             var verified = false, detail: String?
@@ -706,9 +777,16 @@ struct Routes: Sendable {
                 let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
                 verified = check?.0 == resource.sha256 && check?.1 == resource.size
                 detail = verified ? nil : "the original at \(path) is missing or changed"
-            } else if let path = resource.storedPath, let url = await originals.url(path) {
-                let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
-                verified = check?.0 == resource.sha256 && check?.1 == resource.size
+            } else if resource.storedPath != nil {
+                verified = try await originals.place { root in
+                    // A rename can change paths while waiting for the read lease.
+                    guard let current = try await catalog.resources(assetID).first(where: { $0.role == resource.role }),
+                          current.generation == resource.generation, current.sha256 == resource.sha256,
+                          current.size == resource.size, let path = current.storedPath,
+                          Trash.restored(path) == nil, let url = OriginalsStore.resolve(path, in: root) else { return false }
+                    let check = try? await detached { (try Fingerprint.sha256(of: url), try JobRunner.size(of: url)) }
+                    return check?.0 == resource.sha256 && check?.1 == resource.size
+                }
                 detail = verified ? nil : "stored file is missing or changed"
             } else if let immich = await immichState.client, let id = resource.immichAssetID, let sha1 = resource.sha1 {
                 (verified, detail) = try await immich.stillHolds(id: id, sha1Hex: sha1)
@@ -718,8 +796,9 @@ struct Routes: Sendable {
             results.append(.init(role: resource.role, sha256: verified ? resource.sha256 : nil,
                                  size: verified ? resource.size : nil, verified: verified, detail: detail))
         }
-        await catalog.log("verified", asset: assetID, device: context.deviceID,
-                          detail: results.allSatisfy(\.verified) ? "all" : "incomplete")
+        guard try await catalog.proofEligible(assetID), try await catalog.asset(assetID)?.generation == generation else {
+            throw HTTPError(.conflict, message: "The backup changed while it was checked; check it again.")
+        }
         return ServerAPI.Verification(assetID: assetID, checkedAt: Date(), resources: results)
     }
 }

@@ -18,6 +18,7 @@ struct DeviceRename: Sendable {
         var trash: [String]
         /// A rename that changes only letter case goes through this name (case-insensitive disks).
         var via: String?
+        var hadFolder: Bool? = nil
     }
 
     enum Failure: Error, CustomStringConvertible {
@@ -50,21 +51,25 @@ struct DeviceRename: Sendable {
         guard !name.isEmpty, name.count <= ServerAPI.RenameDeviceRequest.maximumLength, !folder.isEmpty else {
             throw Failure.invalid("Use a name of 1 to \(ServerAPI.RenameDeviceRequest.maximumLength) characters, with letters or numbers.")
         }
-        guard let device = try await catalog.devices().first(where: { $0.id == id && $0.revokedAt == nil }) else {
-            throw Failure.notFound
-        }
-        guard await !mover.isMoving else {
-            throw Failure.busy("The originals are moving to another folder. Rename this device once that's done.")
-        }
-        // No new original is placed while the folder moves (an upload finishing now waits, then
-        // goes into the new folder).
-        await originals.freeze()
+        let owner: OriginalsStore.Mutation
+        do { owner = try await originals.reserveMutation() }
+        catch { throw Failure.busy("The originals folder is already being changed or needs recovery.") }
         do {
+            try await originals.makeExclusive(owner)
+            // Read only after admission: an earlier rename may have changed both names.
+            guard let device = try await catalog.devices().first(where: { $0.id == id && $0.revokedAt == nil }) else {
+                throw Failure.notFound
+            }
+            guard try await catalog.setting(Self.journal) == nil,
+                  try await catalog.setting(OriginalsMover.setting) == nil,
+                  try await catalog.trashJournals().isEmpty else {
+                throw Failure.busy("An originals folder change needs to finish before renaming this device.")
+            }
             let renamed = try await renameFrozen(device, name: name, folder: folder)
-            await originals.unfreeze()
+            await originals.releaseMutation(owner)
             return renamed
         } catch {
-            await originals.unfreeze()
+            await originals.releaseMutation(owner)
             throw error
         }
     }
@@ -90,27 +95,31 @@ struct DeviceRename: Sendable {
         if !fileManager.fileExists(atPath: root.path), try await catalog.storedOriginalCount() > 0 {
             throw Failure.unavailable("The originals folder \(root.path) isn't available (is its disk connected?).")
         }
-        if !caseOnly, fileManager.fileExists(atPath: target.path) {
+        if fileManager.fileExists(atPath: target.path),
+           !caseOnly || !OriginalsMover.sameFile(source, target) {
             throw Failure.taken("There's already a folder named “\(folder)” in \(root.path). Choose another name.")
         }
         let trash = try await catalog.trashFolders(device: id).filter {
             fileManager.fileExists(atPath: root.appendingPathComponent($0).appendingPathComponent(from).path)
         }
         let plan = Plan(device: id, from: from, to: folder, trash: trash,
-                        via: caseOnly ? ".homespun-rename-\(UUID().uuidString)" : nil)
+                        via: caseOnly ? ".homespun-rename-\(UUID().uuidString)" : nil, hadFolder: hasFolder)
         try await catalog.setSetting(Self.journal, String(decoding: try JSONEncoder().encode(plan), as: UTF8.self))
-        var done: [(URL, URL)] = []
         do {
-            if hasFolder { try Self.move(source, to: target, via: plan.via.map { root.appendingPathComponent($0) }, done: &done) }
+            if hasFolder { try Self.move(source, to: target, via: plan.via.map { root.appendingPathComponent($0) }) }
             for item in trash {
                 let base = root.appendingPathComponent(item, isDirectory: true)
                 try Self.move(base.appendingPathComponent(from), to: base.appendingPathComponent(folder),
-                              via: plan.via.map { base.appendingPathComponent($0) }, done: &done)
+                              via: plan.via.map { base.appendingPathComponent($0) })
             }
             try await catalog.renameDevice(id, name: name, folder: folder, from: from, journal: Self.journal)
         } catch {
-            for (moved, back) in done.reversed() { try? fileManager.moveItem(at: moved, to: back) }
-            try? await catalog.setSetting(Self.journal, nil)
+            do {
+                try await Self.recover(catalog: catalog, root: root)
+            } catch let recovery {
+                await originals.requireRecovery("An interrupted device rename needs recovery: \(recovery)")
+                throw Failure.unavailable("The rename could not be rolled back; its recovery journal was kept. \(recovery)")
+            }
             throw error
         }
         return try await updated(id)
@@ -121,16 +130,13 @@ struct DeviceRename: Sendable {
         return device
     }
 
-    /// Moves a folder (through `via` when only the letter case changes), recording each step.
-    private static func move(_ from: URL, to: URL, via: URL?, done: inout [(URL, URL)]) throws {
+    /// The journal describes both steps of a case-only move, including its intermediate name.
+    private static func move(_ from: URL, to: URL, via: URL?) throws {
         if let via {
             try FileManager.default.moveItem(at: from, to: via)
-            done.append((via, from))
             try FileManager.default.moveItem(at: via, to: to)
-            done.append((to, via))
         } else {
             try FileManager.default.moveItem(at: from, to: to)
-            done.append((to, from))
         }
     }
 
@@ -138,23 +144,39 @@ struct DeviceRename: Sendable {
     /// the folders go back where the catalog says they are.
     static func recover(catalog: Catalog, root: URL) async throws {
         guard let saved = try await catalog.setting(journal) else { return }
-        if let plan = try? JSONDecoder().decode(Plan.self, from: Data(saved.utf8)) {
-            let bases = [root] + plan.trash.map { root.appendingPathComponent($0, isDirectory: true) }
-            for base in bases {
-                let original = base.appendingPathComponent(plan.from), renamed = base.appendingPathComponent(plan.to)
-                let fileManager = FileManager.default
-                if let via = plan.via.map({ base.appendingPathComponent($0) }), fileManager.fileExists(atPath: via.path) {
-                    try? fileManager.moveItem(at: via, to: original)
-                } else if plan.via == nil, fileManager.fileExists(atPath: renamed.path),
-                          !fileManager.fileExists(atPath: original.path) {
-                    try? fileManager.moveItem(at: renamed, to: original)
-                } else if plan.via != nil, fileManager.fileExists(atPath: renamed.path),
-                          (try? fileManager.contentsOfDirectory(atPath: base.path))?.contains(plan.to) == true {
-                    // Case-only: the folder has the new case already; put the old case back.
-                    let via = base.appendingPathComponent(".homespun-rename-recover")
-                    try? fileManager.moveItem(at: renamed, to: via)
-                    try? fileManager.moveItem(at: via, to: original)
-                }
+        let plan = try JSONDecoder().decode(Plan.self, from: Data(saved.utf8))
+        guard Storage.folderName(plan.from) == plan.from, !plan.from.isEmpty,
+              Storage.folderName(plan.to) == plan.to, !plan.to.isEmpty,
+              plan.via.map({ $0.hasPrefix(".homespun-rename-") && !$0.contains("/") }) ?? true else {
+            throw Failure.unavailable("The device rename journal has unsafe paths; it was kept for repair.")
+        }
+        try Trash.requireRoot(root)
+        var bases = plan.hadFolder == false ? [] : [root]
+        for path in plan.trash {
+            guard path.hasPrefix(".trash/"), path.split(separator: "/").count == 2,
+                  let base = OriginalsStore.resolve(path, in: root) else {
+                throw Failure.unavailable("The device rename journal has an unsafe trash path.")
+            }
+            bases.append(base)
+        }
+        for base in bases {
+            let original = base.appendingPathComponent(plan.from), renamed = base.appendingPathComponent(plan.to)
+            let files = FileManager.default
+            let names = try files.contentsOfDirectory(atPath: base.path)
+            let oldExists = names.contains(plan.from), newExists = names.contains(plan.to)
+            let via = plan.via.map { base.appendingPathComponent($0) }
+            let viaExists = via.map { files.fileExists(atPath: $0.path) } ?? false
+            guard [oldExists, newExists, viaExists].filter({ $0 }).count == 1 else {
+                throw Failure.unavailable("Cannot reconcile \(base.path): the rename paths are missing or collide. The journal was kept.")
+            }
+            if oldExists { continue }
+            if viaExists, let via {
+                try files.moveItem(at: via, to: original)
+            } else if let via {
+                try files.moveItem(at: renamed, to: via)
+                try files.moveItem(at: via, to: original)
+            } else {
+                try files.moveItem(at: renamed, to: original)
             }
         }
         try await catalog.setSetting(journal, nil)

@@ -102,8 +102,8 @@ extension Catalog {
     defer { try? FileManager.default.removeItem(at: directory) }
     let path = directory.appendingPathComponent("old.db").path
     let old = try SQLiteDatabase(path: path)
-    for migration in Catalog.migrations.dropLast() { try old.executeScript(migration) }
-    try old.execute("PRAGMA user_version = \(Catalog.migrations.count - 1)")
+    for migration in Catalog.migrations.prefix(9) { try old.executeScript(migration) }
+    try old.execute("PRAGMA user_version = 9")
     try old.execute("INSERT INTO devices (id, name, token_hash, created_at, folder) VALUES (?, ?, ?, ?, ?)",
                     [.text("legacy-device"), .text("Family Phone"), .text(Pairing.hash("legacy token")),
                      .text(Timestamp.string()), .text("Family Phone")])

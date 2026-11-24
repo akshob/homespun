@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 import HomespunCore
+import Hummingbird
 import Logging
 
 /// Where originals are kept: `<root>/<phone folder>/YYYY/MM/<name>`. The root is a setting of its
@@ -12,7 +13,10 @@ actor OriginalsStore {
 
     private(set) var root: URL
     private var placing = 0
-    private var frozen = false
+    struct Mutation: Equatable, Sendable { fileprivate let owner: UUID }
+    private var mutation: Mutation?
+    private var exclusive = false
+    private var recoveryFailure: String?
 
     init(root: URL) { self.root = root.standardizedFileURL }
 
@@ -31,21 +35,71 @@ actor OriginalsStore {
 
     /// Puts a new original in place (`body` gets the root to use) while no move is switching roots.
     func place<T: Sendable>(_ body: @Sendable (URL) async throws -> T) async throws -> T {
-        while frozen { try await Task.sleep(for: .milliseconds(50)) }
+        while exclusive {
+            if let recoveryFailure { throw HTTPError(.serviceUnavailable, message: recoveryFailure) }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        if let recoveryFailure { throw HTTPError(.serviceUnavailable, message: recoveryFailure) }
+        try Task.checkCancellation()
         placing += 1
         defer { placing -= 1 }
         return try await body(root)
     }
 
-    /// Holds new originals until `unfreeze`, once those being placed are in.
-    func freeze() async {
-        frozen = true
-        while placing > 0 { try? await Task.sleep(for: .milliseconds(20)) }
+    /// Reserve exactly one rename/move owner. A mover can copy while placements continue,
+    /// then upgrade its own reservation for the final switch. A second owner is refused.
+    func reserveMutation() throws -> Mutation {
+        if let recoveryFailure { throw OriginalsMover.Failure(description: recoveryFailure) }
+        guard mutation == nil else { throw OriginalsMover.Failure(description: "The originals folder is already being changed.") }
+        let lease = Mutation(owner: UUID())
+        mutation = lease
+        return lease
     }
 
-    func unfreeze(switchingTo newRoot: URL? = nil) {
+    func makeExclusive(_ lease: Mutation) async throws {
+        guard mutation == lease else { throw OriginalsMover.Failure(description: "The originals mutation lease expired.") }
+        exclusive = true
+        while placing > 0 { try await Task.sleep(for: .milliseconds(20)) }
+        try Task.checkCancellation()
+    }
+
+    func releaseMutation(_ lease: Mutation, switchingTo newRoot: URL? = nil) {
+        guard mutation == lease else { return }
         if let newRoot { root = newRoot.standardizedFileURL }
-        frozen = false
+        mutation = nil
+        exclusive = false
+    }
+
+    func requireRecovery(_ message: String) {
+        recoveryFailure = message
+        exclusive = true
+    }
+
+    func mutate<T: Sendable>(_ body: @Sendable (URL) async throws -> T) async throws -> T {
+        let owner = try reserveMutation()
+        do {
+            try await makeExclusive(owner)
+            let result = try await body(root)
+            releaseMutation(owner)
+            return result
+        } catch {
+            releaseMutation(owner)
+            throw error
+        }
+    }
+
+    /// An instance can have been constructed before another server moved the root.
+    /// Only call while holding serving/offline ownership, before admitting other work.
+    func refreshRoot(catalog: Catalog) async throws {
+        guard let path = try await catalog.setting(Self.setting) else { return }
+        let owner = try reserveMutation()
+        do {
+            try await makeExclusive(owner)
+            releaseMutation(owner, switchingTo: URL(fileURLWithPath: path, isDirectory: true))
+        } catch {
+            releaseMutation(owner)
+            throw error
+        }
     }
 
     /// `<folder>/YYYY/MM/<name>` (by capture month) in `root`, adding part of the SHA-256 if
@@ -60,12 +114,7 @@ actor OriginalsStore {
         }
         directory.appendPathComponent(month, isDirectory: true)
         let name = Storage.sanitized(filename)
-        var candidate = directory.appendingPathComponent(name)
-        if FileManager.default.fileExists(atPath: candidate.path) {
-            let stem = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
-            candidate = directory.appendingPathComponent("\(stem)_\(sha256.prefix(12))" + (ext.isEmpty ? "" : ".\(ext)"))
-        }
-        return candidate
+        return Trash.free(directory.appendingPathComponent(name), sha256: sha256)
     }
 
     /// Free space and size of the disk holding `path` (or its nearest existing parent).
@@ -85,12 +134,12 @@ actor OriginalsStore {
 }
 
 /// Moves every stored original to a new originals folder: copy and check each one, hold new
-/// originals for a moment, copy any that arrived meanwhile, switch, and only then delete the old
-/// files. Interrupted, it starts again when the server does (files already copied and checked
-/// are kept).
+/// originals for a moment, copy any that arrived meanwhile, then switch. Old good copies stay
+/// until a separate, durable retirement policy can be established. Interrupted copies resume.
 actor OriginalsMover {
     /// Catalog setting naming the move under way (`from` and `to`), so it resumes after a restart.
     static let setting = "originals.move"
+    static let previousRootsSetting = "originals.previous_roots"
 
     struct Failure: Error, CustomStringConvertible { var description: String }
     /// The new folder's disk isn't there: the move waits for it (the plan is kept).
@@ -120,53 +169,82 @@ actor OriginalsMover {
         guard !isMoving, !starting else { throw Failure(description: "Originals are already being moved.") }
         starting = true
         defer { starting = false }
-        let from = await store.root
-        let target = try Self.validate(path, current: from, dataDirectory: dataDirectory)
-        let originals = try await catalog.storedOriginals()
-        let needed = originals.reduce(Int64(0)) { $0 + Int64($1.size) }
-        // On the same APFS disk copies are clones and take no space; elsewhere they need room.
-        #if os(macOS)
-        let clones = OriginalsStore.device(of: from.path) == OriginalsStore.device(of: target.path)
-        #else
-        let clones = false
-        #endif
-        if !clones, let free = OriginalsStore.space(at: target.path).free, free < needed + (1 << 30) {
-            throw Failure(description: "That disk has \(Self.bytes(free)) free; the originals need \(Self.bytes(needed)) plus room to spare.")
-        }
+        let owner = try await store.reserveMutation()
         do {
-            if !FileManager.default.fileExists(atPath: target.path) {
-                try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+            guard try await catalog.setting(DeviceRename.journal) == nil,
+                  try await catalog.trashJournals().isEmpty else {
+                throw Failure(description: "An interrupted rename or trash change needs recovery before moving originals.")
             }
+            let from = await store.root
+            let target = try Self.validate(path, current: from, dataDirectory: dataDirectory)
+            if let saved = try await catalog.setting(Self.setting) {
+                guard let plan = try? JSONDecoder().decode(Plan.self, from: Data(saved.utf8)),
+                      plan.from == from.path, plan.to == target.path else {
+                    throw Failure(description: "An interrupted originals move has a different destination; resume it before starting another.")
+                }
+            }
+            let originals = try await catalog.storedOriginals()
+            let needed = originals.reduce(Int64(0)) { $0 + Int64($1.size) }
+            // On the same APFS disk copies are clones and take no space; elsewhere they need room.
+            #if os(macOS)
+            let clones = OriginalsStore.device(of: from.path) == OriginalsStore.device(of: target.path)
+            #else
+            let clones = false
+            #endif
+            if !clones, let free = OriginalsStore.space(at: target.path).free, free < needed + (1 << 30) {
+                throw Failure(description: "That disk has \(Self.bytes(free)) free; the originals need \(Self.bytes(needed)) plus room to spare.")
+            }
+            do {
+                if !FileManager.default.fileExists(atPath: target.path) {
+                    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+                }
+            } catch {
+                throw Failure(description: "Homespun Server can't make \(target.path): \(error.localizedDescription)")
+            }
+            let probe = target.appendingPathComponent(".homespun-write-test-\(UUID().uuidString)")
+            guard FileManager.default.createFile(atPath: probe.path, contents: Data()) else {
+                throw Failure(description: "Homespun Server can't write to \(target.path).")
+            }
+            try FileManager.default.removeItem(at: probe)
+            let plan = Plan(from: from.path, to: target.path)
+            try await catalog.setSetting(Self.setting, String(decoding: try JSONEncoder().encode(plan), as: UTF8.self))
+            launch(plan, owner: owner)
         } catch {
-            throw Failure(description: "Homespun Server can't make \(target.path): \(error.localizedDescription)")
+            await store.releaseMutation(owner)
+            throw error
         }
-        let probe = target.appendingPathComponent(".homespun-write-test")
-        guard FileManager.default.createFile(atPath: probe.path, contents: Data()) else {
-            throw Failure(description: "Homespun Server can't write to \(target.path).")
-        }
-        try? FileManager.default.removeItem(at: probe)
-        let plan = Plan(from: from.path, to: target.path)
-        try await catalog.setSetting(Self.setting, String(decoding: try JSONEncoder().encode(plan), as: UTF8.self))
-        launch(plan)
     }
 
     /// Picks up a move the server was making when it stopped.
     func resume() async {
+        guard !isMoving, !starting else { return }
+        starting = true
+        defer { starting = false }
+        if let saved = try? await catalog.setting(Self.previousRootsSetting),
+           let previous = try? JSONDecoder().decode([String].self, from: Data(saved.utf8)), !previous.isEmpty {
+            logger.notice("previous originals folders are retained; cleanup is pending: \(previous.joined(separator: ", "))")
+        }
         guard let text = try? await catalog.setting(Self.setting),
               let plan = try? JSONDecoder().decode(Plan.self, from: Data(text.utf8)) else { return }
+        guard let owner = try? await store.reserveMutation() else { return }
         logger.notice("resuming the move of originals to \(plan.to)")
-        launch(plan)
+        launch(plan, owner: owner)
     }
 
     /// Waits for the move under way to end (for tests and tools).
     func wait() async { await task?.value }
 
-    private func launch(_ plan: Plan) {
-        status = .init(state: .copying, from: plan.from, to: plan.to, copied: 0, total: 0, copiedBytes: 0, totalBytes: 0)
-        task = Task { await run(plan) }
+    func stop() async {
+        task?.cancel()
+        await task?.value
     }
 
-    private func run(_ plan: Plan) async {
+    private func launch(_ plan: Plan, owner: OriginalsStore.Mutation) {
+        status = .init(state: .copying, from: plan.from, to: plan.to, copied: 0, total: 0, copiedBytes: 0, totalBytes: 0)
+        task = Task { await run(plan, owner: owner) }
+    }
+
+    private func run(_ plan: Plan, owner: OriginalsStore.Mutation) async {
         let from = URL(fileURLWithPath: plan.from), to = URL(fileURLWithPath: plan.to)
         var copied = Set<String>()
         do {
@@ -180,43 +258,33 @@ actor OriginalsMover {
                 try await copy(pending, from: from, to: to, into: &copied)
             }
             status?.state = .finishing
-            await store.freeze()
-            do {
-                // The switch happens only when every stored original is among those copied.
-                var switched = false
-                for _ in 0..<5 where !switched {
-                    try await copy(try await pendingOriginals(excluding: copied), from: from, to: to, into: &copied)
-                    switched = try await catalog.switchOriginals(to: to.path, copied: copied).isEmpty
-                }
-                guard switched else { throw Failure(description: "new originals kept arriving; try again") }
-            } catch {
-                await store.unfreeze()
-                throw error
+            try await store.makeExclusive(owner)
+            // The switch happens only when every stored original is among those copied.
+            var switched = false
+            for _ in 0..<5 where !switched {
+                try await copy(try await pendingOriginals(excluding: copied), from: from, to: to, into: &copied)
+                switched = try await catalog.switchOriginals(to: to.path, copied: copied).isEmpty
             }
-            await store.unfreeze(switchingTo: to)
+            guard switched else { throw Failure(description: "new originals kept arriving; try again") }
+            await store.releaseMutation(owner, switchingTo: to)
             await catalog.log("originals_moved", detail: "\(from.path) -> \(to.path) (\(copied.count) files)")
             logger.notice("moved \(copied.count) originals to \(to.path)")
 
-            // Readers that resolved an old path a moment ago can finish first.
-            try? await Task.sleep(for: .seconds(2))
-            let kept = Set(copied.compactMap { OriginalsStore.resolve($0, in: to)?.path })
-            for path in copied {
-                guard let old = OriginalsStore.resolve(path, in: from), !kept.contains(old.path),
-                      let new = OriginalsStore.resolve(path, in: to), !Self.sameFile(old, new) else { continue }
-                try? FileManager.default.removeItem(at: old)
-            }
-            Self.removeEmptyFolders(in: from, keeping: [dataDirectory, to])
+            // Keep the previous good copies. A delay/hash readback is not a filesystem
+            // durability barrier, and readers may still have the old paths open.
             status?.state = .done
+            status?.message = "Originals now use the new folder. Previous copies remain in \(from.path); cleanup is pending."
             status?.finishedAt = Date()
         } catch {
             logger.error("moving originals to \(to.path) failed: \(error)")
             // Nothing switched, so the originals are all still where they were. A missing disk
             // keeps the plan, so the move continues when the server starts with it connected.
-            if !(error is TargetMissing) { try? await catalog.setSetting(Self.setting, nil) }
+            // The plan is also useful after I/O errors or cancellation; never discard it.
             status?.state = .failed
             status?.message = "\(error)"
             status?.finishedAt = Date()
         }
+        await store.releaseMutation(owner)
     }
 
     private func pendingOriginals(excluding copied: Set<String>) async throws
@@ -230,6 +298,7 @@ actor OriginalsMover {
     private func copy(_ originals: [(assetID: String, role: ServerAPI.ResourceRole, path: String, size: Int, sha256: String)],
                       from: URL, to: URL, into copied: inout Set<String>) async throws {
         for original in originals {
+            try Task.checkCancellation()
             guard let source = OriginalsStore.resolve(original.path, in: from),
                   let target = OriginalsStore.resolve(original.path, in: to) else {
                 throw Failure(description: "\(original.path) is not a safe path")
@@ -258,8 +327,8 @@ actor OriginalsMover {
             throw TargetMissing(description: "\(root.path) isn't there (is its disk connected?)")
         }
         try files.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let partial = target.deletingLastPathComponent().appendingPathComponent(".\(target.lastPathComponent).partial")
-        try? files.removeItem(at: partial)
+        let partial = target.deletingLastPathComponent().appendingPathComponent(".homespun-move-\(UUID().uuidString).partial")
+        defer { try? files.removeItem(at: partial) }
         try files.copyItem(at: source, to: partial)
         guard try Fingerprint.sha256(of: partial) == sha256, try JobRunner.size(of: partial) == size else {
             try? files.removeItem(at: partial)
@@ -289,6 +358,10 @@ actor OriginalsMover {
             throw Failure(description: "\(target.deletingLastPathComponent().path) doesn't exist (is the disk connected?).")
         }
         let resolved = target.resolvingSymlinksInPath().path
+        let source = current.resolvingSymlinksInPath().standardizedFileURL.path
+        guard !resolved.hasPrefix(source + "/"), !source.hasPrefix(resolved + "/") else {
+            throw Failure(description: "The old and new originals folders must not contain one another.")
+        }
         guard resolved != data, !resolved.hasPrefix(data + "/") else {
             throw Failure(description: "That's inside Homespun Server's own data folder; pick another folder.")
         }
