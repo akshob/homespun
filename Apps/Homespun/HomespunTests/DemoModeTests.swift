@@ -70,7 +70,7 @@ import UIKit
         catalog = nil
         #expect(weakModel == nil && weakCatalog == nil)
 
-        let messages = Messages()
+        let messages = ObservationCount()
         let observation = fixture.session.library.observe { messages.add() }
         let photo = try sample(fixture.session.library, "photo")
         _ = fixture.session.library.restore(photo.id)
@@ -80,7 +80,7 @@ import UIKit
         #expect(messages.count == 1)
     }
 
-    private final class Messages: @unchecked Sendable {
+    private final class ObservationCount: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0
         func add() { lock.withLock { value += 1 } }
