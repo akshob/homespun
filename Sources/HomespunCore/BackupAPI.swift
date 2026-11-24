@@ -149,20 +149,22 @@ public enum BackupAPI {
         public var manifest: Manifest
         public var profile: CompressionProfile
         public var retention: RetentionPolicy
+        public var compact: Bool
         public var captureDate: Date?
 
         public init(operationID: UUID, origin: Origin, manifest: Manifest, profile: CompressionProfile,
-                    retention: RetentionPolicy = .permanent, captureDate: Date? = nil) {
+                    retention: RetentionPolicy = .permanent, compact: Bool = true, captureDate: Date? = nil) {
             self.operationID = operationID
             self.origin = origin
             self.manifest = manifest
             self.profile = profile
             self.retention = retention
+            self.compact = compact
             self.captureDate = captureDate
         }
 
         enum CodingKeys: String, CodingKey {
-            case operationID = "operationId", origin, manifest, profile, retention, captureDate
+            case operationID = "operationId", origin, manifest, profile, retention, compact, captureDate
         }
     }
 
@@ -285,6 +287,62 @@ public enum BackupAPI {
         enum CodingKeys: String, CodingKey {
             case deliveryID = "deliveryId", requestID = "requestId", generationID = "generationId", version
         }
+    }
+
+    public enum CommandAction: String, Codable, Sendable {
+        case pause, cancel, retry
+        case compactNow = "compact_now"
+    }
+
+    public struct Command: Codable, Equatable, Sendable {
+        public var operationID: UUID
+        public var version: Version
+        public var action: CommandAction
+        public init(operationID: UUID, version: Version, action: CommandAction) {
+            self.operationID = operationID
+            self.version = version
+            self.action = action
+        }
+        enum CodingKeys: String, CodingKey { case operationID = "operationId", version, action }
+    }
+
+    public struct UploadRequest: Codable, Equatable, Sendable {
+        public var uploadID: UUID
+        public var requestID: UUID
+        public var version: Version
+        public var role: ServerAPI.ResourceRole
+        public init(uploadID: UUID, requestID: UUID, version: Version, role: ServerAPI.ResourceRole) {
+            self.uploadID = uploadID
+            self.requestID = requestID
+            self.version = version
+            self.role = role
+        }
+        enum CodingKeys: String, CodingKey {
+            case uploadID = "uploadId", requestID = "requestId", version, role
+        }
+    }
+
+    public struct UploadAdmission: Codable, Equatable, Sendable {
+        public var upload: UploadRequest
+        public var uploadProtocol: UploadProtocol
+        public var offset: Int64
+        public var size: Int64
+        public var maximumChunkBytes: Int64
+        public init(upload: UploadRequest, uploadProtocol: UploadProtocol, offset: Int64, size: Int64,
+                    maximumChunkBytes: Int64) {
+            self.upload = upload
+            self.uploadProtocol = uploadProtocol
+            self.offset = offset
+            self.size = size
+            self.maximumChunkBytes = maximumChunkBytes
+        }
+    }
+
+    public enum ErrorCode {
+        public static let historyChanged = "history_changed"
+        public static let snapshotRequired = "snapshot_required"
+        public static let idempotencyConflict = "idempotency_conflict"
+        public static let versionChanged = "version_changed"
     }
 
     public struct OriginalProof: Codable, Equatable, Sendable {
