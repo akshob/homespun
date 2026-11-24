@@ -2614,6 +2614,26 @@ private struct PauseMotionUpload: RouterMiddleware {
                         #expect(try await client.call("/api/v2/backup-requests/\(receipt.requestID)", token: token)
                             .decode(BackupAPI.Receipt.self).retention == .permanent)
                     }
+
+                    @Test(.timeLimit(.minutes(1))) func versionedAdmissionDoesNotWaitForALegacyEncoderAssetClaim() async throws {
+                        let fixture = try await Fixture()
+                        try await fixture.test { client, token in
+                            let bytes = Data("admit-without-encoder-wait".utf8), asset = Fingerprint.sha256(of: bytes)
+                            let entered = StorageTestGate(), resume = StorageTestGate()
+                            let encoder = Task {
+                                try await fixture.server.catalog.mutations.withClaim(asset) {
+                                    await entered.open()
+                                    try await resume.wait()
+                                }
+                            }
+                            defer { encoder.cancel() }
+                            try await entered.wait()
+                            let (_, receipt) = try await backupTestRequest(client, token: token, data: bytes)
+                            #expect(receipt.backup == .uploading && receipt.version.assetID == asset)
+                            await resume.open()
+                            try await encoder.value
+                        }
+                    }
                 }
             }
         }

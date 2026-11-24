@@ -104,11 +104,9 @@ struct BackupRoutes: Sendable {
             }
             let selectedRecipe = try self.recipe(body.profile)
             let external = await immich.mode != .files
-            return try await catalog.mutations.withClaim(try manifest.assetID()) {
-                let (receipt, created) = try await catalog.admitBackup(body, principal: principal(context), recipe: selectedRecipe,
-                                                                       external: external)
-                return try json(receipt, status: created ? .created : .ok)
-            }
+            let (receipt, created) = try await catalog.admitBackup(body, principal: principal(context), recipe: selectedRecipe,
+                                                                   external: external)
+            return try json(receipt, status: created ? .created : .ok)
         }
         api.get("backup-requests") { request, context in
             guard let text: String = request.uri.queryParameters.get("operation_id"), let operation = UUID(uuidString: text) else {

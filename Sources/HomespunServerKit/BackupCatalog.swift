@@ -227,7 +227,8 @@ extension Catalog {
                        .text(request.retention.rawValue), .text(Timestamp.string())])
             if request.retention == .permanent, !external {
                 // A versioned permanent consumer also dominates legacy temporary cleanup.
-                // Admission's caller holds this legacy asset's mutation claim.
+                // Purge's atomic claim and permanent-trash quarantine arbitrate any race;
+                // admission itself must never wait for a legacy encoder's asset claim.
                 try database.execute("UPDATE assets SET permanent = 1 WHERE id = ? AND purging = 0", [.text(assetID)])
                 for resource in request.manifest.resources {
                     if let source = try legacyBackupSource(manifest: manifestID, role: resource.role) {
