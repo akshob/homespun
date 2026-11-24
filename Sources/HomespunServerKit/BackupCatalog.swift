@@ -248,37 +248,37 @@ extension Catalog {
     }
 
     func backupObjects(_ manifest: String) throws -> [BackupObject] {
-        try database.query("SELECT * FROM backup_objects WHERE manifest_id = ? ORDER BY role", [.text(manifest)]).compactMap {
-            guard let role = Role(rawValue: $0["role"]?.string ?? "") else { return nil }
-            return .init(manifest: manifest, role: role, filename: $0["filename"]?.string ?? "",
-                         size: $0["size"]?.int ?? 0, sha256: $0["sha256"]?.string ?? "", path: $0["stored_path"]?.string)
+        try database.query("SELECT * FROM backup_objects WHERE manifest_id = ? ORDER BY role", [.text(manifest)]).compactMap { row -> BackupObject? in
+            guard let role = Role(rawValue: row["role"]?.string ?? "") else { return nil }
+            return BackupObject(manifest: manifest, role: role, filename: row["filename"]?.string ?? "",
+                                size: row["size"]?.int ?? 0, sha256: row["sha256"]?.string ?? "", path: row["stored_path"]?.string)
         }
+    }
 
-        func backupObjectFolder(_ manifest: String) throws -> String {
-            guard let row = try database.query("""
-                SELECT d.folder FROM backup_manifests m JOIN devices d ON d.id = m.device_id WHERE m.id = ?
-                """, [.text(manifest)]).first, let folder = row["folder"]?.string else { throw HTTPError(.serviceUnavailable) }
-            let safe = Storage.folderName(folder)
-            guard !safe.isEmpty, safe == folder else { throw HTTPError(.serviceUnavailable) }
-            return safe
-        }
+    func backupObjectFolder(_ manifest: String) throws -> String {
+        guard let row = try database.query("""
+            SELECT d.folder FROM backup_manifests m JOIN devices d ON d.id = m.device_id WHERE m.id = ?
+            """, [.text(manifest)]).first, let folder = row["folder"]?.string else { throw HTTPError(.serviceUnavailable) }
+        let safe = Storage.folderName(folder)
+        guard !safe.isEmpty, safe == folder else { throw HTTPError(.serviceUnavailable) }
+        return safe
+    }
 
-        func backupObjectDirectory(_ manifest: String) throws -> String {
-            let folder = try backupObjectFolder(manifest)
-            guard let row = try database.query("SELECT capture_date, manifest_json FROM backup_manifests WHERE id = ?", [.text(manifest)]).first else {
-                throw HTTPError(.notFound)
-            }
-            let definition = try Self.backupDecode(BackupAPI.Manifest.self, row["manifest_json"]!.string!)
-            let primary: Role = definition.kind == .video ? .video : .photo
-            let name = Storage.sanitized(definition.resources.first(where: { $0.role == primary })!.filename)
-            let stem = String((name as NSString).deletingPathExtension.prefix(60))
-            var month = "undated"
-            if let date = Timestamp.date(row["capture_date"]?.string) {
-                let parts = Calendar(identifier: .gregorian).dateComponents(in: TimeZone(secondsFromGMT: 0)!, from: date)
-                month = String(format: "%04d/%02d", parts.year ?? 0, parts.month ?? 0)
-            }
-            return folder + "/" + month + "/" + (stem.isEmpty ? "Item" : stem) + "." + manifest
+    func backupObjectDirectory(_ manifest: String) throws -> String {
+        let folder = try backupObjectFolder(manifest)
+        guard let row = try database.query("SELECT capture_date, manifest_json FROM backup_manifests WHERE id = ?", [.text(manifest)]).first else {
+            throw HTTPError(.notFound)
         }
+        let definition = try Self.backupDecode(BackupAPI.Manifest.self, row["manifest_json"]!.string!)
+        let primary: Role = definition.kind == .video ? .video : .photo
+        let name = Storage.sanitized(definition.resources.first(where: { $0.role == primary })!.filename)
+        let stem = String((name as NSString).deletingPathExtension.prefix(60))
+        var month = "undated"
+        if let date = Timestamp.date(row["capture_date"]?.string) {
+            let parts = Calendar(identifier: .gregorian).dateComponents(in: TimeZone(secondsFromGMT: 0)!, from: date)
+            month = String(format: "%04d/%02d", parts.year ?? 0, parts.month ?? 0)
+        }
+        return folder + "/" + month + "/" + (stem.isEmpty ? "Item" : stem) + "." + manifest
     }
 
     func backupVersion(_ request: String, principal: String) throws -> BackupAPI.Version {
