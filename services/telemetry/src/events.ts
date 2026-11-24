@@ -4,6 +4,7 @@ import { EVENT_ALLOWLIST } from "./allowlist";
 import { Budget, busy, LOW_PRIORITY_PERCENT, WRITES_PER_ROW, withWrites, type Flag } from "./budget";
 import { badRequest, isObject, json } from "./http";
 import { onlyKeys, parseApp, parseDevice, parseInstall, parseTime, quoted } from "./validate";
+import { ERASURE_FENCE_WRITES, erasureFence, installDigest } from "./writes";
 
 export const MAX_EVENTS = 100;
 const MAX_INTEGER = 1e12;
@@ -34,10 +35,11 @@ export async function handleEvents(body: Record<string, unknown>, env: Env): Pro
 		badRequest(`events: must be an array of 1 to ${MAX_EVENTS} events`);
 	}
 	const parsed = events.map((event, index) => parseEvent(event, `events[${index}]`));
+	const digest = await installDigest(install);
 
 	const now = new Date();
 	const budget = await Budget.load(env, now);
-	const deltas = withWrites({ dayEvents: parsed.length }, parsed.length * WRITES_PER_ROW);
+	const deltas = withWrites({ dayEvents: parsed.length }, parsed.length * WRITES_PER_ROW + ERASURE_FENCE_WRITES);
 	const refused: Flag[] = [];
 	if (!budget.allows({ dayEvents: parsed.length })) refused.push("events");
 	if (!budget.allows({ dayWrites: deltas.dayWrites }, LOW_PRIORITY_PERCENT)) refused.push("d1");
@@ -65,6 +67,7 @@ export async function handleEvents(body: Record<string, unknown>, env: Env): Pro
 			),
 		),
 		budget.add(env.DB, deltas),
+		...erasureFence(env, digest),
 	]);
 	return json({ accepted: parsed.length }, 202);
 }

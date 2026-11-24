@@ -30,6 +30,7 @@ private final class FakeService: @unchecked Sendable {
     let suite = "telemetry-tests-\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     let queue = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
+    defaults.set(queue.path, forKey: "test.queue")
     let telemetry = Telemetry(defaults: defaults, queueURL: queue, endpoint: URL(string: "https://telemetry.example")!,
                               send: service.send)
     return (telemetry, defaults)
@@ -97,16 +98,18 @@ private final class FakeService: @unchecked Sendable {
     telemetry.setSharing(true)
     let second = try #require(telemetry.installID)
     #expect(first != second)
+    await telemetry.flush() // Both identities actually sent, not just the first.
     // The choice survives a relaunch.
-    let relaunched = Telemetry(defaults: defaults, queueURL: FileManager.default.temporaryDirectory.appendingPathComponent("x.json"),
+    let relaunched = Telemetry(defaults: defaults, queueURL: URL(fileURLWithPath: defaults.string(forKey: "test.queue")!),
                                endpoint: URL(string: "https://telemetry.example")!, send: service.send)
     #expect(relaunched.consent == .sharing && relaunched.installID == second)
+    #expect(relaunched.deletionHandles == [first, second])
 
     service.status = 204
-    try await telemetry.deleteSharedData()
+    try await relaunched.deleteSharedData()
     let deletes = service.sent.filter { $0.httpMethod == "DELETE" }.compactMap { $0.url?.lastPathComponent }
     #expect(Set(deletes) == [first.uuidString.lowercased(), second.uuidString.lowercased()])
-    #expect(!telemetry.hasSharedData && telemetry.installID != second && telemetry.isSharing)
+    #expect(!relaunched.hasSharedData && relaunched.installID != second && relaunched.isSharing)
 }
 
 @MainActor @Test func reportsGoWithoutAnInstallWhenNotSharing() async throws {
@@ -168,16 +171,260 @@ private final class FakeService: @unchecked Sendable {
 
 @MainActor @Test func aSessionThatEndedOnScreenIsNoticed() {
     let defaults = UserDefaults(suiteName: "session-\(UUID().uuidString)")!
-    #expect(!SessionMarker(defaults: defaults).endedUnexpectedly)
-    SessionMarker(defaults: defaults).active()                       // on screen, then killed
-    let next = SessionMarker(defaults: defaults)
+    let (telemetry, _) = makeTelemetry(FakeService())
+    #expect(!SessionMarker(defaults: defaults, telemetry: telemetry).endedUnexpectedly)
+    SessionMarker(defaults: defaults, telemetry: telemetry).active() // on screen, then killed
+    let next = SessionMarker(defaults: defaults, telemetry: telemetry)
     #expect(next.endedUnexpectedly && !next.offersReport)            // Debug builds ask only with -crashPrompt
     next.active()
     next.background()                                                // left normally
-    #expect(!SessionMarker(defaults: defaults).endedUnexpectedly)
+    #expect(!SessionMarker(defaults: defaults, telemetry: telemetry).endedUnexpectedly)
     defaults.set(true, forKey: "crashPrompt")
-    SessionMarker(defaults: defaults).active()
-    #expect(SessionMarker(defaults: defaults).offersReport)
+    SessionMarker(defaults: defaults, telemetry: telemetry).active()
+    #expect(SessionMarker(defaults: defaults, telemetry: telemetry).offersReport)
+}
+
+private actor SuspendedTelemetryService {
+    private(set) var requests: [URLRequest] = []
+    private var completions: [Int: CheckedContinuation<(Data, URLResponse), any Error>] = [:]
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func send(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let index = requests.count
+        requests.append(request)
+        return try await withCheckedThrowingContinuation { continuation in
+            completions[index] = continuation
+            let ready = waiters.filter { requests.count >= $0.0 }
+            waiters.removeAll { requests.count >= $0.0 }
+            ready.forEach { $0.1.resume() }
+        }
+    }
+
+    func waitForRequests(_ count: Int) async {
+        if requests.count < count { await withCheckedContinuation { waiters.append((count, $0)) } }
+    }
+
+    func finish(_ index: Int, status: Int = 202, body: String = "{}") {
+        completions.removeValue(forKey: index)!.resume(returning: (
+            Data(body.utf8),
+            HTTPURLResponse(url: requests[index].url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+        ))
+    }
+}
+
+@MainActor private func suspendedTelemetry(_ service: SuspendedTelemetryService) -> (Telemetry, UserDefaults, URL) {
+    let suite = "suspended-telemetry-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
+    return (Telemetry(defaults: defaults, queueURL: url, endpoint: URL(string: "https://telemetry.example")!,
+                      send: service.send), defaults, url)
+}
+
+@MainActor @Test func suspendedFlushCannotConsumeOrSendTheNextConsentQueue() async throws {
+    let service = SuspendedTelemetryService()
+    let (telemetry, _, _) = suspendedTelemetry(service)
+    telemetry.setSharing(true)
+    let first = try #require(telemetry.installID)
+    let old = Task { await telemetry.flush() }
+    await service.waitForRequests(1)
+    telemetry.setSharing(false)
+    telemetry.setSharing(true)
+    telemetry.record(.featureUsed("compare"))
+    let secondQueue = telemetry.queued
+    let second = try #require(telemetry.installID)
+    await service.finish(0)
+    await old.value
+    #expect(telemetry.queued == secondQueue && telemetry.deletionHandles == [first])
+    let firstRequests = await service.requests
+    #expect(firstRequests.count == 1)
+
+    let current = Task { await telemetry.flush() }
+    await service.waitForRequests(2)
+    let requests = await service.requests
+    let body = try #require(try JSONSerialization.jsonObject(with: requests[1].httpBody!) as? [String: Any])
+    #expect(body["install"] as? String == second.uuidString.lowercased())
+    await service.finish(1)
+    await current.value
+    #expect(telemetry.queued.isEmpty && telemetry.deletionHandles == [first, second])
+}
+
+@MainActor @Test func erasureWaitsForLateSendButPreservesNewSharingAndItsHandle() async throws {
+    let service = SuspendedTelemetryService()
+    let (telemetry, defaults, url) = suspendedTelemetry(service)
+    telemetry.setSharing(true)
+    let first = try #require(telemetry.installID)
+    let old = Task { await telemetry.flush() }
+    await service.waitForRequests(1)
+    let erasure = Task { try await telemetry.deleteSharedData() }
+    for _ in 0..<1000 {
+        if telemetry.installID != first { break }
+        await Task.yield()
+    }
+    let second = try #require(telemetry.installID)
+    try #require(second != first)
+    telemetry.record(.featureUsed("compare"))
+    let current = Task { await telemetry.flush() }
+    await service.waitForRequests(2)
+    let admittedRequests = await service.requests
+    #expect(admittedRequests.allSatisfy { $0.httpMethod == "POST" })
+    await service.finish(1)
+    await current.value
+    await service.finish(0)
+    await old.value
+    await service.waitForRequests(3)
+    let requests = await service.requests
+    #expect(requests[2].httpMethod == "DELETE" && requests[2].url?.lastPathComponent == first.uuidString.lowercased())
+    await service.finish(2, status: 204)
+    try await erasure.value
+    #expect(telemetry.installID == second && telemetry.deletionHandles == [second])
+    let relaunched = Telemetry(defaults: defaults, queueURL: url, endpoint: nil)
+    #expect(relaunched.deletionHandles == [second] && relaunched.installID == second)
+}
+
+@MainActor @Test func metricAndReportAttemptsKeepTheirOriginalErasureHandle() async throws {
+    for report in [false, true] {
+        let service = SuspendedTelemetryService()
+        let (telemetry, _, _) = suspendedTelemetry(service)
+        telemetry.setSharing(true)
+        let first = try #require(telemetry.installID)
+        let sending = Task {
+            if report { _ = try await telemetry.sendReport(ProblemReport(message: "Stopped")) }
+            else {
+                let at = Date()
+                await telemetry.upload(payload: Data("{}".utf8), kind: "metrics", begin: at, end: at)
+            }
+        }
+        await service.waitForRequests(1)
+        telemetry.setSharing(false)
+        telemetry.setSharing(true)
+        let queue = telemetry.queued
+        await service.finish(0, status: report ? 201 : 202, body: #"{"id":"HS-ABCDEF"}"#)
+        try await sending.value
+        #expect(telemetry.deletionHandles == [first] && telemetry.queued == queue)
+    }
+}
+
+@MainActor @Test func legacySentHandleMigratesAndFailedErasureRemainsRetryable() async throws {
+    let service = FakeService()
+    let suite = "legacy-telemetry-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    let old = UUID()
+    defaults.set(old.uuidString, forKey: "telemetry.sentInstall")
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
+    let telemetry = Telemetry(defaults: defaults, queueURL: url, endpoint: URL(string: "https://telemetry.example")!,
+                              send: service.send)
+    #expect(defaults.string(forKey: "telemetry.sentInstall") == nil)
+    for status in [503, 404] {
+        service.status = status
+        await #expect(throws: TelemetryError.self) { try await telemetry.deleteSharedData() }
+        #expect(telemetry.deletionHandles == [old])
+    }
+    let relaunched = Telemetry(defaults: defaults, queueURL: url, endpoint: URL(string: "https://telemetry.example")!,
+                               send: service.send)
+    #expect(relaunched.deletionHandles == [old])
+    service.status = 204
+    try await relaunched.deleteSharedData()
+    #expect(!relaunched.hasSharedData)
+}
+
+@MainActor @Test func metricAggregatesCannotBridgeConsentPeriods() async throws {
+    let service = FakeService()
+    let suite = "metric-consent-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    var now = Date(timeIntervalSince1970: 100)
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
+    let telemetry = Telemetry(defaults: defaults, queueURL: url, endpoint: URL(string: "https://telemetry.example")!,
+                              now: { now }, send: service.send)
+    let payload = Data("{}".utf8)
+    telemetry.setSharing(true)
+    let first = try #require(telemetry.installID)
+    now = Date(timeIntervalSince1970: 120)
+    await telemetry.upload(payload: payload, kind: "metrics", begin: Date(timeIntervalSince1970: 110), end: now)
+    now = Date(timeIntervalSince1970: 200)
+    telemetry.setSharing(false)
+    now = Date(timeIntervalSince1970: 300)
+    telemetry.setSharing(true)
+    let second = try #require(telemetry.installID)
+    now = Date(timeIntervalSince1970: 400)
+    for begin in [110.0, 250.0] {
+        await telemetry.upload(payload: payload, kind: "metrics", begin: Date(timeIntervalSince1970: begin), end: now)
+    }
+    #expect(service.sent.count == 1 && telemetry.deletionHandles == [first])
+    await telemetry.upload(payload: payload, kind: "metrics", begin: Date(timeIntervalSince1970: 310), end: now)
+    #expect(service.sent.count == 2 && telemetry.deletionHandles == [first, second])
+}
+
+@MainActor @Test func failedQueueWriteCannotResurrectOldConsentOnRelaunch() async throws {
+    let service = FakeService()
+    let (telemetry, defaults) = makeTelemetry(service)
+    let url = URL(fileURLWithPath: defaults.string(forKey: "test.queue")!)
+    telemetry.setSharing(true)
+    let first = try #require(telemetry.installID)
+    await telemetry.flush()
+    let oldState = try Data(contentsOf: url)
+    try FileManager.default.removeItem(at: url)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+    telemetry.setSharing(false) // The consent fence succeeds even though the file write cannot.
+    #expect(telemetry.lastError != nil)
+    try FileManager.default.removeItem(at: url)
+    try oldState.write(to: url)
+    let relaunched = Telemetry(defaults: defaults, queueURL: url, endpoint: nil)
+    #expect(relaunched.consent == .notSharing && relaunched.installID == nil && relaunched.queued.isEmpty)
+    #expect(relaunched.deletionHandles == [first])
+}
+
+@MainActor @Test func resumedDemoSuppressesColdCrashAndDelayedMixedDiagnostics() async throws {
+    let service = FakeService()
+    let suite = "demo-diagnostics-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    var now = Date(timeIntervalSince1970: 100)
+    let policy = DiagnosticPolicy(defaults: defaults, now: { now })
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(suite).json")
+    var telemetry = Telemetry(defaults: defaults, queueURL: url, endpoint: URL(string: "https://telemetry.example")!,
+                              diagnosticPolicy: policy, now: { now }, send: service.send)
+    telemetry.setSharing(true)
+    let realQueue = telemetry.queued.map(\.name)
+    now = Date(timeIntervalSince1970: 200)
+    telemetry.paused = true
+    now = Date(timeIntervalSince1970: 250)
+    let resumedPolicy = DiagnosticPolicy(defaults: defaults, now: { now })
+    telemetry = Telemetry(defaults: defaults, queueURL: url, endpoint: URL(string: "https://telemetry.example")!,
+                          diagnosticPolicy: resumedPolicy, now: { now }, send: service.send)
+    telemetry.paused = true
+    telemetry.resolveDiagnosticNamespace()
+    // Namespace resolution precedes both SessionMarker and the receiver on a resumed launch.
+    defaults.set(true, forKey: "session.foreground")
+    defaults.set(true, forKey: "crashPrompt")
+    let marker = SessionMarker(defaults: defaults, telemetry: telemetry)
+    #expect(!marker.endedUnexpectedly && !marker.offersReport)
+    let store = DiagnosticsStore(folder: url.deletingPathExtension(), isPaused: { telemetry.paused })
+    let receiver = MetricsReceiver(telemetry: telemetry, store: store)
+    let data = Data(#"{"crashDiagnostics":[]}"#.utf8)
+    await receiver.receive(data, begin: Date(timeIntervalSince1970: 110), end: now, kind: "diagnostics")
+    await telemetry.flush()
+    await telemetry.upload(payload: data, kind: "diagnostics", begin: now, end: now)
+    #expect(store.latest() == nil && service.sent.isEmpty && telemetry.queued.map(\.name) == realQueue)
+    now = Date(timeIntervalSince1970: 300)
+    telemetry.paused = false
+    let relaunchedPolicy = DiagnosticPolicy(defaults: defaults, now: { now })
+    #expect(!relaunchedPolicy.allows(begin: Date(timeIntervalSince1970: 150), end: now))
+    #expect(!relaunchedPolicy.allows(begin: Date(timeIntervalSince1970: 50), end: Date(timeIntervalSince1970: 60)))
+    await receiver.receive(data, begin: Date(timeIntervalSince1970: 150), end: now, kind: "diagnostics")
+    #expect(store.latest() == nil && service.sent.isEmpty)
+    now = Date(timeIntervalSince1970: 400)
+    await receiver.receive(data, begin: Date(timeIntervalSince1970: 310), end: now, kind: "diagnostics")
+    #expect(store.latest() != nil && service.sent.count == 1)
+    #expect(telemetry.consent == .sharing && telemetry.queued.map(\.name) == realQueue)
+}
+
+@MainActor @Test func legacyUnattributedDiagnosticCachesNeverEnterAProblemReport() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("diagnostic-cache-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data(#"{"crashDiagnostics":[{"legacy":"possibly demo"}]}"#.utf8)
+        .write(to: folder.appendingPathComponent("1.json"))
+    let store = DiagnosticsStore(folder: folder, isPaused: { false })
+    #expect(store.latest() == nil)
 }
 
 /// The first task (10 items) asks iOS for background time: whatever iOS answers, or raises, the

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { Budget, r2Put, withWrites } from "../src/budget";
+import { runRetention } from "../src/retention";
+import { cleanOwnWrite, installDigest, OBJECT_WRITE_WRITES, reserveWrite } from "../src/writes";
 import diagnosticPayload from "./fixtures/diagnostic-payload.json";
 import metricPayload from "./fixtures/metric-payload.json";
-import { APP, DEVICE, fakeMail, newInstall, objectText, post, rows, send, sendWith } from "./helpers";
+import { APP, DEVICE, barrier, fakeMail, interceptDatabase, newInstall, objectText, post, rows, send, sendWith } from "./helpers";
 
 /** Uploads one of everything for `install` and returns the R2 keys it created. */
 async function seed(install: string): Promise<string[]> {
@@ -60,11 +64,281 @@ describe("DELETE /v1/installs/<install>", () => {
 		expect((await send("DELETE", `/v1/installs/${newInstall()}`)).status).toBe(204);
 	});
 
+	it("retains only the stable domain-separated digest as the permanent tombstone", async () => {
+		const install = "8a7e7c1c-6b7a-4a55-9d3e-0c1b2a3d4e5f";
+		// SHA-256 of UTF-8 "photos.homespun.telemetry.erasure.v1", NUL, then the UUID.
+		const expected = "c412e093d58de6479b17f3d9b65aaaa6ff18a64493f98c2b11dc1b9e2096128e";
+		expect(await installDigest(install)).toBe(expected);
+		await seed(install);
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		expect(await rows("SELECT * FROM erased_installs WHERE digest = ?1", expected)).toEqual([{ digest: expected }]);
+		expect(await rows("SELECT * FROM erasure_checks")).toEqual([]);
+		// A repeated erasure derives the same marker; a different generation remains independent.
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		expect(await rows("SELECT * FROM erased_installs WHERE digest = ?1", expected)).toEqual([{ digest: expected }]);
+		const kept = newInstall();
+		await seed(kept);
+		expect(await installDigest(kept)).not.toBe(expected);
+		expect((await counts(kept)).payloads).toBe(2);
+	});
+
 	it("rejects an invalid install id", async () => {
 		for (const id of ["not-a-uuid", "8A7E7C1C-6B7A-4A55-9D3E-0C1B2A3D4E5F", "%27%20OR%201%3D1"]) {
 			const response = await send("DELETE", `/v1/installs/${id}`);
 			expect(response.status, id).toBe(400);
 			expect(await response.json()).toEqual({ error: "install: must be a lowercase UUID" });
 		}
+	});
+
+	it.each([
+		["metrics", "before"], ["metrics", "after"], ["reports", "before"], ["reports", "after"],
+	] as const)("fences %s with erasure %s its R2 PUT", async (kind, ordering) => {
+		const install = newInstall();
+		const gate = barrier();
+		let key = "";
+		const bucket = {
+			async put(path: string, value: string, options: R2PutOptions) {
+				key = path;
+				if (ordering === "before") await gate.hold();
+				const result = await env.BUCKET.put(path, value, options);
+				if (ordering === "after") await gate.hold();
+				return result;
+			},
+			delete: (keys: string | string[]) => env.BUCKET.delete(keys),
+		};
+		const body = { install, app: APP, device: DEVICE, ...(kind === "reports" ? { message: "Stopped" } : { payload: metricPayload }) };
+		const intake = sendWith({ BUCKET: bucket, MAIL: fakeMail().binding }, "POST", `/v1/${kind}`, body);
+		await gate.reached;
+		// Reports have their D1 fallback row first; payloads have only their durable PUT pointer.
+		expect((await counts(install)).reports).toBe(kind === "reports" ? 1 : 0);
+		expect(await rows("SELECT r2_key FROM object_writes WHERE install = ?1", install)).toEqual([{ r2_key: key }]);
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		expect(await counts(install)).toEqual({ events: 0, payloads: 0, reports: 0 });
+		gate.release();
+		expect((await intake).status).toBe(410);
+		expect(await objectText(key)).toBeNull();
+		expect(await rows("SELECT r2_key FROM object_writes WHERE install = ?1", install)).toHaveLength(0);
+	});
+
+	it("erases a payload committed before the deletion snapshot even when its response is late", async () => {
+		const install = newInstall();
+		const gate = barrier();
+		const db = interceptDatabase(async (sql, commit) => {
+			const result = await commit();
+			if (sql.some((statement) => statement.startsWith("INSERT INTO payloads"))) await gate.hold();
+			return result;
+		});
+		const intake = sendWith({ DB: db }, "POST", "/v1/metrics", { install, app: APP, device: DEVICE, payload: metricPayload });
+		await gate.reached;
+		const keys = await keysOf(install);
+		expect(keys).toHaveLength(1);
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		gate.release();
+		expect((await intake).status).toBe(410);
+		expect(await counts(install)).toEqual({ events: 0, payloads: 0, reports: 0 });
+		expect(await objectText(keys[0])).toBeNull();
+	});
+
+	it("refuses intake while erasure is suspended after its snapshot", async () => {
+		const install = newInstall();
+		const keys = await seed(install);
+		const gate = barrier();
+		const deletion = sendWith({
+			BUCKET: { async delete(paths: string[]) { await gate.hold(); return env.BUCKET.delete(paths); } },
+		}, "DELETE", `/v1/installs/${install}`);
+		await gate.reached;
+		for (const [path, content] of [
+			["events", { events: [{ name: "app.launch", time: new Date().toISOString(), props: {} }] }],
+			["metrics", { payload: metricPayload }],
+			["reports", { message: "Late" }],
+		] as const) {
+			expect((await post(`/v1/${path}`, { install, app: APP, device: DEVICE, ...content })).status).toBe(410);
+		}
+		gate.release();
+		expect((await deletion).status).toBe(204);
+		expect(await counts(install)).toEqual({ events: 0, payloads: 0, reports: 0 });
+		for (const key of keys) expect(await objectText(key)).toBeNull();
+	});
+
+	it.each(["before", "after"] as const)("reconciles an interrupted writer %s PUT without forgetting its late-write pointer", async (boundary) => {
+		// Bindings are shared by this file's tests: earlier cases deliberately retain other
+		// installs. The global counter covers those content rows AND every unsettled pointer.
+		const [{ bytes: initialBytes }] = await rows<{ bytes: number }>(
+			`SELECT (SELECT coalesce(sum(size), 0) FROM payloads)
+				+ (SELECT coalesce(sum(size), 0) FROM reports)
+				+ (SELECT coalesce(sum(size), 0) FROM object_writes) AS bytes`,
+		);
+		const initialCounter = await rows<{ value: number }>("SELECT value FROM usage WHERE key = 'r2.bytes'");
+		expect(initialCounter[0]?.value ?? 0).toBe(initialBytes);
+		const expectStoredBytes = async (value: number) => {
+			expect(await rows("SELECT value FROM usage WHERE key = 'r2.bytes'")).toEqual([{ value }]);
+		};
+
+		// Keep known settled content even when this case runs alone, so a duplicate refund
+		// cannot hide behind max(0, ...). Its published row must replace, not add to, its pointer.
+		const kept = newInstall();
+		const keptBody = { install: kept, app: APP, device: DEVICE, payload: metricPayload };
+		const keptSize = new TextEncoder().encode(JSON.stringify(keptBody)).byteLength;
+		expect((await post("/v1/metrics", keptBody)).status).toBe(202);
+		const [keptKey] = await keysOf(kept);
+		const baselineBytes = initialBytes + keptSize;
+		await expectStoredBytes(baselineBytes);
+
+		const install = newInstall();
+		const now = new Date();
+		const key = `metrics/interrupted/${install}/${crypto.randomUUID()}.json`;
+		const payload = "x".repeat(10);
+		const size = new TextEncoder().encode(payload).byteLength;
+		const reservedBytes = baselineBytes + size;
+		const budget = await Budget.load(env, now);
+		// Simulate process loss at a durable boundary: no catch/finally in the writer runs.
+		await env.DB.batch([
+			reserveWrite(env, key, install, size, now),
+			budget.add(env.DB, withWrites(r2Put(size), OBJECT_WRITE_WRITES + 4)),
+		]);
+		await expectStoredBytes(reservedBytes);
+		if (boundary === "after") await env.BUCKET.put(key, payload);
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		await expectStoredBytes(reservedBytes);
+		const firstSweep = await runRetention(env, new Date(now.getTime() + 2 * 60 * 60 * 1000));
+		expect(firstSweep.storedBytes).toBe(reservedBytes);
+		await expectStoredBytes(reservedBytes);
+		expect(await objectText(key)).toBeNull();
+		expect(await rows("SELECT state, settled, size FROM object_writes WHERE r2_key = ?1", key))
+			.toEqual([{ state: "cleanup", settled: 0, size }]);
+		// A PUT that was already issued may settle even after an erasure/sweep.
+		await env.BUCKET.put(key, payload);
+		await expectStoredBytes(reservedBytes);
+		const secondSweep = await runRetention(env, new Date(now.getTime() + 26 * 60 * 60 * 1000));
+		expect(secondSweep.storedBytes).toBe(reservedBytes);
+		expect(await objectText(key)).toBeNull();
+		await expectStoredBytes(reservedBytes);
+		expect(await rows("SELECT state, settled, size FROM object_writes WHERE r2_key = ?1", key))
+			.toEqual([{ state: "cleanup", settled: 0, size }]);
+
+		// Only the writer's explicit settlement acknowledgement permits releasing these bytes.
+		// Repeated cleanup/erasure must not refund bytes belonging to other installs.
+		await cleanOwnWrite(env, key);
+		await expectStoredBytes(baselineBytes);
+		expect(await rows("SELECT r2_key FROM object_writes WHERE r2_key = ?1", key)).toEqual([]);
+		await cleanOwnWrite(env, key);
+		await expectStoredBytes(baselineBytes);
+		expect(await objectText(keptKey)).not.toBeNull();
+		expect((await send("DELETE", `/v1/installs/${kept}`)).status).toBe(204);
+		await expectStoredBytes(initialBytes);
+		expect(await objectText(keptKey)).toBeNull();
+		expect((await send("DELETE", `/v1/installs/${kept}`)).status).toBe(204);
+		await expectStoredBytes(initialBytes);
+	});
+
+	it("keeps erasure retryable when R2 deletion fails", async () => {
+		const install = newInstall();
+		const keys = await seed(install);
+		const failed = await sendWith({
+			BUCKET: { async delete() { throw new Error("R2 unavailable"); } },
+		}, "DELETE", `/v1/installs/${install}`);
+		expect(failed.status).toBe(500);
+		expect((await counts(install)).payloads).toBe(2);
+		expect(await rows("SELECT digest FROM erased_installs WHERE digest = ?1", await installDigest(install))).toHaveLength(1);
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		for (const key of keys) expect(await objectText(key)).toBeNull();
+	});
+
+	it("keeps row keys retryable when D1 fails after objects were erased", async () => {
+		const install = newInstall();
+		const keys = await seed(install);
+		const db = interceptDatabase(async (sql, commit) => {
+			if (sql.some((statement) => statement.startsWith("DELETE FROM payloads"))) throw new Error("D1 deletion failed");
+			return commit();
+		});
+		expect((await sendWith({ DB: db }, "DELETE", `/v1/installs/${install}`)).status).toBe(500);
+		expect((await counts(install)).payloads).toBe(2);
+		for (const key of keys) expect(await objectText(key)).toBeNull();
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		expect(await counts(install)).toEqual({ events: 0, payloads: 0, reports: 0 });
+	});
+
+	it.each(["events", "metrics", "reports"] as const)("fences %s admission even after its preflight passed", async (kind) => {
+		const install = newInstall();
+		const gate = barrier();
+		const db = interceptDatabase(async (sql, commit) => {
+			if (sql.some((statement) => /^INSERT INTO (events|reports|object_writes)\b/.test(statement))) await gate.hold();
+			return commit();
+		});
+		let puts = 0;
+		const bucket = {
+			async put(path: string, value: string, options: R2PutOptions) {
+				puts++;
+				return env.BUCKET.put(path, value, options);
+			},
+		};
+		const content = kind === "events"
+			? { events: [{ name: "app.launch", time: new Date().toISOString(), props: {} }] }
+			: kind === "reports" ? { message: "Passed preflight" } : { payload: metricPayload };
+		const intake = sendWith({ DB: db, BUCKET: bucket }, "POST", `/v1/${kind}`, { install, app: APP, device: DEVICE, ...content });
+		await gate.reached;
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		const usageAfterErasure = await rows("SELECT key, value FROM usage ORDER BY key");
+		gate.release();
+		expect((await intake).status).toBe(410);
+		expect(await counts(install)).toEqual({ events: 0, payloads: 0, reports: 0 });
+		expect(await rows("SELECT r2_key FROM object_writes WHERE install = ?1", install)).toHaveLength(0);
+		expect(await rows("SELECT * FROM erasure_checks")).toEqual([]);
+		expect(puts).toBe(0);
+		expect(await rows("SELECT key, value FROM usage ORDER BY key")).toEqual(usageAfterErasure);
+	});
+
+	it("retains a failed publication/cleanup pointer for cron instead of orphaning its object", async () => {
+		const install = newInstall();
+		let key = "";
+		const db = interceptDatabase(async (sql, commit) => {
+			if (sql.some((statement) => statement.startsWith("INSERT INTO payloads"))) throw new Error("D1 publication failed");
+			return commit();
+		});
+		const bucket = {
+			async put(path: string, value: string, options: R2PutOptions) {
+				key = path;
+				return env.BUCKET.put(path, value, options);
+			},
+			async delete() { throw new Error("R2 cleanup failed"); },
+		};
+		const response = await sendWith({ DB: db, BUCKET: bucket }, "POST", "/v1/metrics",
+			{ install, app: APP, device: DEVICE, payload: metricPayload });
+		expect(response.status).toBe(500);
+		expect(await objectText(key)).not.toBeNull();
+		expect(await rows("SELECT state, settled FROM object_writes WHERE r2_key = ?1", key))
+			.toEqual([{ state: "cleanup", settled: 1 }]);
+		await runRetention(env, new Date());
+		expect(await objectText(key)).toBeNull();
+		expect(await rows("SELECT r2_key FROM object_writes WHERE r2_key = ?1", key)).toHaveLength(0);
+	});
+
+	it("does not expire a report's fallback row while its R2 publication is pending", async () => {
+		const install = newInstall();
+		const gate = barrier();
+		let key = "";
+		const bucket = {
+			async put(path: string, value: string, options: R2PutOptions) {
+				key = path;
+				await gate.hold();
+				return env.BUCKET.put(path, value, options);
+			},
+			delete: (keys: string | string[]) => env.BUCKET.delete(keys),
+		};
+		const intake = sendWith({ BUCKET: bucket, MAIL: fakeMail().binding }, "POST", "/v1/reports",
+			{ install, app: APP, device: DEVICE, message: "Pending report" });
+		await gate.reached;
+		// An old receive time with a live writer (e.g. clock correction) must not let retention
+		// snapshot an empty key and later remove a row whose key was just published.
+		await env.DB.prepare("UPDATE reports SET received = ?1 WHERE install = ?2")
+			.bind(new Date(Date.now() - 731 * 24 * 60 * 60 * 1000).toISOString(), install).run();
+		await runRetention(env, new Date());
+		expect((await counts(install)).reports).toBe(1);
+		gate.release();
+		expect((await intake).status).toBe(201);
+		expect(await objectText(key)).not.toBeNull();
+		await runRetention(env, new Date());
+		expect((await counts(install)).reports).toBe(0);
+		expect(await objectText(key)).toBeNull();
 	});
 });

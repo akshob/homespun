@@ -2,6 +2,7 @@
 import Foundation
 import HomespunCore
 import Observation
+import os
 import StoreKit
 import UIKit
 
@@ -26,38 +27,188 @@ final class Telemetry {
     private(set) var consent: Consent
     /// Random per opt-in; nil while not sharing. Shown in Settings for deleting shared data.
     private(set) var installID: UUID?
-    /// The last install ID that sent anything, so its data can still be deleted after opting out.
-    private(set) var sentInstallID: UUID?
-    private(set) var queued: [Event] = []
+    /// Local only: never send these identities together or link consent periods on the service.
+    private(set) var deletionHandles: Set<UUID> = []
+    var queued: [Event] { entries.map(\.event) }
+    private var entries: [Entry] = []
+    private var generation = UUID()
+    private var consentBegan: Date
+    private var erasing: Set<UUID> = []
     /// Setup events before the person decided: kept in memory, sent only if they choose to share.
     private var beforeConsent: [Event] = []
-    private var flushing = false
+    private var flushing: Set<UUID> = []
+    private var flushWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var activeRequests: [UUID: Int] = [:]
+    private var requestWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var deleting = false
+    private var unreadableState = false
+    private(set) var lastError: (any Error)?
     private var channel: AppInfo.Channel?
-    /// Nothing is recorded while the demo is on: it isn't how the person uses Homespun.
-    var paused = false
+    let diagnosticPolicy: DiagnosticPolicy
+    /// Demo retirement keeps this true until its last writer has stopped.
+    var paused = false {
+        didSet {
+            diagnosticPolicy.setDemo(paused)
+            if paused { defaults.set(false, forKey: "session.foreground") }
+        }
+    }
 
     let endpoint: URL?
     private let defaults: UserDefaults
     private let queueURL: URL
+    private let now: () -> Date
     private let send: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     init(defaults: UserDefaults = .standard,
          queueURL: URL = URL.applicationSupportDirectory.appendingPathComponent("Homespun/telemetry-queue.json"),
          endpoint: URL? = Telemetry.defaultEndpoint,
+         diagnosticPolicy: DiagnosticPolicy? = nil,
+         now: @escaping () -> Date = Date.init,
          send: @escaping @Sendable (URLRequest) async throws -> (Data, URLResponse) = { try await URLSession.shared.data(for: $0) }) {
         self.defaults = defaults
         self.queueURL = queueURL
         self.endpoint = endpoint
         self.send = send
+        self.now = now
+        self.diagnosticPolicy = diagnosticPolicy ?? DiagnosticPolicy(defaults: defaults, now: now)
         consent = defaults.string(forKey: "telemetry.consent").flatMap(Consent.init) ?? .unasked
         installID = defaults.string(forKey: "telemetry.install").flatMap(UUID.init)
-        sentInstallID = defaults.string(forKey: "telemetry.sentInstall").flatMap(UUID.init)
-        if consent == .sharing {
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            queued = (try? decoder.decode([Event].self, from: Data(contentsOf: queueURL))) ?? []
-            if !ReleaseFeatures.premium { queued.removeAll { $0.name == "premium.event" } }
+        consentBegan = defaults.object(forKey: "telemetry.consentBegan") as? Date ?? now()
+        do {
+            let fence = try defaults.data(forKey: "telemetry.fence").map { try JSONDecoder().decode(Fence.self, from: $0) }
+            if let fence {
+                consent = fence.consent
+                installID = fence.install
+                generation = fence.generation
+                consentBegan = fence.began
+            }
+            if FileManager.default.fileExists(atPath: queueURL.path) {
+                let data = try Data(contentsOf: queueURL)
+                let decoder = JSONDecoder()
+                decoder.dateDecodingStrategy = .millisecondsSince1970
+                if let state = try? decoder.decode(State.self, from: data) {
+                    consent = state.consent
+                    installID = state.install
+                    generation = state.generation
+                    consentBegan = state.began
+                    entries = state.entries
+                    deletionHandles = state.handles
+                    erasing = state.erasing
+                    if let fence, fence.generation != state.generation {
+                        // A consent change can outlive a failed queue-file write. Never resurrect
+                        // its old consent or queue; keep its outstanding erasure handles.
+                        generation = fence.generation
+                        consent = fence.consent
+                        installID = fence.install
+                        consentBegan = fence.began
+                        entries = []
+                    }
+                } else {
+                    // Upgrade the old event-only queue without losing the legacy erasure handle.
+                    decoder.dateDecodingStrategy = .iso8601
+                    entries = try decoder.decode([Event].self, from: data).map { Entry(event: $0) }
+                }
+            }
+            if let legacy = defaults.string(forKey: "telemetry.sentInstall").flatMap(UUID.init) {
+                deletionHandles.insert(legacy)
+            }
+            if consent != .sharing { entries = [] }
+            if consent == .sharing && installID == nil { installID = UUID() }
+            if !ReleaseFeatures.premium { entries.removeAll { $0.event.name == "premium.event" } }
+        } catch {
+            // Do not overwrite an unreadable journal: it may hold the only erasure handles.
+            unreadableState = true
+            note(error)
         }
+        if !unreadableState { saveOrNoteFailure() }
+    }
+
+    private struct Entry: Codable {
+        var id = UUID()
+        var event: Event
+    }
+
+    private struct State: Codable {
+        var consent: Consent
+        var install: UUID?
+        var generation: UUID
+        var began: Date
+        var entries: [Entry]
+        var handles: Set<UUID>
+        var erasing: Set<UUID>
+    }
+
+    private struct Fence: Codable {
+        var consent: Consent
+        var install: UUID?
+        var generation: UUID
+        var began: Date
+    }
+
+    private func saveState() throws {
+        guard !unreadableState else { throw TelemetryError.unavailable }
+        try FileManager.default.createDirectory(at: queueURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .millisecondsSince1970
+        try encoder.encode(State(consent: consent, install: installID, generation: generation, began: consentBegan, entries: entries,
+                                 handles: deletionHandles, erasing: erasing)).write(to: queueURL, options: .atomic)
+        try saveConsentFence()
+        defaults.removeObject(forKey: "telemetry.sentInstall")
+        lastError = nil
+    }
+
+    private func saveOrNoteFailure() {
+        do { try saveState() } catch { note(error) }
+    }
+
+    private func saveConsentFence() throws {
+        // One value, not separately-written consent/install/generation keys.
+        let fence = Fence(consent: consent, install: installID, generation: generation, began: consentBegan)
+        defaults.set(try JSONEncoder().encode(fence), forKey: "telemetry.fence")
+        defaults.set(consent.rawValue, forKey: "telemetry.consent")
+        defaults.set(installID?.uuidString.lowercased(), forKey: "telemetry.install")
+        defaults.set(consentBegan, forKey: "telemetry.consentBegan")
+    }
+
+    private func note(_ error: any Error) {
+        lastError = error
+        Logger(subsystem: "photos.homespun.app", category: "Telemetry").error("Telemetry operation failed; erasure state preserved.")
+    }
+
+    private func matches(_ token: UUID, _ install: UUID) -> Bool {
+        isSharing && generation == token && installID == install && !erasing.contains(install)
+    }
+
+    /// Persist the attempt *before* issuing the request: a lost response may still mean stored data.
+    private func transmit(_ request: URLRequest, install: UUID?, generation token: UUID) async throws -> (Data, URLResponse) {
+        guard !paused, generation == token, !Task.isCancelled else { throw TelemetryError.rejected }
+        if let install {
+            guard matches(token, install) else { throw TelemetryError.rejected }
+            deletionHandles.insert(install)
+            try saveState()
+            activeRequests[install, default: 0] += 1
+        }
+        defer {
+            if let install {
+                activeRequests[install, default: 1] -= 1
+                if activeRequests[install] == 0 {
+                    activeRequests.removeValue(forKey: install)
+                    requestWaiters.removeValue(forKey: install)?.forEach { $0.resume() }
+                }
+            }
+        }
+        return try await send(request)
+    }
+
+    private func waitForRequests(_ install: UUID) async {
+        if activeRequests[install, default: 0] > 0 {
+            await withCheckedContinuation { requestWaiters[install, default: []].append($0) }
+        }
+    }
+
+    /// Called only after DemoMode has resolved a resumed demo, before registering MetricKit.
+    func resolveDiagnosticNamespace() {
+        diagnosticPolicy.setDemo(paused)
     }
 
     nonisolated static var defaultEndpoint: URL? {
@@ -79,18 +230,22 @@ final class Telemetry {
             guard consent != .sharing else { return }
             consent = .sharing
             installID = UUID()
-            queued = beforeConsent
+            generation = UUID()
+            entries = beforeConsent.map { Entry(event: $0) }
             beforeConsent = []
-            record(.analyticsOptIn)
         } else {
             consent = .notSharing
             installID = nil
-            queued = []
+            generation = UUID()
+            entries = []
             beforeConsent = []
         }
-        defaults.set(consent.rawValue, forKey: "telemetry.consent")
-        defaults.set(installID?.uuidString.lowercased(), forKey: "telemetry.install")
-        saveQueue()
+        consentBegan = now()
+        do {
+            try saveConsentFence()
+            if on { record(.analyticsOptIn) }
+            try saveState()
+        } catch { note(error) }
     }
 
     // MARK: Events
@@ -101,9 +256,9 @@ final class Telemetry {
         guard ReleaseFeatures.premium || event.name != "premium.event" else { return }
         switch consent {
         case .sharing:
-            queued.append(event)
-            if queued.count > Self.maximumQueued { queued.removeFirst(queued.count - Self.maximumQueued) }
-            saveQueue()
+            entries.append(Entry(event: event))
+            if entries.count > Self.maximumQueued { entries.removeFirst(entries.count - Self.maximumQueued) }
+            saveOrNoteFailure()
             if queued.count >= Self.batchSize { Task { await flush() } }
         case .unasked:
             if event.name.hasPrefix("setup.") || event.name == "pair.result" || event.name == "server.info" {
@@ -117,27 +272,36 @@ final class Telemetry {
     /// Sends what's queued, in batches; keeps it for next time if the network or the service fails.
     /// If a flush is already under way, waits for it instead of starting another.
     func flush() async {
-        if flushing {
-            while flushing { try? await Task.sleep(for: .milliseconds(20)) }
+        let token = generation
+        if flushing.contains(token) {
+            await withCheckedContinuation { flushWaiters[token, default: []].append($0) }
             return
         }
-        guard isSharing, let endpoint, let installID, !queued.isEmpty else { return }
-        flushing = true
-        defer { flushing = false }
+        guard !paused, isSharing, let endpoint, let installID, !entries.isEmpty else { return }
+        flushing.insert(token)
+        defer {
+            flushing.remove(token)
+            flushWaiters.removeValue(forKey: token)?.forEach { $0.resume() }
+        }
         let channel = await currentChannel()
-        while isSharing, !queued.isEmpty {
-            let batch = Array(queued.prefix(Self.batchSize))
+        while !paused, matches(token, installID), !entries.isEmpty, !Task.isCancelled {
+            let batch = Array(entries.prefix(Self.batchSize))
             let body = Batch(install: installID.uuidString.lowercased(), app: AppInfo.current(channel: channel),
-                             device: DeviceInfo.current, events: batch)
-            guard let request = try? Self.request(endpoint.appendingPathComponent("v1/events"), json: body),
-                  let (_, response) = try? await send(request),
-                  let status = (response as? HTTPURLResponse)?.statusCode else { return }
-            if (200..<300).contains(status) || status == 400 {
-                // 400: the service rejects this batch for good (an older app's event); don't retry it.
-                queued.removeFirst(min(batch.count, queued.count))
-                markSent(installID)
-                saveQueue()
-            } else {
+                             device: DeviceInfo.current, events: batch.map(\.event))
+            do {
+                let request = try Self.request(endpoint.appendingPathComponent("v1/events"), json: body)
+                let (_, response) = try await transmit(request, install: installID, generation: token)
+                guard let status = (response as? HTTPURLResponse)?.statusCode,
+                      (200..<300).contains(status) || status == 400 || status == 410 else {
+                    throw TelemetryError.rejected
+                }
+                guard matches(token, installID) else { return }
+                // A full queue may have evicted some of this batch while the request was suspended.
+                let acknowledged = Set(batch.map(\.id))
+                entries.removeAll { acknowledged.contains($0.id) }
+                try saveState()
+            } catch {
+                note(error)
                 return
             }
         }
@@ -145,7 +309,7 @@ final class Telemetry {
 
     /// Flush while iOS gives the app a little time after it leaves the screen.
     func flushInBackground() {
-        guard isSharing, !queued.isEmpty else { return }
+        guard !paused, isSharing, !queued.isEmpty else { return }
         let task = UIApplication.shared.beginBackgroundTask(withName: "Analytics")
         Task {
             await flush()
@@ -168,52 +332,70 @@ final class Telemetry {
     /// with a new ID.
     func deleteSharedData() async throws {
         guard let endpoint else { throw TelemetryError.unavailable }
-        for id in Set([sentInstallID, installID].compactMap { $0 }) {
+        guard !deleting else { throw TelemetryError.rejected }
+        deleting = true
+        defer { deleting = false }
+        let targets = deletionHandles.union(erasing).union(installID.map { [$0] } ?? [])
+        erasing.formUnion(targets)
+        deletionHandles.formUnion(targets)
+        entries = []
+        generation = UUID()
+        consentBegan = now()
+        if isSharing { installID = UUID() }
+        try saveConsentFence()
+        try saveState()
+        for id in targets {
+            // Requests already on the wire cannot be recalled. Reconcile their completion before
+            // erasing A, without blocking a new consent generation B from collecting or sending.
+            await waitForRequests(id)
             var request = URLRequest(url: endpoint.appendingPathComponent("v1/installs/\(id.uuidString.lowercased())"))
             request.httpMethod = "DELETE"
             request.setValue(Self.appKey, forHTTPHeaderField: "X-Homespun-Key")
             let (_, response) = try await send(request)
-            guard let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) || status == 404 else {
+            guard (response as? HTTPURLResponse)?.statusCode == 204 else {
                 throw TelemetryError.rejected
             }
+            erasing.remove(id)
+            deletionHandles.remove(id)
+            try saveState()
         }
-        sentInstallID = nil
-        defaults.removeObject(forKey: "telemetry.sentInstall")
-        queued = []
-        if isSharing {
-            installID = UUID()
-            defaults.set(installID?.uuidString.lowercased(), forKey: "telemetry.install")
-        }
-        saveQueue()
     }
 
-    var hasSharedData: Bool { sentInstallID != nil }
+    var hasSharedData: Bool { !deletionHandles.isEmpty }
 
     // MARK: MetricKit and reports
 
     /// A MetricKit payload (`kind` "metrics" or "diagnostics"), sent at once if the person shares.
-    func upload(payload json: Data, kind: String) async {
-        guard isSharing, let endpoint, let installID,
+    func upload(payload json: Data, kind: String, begin: Date, end: Date) async {
+        let token = generation
+        guard !paused, isSharing, let endpoint, let installID,
+              begin >= consentBegan, begin <= end, end <= now(),
+              diagnosticPolicy.allows(begin: begin, end: end),
               let payload = try? JSONSerialization.jsonObject(with: json) else { return }
         let channel = await currentChannel()
+        guard !paused, matches(token, installID) else { return }
         let body: [String: Any] = ["install": installID.uuidString.lowercased(),
                                    "app": AppInfo.current(channel: channel).dictionary,
                                    "device": DeviceInfo.current.dictionary, "payload": payload]
         guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
         var request = Self.baseRequest(endpoint.appendingPathComponent("v1/\(kind)"))
         request.httpBody = data
-        if let (_, response) = try? await send(request), let status = (response as? HTTPURLResponse)?.statusCode,
-           (200..<300).contains(status) {
-            markSent(installID)
-        }
+        do {
+            let (_, response) = try await transmit(request, install: installID, generation: token)
+            guard let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) else {
+                throw TelemetryError.rejected
+            }
+        } catch { note(error) }
     }
 
     /// Sends a problem report; returns its number ("HS-…"). Reports work whether or not the person
     /// shares analytics (they're sent on purpose). A reply address must never link analytics to a person.
     func sendReport(_ report: ProblemReport) async throws -> String {
-        guard let endpoint else { throw TelemetryError.unavailable }
-        let channel = await currentChannel()
+        guard !paused, let endpoint else { throw TelemetryError.unavailable }
+        let token = generation
         let reportInstall = report.email == nil && isSharing ? installID : nil
+        let channel = await currentChannel()
+        guard !paused, token == generation else { throw TelemetryError.rejected }
         var body: [String: Any] = ["install": reportInstall.map { $0.uuidString.lowercased() as Any } ?? NSNull(),
                                    "app": AppInfo.current(channel: channel).dictionary,
                                    "device": DeviceInfo.current.dictionary, "message": report.message]
@@ -221,14 +403,13 @@ final class Telemetry {
         if let diagnostics = report.diagnostics { body["diagnostics"] = diagnostics }
         var request = Self.baseRequest(endpoint.appendingPathComponent("v1/reports"))
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await send(request)
+        let (data, response) = try await transmit(request, install: reportInstall, generation: token)
         guard let status = (response as? HTTPURLResponse)?.statusCode else { throw TelemetryError.rejected }
         guard (200..<300).contains(status),
               let id = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["id"] as? String else {
             throw status == 429 ? TelemetryError.tooMany : TelemetryError.rejected
         }
-        if let reportInstall { markSent(reportInstall) }
-        record(.reportSent(withDiagnostics: report.diagnostics != nil))
+        if token == generation { record(.reportSent(withDiagnostics: report.diagnostics != nil)) }
         return id
     }
 
@@ -239,23 +420,6 @@ final class Telemetry {
         let found = await AppInfo.channel()
         channel = found
         return found
-    }
-
-    private func markSent(_ id: UUID) {
-        guard sentInstallID != id else { return }
-        sentInstallID = id
-        defaults.set(id.uuidString.lowercased(), forKey: "telemetry.sentInstall")
-    }
-
-    private func saveQueue() {
-        if queued.isEmpty {
-            try? FileManager.default.removeItem(at: queueURL)
-            return
-        }
-        try? FileManager.default.createDirectory(at: queueURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        try? encoder.encode(queued).write(to: queueURL, options: .atomic)
     }
 
     nonisolated static func baseRequest(_ url: URL) -> URLRequest {

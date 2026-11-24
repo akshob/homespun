@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import { sendAlerts } from "./alerts";
-import { Budget, limitsFrom, releaseStoredBytes, utcDay, WRITES_PER_ROW, withWrites } from "./budget";
+import { Budget, limitsFrom, utcDay, WRITES_PER_ROW, withWrites } from "./budget";
 import type { PayloadKind } from "./payloads";
 import { deleteObjects } from "./storage";
+import { reconcileWrites } from "./writes";
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -41,6 +42,7 @@ export async function runRetention(env: Env, now: Date): Promise<RetentionResult
 	const limits = limitsFrom(env);
 	const cutoff = (days: number) => new Date(now.getTime() - days * DAY).toISOString();
 	const deleter = new Deleter(env, Math.floor(limits.d1MaxWritesDay * RETENTION_WRITE_SHARE));
+	deleter.writes += await reconcileWrites(env, now, Math.floor(limits.d1MaxWritesDay * RETENTION_WRITE_SHARE));
 
 	// Rows with R2 objects first: they cost storage.
 	const metrics = await deleter.withObjects("payloads", cutoff(RETENTION_DAYS.metrics), "metrics");
@@ -57,7 +59,8 @@ export async function runRetention(env: Env, now: Date): Promise<RetentionResult
 		),
 		env.DB.prepare(
 			`INSERT INTO usage (key, value)
-			VALUES ('r2.bytes', (SELECT coalesce(sum(size), 0) FROM payloads) + (SELECT coalesce(sum(size), 0) FROM reports))
+			VALUES ('r2.bytes', (SELECT coalesce(sum(size), 0) FROM payloads) + (SELECT coalesce(sum(size), 0) FROM reports)
+				+ (SELECT coalesce(sum(size), 0) FROM object_writes))
 			ON CONFLICT(key) DO UPDATE SET value = excluded.value RETURNING value`,
 		),
 	]);
@@ -96,21 +99,24 @@ class Deleter {
 			if (limit === 0) break;
 			const select = kind
 				? DB.prepare("SELECT id, r2_key, size FROM payloads WHERE kind = ?3 AND received < ?1 LIMIT ?2").bind(cutoff, limit, kind)
-				: DB.prepare(`SELECT id, r2_key, size FROM ${table} WHERE received < ?1 LIMIT ?2`).bind(cutoff, limit);
+				: DB.prepare(`SELECT id, r2_key, size FROM ${table} WHERE received < ?1
+					${table === "reports" ? `AND NOT EXISTS (SELECT 1 FROM object_writes
+						WHERE r2_key = 'reports/' || reports.id || '.json' AND state = 'pending')` : ""}
+					LIMIT ?2`).bind(cutoff, limit);
 			const { results } = await select.all<{ id: string; r2_key: string; size: number }>();
 			if (results.length === 0) break;
 			await deleteObjects(
 				BUCKET,
 				results.map((row) => row.r2_key).filter((key) => key !== ""),
 			);
-			const bytes = results.reduce((sum, row) => sum + row.size, 0);
+			const ids = JSON.stringify(results.map((row) => row.id));
 			await DB.batch([
-				DB.prepare(`DELETE FROM ${table} WHERE id IN (SELECT value FROM json_each(?1))`).bind(
-					JSON.stringify(results.map((row) => row.id)),
-				),
-				...(bytes > 0 ? [releaseStoredBytes(DB, bytes)] : []),
+				DB.prepare(`UPDATE usage SET value = max(0, value -
+					(SELECT coalesce(sum(size), 0) FROM ${table} WHERE id IN (SELECT value FROM json_each(?1))))
+					WHERE key = 'r2.bytes'`).bind(ids),
+				DB.prepare(`DELETE FROM ${table} WHERE id IN (SELECT value FROM json_each(?1))`).bind(ids),
 			]);
-			this.writes += results.length * WRITES_PER_ROW + (bytes > 0 ? 1 : 0);
+			this.writes += results.length * WRITES_PER_ROW + 1;
 			deleted += results.length;
 			if (results.length < limit) break;
 		}

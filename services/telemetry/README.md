@@ -25,13 +25,45 @@ account identifiers. IP addresses are used only transiently as rate-limit keys a
 stored; per-request invocation logs are turned off (`wrangler.jsonc`).
 
 Retention (by time received, enforced by a daily cron): events 400 days, MetricKit metrics 90
-days, MetricKit diagnostics 365 days, reports 730 days. `DELETE /v1/installs/<install>` removes
-everything for an install immediately (the app calls it when the person chooses Delete Shared Data).
+days, MetricKit diagnostics 365 days, reports 730 days. `DELETE /v1/installs/<install>` erases
+an install's indexed content and permanently fences further intake for that identity (the app
+calls it when the person chooses Delete Shared Data). Already-issued writes have durable cleanup
+pointers; see [Erasure and interrupted writes](#erasure-and-interrupted-writes).
 Reports without an install ID, including those with an email, can be deleted on request to
 support@homespun.photos with the report number.
 
 The Worker also enforces a hard usage budget so the public app key can't run up a bill; see
 [Budget](#budget).
+
+## App consent and demo attribution
+
+The app's small atomic telemetry journal holds its current consent generation, exact queued
+event identities, outstanding attempted/sent identities, and erasure work. It migrates the
+previous `telemetry.sentInstall` handle and event-only queue. A separate local consent fence
+prevents a failed queue write from restoring an older consent choice. An unreadable journal
+blocks linked sends rather than discarding erasure handles.
+
+An identity is journaled **before** its first attempted event, MetricKit or install-linked
+report request: a lost response does not prove that the service stored nothing. All outstanding
+handles survive fully flushed queues, opt-out/in and relaunch. Erasure addresses them separately,
+removing each only after acknowledgement; the service never receives a list linking identities.
+Erasure rotates the current generation before awaiting the network. A new generation can keep
+sharing while erasure waits for an old generation's already-issued requests to finish. Old
+completions cannot dequeue new events or record `report.sent` in the new generation.
+Automatic MetricKit uploads must also fit wholly inside the current consent period; an aggregate
+spanning an opt-out/in or erasure boundary is not attributed to the replacement identity.
+
+Try the Demo is resolved before the crash marker and MetricKit subscriber start. Pausing
+prevents event collection, new sends, diagnostic caching and the cold-crash question; previously
+queued real events remain queued, not relabeled as demo events. It does not change consent.
+Device-local demo intervals survive relaunch (including an open interval after an interrupted
+demo). MetricKit payloads overlapping **any** interval are discarded in full, even if part of
+the aggregate describes real use. Payloads predating the first installation of this attribution
+policy, with invalid/future intervals, or with unreadable attribution history are also excluded.
+This intentionally loses some real diagnostics rather than claiming delivery-time pause checks
+can identify a mixed daily payload. Diagnostic history contains times only, not media or events.
+This applies equally to diagnostics retained locally for a later problem report.
+Unattributed caches from older app versions are not attached to reports.
 
 ## API (v1)
 
@@ -48,6 +80,7 @@ not a secret). Errors are `{"error": "<short reason>"}`. Checks run in this orde
 | 415 | `Content-Type` is not `application/json` (parameters such as `; charset=utf-8` are fine) |
 | 413 | Body over the endpoint's limit |
 | 400 | Invalid UTF-8/JSON, or a schema violation (the reason names the first problem, e.g. `events[3].props: "foo" is not allowed for "setup.step"`) |
+| 410 | The install identity was erased, or an interrupted object write was retired; nothing may resurrect that consent generation |
 | 503 | `{"error": "busy"}`: a daily budget is used up (events, or reports past the D1 write cap); `Retry-After` is the seconds until the next UTC day |
 
 Unknown fields are rejected everywhere (400), so nothing unexpected is ever stored.
@@ -159,7 +192,57 @@ A stored diagnostics payload with crashes or hangs is also emailed to you; see
 ### `DELETE /v1/installs/<install>` → 204
 
 Deletes all events, payloads (rows and R2 objects) and reports (rows and R2 objects) of the
-install, and releases their bytes from the budget. Never refused by the budget. Also 204 when nothing exists. 400 if `<install>` is not a lowercase UUID.
+install, and releases their bytes from the budget. Never refused by the budget. Also 204 when
+nothing exists. 400 if `<install>` is not a lowercase UUID. A storage failure is not acknowledged
+as success: rows/pointers and the intake fence survive for retry.
+
+### Erasure and interrupted writes
+
+The install UUID itself is the consent generation. Migration `0005_erasure_writes.sql` adds:
+
+- `erased_installs`: permanent digest-only anti-replay tombstones. Each is the lowercase hex
+  SHA-256 of UTF-8 `photos.homespun.telemetry.erasure.v1`, one NUL byte, and the canonical
+  lowercase install UUID. This table retains no raw UUID, timestamp, account information,
+  replacement ID or link to any other consent identity. The random UUID's entropy makes a
+  deployment secret/HMAC unnecessary; a party already knowing the UUID can still derive its
+  marker. Do not expire these: delayed/replayed old requests must not resurrect erased data.
+  Keep this derivation stable across deployments so existing tombstones remain recognizable.
+- `erasure_checks`: transient SQL guard rows, deleted immediately by an AFTER INSERT trigger.
+  The Worker derives the digest once per request and passes it separately into these checks.
+  A BEFORE INSERT trigger refuses erased digests inside each atomic admission/publication
+  batch, rolling back its content and budget writes together. No check rows survive the
+  statement, and no digest copies need to be retained on the existing content rows.
+- `object_writes`: a durable R2 key, optional install UUID, byte reservation, creation/check times,
+  and publication/settlement state. Every PUT is journaled and budget-reserved **before** it is
+  issued. Payload publication atomically exchanges its pointer for a payload row. Reports first
+  commit a D1-only fallback row and pointer, then atomically publish the R2 reference after PUT.
+
+Erasure atomically writes the tombstone and cancels that install's pending publications.
+D1 transactional digest checks fence all subsequent event/report/payload/pointer admission and
+publication (including the budget charge), not just at an earlier preflight check. Erasure
+then deletes snapshotted R2 keys and **only those snapshotted content rows**. Concurrent erasure
+and retention release bytes from rows still present in their deletion transaction, not from
+a stale sum. Neither assumes an unsnapshotted object's bytes were erased.
+
+A writer settling after erasure cleans its own object instead of publishing. If it crashes,
+the daily job cancels pending publications older than one hour and repeatedly erases their
+objects. A timeout is **not** proof that a PUT settled: an unsettled pointer is retained and
+fairly revisited indefinitely, including after erasure, so an arbitrarily late PUT remains
+discoverable. Only a writer that knows its PUT settled can mark that fact; the pointer is
+removed only after an acknowledged object deletion. Failed cleanup remains retryable.
+Pointers may therefore outlive content retention indefinitely if the writer never acknowledges
+settlement, and reserve their possible bytes conservatively until settlement/cleanup is proven.
+Unlike the digest-only tombstones, cleanup pointers retain their original per-write install/object
+references, sizes and times as needed for retry and late-PUT cleanup. They contain no payload
+content or cross-install linkage.
+Operators must not manually drop such pointers merely because an object is currently absent.
+The cleanup shares the retention job's D1 write allowance; backlogs continue on later runs.
+
+204 acknowledges the fence and deletion of the observed content, not the ability to recall
+a PUT already in flight. Late bytes are erased by the returning writer or the repeated sweep.
+The app waits for its own admitted requests before DELETE; this Worker protocol also covers
+interrupted prior app/Worker invocations. Already-sent emails cannot be recalled by this API;
+as before, report-number/support erasure is required for mailbox copies and unlinked reports.
 
 ### `GET /v1/health` → 200 `{"ok": true}`
 
@@ -167,12 +250,13 @@ No key needed.
 
 ### Scheduled (daily, 03:17 UTC)
 
-1. Deletes metrics received more than 90 days ago, diagnostics older than 365 days, reports older
+1. Reconciles retired/interrupted object writes, then deletes metrics received more than 90 days ago, diagnostics older than 365 days, reports older
    than 730 days (R2 objects first, then rows) and events older than 400 days. One run spends at
    most a quarter of the daily D1 write cap on deletes and stays within Workers Free limits;
    leftovers are removed on later runs.
 2. Deletes daily `usage` counters older than 40 days and monthly ones older than 13 months, and
-   sets `r2.bytes` to the sum of `size` in `payloads` and `reports` (corrects any drift).
+   sets `r2.bytes` to the sum of `size` in `payloads`, `reports`, and unresolved `object_writes`
+   (corrects drift without forgetting possible late writes).
 3. Sends budget alerts (see [Budget](#budget)).
 
 ## Emails you receive
@@ -232,7 +316,10 @@ Caps, as string vars in `wrangler.jsonc` (digits only; anything else falls back 
 The caps sit at 80% because counting is approximate: concurrent requests can overshoot a little,
 and D1 rows written are estimated (4 per row inserted or deleted, 1 per counter). Days and
 months are UTC. The D1 write cap covers what the event cap alone can't: a flood of metrics
-uploads (about 9 rows written each) would otherwise exhaust D1 within the R2 caps.
+uploads (a conservative reservation of about 25 rows written each, including the write journal
+and transient digest fences)
+would otherwise exhaust D1 within the R2 caps. PUT attempts reserve operation/byte counters before
+R2 and retain those operation charges on failure; confirmed cleanup releases only stored bytes.
 
 What is refused, and when:
 
@@ -264,8 +351,8 @@ Each alert lists all current counters and caps.
 
 **Typical usage.** MetricKit delivers about one metrics payload per install per day, 10–30 KB.
 1,000 sharing installs make about 30k R2 writes a month (3% of the free tier) and keep 1–3 GB
-with the 90-day metrics retention. Diagnostics and reports are rare. In D1 that is about 9k rows
-written a day for payloads, plus about 4 per event (10 events per install per day would be 40k).
+with the 90-day metrics retention. Diagnostics and reports are rare. In D1 that reserves about 25k rows
+written a day for payloads, plus about 4 per event, 2 per fenced event batch and counter writes.
 The Worker never reads R2, so there are no Class B operations in normal operation; only your own
 downloads with `wrangler r2 object get` count.
 
@@ -278,6 +365,10 @@ Things the budget can't cover:
 - Sustained growth: retention deletes cost D1 writes too, so at about 10k events a day for over
   a year (inserts plus the deletes 400 days later) D1 Free is too small. Move to Workers Paid and
   raise the caps.
+- Permanent anti-replay tombstones and unresolved write pointers consume D1 capacity over time.
+  Their writes are counted and requests remain rate-limited, but privacy erasure is not refused
+  for budget reasons. Capacity planning must include this metadata; never reclaim it by reopening
+  erased identities or dropping an unsettled pointer.
 
 **Changing caps.** Edit the vars in `wrangler.jsonc` and run `npx wrangler deploy`. (Vars changed
 in the dashboard are replaced by the next deploy.) To see the counters:
@@ -309,6 +400,25 @@ npx wrangler dev --test-scheduled   # then: curl 'localhost:8787/cdn-cgi/handler
 ```
 
 ## Deploy (owner)
+
+### Upgrading an existing deployment to the erasure protocol
+
+Hosted CI must pass before an owner-authorized deployment. This change does not deploy itself.
+`0005` is not deployed: its final definition creates digest-only tombstones directly; no raw-UUID
+tombstone conversion or new deployment secret is required. Apply the final migration, not an
+earlier draft of it.
+For `0005`, put intake **and erasure** behind maintenance and pause the old scheduled job, then
+drain/verify the end of old Worker invocations. Apply the additive migration before deploying
+the matching Worker; restore routes/cron only when no old writer can run. If that cannot be
+established, keep maintenance in place. Do not roll back to the old intake code with live traffic:
+it can PUT without a journal. Deploy this Worker before releasing the corresponding app.
+
+Existing indexed rows need no rewrite. Historical unindexed objects, if any, predate this
+journal and cannot be inferred from D1: a separately authorized maintenance inventory/reconciliation
+of the bucket is needed before claiming historical erasure completeness. Do not assume bucket
+lifecycle rules exist or were validated by these tests.
+
+### Initial setup
 
 1. **Credentials.** Either run `npx wrangler login` (browser), or create an API token
    (My Profile → API Tokens → Create custom token) and export `CLOUDFLARE_API_TOKEN` and
@@ -406,5 +516,6 @@ Reports kept without R2 have `r2_key = ''`. Fetch a stored payload or report wit
   `src/crashmail.ts`: crash and hang notices.
 - `src/events.ts`, `src/payloads.ts`, `src/reports.ts`, `src/installs.ts`, `src/retention.ts`:
   one file per endpoint or job; `src/validate.ts` and `src/http.ts` hold the shared checks.
+- `src/writes.ts`: durable PUT reservations, settlement-aware cleanup and bounded reconciliation.
 - `migrations/`: D1 schema (`wrangler d1 migrations`).
 - `test/`: vitest specs and MetricKit fixtures.
