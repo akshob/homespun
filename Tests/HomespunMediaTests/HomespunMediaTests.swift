@@ -74,7 +74,7 @@ import Darwin
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
                 DispatchQueue.global(qos: .utility).async {
                     continuation.resume(with: Result {
-                        try cancellation.run {
+                        _ = try cancellation.run {
                             try ProcessRunner.run(["sh", "-c", "trap '' TERM; exec sleep 60"])
                         }
                         return ()
@@ -87,7 +87,10 @@ import Darwin
             while cancellation.processID == nil { try await Task.sleep(for: .milliseconds(10)) }
             return cancellation.processID
         }
-        defer { group.cancelAll() }
+        defer {
+            cancellation.cancel()
+            group.cancelAll()
+        }
         // A failed launch or unexpectedly early exit finishes the first child instead of
         // leaving an unstructured task and polling for a PID that will never appear.
         let first = try await group.next()
