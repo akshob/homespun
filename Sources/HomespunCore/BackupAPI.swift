@@ -211,6 +211,7 @@ public enum BackupAPI {
         public var requestID: UUID
         public var operationID: UUID
         public var version: Version
+        public var revision: Int64
         public var backup: BackupState
         public var compact: CompactState
         public var retention: RetentionState
@@ -218,12 +219,13 @@ public enum BackupAPI {
         public var derivative: Derivative?
         public var message: String?
 
-        public init(requestID: UUID, operationID: UUID, version: Version, backup: BackupState,
+        public init(requestID: UUID, operationID: UUID, version: Version, revision: Int64, backup: BackupState,
                     compact: CompactState, retention: RetentionState, originals: [ServerAPI.ResourceStatus],
                     derivative: Derivative? = nil, message: String? = nil) {
             self.requestID = requestID
             self.operationID = operationID
             self.version = version
+            self.revision = revision
             self.backup = backup
             self.compact = compact
             self.retention = retention
@@ -234,7 +236,7 @@ public enum BackupAPI {
 
         enum CodingKeys: String, CodingKey {
             case requestID = "requestId", operationID = "operationId"
-            case version, backup, compact, retention, originals, derivative, message
+            case version, revision, backup, compact, retention, originals, derivative, message
         }
     }
 

@@ -78,7 +78,7 @@ private func backupManifest(_ primary: String = String(repeating: "a", count: 64
     #expect(requestJSON.contains("\"video_crf\":28"))
 
     let retainedWithFailedCompact = BackupAPI.Receipt(
-        requestID: UUID(), operationID: request.operationID, version: version, backup: .retained,
+        requestID: UUID(), operationID: request.operationID, version: version, revision: 3, backup: .retained,
         compact: .failed, retention: .permanent, originals: [], message: "compression_failed")
     let page = BackupAPI.Changes(origin: origin, cursor: 9, hasMore: false,
                                  changes: [.init(sequence: 9, receipt: retainedWithFailedCompact)])
