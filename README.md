@@ -495,11 +495,41 @@ are client-generated UUIDs posted to `/api/v2/deliveries/<id>/ack`; acknowledgem
 delivery. Fresh `/api/v2/assets/<asset>/versions/<manifest>/verify` accepts `BackupAPI.Version` and
 requires that device's permanent local claim. No endpoint falls back to mutable v1 proof.
 
-Versioned Immich acquisition/proof is explicitly unsupported: requests are blocked/external and no
-upload protocol is advertised in that mode. Existing v1 Immich remains read-only. Connector copies
-are not deletion proof. Versioned connector copy/status is not yet offered: existing legacy
-connector jobs remain independently bounded/fenced, and connector information warns that its
-counts cover legacy backups only. No relay or APNs credentials are part of this implementation.
+Immich remains read-only. Its independently scheduled acquisition downloads and checks every
+expected original resource by positive size and SHA-256, using SHA-1/search only to locate it.
+Edited/RAW/auxiliary-resource manifests are rejected explicitly. No upload protocol is advertised
+in Immich mode, and no permanent duplicate original is added to the managed originals root.
+Temporary checked processing inputs are bounded and reclaimed after their worker references end.
+
+Immich capabilities negotiate `external_verification: full_resource_scrub`. Every strengthened
+external proof freshly downloads **all** expected resources again, checks sizes/SHA-256 and live
+association/availability, and returns `retention: external`, never permanent-local retention.
+Version-qualified external original downloads also verify complete requested bytes before serving
+a range. A scrub establishes observed identity/availability, not immunity to a later Immich
+operator change. The phone must negotiate this contract, verify its current complete local
+resources and imported compact, and bound proof age before iOS confirmation; mode alone is not proof.
+
+Cloud Copies includes retained immutable v2 manifests. OneDrive names contain the full manifest,
+role and resource hash; retries deduplicate verified objects and conflicts never overwrite older
+originals. Generation-fenced jobs retry durable transfers under shared connector capacity.
+`GET /api/v2/backup-requests/<id>/copies` returns owner-bound per-connector `ConnectorCounts`;
+the normal connector counts include v1 and v2. Destination changes fence old completions.
+Cloud copies and their status never substitute for local retention or fresh external byte proof.
+
+An optional owner-configured `HOMESPUN_WAKE_RELAY_URL` (HTTPS, default absent) enables a content-free
+wake sender. This does not deploy or advertise a functioning relay. After the phone opts in and
+activates its relay route, `POST /api/v2/wake/enrollment` accepts only `WakeRelayAPI.Sender`
+(`route_id`, `generation_id`, canonical 32-byte `token`) for that authenticated device.
+Without an owner endpoint it returns `wake_unavailable` and stores nothing. It returns an ETag
+containing the enrolled generation. `DELETE /api/v2/wake/enrollment` sends that generation as
+`If-Match`; a stale retirement cannot erase a newer route. Unpair/revoke disables the route.
+No APNs token, provider key or client-supplied relay URL is accepted.
+
+The durable outbox coalesces hints, retries the same content-free nonce after lost responses,
+and preserves newer changes for a new nonce. Route/generation/lease fences reject stale completions.
+Acceptance is not device delivery/execution. Sends are throttled to about three per hour per
+consumer; a gone route is retired without touching work or retention. The service joins sends and
+shuts down its HTTPS client explicitly. Authenticated changes/snapshots remain correct without push.
 
 After an **offline, consistent catalog restore**, run `homespun-server resync-history` before
 restarting. It preserves the server ID and originals but advances the history epoch and requires

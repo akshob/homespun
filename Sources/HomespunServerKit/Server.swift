@@ -42,6 +42,7 @@ public struct HomespunServer: Sendable {
               configuration.minimumFreeBytes >= (256 << 20) else {
             throw ServerConfiguration.Failure.invalid("Invalid server worker or storage budget.")
         }
+        if let relay = configuration.wakeRelayURL { _ = try WakeHintClient(baseURL: relay) }
         self.configuration = configuration
         self.logger = logger
         storage = Storage(root: configuration.dataDirectory)
@@ -161,6 +162,12 @@ public struct HomespunServer: Sendable {
         // The idle timeout closes uploads that stall (a phone leaving Wi-Fi), releasing their lock.
         let startup = ServingStartup()
         var workers: [any Service] = [runner, videoRunner, copier, backupPhoto, backupVideo,
+                                    BackupConnectorWorker(catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                                          hub: hub, immich: immichState, configuration: configuration),
+                                    BackupExternalWorker(lane: "photo", catalog: catalog, storage: storage, immich: immichState,
+                                                         budget: budget, configuration: configuration),
+                                    BackupExternalWorker(lane: "video", catalog: catalog, storage: storage, immich: immichState,
+                                                         budget: budget, configuration: configuration),
                                     BackupAdoption(catalog: catalog, storage: storage, originals: originals, budget: budget,
                                                    configuration: configuration, lane: "photo"),
                                     BackupAdoption(catalog: catalog, storage: storage, originals: originals, budget: budget,
@@ -176,12 +183,15 @@ public struct HomespunServer: Sendable {
             workers.append(BackupWorker(lane: "video", catalog: catalog, storage: storage, originals: originals, budget: budget,
                                         logger: logger, minimumFreeBytes: configuration.minimumFreeBytes))
         }
+        if let relay = configuration.wakeRelayURL, let hints = try? WakeHintClient(baseURL: relay) {
+            workers.append(BackupWakeWorker(catalog: catalog, relay: relay, sender: hints, ownedClient: hints))
+        }
         var application = Application(router: router(startup: startup), server: transport,
                     configuration: .init(address: .hostname(configuration.host, port: configuration.port),
                                          serverName: "homespun"),
                     services: [OwnedServerServices(dataDirectory: configuration.dataDirectory, catalog: catalog,
                                                    originals: originals, storage: storage, mover: mover,
-                                                   startup: startup, services: workers, logger: logger)], logger: logger)
+                                                   startup: startup, services: workers, logger: logger, immich: immichState)], logger: logger)
         application.beforeServerStarts { try await startup.wait() }
         return application
     }
@@ -231,6 +241,7 @@ public struct HomespunServer: Sendable {
             "HOMESPUN_MAX_STAGING_BYTES": String(configuration.maximumStagingBytes),
             "HOMESPUN_MIN_FREE_BYTES": String(configuration.minimumFreeBytes),
         ]
+        if let relay = configuration.wakeRelayURL { environment["HOMESPUN_WAKE_RELAY_URL"] = relay.absoluteString }
         if let originals = configuration.originalsDirectory { environment["HOMESPUN_ORIGINALS"] = originals.path }
         if let publicURL = configuration.publicURL { environment["HOMESPUN_PUBLIC_URL"] = publicURL }
         let current = ProcessInfo.processInfo.environment
@@ -283,6 +294,14 @@ public struct HomespunServer: Sendable {
         try await BackupPublication.recover(catalog: catalog, storage: storage, originals: originals)
         try await catalog.releaseLeases()
         try await catalog.releaseBackupLeases()
+        try await catalog.releaseBackupCopyLeases()
+        try await catalog.configureBackupExternal(await immichState.backupBinding)
+        try await catalog.releaseExternalBackupLeases()
+        for lane in ["photo", "video"] {
+            let external = BackupExternalWorker(lane: lane, catalog: catalog, storage: storage, immich: immichState,
+                                                budget: budget, configuration: configuration)
+            while try await external.runNext() {}
+        }
         let adoption = BackupAdoption(catalog: catalog, storage: storage, originals: originals, budget: budget, configuration: configuration)
         while try await catalog.nextBackupAdoption() != nil {
             do { _ = try await adoption.runNext() }
@@ -299,6 +318,9 @@ public struct HomespunServer: Sendable {
             try await group.waitForAll()
         }
         try await copier.drain()
+        let cloud = BackupConnectorWorker(catalog: catalog, storage: storage, originals: originals, budget: budget,
+                                          hub: hub, immich: immichState, configuration: configuration)
+        while try await cloud.runNext() {}
     }
 
     /// Call after an offline catalog restore, before starting this server. Existing immutable

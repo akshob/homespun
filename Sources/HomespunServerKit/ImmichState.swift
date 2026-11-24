@@ -25,6 +25,11 @@ actor ImmichState {
     var mode: ServerAPI.StorageMode { configuration == nil ? .files : .immich }
     var current: ImmichConfiguration? { configuration }
     var client: ImmichClient? { configuration.map { ImmichClient(configuration: $0) } }
+    var backupBinding: String? {
+        configuration.map {
+            Fingerprint.sha256(of: Data(("homespun.immich.binding.v1\n" + $0.url.absoluteString + "\n" + $0.apiKey).utf8))
+        }
+    }
 
     struct Failure: Error, CustomStringConvertible { var description: String }
 

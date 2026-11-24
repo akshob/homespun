@@ -33,6 +33,7 @@ struct BackupJob: Sendable {
     var output: UUID
     var lane: String
     var attempts: Int
+    var externalSetID: String? = nil
 }
 
 struct BackupAdoptionCandidate: Sendable {
@@ -216,10 +217,11 @@ extension Catalog {
             let id = UUID().uuidString.lowercased()
             try database.execute("""
                 INSERT INTO backup_requests(id, principal, operation_id, payload_hash, manifest_id, recipe_id,
-                    recipe_json, source, wants_compact, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    recipe_json, source, wants_compact, created_at, source_binding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [.text(id), .text(principal), .text(operation), .text(hash), .text(manifestID), .text(recipeID),
                        .text(try Self.backupJSON(recipe)), .text(external ? "external" : "files"),
-                       .integer(request.compact ? 1 : 0), .text(Timestamp.string())])
+                       .integer(request.compact ? 1 : 0), .text(Timestamp.string()),
+                       external ? try setting("backup.external_binding").sqlValue : .null])
             // This claim is committed before any byte or processing receipt is returned.
             try database.execute("""
                 INSERT INTO backup_claims(id, request_id, principal, manifest_id, policy, created_at) VALUES (?, ?, ?, ?, ?, ?)
@@ -281,6 +283,10 @@ extension Catalog {
         return folder + "/" + month + "/" + (stem.isEmpty ? "Item" : stem) + "." + manifest
     }
 
+    func backupCaptureDate(_ manifest: String) throws -> Date? {
+        Timestamp.date(try database.query("SELECT capture_date FROM backup_manifests WHERE id = ?", [.text(manifest)]).first?["capture_date"]?.string)
+    }
+
     func backupVersion(_ request: String, principal: String) throws -> BackupAPI.Version {
         let row = try backupRequestRow(request, principal: principal)
         let manifest = row["manifest_id"]!.string!
@@ -309,23 +315,27 @@ extension Catalog {
         let objects = try backupObjects(version.manifestID)
         let complete = !objects.isEmpty && objects.allSatisfy { $0.path != nil }
         let external = row["source"]?.string == "external"
+        let binding = try setting("backup.external_binding")
+        let externalVerified = try binding.map { try externalResourcesVerified(version.manifestID, binding: $0) } ?? false
         let policy = try database.query("SELECT policy FROM backup_claims WHERE request_id = ?", [.text(id)]).first?["policy"]?.string
         var derivative: BackupAPI.Derivative?
         if let generation = row["derivative_id"]?.string, row["wants_compact"]?.int == 1 {
             derivative = try backupDerivative(generation, principal: principal)
         }
         let originals: [ServerAPI.ResourceStatus] = objects.map {
-            .init(role: $0.role, sha256: $0.sha256, size: $0.size, state: $0.path == nil ? .missing : .verified,
-                  receivedBytes: $0.path == nil ? 0 : $0.size, verifiedAt: nil)
+            let verified = external ? externalVerified : $0.path != nil
+            return .init(role: $0.role, sha256: $0.sha256, size: $0.size, state: verified ? .verified : .missing,
+                  receivedBytes: verified ? $0.size : 0, verifiedAt: nil)
         }
         return .init(requestID: UUID(uuidString: id)!, operationID: UUID(uuidString: row["operation_id"]!.string!)!,
                      version: version, revision: Int64(row["revision"]?.int ?? 0),
-                     backup: external ? .blocked : complete ? .retained : .uploading,
+                     backup: external ? (binding == nil ? .blocked : externalVerified ? .retained : .verifying) : complete ? .retained : .uploading,
                      compact: BackupAPI.CompactState(rawValue: row["compact_state"]?.string ?? "") ?? .requested,
                      retention: external ? .external : complete ? (policy == "permanent" ? .permanent : .deferred) : .pending,
                      originals: originals, derivative: derivative,
-                     message: external ? "Immich is external storage. Versioned acquisition and permanent-local proof are unsupported."
-                        : row["message"]?.string ?? (row["wants_compact"]?.int == 0 ? "Compact processing was not requested." : nil))
+                     message: row["message"]?.string ?? (external && !externalVerified
+                        ? "Waiting for a full original-resource byte verification in Immich."
+                        : row["wants_compact"]?.int == 0 ? "Compact processing was not requested." : nil))
     }
 
     func findBackup(operation: UUID, principal: String) throws -> BackupAPI.Receipt {
@@ -346,6 +356,7 @@ extension Catalog {
     }
 
     func queueBackupIfComplete(_ manifest: String) throws {
+        try queueBackupExternal(manifest)
         let objects = try backupObjects(manifest)
         guard !objects.isEmpty, objects.allSatisfy({ $0.path != nil }) else { return }
         let kind = try database.query("SELECT manifest_json, generation FROM backup_manifests WHERE id = ?", [.text(manifest)]).first!
@@ -536,12 +547,12 @@ extension Catalog {
             if let old = try database.query("SELECT * FROM backup_commands WHERE principal = ? AND operation_id = ?",
                                             [.text(principal), .text(operation)]).first {
                 guard old["request_id"]?.string == id, old["payload_hash"]?.string == hash else { throw Self.backupConflict() }
+                if let outcome = old["response_json"]?.string {
+                    return try Self.backupDecode(BackupAPI.Receipt.self, outcome)
+                }
                 return try backupReceipt(id, principal: principal)
             }
             let row = try backupRequestRow(id, principal: principal)
-            guard row["source"]?.string == "files" else {
-                throw HTTPError(.unprocessableContent, message: "Versioned Immich processing is unsupported.")
-            }
             try database.execute("INSERT INTO backup_commands(principal, operation_id, request_id, payload_hash) VALUES (?, ?, ?, ?)",
                                  [.text(principal), .text(operation), .text(id), .text(hash)])
             switch command.action {
@@ -555,23 +566,46 @@ extension Catalog {
                         message = 'Cancelled; original retention is unchanged.' WHERE id = ?
                     """, [.text(id)])
                 try database.execute("UPDATE backup_uploads SET state = 'cancelled' WHERE request_id = ? AND state = 'open'", [.text(id)])
-            case .retry: try database.execute("UPDATE backup_requests SET paused = 0, cancelled = 0, message = NULL WHERE id = ?", [.text(id)])
+            case .retry: try database.execute("""
+                UPDATE backup_requests SET paused = 0, cancelled = 0, message = NULL,
+                    compact_state = CASE WHEN wants_compact = 1 AND derivative_id IS NULL THEN 'requested' ELSE compact_state END WHERE id = ?
+                """, [.text(id)])
             case .compactNow:
-                try database.execute("UPDATE backup_requests SET wants_compact = 1, paused = 0, cancelled = 0, message = NULL WHERE id = ?", [.text(id)])
+                try database.execute("""
+                    UPDATE backup_requests SET wants_compact = 1, paused = 0, cancelled = 0, message = NULL,
+                        compact_state = CASE WHEN derivative_id IS NULL THEN 'requested' ELSE 'ready' END WHERE id = ?
+                    """, [.text(id)])
             }
             let manifest = row["manifest_id"]!.string!, recipe = row["recipe_id"]!.string!
             if try database.query("""
                 SELECT id FROM backup_requests WHERE manifest_id = ? AND recipe_id = ?
-                  AND wants_compact = 1 AND paused = 0 AND cancelled = 0 AND source = 'files' LIMIT 1
+                  AND wants_compact = 1 AND paused = 0 AND cancelled = 0 LIMIT 1
                 """, [.text(manifest), .text(recipe)]).isEmpty {
                 try database.execute("""
                     UPDATE backup_jobs SET status = 'cancelled', fence = fence + 1, owner = NULL, expires_at = NULL
                     WHERE manifest_id = ? AND recipe_id = ? AND status IN ('queued', 'leased', 'retry_wait')
                     """, [.text(manifest), .text(recipe)])
             }
+            if try database.query("""
+                SELECT id FROM backup_requests WHERE manifest_id = ? AND source = 'external' AND paused = 0 AND cancelled = 0 LIMIT 1
+                """, [.text(manifest)]).isEmpty {
+                try database.execute("""
+                    UPDATE backup_external_jobs SET status = 'cancelled', fence = fence + 1, owner = NULL, expires_at = NULL
+                    WHERE manifest_id = ? AND status IN ('queued', 'leased', 'retry_wait')
+                    """, [.text(manifest)])
+            }
             try queueBackupIfComplete(manifest)
+            if row["source"]?.string == "external", command.action == .retry || command.action == .compactNow {
+                try database.execute("""
+                    UPDATE backup_external_jobs SET status = 'queued', fence = fence + 1, owner = NULL,
+                        expires_at = NULL, available_at = ? WHERE manifest_id = ? AND status IN ('failed', 'retry_wait', 'cancelled')
+                    """, [.text(Timestamp.string()), .text(manifest)])
+            }
             try refreshBackupRequests(manifest, force: [id])
-            return try backupReceipt(id, principal: principal)
+            let outcome = try backupReceipt(id, principal: principal)
+            try database.execute("UPDATE backup_commands SET response_json = ? WHERE principal = ? AND operation_id = ?",
+                                 [.text(try Self.backupJSON(outcome)), .text(principal), .text(operation)])
+            return outcome
         }
     }
 

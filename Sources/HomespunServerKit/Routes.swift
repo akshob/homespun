@@ -38,8 +38,15 @@ struct DeviceAuthentication: RouterMiddleware {
 final class OriginalReader: @unchecked Sendable {
     let handle: FileHandle
     private let lock = NSLock()
-    init(_ url: URL) throws { handle = try FileHandle(forReadingFrom: url) }
-    deinit { try? handle.close() }
+    private let cleanupDirectory: URL?
+    init(_ url: URL, cleanupDirectory: URL? = nil) throws {
+        handle = try FileHandle(forReadingFrom: url)
+        self.cleanupDirectory = cleanupDirectory
+    }
+    deinit {
+        try? handle.close()
+        if let cleanupDirectory { try? FileManager.default.removeItem(at: cleanupDirectory) }
+    }
 
     func read(offset: Int, count: Int) throws -> Data {
         lock.lock()
@@ -160,6 +167,7 @@ struct Routes: Sendable {
         authenticated.put("settings/immich") { request, context in try await connectImmich(request, context) }
         authenticated.delete("settings/immich") { _, _ in
             try await immichState.clear()
+            try await catalog.configureBackupExternal(nil)
             return try json(await immichState.settings())
         }
         authenticated.get("connectors") { _, _ in try json(try await connectors.all()) }
@@ -343,6 +351,7 @@ struct Routes: Sendable {
             throw HTTPError(.unprocessableContent, message: "\(error)")
         }
         try await immichState.set(configuration)
+        try await catalog.configureBackupExternal(await immichState.backupBinding)
         return try json(ServerAPI.ImmichSettings(url: url.absoluteString, keyHint: String(key.suffix(4)), permissions: permissions,
                                                  connected: true, message: ImmichState.permissionWarning(permissions)))
     }

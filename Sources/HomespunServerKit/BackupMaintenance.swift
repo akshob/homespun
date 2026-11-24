@@ -16,6 +16,11 @@ struct BackupMaintenance: Service {
                             if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
                             try await catalog.backupStagingCleaned(id)
                         }
+                        for path in (try? await catalog.externalCacheCleanup()) ?? [] {
+                            if path.hasPrefix("cache/external-v2-"), let directory = storage.resolve(path) {
+                                try? FileManager.default.removeItem(at: directory)
+                            }
+                        }
                     } catch is CancellationError { return }
                     catch { break }
                 }
