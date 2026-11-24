@@ -40,7 +40,9 @@ private func backupManifest(_ primary: String = String(repeating: "a", count: 64
     invalidHash.resources[0].sha256 = String(repeating: "z", count: 64)
     var missingPrimary = original
     missingPrimary.resources.removeFirst()
-    for candidate in [duplicate, missingMotion, empty, invalidHash, missingPrimary] {
+    var overflowing = original
+    overflowing.resources[0].size = .max
+    for candidate in [duplicate, missingMotion, empty, invalidHash, missingPrimary, overflowing] {
         #expect(throws: BackupAPI.ValidationError.invalidManifest) { try candidate.identifier() }
     }
 }
