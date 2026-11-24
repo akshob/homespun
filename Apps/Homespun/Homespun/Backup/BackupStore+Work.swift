@@ -53,6 +53,7 @@ extension BackupStore {
                                                    [.text(operation.namespace), .text(operation.itemID)]).first,
                   try lineage.text("current_operation") == id.uuidString else { throw Failure.staleOperation }
             operation.desired = .active
+            operation.bindingPaused = nil
             operation.epoch += 1
             operation.lease = nil
             operation.attention = false
@@ -77,6 +78,7 @@ extension BackupStore {
                 var operation = try Self.decode(Operation.self, row.blob("body"))
                 guard operation.epoch < Int64.max else { throw Failure.unsupportedSchema }
                 operation.desired = .paused
+                operation.bindingPaused = true
                 operation.epoch += 1
                 operation.lease = nil
                 operation.updatedAt = Date()
@@ -96,6 +98,7 @@ extension BackupStore {
             guard let row = try connection.rows("SELECT body FROM imports WHERE id = ?", [.text(id.uuidString)]).first else {
                 throw Failure.importNeedsReconciliation
             }
+
             var intent = try Self.decode(ImportIntent.self, row.blob("body"))
             guard intent.phase == .mutating || intent.phase == .uncertain else { return }
             intent.phase = .uncertain

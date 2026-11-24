@@ -42,6 +42,7 @@ actor BackupStore {
         var baseURL: URL
         var keychainReference: String
         var mode: ServerAPI.StorageMode = .files
+        var consumerID: String?
         var retired = false
     }
 
@@ -77,6 +78,7 @@ actor BackupStore {
         var lease: Lease?
         var attention = false
         var problem: Problem?
+        var bindingPaused: Bool?
         var createdAt: Date
         var updatedAt: Date
     }
@@ -290,6 +292,8 @@ actor BackupStore {
             operation.lease = nil
             operation.updatedAt = Date()
             try Self.write(operation, connection)
+            try connection.execute("DELETE FROM reservations WHERE operation = ? AND stage = 'preparation'",
+                                   [.text(operation.id.uuidString)])
         }
     }
 
@@ -298,6 +302,7 @@ actor BackupStore {
             guard var operation = try Self.operation(operationID, connection) else { throw Failure.missingOperation }
             guard operation.epoch < Int64.max else { throw Failure.unsupportedSchema }
             operation.desired = desired
+            operation.bindingPaused = nil
             operation.epoch += 1
             operation.lease = nil
             operation.updatedAt = Date()
@@ -329,6 +334,8 @@ actor BackupStore {
             operation.lease = nil
             operation.updatedAt = Date()
             try Self.write(operation, connection)
+            try connection.execute("DELETE FROM reservations WHERE operation = ? AND stage = 'preparation'",
+                                   [.text(operation.id.uuidString)])
         }
     }
 
@@ -345,28 +352,7 @@ actor BackupStore {
 
     /// Applying a page and advancing its cursor is one transaction.
     func apply(_ page: BackupAPI.Changes, bindingID: UUID) throws {
-        try db().transaction { connection in
-            guard let binding = try connection.rows("SELECT body FROM bindings WHERE id = ?",
-                                                    [.text(bindingID.uuidString)]).first else { throw Failure.retiredBinding }
-            guard try Self.decode(Binding.self, binding.blob("body")).origin == page.origin else { throw Failure.invalidReceipt }
-            let old = try connection.rows("SELECT cursor FROM cursors WHERE binding = ?", [.text(bindingID.uuidString)])
-                .first?.integer("cursor") ?? 0
-            guard page.cursor >= old, page.changes.allSatisfy({ $0.sequence > old && $0.sequence <= page.cursor }) else {
-                throw Failure.invalidReceipt
-            }
-            var previous = old
-            for change in page.changes {
-                guard change.sequence > previous, change.receipt.version.origin == page.origin else { throw Failure.invalidReceipt }
-                previous = change.sequence
-                guard let operation = try Self.operation(change.receipt.operationID, connection),
-                      operation.bindingID == bindingID else { throw Failure.invalidReceipt }
-                _ = try Self.apply(change.receipt, operationID: operation.id, epoch: operation.epoch, connection)
-            }
-            try connection.execute("""
-                INSERT INTO cursors (binding, cursor) VALUES (?, ?)
-                ON CONFLICT(binding) DO UPDATE SET cursor = excluded.cursor
-                """, [.text(bindingID.uuidString), .integer(page.cursor)])
-        }
+        _ = try applyChanges(page, bindingID: bindingID)
     }
 
     func cursor(bindingID: UUID) throws -> Int64 {
@@ -516,10 +502,14 @@ actor BackupStore {
             if let bindingID { values.append(.text(bindingID.uuidString)) }
             values.append(.integer(Int64(limit)))
             return try connection.rows("""
-                SELECT body FROM outbox
-                WHERE coalesce(json_extract(CAST(body AS TEXT), '$.nextAttempt'), 0) <= ?
-                \(bindingID == nil ? "" : "AND json_extract(CAST(body AS TEXT), '$.bindingID') = ?")
-                ORDER BY rowid LIMIT ?
+                SELECT o.body FROM outbox o
+                WHERE (json_extract(CAST(o.body AS TEXT), '$.nextAttempt') IS NULL
+                       OR json_extract(CAST(o.body AS TEXT), '$.nextAttempt') <= ?)
+                \(bindingID == nil ? "" : "AND json_extract(CAST(o.body AS TEXT), '$.bindingID') = ?")
+                AND (json_extract(CAST(o.body AS TEXT), '$.kind') != 'serverCommand' OR NOT EXISTS (
+                    SELECT 1 FROM outbox prior WHERE prior.operation = o.operation AND prior.rowid < o.rowid
+                    AND json_extract(CAST(prior.body AS TEXT), '$.kind') = 'serverCommand'))
+                ORDER BY o.rowid LIMIT ?
                 """, values).map {
                 try Self.decode(OutboxItem.self, $0.blob("body"))
             }
@@ -714,6 +704,7 @@ actor BackupStore {
                     transfer.state = .unknown
                     try write(transfer, connection)
                 }
+                try connection.execute("DELETE FROM reservations WHERE stage IN ('preparation', 'finalization')")
                 try connection.execute("""
                     UPDATE photo_effects SET phase = 'uncertain',
                     body = CAST(json_set(CAST(body AS TEXT), '$.phase', 'uncertain') AS BLOB)
@@ -751,13 +742,14 @@ actor BackupStore {
         try connection.execute("""
             INSERT INTO operations (id, namespace, item, binding, desired, backup, delivery, body)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
-            desired = excluded.desired, backup = excluded.backup, delivery = excluded.delivery, body = excluded.body
+            binding = excluded.binding, desired = excluded.desired, backup = excluded.backup,
+            delivery = excluded.delivery, body = excluded.body
             """, [.text(operation.id.uuidString), .text(operation.namespace), .text(operation.itemID),
                    .text(operation.bindingID.uuidString), .text(operation.desired.rawValue), .text(operation.backup.rawValue),
                    .text(operation.delivery.rawValue), .blob(try encode(operation))])
     }
 
-    private static func apply(_ receipt: BackupAPI.Receipt, operationID: UUID, epoch: Int64,
+    static func apply(_ receipt: BackupAPI.Receipt, operationID: UUID, epoch: Int64,
                               _ connection: BackupDatabase.Connection) throws -> ReceiptApplication {
         guard var operation = try operation(operationID, connection), operation.epoch == epoch,
               operation.origin == receipt.version.origin, receipt.operationID == operation.id,
@@ -862,6 +854,7 @@ extension BackupStore.Operation {
         lease = try values.decodeIfPresent(BackupStore.Lease.self, forKey: .lease)
         attention = try values.decodeIfPresent(Bool.self, forKey: .attention) ?? false
         problem = try values.decodeIfPresent(BackupStore.Problem.self, forKey: .problem)
+        bindingPaused = try values.decodeIfPresent(Bool.self, forKey: .bindingPaused)
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
     }
