@@ -244,7 +244,9 @@ struct Trash: Sendable {
         } else {
             for role in plan.missing { try await catalog.forgetStored(plan.asset, role: role) }
             let complete = try await catalog.resources(plan.asset).allSatisfy { $0.state == .verified }
-            try await catalog.setTrashed(plan.asset, generation: plan.generation, paths: paths, at: plan.at,
+            let permanentlyRetained = try await catalog.asset(plan.asset)?.permanent == true
+            try await catalog.setTrashed(plan.asset, generation: plan.generation, paths: paths,
+                                        at: plan.action == .remove && permanentlyRetained ? nil : plan.at,
                                         state: plan.action == .remove ? .trashed : complete ? .stored : .receiving)
         }
         // Never recursively delete a folder that might still hold indexed historical originals.

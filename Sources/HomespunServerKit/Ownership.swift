@@ -113,8 +113,11 @@ struct OwnedServerServices: Service {
             try await originals.refreshRoot(catalog: catalog)
             try await DeviceRename.recover(catalog: catalog, root: await originals.root)
             try await Trash(catalog: catalog, originals: originals, storage: storage).recover()
+            try await BackupPublication.recover(catalog: catalog, storage: storage, originals: originals)
             try await catalog.assignMissingFolders()
+            _ = try await catalog.backupOrigin()
             try await catalog.releaseLeases()
+            try await catalog.releaseBackupLeases()
             await mover.resume()
             await startup.complete(.success(()), ownership: ownership)
             do {

@@ -165,13 +165,13 @@ actor ConnectorHub {
     }
 
     /// Queues copies of an item whose originals were just stored and checked.
-    func originalsVerified(_ assetID: String) async throws {
-        for id in try await enabledIDs() { try await queue(id, assetID: assetID) }
+    func originalsVerified(_ assetID: String, job: Job? = nil) async throws {
+        for id in try await enabledIDs() { try await queue(id, assetID: assetID, job: job) }
     }
 
-    private func queue(_ id: String, assetID: String) async throws {
-        try await catalog.setCopyState(assetID, connector: id, state: "queued")
-        try await catalog.enqueue(Self.jobPrefix + id, assetID: assetID)
+    private func queue(_ id: String, assetID: String, job: Job? = nil) async throws {
+        try await catalog.setCopyState(assetID, connector: id, state: "queued", job: job)
+        try await catalog.enqueue(Self.jobPrefix + id, assetID: assetID, job: job)
     }
 
     func info(_ id: String) async throws -> ServerAPI.ConnectorInfo? {
@@ -250,20 +250,20 @@ actor ConnectorHub {
     }
 
     /// Runs one copy job. Errors other than `ConnectorError` are retried by the job runner.
-    func copy(_ id: String, assetID: String, originals: (AssetRecord, [ResourceRecord]) async throws -> [Role: URL])
+    func copy(_ id: String, assetID: String, job: Job? = nil, originals: (AssetRecord, [ResourceRecord]) async throws -> [Role: URL])
         async throws {
         guard let connector = connectors[id] else {
-            try await catalog.setCopyState(assetID, connector: id, state: "failed", message: "This server no longer has \(id).")
+            try await catalog.setCopyState(assetID, connector: id, state: "failed", message: "This server no longer has \(id).", job: job)
             return
         }
         let context = context(id)
         guard try await context.value(Self.enabledKey) == "true" else {
-            try await catalog.setCopyState(assetID, connector: id, state: "failed", message: "\(connector.name) is turned off.")
+            try await catalog.setCopyState(assetID, connector: id, state: "failed", message: "\(connector.name) is turned off.", job: job)
             return
         }
         guard let asset = try await catalog.asset(assetID) else { return }
         let resources = try await catalog.resources(assetID)
-        try await catalog.setCopyState(assetID, connector: id, state: "copying")
+        try await catalog.setCopyState(assetID, connector: id, state: "copying", job: job)
         let urls = try await originals(asset, resources)
         let item = ConnectorItem(
             assetID: assetID, kind: asset.kind, captureDate: Timestamp.date(asset.captureDate),
@@ -273,13 +273,13 @@ actor ConnectorHub {
                 }
             })
         let reference = try await connector.copy(item, context: context)
-        try await catalog.setCopyState(assetID, connector: id, state: "copied", reference: reference)
+        try await catalog.setCopyState(assetID, connector: id, state: "copied", reference: reference, job: job)
         try await context.set([Self.messageKey: nil])
     }
 
     /// Records a copy that didn't work: `final` failures stay failed; others wait for a retry.
-    func copyFailed(_ id: String, assetID: String, message: String, final: Bool) async throws {
-        try await catalog.setCopyState(assetID, connector: id, state: final ? "failed" : "queued", message: message)
+    func copyFailed(_ id: String, assetID: String, message: String, final: Bool, job: Job? = nil) async throws {
+        try await catalog.setCopyState(assetID, connector: id, state: final ? "failed" : "queued", message: message, job: job)
         try await context(id).set([Self.messageKey: message])
     }
 }
