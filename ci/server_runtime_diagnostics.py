@@ -211,7 +211,7 @@ def run_phase(name, maximum_seconds, selector, base):
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
                                        stderr=subprocess.STDOUT,
                                        env={**os.environ, "SWIFT_BACKTRACE":
-                                            BACKTRACE + f",output-to={backtraces}"})
+                                            BACKTRACE + f",output-to={backtraces.resolve() / 'crash.txt'}"})
             tree = OwnedTree(process.pid)
             heartbeat = started
             while process.poll() is None:
