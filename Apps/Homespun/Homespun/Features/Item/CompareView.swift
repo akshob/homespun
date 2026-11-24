@@ -25,6 +25,18 @@ enum CompareMode: String, CaseIterable, Identifiable {
 /// is deleted when Compare closes.
 @MainActor @Observable
 final class CompareModel {
+    var mode = CompareMode.split {
+        didSet { switchVideo(from: oldValue, to: mode) }
+    }
+    var split = 0.5
+    var holding = false
+    var zoomed = false
+    @ObservationIgnored let zoom = ZoomLink()
+    @ObservationIgnored private var loading: Task<Void, Never>?
+    @ObservationIgnored private var identifier: String?
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var retirementObservation: CatalogObservation?
+    @ObservationIgnored private var retiring: [UUID: Task<Void, Never>] = [:]
     enum Status: Equatable {
         case loading
         case downloading(received: Int64, expected: Int64)
@@ -64,8 +76,21 @@ final class CompareModel {
         return nil
     }
 
-    func load(model: AppModel, compactIdentifier: String) async {
+    func open(model: AppModel, compactIdentifier: String) {
+        guard !model.settings.isRetired else { return }
+        guard identifier != compactIdentifier else { return }
+        if model.settings.isDemo, retirementObservation == nil {
+            guard let observation = model.library.observeRetirement({ [weak self] in await self?.stopAndWait() }) else { return }
+            retirementObservation = observation
+        }
         close()
+        identifier = compactIdentifier
+        let mine = generation
+        loading = Task { await load(model: model, compactIdentifier: compactIdentifier, generation: mine) }
+    }
+
+    private func load(model: AppModel, compactIdentifier: String, generation mine: Int) async {
+        guard !Task.isCancelled, generation == mine else { return }
         status = .loading
         original = nil
         compact = nil
@@ -81,9 +106,10 @@ final class CompareModel {
             return
         }
         kind = asset.itemKind ?? .photo
+        pair.active = isVideo && mode == .sideBySide
         compactFacts = asset.mediaFacts().main
         let match = await model.job.ledger.snapshot().first { $0.value.compactIdentifier == compactIdentifier }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, generation == mine else { return }
         let originalAsset = match.flatMap { photos.item($0.key) }
         source = OriginalSource.choose(original: match?.key, onPhone: originalAsset != nil,
                                        serverAssetID: match?.value.serverAssetID, mode: model.settings.server?.mode)
@@ -95,20 +121,24 @@ final class CompareModel {
         }
         if isVideo {
             let player = await asset.player()
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == mine else { return }
             compactPlayer = player
             pair.attach(original: originalPlayer, compact: compactPlayer)
         } else {
-            compact = await asset.image(size: nil, fast: false)
+            let image = await asset.image(size: nil, fast: false)
+            guard !Task.isCancelled, generation == mine else { return }
+            compact = image
         }
         if case .phone = source, let originalAsset, !Task.isCancelled {
             if isVideo {
                 let player = await originalAsset.player()
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == mine else { return }
                 originalPlayer = player
                 pair.attach(original: originalPlayer, compact: compactPlayer)
             } else {
-                original = await originalAsset.image(size: nil, fast: false)
+                let image = await originalAsset.image(size: nil, fast: false)
+                guard !Task.isCancelled, generation == mine else { return }
+                original = image
             }
             status = hasOriginal ? .ready : .failed("The original couldn't be read from Photos.")
         }
@@ -126,6 +156,7 @@ final class CompareModel {
         }
         self.folder = folder
         let kind = kind
+        let mine = generation
         status = .downloading(received: 0, expected: 0)
         Announce.say("Getting the original from \(server).")
         download = Task {
@@ -133,31 +164,40 @@ final class CompareModel {
                 let url = try await Self.fetch(client, assetID: assetID, role: OriginalSource.role(for: kind), to: folder,
                                                name: OriginalSource.fileName(for: kind)) { received, expected in
                     Task { @MainActor in
-                        guard case .downloading = self.status else { return }
+                        guard self.generation == mine, case .downloading = self.status else { return }
                         self.status = .downloading(received: received, expected: expected)
                     }
                 }
                 try Task.checkCancellation()
+                guard generation == mine else { return }
                 if kind == .video {
-                    originalFacts = await ItemMedia.videoFacts(at: url)
+                    let facts = await ItemMedia.videoFacts(at: url)
                     try Task.checkCancellation()
+                    guard generation == mine else { return }
+                    originalFacts = facts
                     originalPlayer = AVPlayer(url: url)
                     pair.attach(original: originalPlayer, compact: compactPlayer)
                 } else {
                     guard let loaded = await Task.detached(operation: { ItemMedia.image(at: url) }).value else {
                         throw PhotoLibrary.Failure.unsupported("The original couldn't be opened on this iPhone.")
                     }
+                    let image = await loaded.image.byPreparingForDisplay() ?? loaded.image
+                    try Task.checkCancellation()
+                    guard generation == mine else { return }
                     originalFacts = loaded.facts
-                    original = await loaded.image.byPreparingForDisplay() ?? loaded.image
+                    original = image
                 }
                 try Task.checkCancellation()
                 status = .ready
                 Announce.say("The original is ready to compare.")
             } catch let error as URLError where error.code == .cancelled {
+                guard generation == mine else { return }
                 status = .stopped
             } catch is CancellationError {
+                guard generation == mine else { return }
                 status = .stopped
             } catch {
+                guard generation == mine else { return }
                 status = .failed(error.localizedDescription)
             }
             download = nil
@@ -171,14 +211,38 @@ final class CompareModel {
 
     /// Stops any download and deletes the downloaded original.
     func close() {
+        generation &+= 1
+        identifier = nil
+        let loading = loading, download = download, folder = folder
+        loading?.cancel()
+        self.loading = nil
         videoSwitch += 1
         download?.cancel()
-        download = nil
+        self.download = nil
         originalPlayer?.pause()
         compactPlayer?.pause()
         pair.stop()
-        if let folder { try? FileManager.default.removeItem(at: folder) }
-        folder = nil
+        self.folder = nil
+        zoom.reset()
+        zoomed = false
+        holding = false
+        if loading != nil || download != nil || folder != nil {
+            let id = UUID()
+            retiring[id] = Task {
+                await loading?.value
+                await download?.value
+                if let folder { try? FileManager.default.removeItem(at: folder) }
+                retiring[id] = nil
+            }
+        }
+    }
+
+    func stopAndWait() async {
+        close()
+        let tasks = Array(retiring.values)
+        for task in tasks { await task.value }
+        retirementObservation?.cancel()
+        retirementObservation = nil
     }
 
     /// Videos: the other version carries on from the same moment.
@@ -258,23 +322,26 @@ struct CompareView: View {
     /// False when it's part of another screen (Free Up Space on the open iPhone Duo), which has the title.
     var standalone = true
     @State private var compare = CompareModel()
-    @State private var mode = CompareMode.split
-    @State private var split = 0.5
-    @State private var holding = false
-    @State private var zoomed = false
+    private let ownsComparison: Bool
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     static let stage = "compare.stage"
 
-    init(model: AppModel, compactIdentifier: String, standalone: Bool = true) {
+    init(model: AppModel, compactIdentifier: String, standalone: Bool = true, comparison: CompareModel? = nil) {
         self.model = model
         self.compactIdentifier = compactIdentifier
         self.standalone = standalone
+        ownsComparison = comparison == nil
+        _compare = State(initialValue: comparison ?? CompareModel())
     }
 
+    private var mode: CompareMode {
+        get { compare.mode }
+        nonmutating set { compare.mode = newValue }
+    }
     /// Touch and hold shows the other version.
     private var shown: CompareMode {
-        guard holding else { return mode }
+        guard compare.holding else { return mode }
         switch mode {
         case .original: return .compact
         case .compact: return .original
@@ -301,8 +368,9 @@ struct CompareView: View {
     }
 
     var body: some View {
+        @Bindable var compare = compare
         VStack(spacing: 0) {
-            Picker("Show", selection: $mode) {
+            Picker("Show", selection: $compare.mode) {
                 ForEach(modes) { mode in Text(mode.title).tag(mode) }
             }
             .pickerStyle(.segmented)
@@ -318,8 +386,9 @@ struct CompareView: View {
         .background(Theme.background)
         .modifier(CompareScreen(standalone: standalone))
         .task(id: compactIdentifier) {
-            await compare.load(model: model, compactIdentifier: compactIdentifier)
-            guard !Task.isCancelled else { return }
+            compare.open(model: model, compactIdentifier: compactIdentifier)
+        }
+        .onChange(of: compare.kind) {
             mode = Self.adjusted(mode, video: compare.isVideo, regular: sizeClass == .regular)
             if compare.isVideo, mode == .sideBySide { compare.pair.active = true }
         }
@@ -327,8 +396,7 @@ struct CompareView: View {
         .onChange(of: sizeClass, initial: true) { _, size in
             mode = Self.adjusted(mode, video: compare.isVideo, regular: size == .regular)
         }
-        .onChange(of: mode) { old, new in compare.switchVideo(from: old, to: new) }
-        .onDisappear { compare.close() }
+        .onDisappear { if ownsComparison { compare.close() } }
     }
 
     // MARK: The photo
@@ -339,7 +407,8 @@ struct CompareView: View {
                 if compare.isVideo, shown == .sideBySide {
                     SideBySide(media: .videos(original: compare.originalPlayer, compact: compare.compactPlayer,
                                               size: compare.videoSize),
-                               originalLabel: originalPill, compactLabel: "Compact copy · in Photos")
+                               originalLabel: originalPill, compactLabel: "Compact copy · in Photos", link: compare.zoom,
+                               itemLabel: itemLabel)
                 } else if compare.isVideo {
                     let player = shown == .original ? compare.originalPlayer : compare.compactPlayer
                     if let player {
@@ -349,15 +418,16 @@ struct CompareView: View {
                     }
                 } else if shown == .sideBySide {
                     SideBySide(media: .photos(original: compare.original, compact: compare.compact), originalLabel: originalPill,
-                               compactLabel: "Compact copy · in Photos")
+                               compactLabel: "Compact copy · in Photos", link: compare.zoom, itemLabel: itemLabel)
                 } else {
-                    CompareCanvas(original: compare.original, compact: compare.compact, mode: shown, split: split,
-                                  label: imageLabel, onZoom: { zoomed = $0 }) { holding = $0 }
+                    CompareCanvas(original: compare.original, compact: compare.compact, mode: shown, split: compare.split,
+                                  link: compare.zoom, label: imageLabel, onZoom: { compare.zoomed = $0 }) { compare.holding = $0 }
                     if shown == .split, compare.hasOriginal, compare.hasCompact {
                         // The line spans the photo; the whole height once it's zoomed in.
                         let photo = ZoomScrollView.fitted(compare.compact?.size ?? .zero, in: geo.size)
-                        SplitHandle(split: $split, size: geo.size, height: zoomed ? geo.size.height : photo.height,
-                                    knobY: Self.knobY(in: geo, height: zoomed ? geo.size.height : photo.height))
+                        SplitHandle(split: Binding(get: { compare.split }, set: { compare.split = $0 }),
+                                    size: geo.size, height: compare.zoomed ? geo.size.height : photo.height,
+                                    knobY: Self.knobY(in: geo, height: compare.zoomed ? geo.size.height : photo.height))
                     }
                 }
                 if shown != .sideBySide { pills }
@@ -387,13 +457,16 @@ struct CompareView: View {
     }
 
     private var imageLabel: String {
-        switch shown {
+        let version = switch shown {
         case .original: "Original"
         case .compact: "Compact copy"
         case .split: "Original on the left, compact copy on the right"
         case .sideBySide: "Original and compact copy, side by side"
         }
+        return "\(version), \(itemLabel)"
     }
+
+    private var itemLabel: String { GridCell.name(model.library.library.info(compactIdentifier)) }
 
     private var originalPill: String {
         switch compare.source {
@@ -550,7 +623,8 @@ struct SideBySide: View {
     var media: Media
     var originalLabel: String
     var compactLabel: String
-    @State private var link = ZoomLink()
+    let link: ZoomLink
+    var itemLabel = ""
 
     var body: some View {
         GeometryReader { proxy in
@@ -587,9 +661,10 @@ struct SideBySide: View {
     @ViewBuilder private func picture(first: Bool, label: String, identifier: String) -> some View {
         switch media {
         case .photos(let original, let compact):
-            LinkedZoomImage(image: first ? original : compact, link: link, label: label, identifier: identifier)
+            LinkedZoomImage(image: first ? original : compact, link: link, label: "\(label), \(itemLabel)", identifier: identifier)
         case .videos(let original, let compact, let size):
-            LinkedZoomPlayer(player: first ? original : compact, size: size, link: link, label: label, identifier: identifier)
+            LinkedZoomPlayer(player: first ? original : compact, size: size, link: link, label: "\(label), \(itemLabel)",
+                             identifier: identifier)
         }
     }
 
@@ -639,31 +714,32 @@ struct SideBySide: View {
 final class ZoomLink {
     private let views = NSHashTable<ZoomScrollView>.weakObjects()
     private var following = false
+    private(set) var position = ZoomPosition()
 
-    func add(_ view: ZoomScrollView) {
+    func reset() {
+        following = true
+        position = ZoomPosition()
+        for view in views.allObjects { view.apply(position) }
+        following = false
+    }
+
+    func add(_ view: ZoomScrollView, transformed: (() -> Void)? = nil) {
         views.add(view)
+        view.retainedPosition = { [weak self] in self?.position }
         view.onTransform = { [weak self, weak view] in
             guard let self, let view else { return }
             follow(view)
+            transformed?()
         }
     }
 
     private func follow(_ source: ZoomScrollView) {
-        guard !following else { return }
+        guard !following, !source.isFitting, source.bounds.width > 0, source.contentSize.width > 0 else { return }
         following = true
         defer { following = false }
+        position = source.position
         for other in views.allObjects where other !== source {
-            if abs(other.zoomScale - source.zoomScale) > 0.0001 { other.zoomScale = source.zoomScale }
-            let from = source.contentSize, to = other.contentSize
-            guard from.width > 0, from.height > 0 else { continue }
-            let middle = CGPoint(x: (source.contentOffset.x + source.bounds.width / 2) / from.width,
-                                 y: (source.contentOffset.y + source.bounds.height / 2) / from.height)
-            let insets = other.contentInset
-            let x = min(max(middle.x * to.width - other.bounds.width / 2, -insets.left),
-                        max(-insets.left, to.width - other.bounds.width + insets.right))
-            let y = min(max(middle.y * to.height - other.bounds.height / 2, -insets.top),
-                        max(-insets.top, to.height - other.bounds.height + insets.bottom))
-            other.contentOffset = CGPoint(x: x, y: y)
+            other.apply(position)
         }
     }
 }
@@ -741,6 +817,7 @@ private struct CompareCanvas: UIViewRepresentable {
     var compact: UIImage?
     var mode: CompareMode
     var split: Double
+    let link: ZoomLink
     var label: String
     var onZoom: (Bool) -> Void
     var onHold: (Bool) -> Void
@@ -788,7 +865,7 @@ private struct CompareCanvas: UIViewRepresentable {
     func makeUIView(context: Context) -> ZoomScrollView {
         let content = Content()
         let view = ZoomScrollView(content: content)
-        view.onTransform = { [weak view, weak content] in
+        link.add(view) { [weak view, weak content] in
             guard let view, let content else { return }
             content.update(in: view)
         }

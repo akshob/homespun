@@ -38,6 +38,7 @@ enum PhotoLibrary {
         case missingResource(String)
         case livePhotoInvalid(String)
         case importFailed(String)
+        case restoreMetadata(identifier: String, message: String)
         case verificationFailed(String)
 
         var errorDescription: String? {
@@ -47,12 +48,14 @@ enum PhotoLibrary {
             case .missingResource(let name): "The \(name) could not be found."
             case .livePhotoInvalid(let reason): "The compact Live Photo did not validate (\(reason))."
             case .importFailed(let reason): "Saving to Photos failed (\(reason))."
+            case .restoreMetadata(_, let reason):
+                "The original was added to Photos, but its date or place couldn't be restored (\(reason)). Its compact copy wasn't removed."
             case .verificationFailed(let reason): "A downloaded file did not match (\(reason))."
             }
         }
     }
 
-    enum Kind: Sendable {
+    enum Kind: Sendable, Equatable {
         case photo, livePhoto, video
 
         var name: String {
@@ -331,10 +334,23 @@ enum PhotoLibrary {
         PHAssetResource.assetResources(for: asset).contains { $0.type == .adjustmentData }
     }
 
-    /// Adds an original back to Photos from its files (`shouldMoveFile`: they're temporary), with
-    /// the favorite, hidden and album choices the compact copy had. Returns its local identifier.
+    /// Library metadata is authoritative, including a date or location explicitly cleared in Photos.
+    enum RestoreMetadata: @unchecked Sendable {
+        case embedded
+        case library(creationDate: Date?, location: CLLocation?)
+
+        init(compact: PHAsset?) {
+            if let compact {
+                self = .library(creationDate: compact.creationDate, location: compact.location)
+            } else {
+                self = .embedded
+            }
+        }
+    }
+
+    /// Adds the original bytes with the compact copy's library attributes and albums.
     static func restore(_ files: [(role: ServerAPI.ResourceRole, url: URL)], favorite: Bool, hidden: Bool,
-                        albums: [String]) async throws -> String {
+                        albums: [String], metadata: RestoreMetadata) async throws -> String {
         let typed = files.compactMap { file in type(for: file.role).map { (type: $0, url: file.url) } }
         guard !typed.isEmpty else { throw Failure.importFailed("nothing to add") }
         let collections = AlbumsReference(albums: PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: albums,
@@ -349,6 +365,10 @@ enum PhotoLibrary {
                     options.shouldMoveFile = true
                     request.addResource(with: file.type, fileURL: file.url, options: options)
                 }
+                if case .library(let date, let location) = metadata {
+                    request.creationDate = date
+                    request.location = location
+                }
                 request.isFavorite = favorite
                 request.isHidden = hidden
                 guard let placeholder = request.placeholderForCreatedAsset else { return }
@@ -361,8 +381,28 @@ enum PhotoLibrary {
             throw Failure.importFailed(error.localizedDescription)
         }
         guard let identifier = box.value else { throw Failure.importFailed("no asset was created") }
+        // Clear nil values after creation too: Photos can initialize them from embedded file metadata.
+        if case .library(let date, let location) = metadata {
+            let options = PHFetchOptions()
+            options.includeHiddenAssets = true
+            guard let restored = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: options).firstObject else {
+                throw Failure.restoreMetadata(identifier: identifier, message: "the restored item could not be read")
+            }
+            let reference = UncheckedAsset(asset: restored)
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    let request = PHAssetChangeRequest(for: reference.asset)
+                    request.creationDate = date
+                    request.location = location
+                }
+            } catch {
+                throw Failure.restoreMetadata(identifier: identifier, message: error.localizedDescription)
+            }
+        }
         return identifier
     }
+
+    private struct UncheckedAsset: @unchecked Sendable { let asset: PHAsset }
 
     private struct AlbumsReference: @unchecked Sendable { let albums: PHFetchResult<PHAssetCollection> }
 

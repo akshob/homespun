@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import UIKit
 
+struct ZoomPosition: Equatable {
+    var scale: CGFloat = 1
+    var middle = CGPoint(x: 0.5, y: 0.5)
+}
+
 /// Zooms one view like Photos: pinch, pan and double-tap, the content fitted and centred. At
 /// its smallest it doesn't scroll, so a paging scroll view around it still swipes between items.
 final class ZoomScrollView: UIScrollView, UIScrollViewDelegate {
@@ -11,6 +16,8 @@ final class ZoomScrollView: UIScrollView, UIScrollViewDelegate {
     }
     /// After every zoom or scroll (Compare keeps its split line where it is on screen).
     var onTransform: (() -> Void)?
+    var retainedPosition: (() -> ZoomPosition?)?
+    private(set) var isFitting = false
     /// Whether it's zoomed in, when that changes.
     var onZoom: ((Bool) -> Void)?
     /// Touch and hold: true when it starts, false when the finger lifts.
@@ -63,6 +70,8 @@ final class ZoomScrollView: UIScrollView, UIScrollViewDelegate {
 
     private func fit() {
         guard bounds.width > 0, bounds.height > 0 else { return }
+        let retained = retainedPosition?()
+        isFitting = true
         fittedSize = bounds.size
         zoomScale = minimumZoomScale
         let size = Self.fitted(aspect, in: bounds.size)
@@ -70,6 +79,28 @@ final class ZoomScrollView: UIScrollView, UIScrollViewDelegate {
         contentSize = size
         centre()
         contentOffset = CGPoint(x: -contentInset.left, y: -contentInset.top)
+        if let retained { apply(retained) }
+        isFitting = false
+        onTransform?()
+    }
+
+    var position: ZoomPosition {
+        guard contentSize.width > 0, contentSize.height > 0 else { return ZoomPosition() }
+        return ZoomPosition(scale: zoomScale,
+                            middle: CGPoint(x: (contentOffset.x + bounds.width / 2) / contentSize.width,
+                                            y: (contentOffset.y + bounds.height / 2) / contentSize.height))
+    }
+
+    func apply(_ position: ZoomPosition) {
+        guard bounds.width > 0, bounds.height > 0, fittedSize != .zero else { return }
+        if abs(zoomScale - position.scale) > 0.0001 {
+            zoomScale = min(maximumZoomScale, max(minimumZoomScale, position.scale))
+        }
+        let x = min(max(position.middle.x * contentSize.width - bounds.width / 2, -contentInset.left),
+                    max(-contentInset.left, contentSize.width - bounds.width + contentInset.right))
+        let y = min(max(position.middle.y * contentSize.height - bounds.height / 2, -contentInset.top),
+                    max(-contentInset.top, contentSize.height - bounds.height + contentInset.bottom))
+        contentOffset = CGPoint(x: x, y: y)
         onTransform?()
     }
 

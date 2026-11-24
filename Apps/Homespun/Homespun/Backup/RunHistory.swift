@@ -142,7 +142,9 @@ final class RunHistory {
     func load() async {
         guard !loaded else { return }
         let url = url
-        merge(await Task.detached(priority: .userInitiated) { Self.read(url) }.value)
+        let read = await Task.detached(priority: .userInitiated) { Self.read(url) }.value
+        guard !loaded else { return }
+        merge(read)
     }
 
     private nonisolated static func read(_ url: URL) -> [Run] {

@@ -23,6 +23,7 @@ struct ServerTab: View {
     }
 
     @State private var path: [Route] = []
+    @State private var nameDraft = DeviceNameDraft()
     @State private var storage: ServerAPI.StorageInfo?
     @State private var checks: [ServerSetup.Check]?
     @State private var devices: [ServerAPI.DeviceInfo]?
@@ -41,7 +42,8 @@ struct ServerTab: View {
         let settings = model.settings
         let isPaired = settings.server != nil && settings.isPaired
         // Beside the list on the open iPhone Duo: Server Check (Help and About before pairing).
-        SplitNavigation(path: $path, defaultRoute: isPaired ? .check : .help) { selection in
+        SplitNavigation(path: $path, defaultRoute: isPaired ? .check : .help,
+                        retainsOnFold: { $0 == .deviceName }) { selection in
             Group {
                 if let server = settings.server, settings.isPaired {
                     paired(server, selection: selection)
@@ -55,6 +57,9 @@ struct ServerTab: View {
             EmptyView()
         }
         .sheet(isPresented: $settingUp) { OnboardingView(settings: settings, library: model.library) }
+        .onChange(of: path) { old, new in
+            if old.contains(.deviceName), !new.contains(.deviceName) { nameDraft = DeviceNameDraft() }
+        }
         // A widget's link to one of these pages.
         .onChange(of: model.router.serverRoute, initial: true) { _, route in
             guard let route else { return }
@@ -325,7 +330,7 @@ struct ServerTab: View {
             }
         case .compactCopies: CompactCopiesView(server: settings.server)
         case .devices: DevicesView(settings: settings, rename: { path.append(.deviceName) }) { path.append(.addDevice) }
-        case .deviceName: DeviceNameView(settings: settings) { updated in
+        case .deviceName: DeviceNameView(settings: settings, draft: nameDraft) { updated in
             thisDevice = updated
             devices = devices?.map { $0.isThisDevice ? updated : $0 }
         }

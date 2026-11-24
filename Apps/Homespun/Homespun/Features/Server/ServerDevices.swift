@@ -287,20 +287,35 @@ private struct DeviceRowElement: ViewModifier {
     }
 }
 
+@MainActor @Observable
+final class DeviceNameDraft {
+    var device: ServerAPI.DeviceInfo?
+    var name = ""
+    var working = false
+    var error: String?
+    var wantsFocus = true
+
+    func receive(_ device: ServerAPI.DeviceInfo?) {
+        guard self.device == nil else { return }
+        self.device = device
+        name = device?.name ?? ""
+    }
+}
+
 /// This iPhone's name on the server, which is also the name of its originals folder there: renaming
 /// it renames the folder (the server moves it, with everything in it).
 struct DeviceNameView: View {
     let settings: AppSettings
+    @Bindable var draft: DeviceNameDraft
     var renamed: (ServerAPI.DeviceInfo) -> Void = { _ in }
-    @State private var device: ServerAPI.DeviceInfo?
-    @State private var name = ""
-    @State private var working = false
-    @State private var error: String?
     @FocusState private var focused: Bool
     @Environment(\.dismiss) private var dismiss
 
     private var server: String { settings.server?.name ?? "the server" }
-    private var trimmed: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var device: ServerAPI.DeviceInfo? { draft.device }
+    private var working: Bool { draft.working }
+    private var error: String? { draft.error }
+    private var trimmed: String { draft.name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var canSave: Bool {
         guard let device, !working else { return false }
         return !trimmed.isEmpty && trimmed.count <= ServerAPI.RenameDeviceRequest.maximumLength && trimmed != device.name
@@ -309,7 +324,7 @@ struct DeviceNameView: View {
     var body: some View {
         List {
             Section {
-                TextField("Name", text: $name, prompt: Text("Akshob’s iPhone"))
+                TextField("Name", text: $draft.name, prompt: Text("Akshob’s iPhone"))
                     .focused($focused)
                     .submitLabel(.done)
                     .onSubmit { if canSave { Task { await save() } } }
@@ -340,26 +355,29 @@ struct DeviceNameView: View {
                 .accessibilityIdentifier("device.name.save")
             }
         }
-        .task { await load() }
+        .task {
+            await load()
+            if !Task.isCancelled { focused = draft.wantsFocus }
+        }
+        .onChange(of: focused) { _, focused in if focused { draft.wantsFocus = true } }
     }
 
     private func load() async {
-        guard let client = settings.client else { return }
+        guard draft.device == nil, let client = settings.client else { return }
         do {
             let this = try await client.devices().first(where: \.isThisDevice)
-            device = this
-            name = this?.name ?? ""
-            focused = true
+            guard !Task.isCancelled else { return }
+            draft.receive(this)
         } catch {
-            self.error = error.localizedDescription
+            if !Task.isCancelled { draft.error = error.localizedDescription }
         }
     }
 
     private func save() async {
         guard let client = settings.client, let device else { return }
-        working = true
-        error = nil
-        defer { working = false }
+        draft.working = true
+        draft.error = nil
+        defer { draft.working = false }
         do {
             let updated = try await client.renameDevice(device.id, to: trimmed)
             settings.confirmDeviceName(updated.name)
@@ -367,9 +385,9 @@ struct DeviceNameView: View {
             Announce.say("Renamed to \(updated.name).")
             dismiss()
         } catch let failure as ServerClient.Failure where failure.status == 404 || failure.status == 405 {
-            error = "Update Homespun Server on \(server) to rename this iPhone."
+            draft.error = "Update Homespun Server on \(server) to rename this iPhone."
         } catch {
-            self.error = error.localizedDescription
+            draft.error = error.localizedDescription
         }
     }
 }

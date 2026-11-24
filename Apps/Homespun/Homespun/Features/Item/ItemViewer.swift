@@ -71,7 +71,9 @@ struct ItemViewer: View {
         ItemPager(ids: state.ids, start: shown,
                   current: Binding(get: { state.shown }, set: { if let id = $0 { state.shown = id } }),
                   zoomed: $state.zoomed, playback: playback,
-                  item: { model.library.library.item($0) }, label: spokenLabel)
+                  item: { model.library.library.item($0) }, label: spokenLabel,
+                  contentVersion: model.library.library.contentVersion,
+                  changedContent: { model.library.library.changedContent(since: $0) })
     }
 
     /// The cell for an item (the library state keeps an index by identifier).

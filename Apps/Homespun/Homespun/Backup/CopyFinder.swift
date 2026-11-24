@@ -54,6 +54,8 @@ final class CopyFinder {
     private var settled: Set<String>
     private var atHome: [String: AtHome]
     private var task: Task<Void, Never>?
+    private var retired = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
     private let url: URL
     private let photos: any PhotoSource
 
@@ -74,24 +76,39 @@ final class CopyFinder {
 
     func start(lookup: @escaping Lookup, ledger: CompactLedger, again: Bool = false,
                finished: @escaping @MainActor () async -> Void = {}) {
-        guard !isRunning else { return }
+        guard !retired, !isRunning, task == nil else { return }
         task = Task {
             await run(lookup: lookup, ledger: ledger, again: again)
             await finished()
+            task = nil
         }
     }
 
     func stop() { task?.cancel() }
 
+    func retire() {
+        retired = true
+        stop()
+    }
+
+    func stopAndWait() async {
+        retire()
+        await task?.value
+        if isRunning { await withCheckedContinuation { waiters.append($0) } }
+    }
+
     /// Checks every item not known yet (`again`: also those checked before), `batch` at a time.
     func run(lookup: Lookup, ledger: CompactLedger, again: Bool = false, batch: Int = 100) async {
-        guard !isRunning else { return }
+        guard !retired, !isRunning else { return }
         isRunning = true
         error = nil
         UIApplication.shared.isIdleTimerDisabled = true
         defer {
             isRunning = false
             UIApplication.shared.isIdleTimerDisabled = false
+            let pending = waiters
+            waiters = []
+            pending.forEach { $0.resume() }
         }
         if again {
             settled = []

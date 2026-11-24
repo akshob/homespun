@@ -40,8 +40,9 @@ struct FreeUpColumn<Head: View, Title: View, Tail: View>: UIViewRepresentable {
         ]
         source.refresh()
         let pairs = pairs
-        source.grid.update(items: pairs.map { ThumbnailRow.Item(id: $0.original, photo: $0.compact, marked: true, selected: $0 == selected) },
-                           accessibility: (FreeUpThumbnails.label, FreeUpThumbnails.identifier)) { compare(pairs[$0]) }
+        source.grid.update(items: FreeUpThumbnails.items(pairs, selected: selected),
+                           accessibility: (FreeUpThumbnails.label, FreeUpThumbnails.identifier),
+                           itemAccessibility: FreeUpThumbnails.accessibility(library: library, count: pairs.count)) { compare(pairs[$0]) }
     }
 
     static func dismantleUIView(_ view: UICollectionView, coordinator: FreeUpColumnSource) {
@@ -51,8 +52,21 @@ struct FreeUpColumn<Head: View, Title: View, Tail: View>: UIViewRepresentable {
 
 /// What Free Up Space's compact copies say to VoiceOver and the UI tests, as a row or a grid.
 enum FreeUpThumbnails {
-    static let label = "Compare with the original"
+    static let label = "Compact copy"
     static let identifier = "remove.compare"
+
+    @MainActor static func items(_ pairs: [FreeUpPair], selected: FreeUpPair?) -> [ThumbnailRow.Item] {
+        pairs.map { ThumbnailRow.Item(id: $0.original, photo: $0.compact, marked: true, selected: $0 == selected) }
+    }
+
+    @MainActor static func accessibility(library: LibraryModel, count: Int)
+        -> @MainActor (ThumbnailRow.Item, Int) -> ThumbnailAccessibility {
+        { item, index in
+            ThumbnailAccessibility(label: GridCell.name(library.info(item.photo) ?? library.info(item.id)),
+                                   value: "Compact copy, item \(index + 1) of \(count)",
+                                   hint: "Compare with the original. You can choose Keep Original after comparing.")
+        }
+    }
 }
 
 /// The column's sections: hosted SwiftUI for the words, the thumbnails' own cells for the grid.

@@ -3,6 +3,12 @@ import Photos
 import SwiftUI
 import UIKit
 
+struct ThumbnailAccessibility {
+    var label: String
+    var value: String
+    var hint: String
+}
+
 /// One square thumbnail in a UIKit collection view, with rounded corners: optionally Free Up Space's
 /// compare mark and its outline while it's the one compared. When it can be tapped, it's one button
 /// for VoiceOver (its label and identifier from `accessibility`).
@@ -17,6 +23,7 @@ final class ThumbnailCell: UICollectionViewCell {
     private var request: ThumbnailLoader.Request?
     private weak var loader: ThumbnailLoader?
     private(set) var identifier: String?
+    private var revision = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -69,13 +76,15 @@ final class ThumbnailCell: UICollectionViewCell {
 
     /// Shows an item's thumbnail (loading it unless it's the one already shown).
     func show(_ identifier: String, loader: ThumbnailLoader) {
-        guard identifier != self.identifier || loader !== self.loader else { return }
+        let revision = loader.library.contentRevision(identifier)
+        guard identifier != self.identifier || loader !== self.loader || revision != self.revision else { return }
         if let request { self.loader?.cancel(request) }
         self.identifier = identifier
         self.loader = loader
+        self.revision = revision
         imageView.image = nil
         request = loader.request(identifier) { [weak self] image in
-            guard let self, self.identifier == identifier else { return }
+            guard let self, self.identifier == identifier, self.revision == revision else { return }
             self.imageView.image = image
         }
     }
@@ -87,10 +96,13 @@ final class ThumbnailCell: UICollectionViewCell {
     }
 
     /// A button for VoiceOver (nil: hidden, like the picture it is) that does `activate` when chosen.
-    func accessibility(label: String?, identifier: String?, selected: Bool, activate: (() -> Void)?) {
+    func accessibility(label: String?, identifier: String?, selected: Bool, value: String? = nil, hint: String? = nil,
+                       activate: (() -> Void)?) {
         element.isAccessibilityElement = label != nil
         element.accessibilityLabel = label
         element.accessibilityIdentifier = identifier
+        element.accessibilityValue = value
+        element.accessibilityHint = hint
         element.accessibilityTraits = selected ? [.button, .selected] : .button
         element.activate = activate
     }
@@ -126,6 +138,7 @@ struct ThumbnailRow: UIViewRepresentable {
     var spacing: CGFloat = 6
     /// Each item's VoiceOver label and identifier when it can be tapped; nil hides the row from VoiceOver.
     var accessibility: (label: String, identifier: String)?
+    var itemAccessibility: (@MainActor (Item, Int) -> ThumbnailAccessibility)?
     var tap: (Int) -> Void = { _ in }
 
     func makeCoordinator() -> ThumbnailCollection { ThumbnailCollection() }
@@ -144,7 +157,7 @@ struct ThumbnailRow: UIViewRepresentable {
         view.contentInsetAdjustmentBehavior = .never
         view.accessibilityElementsHidden = accessibility == nil
         context.coordinator.attach(to: view, library: library, side: side, scale: context.environment.displayScale)
-        context.coordinator.update(items: items, accessibility: accessibility, tap: tap)
+        context.coordinator.update(items: items, accessibility: accessibility, itemAccessibility: itemAccessibility, tap: tap)
         return view
     }
 
@@ -156,7 +169,7 @@ struct ThumbnailRow: UIViewRepresentable {
         }
         context.coordinator.resize(side: side, scale: context.environment.displayScale)
         view.accessibilityElementsHidden = accessibility == nil
-        context.coordinator.update(items: items, accessibility: accessibility, tap: tap)
+        context.coordinator.update(items: items, accessibility: accessibility, itemAccessibility: itemAccessibility, tap: tap)
     }
 
     static func dismantleUIView(_ view: UICollectionView, coordinator: ThumbnailCollection) {
@@ -176,6 +189,8 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
     private(set) var items: [ThumbnailRow.Item] = []
     private(set) var loader: ThumbnailLoader?
     private var accessibility: (label: String, identifier: String)?
+    private var itemAccessibility: (@MainActor (ThumbnailRow.Item, Int) -> ThumbnailAccessibility)?
+    private var contentVersion = 0
     private var tap: (Int) -> Void = { _ in }
     private weak var view: UICollectionView?
     /// The section the thumbnails are in (a grid among other sections).
@@ -185,6 +200,8 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
     func attach(to view: UICollectionView, library: LibraryModel, side: CGFloat, scale: CGFloat, own: Bool = true) {
         self.view = view
         loader = ThumbnailLoader(library: library, side: side, scale: scale)
+        contentVersion = library.contentVersion
+        watchContent()
         view.register(ThumbnailCell.self, forCellWithReuseIdentifier: ThumbnailCell.reuse)
         guard own else { return }
         view.dataSource = self
@@ -201,8 +218,11 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
     }
 
     /// New items reload; the same ones (another selected) only redraw what's on screen.
-    func update(items new: [ThumbnailRow.Item], accessibility: (label: String, identifier: String)?, tap: @escaping (Int) -> Void) {
+    func update(items new: [ThumbnailRow.Item], accessibility: (label: String, identifier: String)?,
+                itemAccessibility: (@MainActor (ThumbnailRow.Item, Int) -> ThumbnailAccessibility)? = nil,
+                tap: @escaping (Int) -> Void) {
         self.accessibility = accessibility
+        self.itemAccessibility = itemAccessibility
         self.tap = tap
         guard new != items else { return }
         let same = new.count == items.count && zip(new, items).allSatisfy { $0.id == $1.id && $0.photo == $1.photo }
@@ -222,10 +242,34 @@ final class ThumbnailCollection: NSObject, UICollectionViewDataSource, UICollect
     func configure(_ cell: ThumbnailCell, at item: Int) {
         guard items.indices.contains(item), let loader else { return }
         let thumbnail = items[item]
+        let spoken = itemAccessibility?(thumbnail, item)
         cell.show(thumbnail.photo, loader: loader)
         cell.decorate(marked: thumbnail.marked, selected: thumbnail.selected)
-        cell.accessibility(label: accessibility?.label, identifier: accessibility?.identifier, selected: thumbnail.selected,
+        cell.accessibility(label: accessibility == nil ? nil : spoken?.label ?? accessibility?.label,
+                           identifier: accessibility?.identifier, selected: thumbnail.selected,
+                           value: spoken?.value, hint: spoken?.hint,
                            activate: accessibility == nil ? nil : { [weak self] in self?.tap(item) })
+    }
+
+    private func watchContent() {
+        guard let library = loader?.library else { return }
+        withObservationTracking {
+            _ = library.contentVersion
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let loader, let view else { return }
+                let library = loader.library
+                let changed = library.changedContent(since: contentVersion)
+                contentVersion = library.contentVersion
+                loader.invalidate(changed)
+                for path in view.indexPathsForVisibleItems where path.section == section && items.indices.contains(path.item) {
+                    if changed.contains(items[path.item].photo), let cell = view.cellForItem(at: path) as? ThumbnailCell {
+                        configure(cell, at: path.item)
+                    }
+                }
+                watchContent()
+            }
+        }
     }
 
     func dequeue(_ view: UICollectionView, at indexPath: IndexPath) -> UICollectionViewCell {

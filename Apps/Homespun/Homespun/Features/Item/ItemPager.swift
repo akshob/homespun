@@ -86,6 +86,8 @@ struct ItemPager: UIViewControllerRepresentable {
     var item: (String) -> (any LibraryItem)?
     /// VoiceOver's label for a page.
     var label: (String) -> String
+    var contentVersion = 0
+    var changedContent: (Int) -> Set<String> = { _ in [] }
 
     func makeUIViewController(context: Context) -> ItemPagerController {
         let controller = ItemPagerController(ids: ids, start: start)
@@ -106,6 +108,9 @@ struct ItemPager: UIViewControllerRepresentable {
         controller.zoomChanged = { zoomed.wrappedValue = $0 }
         controller.zoomed = zoomed.wrappedValue
         controller.update(ids: ids)
+        if controller.contentVersion != contentVersion {
+            controller.contentChanged(changedContent(controller.contentVersion), version: contentVersion)
+        }
         controller.refresh()
     }
 }
@@ -136,6 +141,7 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
     private let layout = PagerLayout()
     private lazy var collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
     private let images = ItemImages()
+    private(set) var contentVersion = 0
     /// The size is changing: offsets in between don't say which page is shown.
     private var resizing = false
     /// Paging, for the performance monitor.
@@ -252,6 +258,20 @@ final class ItemPagerController: UIViewController, UICollectionViewDataSource, U
         for path in collectionView.indexPathsForVisibleItems {
             if let cell = collectionView.cellForItem(at: path) { configure(cell, at: path.item) }
         }
+    }
+
+    func contentChanged(_ ids: Set<String>, version: Int) {
+        contentVersion = version
+        images.invalidate(ids)
+        guard isViewLoaded else { return }
+        for path in collectionView.indexPathsForVisibleItems where self.ids.indices.contains(path.item) {
+            let id = self.ids[path.item]
+            guard ids.contains(id), let cell = collectionView.cellForItem(at: path) else { continue }
+            (cell as? PhotoPageCell)?.invalidate(id)
+            (cell as? VideoPageCell)?.invalidate(id)
+            configure(cell, at: path.item)
+        }
+        preload()
     }
 
     // MARK: Pages
@@ -387,6 +407,19 @@ final class ItemImages {
     private var cached: [String: PHAsset] = [:]
     /// The items within reach of the page shown (`cached` has those from Photos).
     private var held: [String: any LibraryItem] = [:]
+    private var revisions: [String: Int] = [:]
+
+    func invalidate(_ ids: Set<String>) {
+        for id in ids {
+            revisions[id, default: 0] &+= 1
+            decoded[id] = nil
+            loading.removeValue(forKey: id)?.cancel()
+            held[id] = nil
+            if let asset = cached.removeValue(forKey: id) {
+                manager.stopCachingImages(for: [asset], targetSize: pixels, contentMode: .aspectFit, options: Self.options)
+            }
+        }
+    }
 
     private static let options: PHImageRequestOptions = {
         let options = PHImageRequestOptions()
@@ -397,6 +430,7 @@ final class ItemImages {
     }()
 
     func image(_ id: String) -> UIImage? { decoded[id] }
+    func revision(_ id: String) -> Int { revisions[id, default: 0] }
 
     /// The screen's size in pixels: a new one lets go of everything loaded at the old.
     func resize(_ pixels: CGSize) {
@@ -466,12 +500,17 @@ final class ItemImages {
             let image = await item.image(size: pixels, fast: false)
             return await image?.byPreparingForDisplay() ?? image
         }
-        let manager = manager, pixels = pixels, options = Self.options
-        let image: UIImage? = await withCheckedContinuation { continuation in
-            manager.requestImage(for: asset, targetSize: pixels, contentMode: .aspectFit, options: options) { image, _ in
-                continuation.resume(returning: image)
+        let manager = Unchecked(value: manager), pixels = pixels, options = Self.options
+        let id = item.localIdentifier, revision = revisions[item.localIdentifier, default: 0]
+        let image = await ItemMedia.PhotoRequest<Unchecked<UIImage?>>.value(
+            cancelled: Unchecked(value: nil), cancel: { manager.value.cancelImageRequest($0) }
+        ) { finish in
+            manager.value.requestImage(for: asset, targetSize: pixels, contentMode: .aspectFit, options: options) { image, info in
+                if info?[PHImageResultIsDegradedKey] as? Bool == true { return }
+                finish(Unchecked(value: image))
             }
-        }
+        }.value
+        guard !Task.isCancelled, revisions[id, default: 0] == revision else { return nil }
         return await image?.byPreparingForDisplay() ?? image
     }
 }

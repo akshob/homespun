@@ -15,8 +15,7 @@ final class DemoMode {
 
     /// The demo's model while it's on.
     private(set) var model: AppModel?
-    /// Just left: what the demo was in the middle of may still be finishing. Try the Demo waits until
-    /// it has and the folder is deleted again, so a new demo never gets the last one's leftovers.
+    /// Reentry waits for the retired generation's admitted work to join, then its state is wiped.
     private(set) var settling = false
     enum Preparation: Equatable {
         case drawing(DemoMediaStore.Progress?)
@@ -164,7 +163,9 @@ final class DemoMode {
     func cancel() {
         guard origin != nil, model == nil else { return }
         let wasLaunch = origin == .launch
-        work?.cancel()
+        let previous = work
+        previous?.cancel()
+        work = nil
         #if DEBUG
         heldCompletion?.resume()
         heldCompletion = nil
@@ -173,9 +174,14 @@ final class DemoMode {
         preparation = nil
         origin = nil
         endBackgroundTask()
-        if wasLaunch {
-            Self.wipe()
-            Telemetry.shared.paused = false
+        settling = true
+        Task {
+            await previous?.value
+            if wasLaunch {
+                Self.wipe()
+                Telemetry.shared.paused = false
+            }
+            settling = false
         }
         Announce.say(wasLaunch ? "Left the demo." : "The demo didn't start.")
     }
@@ -222,25 +228,32 @@ final class DemoMode {
     /// Ends the demo: what it was doing stops, and everything it kept is deleted.
     func leave() {
         if model == nil, origin != nil { cancel(); return }
-        guard let model else { return }
-        model.job.stop()
-        model.library.stopRestoring()
-        model.copyFinder.stop()
-        AppModel.shared.status?.showDemo(nil)
-        self.model = nil
-        DemoServer.running.withLock { $0 = nil }
-        URLProtocol.unregisterClass(DemoURLProtocol.self)
-        Telemetry.shared.paused = false
-        DemoPictures.forget()
-        Self.wipe()
-        // Again once anything it was in the middle of has stopped writing.
+        guard let model, !settling else { return }
         settling = true
-        Task {
-            try? await Task.sleep(for: .seconds(3))
-            Self.wipe()
-            DemoMode.shared.settling = false
+        model.settings.retire()
+        model.library.retire()
+        let library = model.settings.photos as? DemoLibrary
+        library?.retire()
+        DemoPrompt.cancel()
+        let server = DemoServer.running.withLock { server in
+            defer { server = nil }
+            return server
         }
-        Announce.say("Left the demo.")
+        let status = AppModel.shared.status
+        status?.showDemo(nil)
+        self.model = nil
+        URLProtocol.unregisterClass(DemoURLProtocol.self)
+        Task {
+            await server?.stopAndWait()
+            await model.library.stopAndWait()
+            await model.settings.stopAndWait()
+            await status?.publishNow()
+            DemoPictures.forget()
+            Self.wipe()
+            Telemetry.shared.paused = false
+            settling = false
+            Announce.say("Left the demo.")
+        }
     }
 
     /// Deletes the demo's folder and settings.
@@ -267,26 +280,35 @@ final class DemoSession: Sendable {
         server = DemoServer(folder: folder.appendingPathComponent("server", isDirectory: true), pace: pace) {
             library.bundledCompact(sha256: $0)
         }
-        tokens = DemoTokens(defaults: defaults)
+        tokens = DemoTokens(defaults: defaults, library: library)
     }
 }
 
 /// The pretend server's token, kept with the demo's settings (never in the Keychain).
 struct DemoTokens: TokenStore, @unchecked Sendable {
     let defaults: UserDefaults
+    var library: DemoLibrary? = nil
+
+    private func update(_ body: () throws -> Void) throws {
+        if let library { try library.whileActive(body) } else { try body() }
+    }
 
     func token(for server: String) -> String? { (defaults.dictionary(forKey: "demo.tokens") as? [String: String])?[server] }
 
     func setToken(_ token: String, for server: String) throws {
-        var tokens = (defaults.dictionary(forKey: "demo.tokens") as? [String: String]) ?? [:]
-        tokens[server] = token
-        defaults.set(tokens, forKey: "demo.tokens")
+        try update {
+            var tokens = (defaults.dictionary(forKey: "demo.tokens") as? [String: String]) ?? [:]
+            tokens[server] = token
+            defaults.set(tokens, forKey: "demo.tokens")
+        }
     }
 
     func removeToken(for server: String) {
-        var tokens = (defaults.dictionary(forKey: "demo.tokens") as? [String: String]) ?? [:]
-        tokens[server] = nil
-        defaults.set(tokens, forKey: "demo.tokens")
+        try? update {
+            var tokens = (defaults.dictionary(forKey: "demo.tokens") as? [String: String]) ?? [:]
+            tokens[server] = nil
+            defaults.set(tokens, forKey: "demo.tokens")
+        }
     }
 
     func pins(for server: String) -> ServerPins? {
@@ -295,15 +317,19 @@ struct DemoTokens: TokenStore, @unchecked Sendable {
     }
 
     func setPins(_ pins: ServerPins, for server: String) throws {
-        var saved = (defaults.dictionary(forKey: "demo.pins") as? [String: Data]) ?? [:]
-        saved[server] = try JSONEncoder().encode(pins)
-        defaults.set(saved, forKey: "demo.pins")
+        try update {
+            var saved = (defaults.dictionary(forKey: "demo.pins") as? [String: Data]) ?? [:]
+            saved[server] = try JSONEncoder().encode(pins)
+            defaults.set(saved, forKey: "demo.pins")
+        }
     }
 
     func removePins(for server: String) {
-        var saved = (defaults.dictionary(forKey: "demo.pins") as? [String: Data]) ?? [:]
-        saved[server] = nil
-        defaults.set(saved, forKey: "demo.pins")
+        try? update {
+            var saved = (defaults.dictionary(forKey: "demo.pins") as? [String: Data]) ?? [:]
+            saved[server] = nil
+            defaults.set(saved, forKey: "demo.pins")
+        }
     }
 }
 
@@ -312,6 +338,15 @@ struct DemoTokens: TokenStore, @unchecked Sendable {
 @MainActor
 enum DemoPrompt {
     private static var window: UIWindow?
+    private static var answer: ((Bool) -> Void)?
+
+    static func cancel() { finish(false) }
+
+    private static func finish(_ allowed: Bool) {
+        let pending = answer
+        answer = nil
+        pending?(allowed)
+    }
 
     static func ask(_ question: DemoLibrary.Question) async -> Bool {
         guard window == nil, let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene })
@@ -325,9 +360,10 @@ enum DemoPrompt {
         window.makeKeyAndVisible()
         Self.window = window
         let allowed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            answer = { continuation.resume(returning: $0) }
             let alert = UIAlertController(title: question.title, message: question.message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Don't Allow", style: .cancel) { _ in continuation.resume(returning: false) })
-            alert.addAction(UIAlertAction(title: question.confirm, style: .destructive) { _ in continuation.resume(returning: true) })
+            alert.addAction(UIAlertAction(title: "Don't Allow", style: .cancel) { _ in finish(false) })
+            alert.addAction(UIAlertAction(title: question.confirm, style: .destructive) { _ in finish(true) })
             window.rootViewController?.present(alert, animated: true)
         }
         window.isHidden = true

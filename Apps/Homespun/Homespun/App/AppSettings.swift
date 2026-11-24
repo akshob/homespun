@@ -21,6 +21,9 @@ final class AppSettings {
     let photos: any PhotoSource
     /// The demo (Try the Demo): sample photos and a pretend server, kept apart from everything else.
     let isDemo: Bool
+    private(set) var isRetired = false
+    @ObservationIgnored private var pairingOperations = 0
+    @ObservationIgnored private var pairingWaiters: [CheckedContinuation<Void, Never>] = []
     private let tokens: any TokenStore
     private let installationStore: any InstallationStore
     /// How the server is reached (the demo's answers in the app itself).
@@ -115,7 +118,7 @@ final class AppSettings {
     }
 
     var client: ServerClient? {
-        guard let serverURL, let token = tokens.token(for: serverURL.absoluteString) else { return nil }
+        guard !isRetired, let serverURL, let token = tokens.token(for: serverURL.absoluteString) else { return nil }
         return ServerClient(baseURL: serverURL, token: token, trust: connectionTrust, session: session,
                             reconnect: { [weak self] url, token in await self?.followServerAddress(from: url, token: token) })
     }
@@ -144,9 +147,33 @@ final class AppSettings {
     }
 
     var tlsVersion: String { client?.delegate?.tlsVersion ?? "TLS" }
-    func pairingIdentity() throws -> DeviceInstallation { try installationStore.load() }
+    func pairingIdentity() throws -> DeviceInstallation {
+        guard !isRetired else { throw CancellationError() }
+        return try installationStore.load()
+    }
     var pairingName: String { (try? installationStore.load().name) ?? UIDevice.current.name }
-    func confirmDeviceName(_ name: String) { try? installationStore.confirm(name: name) }
+    func confirmDeviceName(_ name: String) {
+        guard !isRetired else { return }
+        try? installationStore.confirm(name: name)
+    }
+
+    func retire() {
+        isRetired = true
+        infoWork?.task.cancel()
+        securityWork?.task.cancel()
+        locationWork?.task.cancel()
+        identityRetryTask?.cancel()
+    }
+
+    func stopAndWait() async {
+        retire()
+        let info = infoWork?.task, security = securityWork?.task, location = locationWork?.task, retry = identityRetryTask
+        await info?.value
+        await security?.value
+        _ = await location?.value
+        await retry?.value
+        if pairingOperations > 0 { await withCheckedContinuation { pairingWaiters.append($0) } }
+    }
 
     var isPaired: Bool {
         server != nil && serverURL.map { tokens.token(for: $0.absoluteString) != nil } == true
@@ -183,6 +210,8 @@ final class AppSettings {
     }
 
     func pair(_ link: PairingLink) async throws {
+        try admitPairing()
+        defer { finishedPairing() }
         guard !isDemo || link.serverURL.host == DemoServer.host else { throw DemoOnly() }
         let installation = try pairingIdentity()
         try finishPairing(try await ServerPairing.pair(link: link, deviceName: installation.name ?? UIDevice.current.name,
@@ -191,9 +220,25 @@ final class AppSettings {
 
     func approvePairing(url: URL, onNumber: (String, Date) -> Void,
                         confirmNumber: (String) async -> Bool) async throws -> ServerPairing.Paired {
+        try admitPairing()
+        defer { finishedPairing() }
         let installation = try pairingIdentity()
         return try await ServerPairing.approve(url: url, deviceName: installation.name ?? UIDevice.current.name,
                                                installID: installation.id, onNumber: onNumber, confirmNumber: confirmNumber)
+    }
+
+    private func admitPairing() throws {
+        guard !isRetired else { throw CancellationError() }
+        pairingOperations += 1
+    }
+
+    private func finishedPairing() {
+        pairingOperations -= 1
+        if pairingOperations == 0 {
+            let waiters = pairingWaiters
+            pairingWaiters = []
+            waiters.forEach { $0.resume() }
+        }
     }
 
     func finishPairing(_ paired: ServerPairing.Paired, serviceName: String? = nil) throws {
@@ -202,6 +247,7 @@ final class AppSettings {
 
     /// Keeps a pairing made with a code or allowed on the server.
     func finishPairing(serverURL newURL: URL, response: ServerAPI.PairResponse, pins: ServerPins, serviceName: String? = nil) throws {
+        guard !isRetired else { throw CancellationError() }
         // The demo's sample photos never go to a real server.
         guard !isDemo || newURL.host == DemoServer.host else { throw DemoOnly() }
         guard newURL.scheme == "https" else { throw ServerPairing.IdentityFailure() }
@@ -359,6 +405,7 @@ final class AppSettings {
 
     /// Checks the server answers and picks up changes (for example Immich being connected).
     func refreshServerInfo() async {
+        guard !isRetired else { return }
         if let infoWork { await infoWork.task.value; return }
         let id = UUID()
         let task = Task { await checkServerInfo() }
@@ -384,7 +431,7 @@ final class AppSettings {
         let knownGood = before == .reachable || (before == .unknown && server != nil)
         let token = client.token
         func current() -> Bool {
-            guard let url = serverURL, token != nil else { return false }
+            guard !isRetired, let url = serverURL, token != nil else { return false }
             return tokens.token(for: url.absoluteString) == token && connectionProblem == nil
         }
         // A retry keeps the last result on screen until it learns something new.

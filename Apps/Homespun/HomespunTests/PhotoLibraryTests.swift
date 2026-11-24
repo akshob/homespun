@@ -3,8 +3,10 @@ import CoreLocation
 import Foundation
 import HomespunCore
 import HomespunTestSupport
+import ImageIO
 import Photos
 import Testing
+import UniformTypeIdentifiers
 @testable import Homespun
 
 /// Saves compact copies the way the server path does, on a simulator library that holds only
@@ -96,11 +98,16 @@ import Testing
         }
         let album = try #require(box.value)
 
+        let adjustedDate = Date(timeIntervalSince1970: 1_200_000_000)
         let restored = try asset(try await PhotoLibrary.restore([(.photo, photo), (.pairedVideo, motion)], favorite: true, hidden: false,
-                                                                 albums: [album]))
+                                                                 albums: [album],
+                                                                 metadata: .library(creationDate: adjustedDate,
+                                                                                    location: CLLocation(latitude: 48, longitude: 2))))
         #expect(restored.mediaSubtypes.contains(.photoLive) && restored.isFavorite && !restored.isHidden)
         #expect(PhotoLibrary.userAlbums(containing: restored) == [album])
         #expect(!PhotoLibrary.albumMembers().contains(restored.localIdentifier))
+        #expect(restored.creationDate == adjustedDate)
+        #expect(abs((restored.location?.coordinate.latitude ?? 0) - 48) < 0.0001)
         let names = PHAssetResource.assetResources(for: restored).map(\.originalFilename)
         #expect(names.contains("IMG_0042.HEIC") && names.contains("IMG_0042.MOV"))
         let check = try Synthetic.directory()
@@ -108,6 +115,39 @@ import Testing
         let held = try await ServerCompactor.export(PHAssetResource.assetResources(for: restored), to: check) { _ in }
         #expect(Dictionary(held.map { ($0.role, $0.descriptor.sha256) }, uniquingKeysWith: { a, _ in a }) == expected)
         #expect(!PhotoLibrary.isEdited(restored))
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func restoreDoesNotResurrectClearedLibraryLocation() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("located.jpg")
+        try Synthetic.photo(at: file, .init())
+        let expected = try Fingerprint.sha256(of: file)
+        let date = Date(timeIntervalSince1970: 1_000_000_000)
+        let restored = try asset(try await PhotoLibrary.restore([(.photo, file)], favorite: false, hidden: false, albums: [],
+                                                                 metadata: .library(creationDate: date, location: nil)))
+        #expect(restored.location == nil && restored.creationDate == date)
+        let check = directory.appendingPathComponent("check")
+        try FileManager.default.createDirectory(at: check, withIntermediateDirectories: true)
+        let held = try await ServerCompactor.export(PHAssetResource.assetResources(for: restored), to: check) { _ in }
+        #expect(held.first?.descriptor.sha256 == expected)
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func metadataFreeRestorationUsesTheLibraryDateAndLocation() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("undated.png")
+        let destination = try #require(CGImageDestinationCreateWithURL(file as CFURL, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, Synthetic.texture(width: 128, height: 96), nil)
+        try #require(CGImageDestinationFinalize(destination))
+        let date = Date(timeIntervalSince1970: 1_100_000_000)
+        let restored = try asset(try await PhotoLibrary.restore([(.photo, file)], favorite: true, hidden: false, albums: [],
+                                                                 metadata: .library(creationDate: date,
+                                                                                    location: CLLocation(latitude: -33.8, longitude: 151.2))))
+        #expect(restored.creationDate == date && restored.isFavorite)
+        #expect(abs((restored.location?.coordinate.latitude ?? 0) + 33.8) < 0.0001)
     }
 }
 

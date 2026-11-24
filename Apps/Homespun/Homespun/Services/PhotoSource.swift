@@ -3,6 +3,7 @@ import AVFoundation
 import CryptoKit
 import HomespunCore
 import Photos
+import Synchronization
 import UIKit
 
 /// One photo or video as Homespun's screens see it: from Photos on this iPhone (`PHAsset`), or one
@@ -98,7 +99,25 @@ protocol ItemCatalog: PhotoSource, AnyObject {
     /// A square thumbnail about `side` pixels across.
     func thumbnail(_ id: String, side: CGFloat) async -> UIImage?
     /// Called (on any thread) after items come or go.
-    func observe(_ changed: @escaping @Sendable () -> Void)
+    func observe(_ changed: @escaping @Sendable () -> Void) -> CatalogObservation
+}
+
+final class CatalogObservation: Sendable {
+    private let cancellation: Synchronization.Mutex<(@Sendable () -> Void)?>
+
+    init(_ cancel: @escaping @Sendable () -> Void) {
+        cancellation = .init(cancel)
+    }
+
+    func cancel() {
+        let cancel = cancellation.withLock { action in
+            defer { action = nil }
+            return action
+        }
+        cancel?()
+    }
+
+    deinit { cancel() }
 }
 
 /// What the grid reads from a library: identifiers in order, months, media info, and the album.

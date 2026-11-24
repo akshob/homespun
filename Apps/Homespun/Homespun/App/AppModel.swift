@@ -45,7 +45,7 @@ final class AppModel {
 
     /// The demo's: everything kept in its folder and settings (`DemoSession`).
     init(demo: DemoSession, premium: Premium, status: StatusPublisher? = nil) {
-        settings = AppSettings(defaults: demo.defaults, photos: demo.library, tokens: demo.tokens, session: DemoServer.session,
+        settings = AppSettings(defaults: demo.defaults, photos: demo.library, tokens: demo.tokens, session: demo.server.clientSession,
                                isDemo: true)
         job = CompactJob(settings: settings, ledger: CompactLedger(url: demo.folder.appendingPathComponent("ledger.json")))
         self.premium = premium
