@@ -49,15 +49,17 @@ public struct FFmpegVideoCompressor: Sendable {
 
     public func arguments(input: URL, output: URL, probe: VideoProbe) -> [String] {
         let size = profile.videoSize(width: probe.width, height: probe.height)
-        var arguments = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror", "-y", "-i", input.path,
+        var arguments = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
+                         "-threads", "2", "-filter_threads", "1", "-filter_complex_threads", "1",
+                         "-max_alloc", "268435456", "-progress", "pipe:1", "-stats_period", "30", "-y", "-i", input.path,
                          "-map", "0:\(probe.videoStreamIndex)"]
         for index in probe.audioStreams { arguments += ["-map", "0:\(index)"] }
         // HLG (including iPhone Dolby Vision 8.4, whose base layer is HLG) stays 10-bit HLG;
         // the Dolby Vision metadata is dropped.
         let color = probe.isHLG
-            ? ["-pix_fmt", "yuv420p10le", "-x265-params", "colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
+            ? ["-pix_fmt", "yuv420p10le", "-x265-params", "pools=2:frame-threads=1:colorprim=bt2020:transfer=arib-std-b67:colormatrix=bt2020nc",
                "-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc"]
-            : ["-pix_fmt", "yuv420p"]
+            : ["-pix_fmt", "yuv420p", "-x265-params", "pools=2:frame-threads=1"]
         arguments += ["-map_metadata", "0",
                       "-c:v", "libx265", "-preset", "medium", "-crf", String(profile.videoCRF)] + color + [
                       "-tag:v", "hvc1",
@@ -89,7 +91,9 @@ public struct FFmpegVideoCompressor: Sendable {
         try? FileManager.default.removeItem(at: partial)
         defer { try? FileManager.default.removeItem(at: partial) }
 
-        try ProcessRunner.run(arguments(input: input, output: partial, probe: probe))
+        // An advancing multi-hour video is allowed to run. Only a stalled frame/media-time
+        // counter is bounded; total duration is deliberately not a timeout.
+        try ProcessRunner.run(arguments(input: input, output: partial, probe: probe), progressTimeout: 30 * 60)
         let result = try VideoProbe.read(partial)
         let box = profile.videoSize(width: probe.width, height: probe.height)
         guard result.width <= box.width, result.height <= box.height else {
@@ -106,7 +110,8 @@ public struct FFmpegVideoCompressor: Sendable {
             where !Self.durationsMatch(source, compressed) {
             throw VideoCompressionError.durationMismatch("\(label) \(source ?? 0)s vs \(compressed ?? 0)s")
         }
-        try ProcessRunner.run(["ffmpeg", "-v", "error", "-xerror", "-i", partial.path,
+        try ProcessRunner.run(["ffmpeg", "-v", "error", "-nostdin", "-xerror", "-threads", "2",
+                               "-filter_threads", "1", "-max_alloc", "268435456", "-i", partial.path,
                                "-map", "0:v:0", "-f", "null", "-"])
 
         if try MediaFiles.size(of: partial) >= MediaFiles.size(of: input) {
