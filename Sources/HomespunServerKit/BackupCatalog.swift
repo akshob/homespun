@@ -159,6 +159,10 @@ extension Catalog {
         try database.transaction { try backupOriginInTransaction() }
     }
 
+    func hasVersionedBackups() throws -> Bool {
+        !(try database.query("SELECT id FROM backup_requests LIMIT 1").isEmpty)
+    }
+
     private func backupOriginInTransaction() throws -> BackupAPI.Origin {
         let savedServer = try setting("backup.server_id"), savedEpoch = try setting("backup.history_epoch")
         if savedServer == nil || savedEpoch == nil {
