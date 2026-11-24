@@ -48,7 +48,7 @@ async function cron(overrides: Record<string, unknown> = {}, mail = fakeMail()) 
 }
 
 beforeEach(async () => {
-	await env.DB.batch(["usage", "events", "payloads", "reports", "object_writes", "erased_installs"]
+	await env.DB.batch(["usage", "events", "payloads", "reports", "object_writes", "erased_installs", "erasure_checks"]
 		.map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
 });
 
@@ -90,8 +90,8 @@ describe("metrics and diagnostics", () => {
 		expect(await usage(keys.monthPuts)).toBe(1);
 		expect(await usage(keys.dayPuts)).toBe(1);
 		expect(await usage(keys.dayBytes)).toBe(size);
-		// Row/indexes, durable write-journal reservation, and five counters.
-		expect(await usage(keys.dayWrites)).toBe(21);
+		// Row/indexes, journal reservation, two transient fences, and five counters.
+		expect(await usage(keys.dayWrites)).toBe(25);
 	});
 
 	it.each([
@@ -102,7 +102,7 @@ describe("metrics and diagnostics", () => {
 		["D1 writes", "dayWrites", "D1_MAX_WRITES_DAY", 1000],
 	] as const)("are refused past 90%% of the %s cap", async (_, counter, variable, cap) => {
 		const body = metrics();
-		const delta = { storedBytes: bytesOf(body), monthPuts: 1, dayPuts: 1, dayBytes: bytesOf(body), dayWrites: 21 }[counter];
+		const delta = { storedBytes: bytesOf(body), monthPuts: 1, dayPuts: 1, dayBytes: bytesOf(body), dayWrites: 25 }[counter];
 		const caps = { [variable]: String(cap) };
 		const key = today()[counter];
 
@@ -147,7 +147,7 @@ describe("events", () => {
 	it("count events and D1 writes", async () => {
 		expect(await (await sendWith({}, "POST", "/v1/events", batch(3))).json()).toEqual({ accepted: 3 });
 		expect(await usage(today().dayEvents)).toBe(3);
-		expect(await usage(today().dayWrites)).toBe(3 * 4 + 2);
+		expect(await usage(today().dayWrites)).toBe(3 * 4 + 2 + 2);
 	});
 
 	it("answer 503 busy past the daily event cap", async () => {
@@ -170,7 +170,7 @@ describe("events", () => {
 
 	it("answer 503 busy past 90% of the D1 write cap", async () => {
 		const caps = { D1_MAX_WRITES_DAY: "1000" };
-		await setUsage({ [today().dayWrites]: 900 - 6 });
+		await setUsage({ [today().dayWrites]: 900 - 8 });
 		expect((await sendWith(caps, "POST", "/v1/events", batch(1))).status).toBe(202);
 		expect(await usage(today().dayWrites)).toBe(900);
 		expect((await sendWith(caps, "POST", "/v1/events", batch(1))).status).toBe(503);
@@ -260,12 +260,12 @@ describe("reports", () => {
 
 	it("may use the D1 write budget up to 100%, then answer 503", async () => {
 		const caps = { D1_MAX_WRITES_DAY: "1000" };
-		// Row, journal reservation, a fallback update, and six counters.
-		await setUsage({ [today().dayWrites]: 1000 - 23 });
+		// Row, journal reservation, two fences, a fallback update, and six counters.
+		await setUsage({ [today().dayWrites]: 1000 - 27 });
 		expect((await sendWith({ ...caps, MAIL: fakeMail().binding }, "POST", "/v1/reports", report())).status).toBe(201);
 		expect((await sendWith(caps, "POST", "/v1/events", batch(1))).status).toBe(503);
 
-		await setUsage({ [today().dayWrites]: 1000 - 22 });
+		await setUsage({ [today().dayWrites]: 1000 - 26 });
 		const busy = await sendWith({ ...caps, MAIL: fakeMail().binding }, "POST", "/v1/reports", report());
 		expect(busy.status).toBe(503);
 		expect(await busy.json()).toEqual({ error: "busy" });

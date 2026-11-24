@@ -200,17 +200,26 @@ as success: rows/pointers and the intake fence survive for retry.
 
 The install UUID itself is the consent generation. Migration `0005_erasure_writes.sql` adds:
 
-- `erased_installs`: permanent UUID-only anti-replay tombstones, without timestamps, account
-  information, replacement IDs or links to any other consent identity. Do not expire these:
-  delayed/replayed old requests must not resurrect erased data.
+- `erased_installs`: permanent digest-only anti-replay tombstones. Each is the lowercase hex
+  SHA-256 of UTF-8 `photos.homespun.telemetry.erasure.v1`, one NUL byte, and the canonical
+  lowercase install UUID. This table retains no raw UUID, timestamp, account information,
+  replacement ID or link to any other consent identity. The random UUID's entropy makes a
+  deployment secret/HMAC unnecessary; a party already knowing the UUID can still derive its
+  marker. Do not expire these: delayed/replayed old requests must not resurrect erased data.
+  Keep this derivation stable across deployments so existing tombstones remain recognizable.
+- `erasure_checks`: transient SQL guard rows, deleted immediately by an AFTER INSERT trigger.
+  The Worker derives the digest once per request and passes it separately into these checks.
+  A BEFORE INSERT trigger refuses erased digests inside each atomic admission/publication
+  batch, rolling back its content and budget writes together. No check rows survive the
+  statement, and no digest copies need to be retained on the existing content rows.
 - `object_writes`: a durable R2 key, optional install UUID, byte reservation, creation/check times,
   and publication/settlement state. Every PUT is journaled and budget-reserved **before** it is
   issued. Payload publication atomically exchanges its pointer for a payload row. Reports first
   commit a D1-only fallback row and pointer, then atomically publish the R2 reference after PUT.
 
 Erasure atomically writes the tombstone and cancels that install's pending publications.
-D1 triggers fence all subsequent event/report/payload/pointer admission inside the write
-transaction (including the budget charge), not just at an earlier preflight check. Erasure
+D1 transactional digest checks fence all subsequent event/report/payload/pointer admission and
+publication (including the budget charge), not just at an earlier preflight check. Erasure
 then deletes snapshotted R2 keys and **only those snapshotted content rows**. Concurrent erasure
 and retention release bytes from rows still present in their deletion transaction, not from
 a stale sum. Neither assumes an unsnapshotted object's bytes were erased.
@@ -221,8 +230,11 @@ objects. A timeout is **not** proof that a PUT settled: an unsettled pointer is 
 fairly revisited indefinitely, including after erasure, so an arbitrarily late PUT remains
 discoverable. Only a writer that knows its PUT settled can mark that fact; the pointer is
 removed only after an acknowledged object deletion. Failed cleanup remains retryable.
-Pointers may therefore outlive content retention, and reserve their possible bytes conservatively
-until settlement/cleanup is proven. They contain no payload content or cross-install linkage.
+Pointers may therefore outlive content retention indefinitely if the writer never acknowledges
+settlement, and reserve their possible bytes conservatively until settlement/cleanup is proven.
+Unlike the digest-only tombstones, cleanup pointers retain their original per-write install/object
+references, sizes and times as needed for retry and late-PUT cleanup. They contain no payload
+content or cross-install linkage.
 Operators must not manually drop such pointers merely because an object is currently absent.
 The cleanup shares the retention job's D1 write allowance; backlogs continue on later runs.
 
@@ -304,7 +316,8 @@ Caps, as string vars in `wrangler.jsonc` (digits only; anything else falls back 
 The caps sit at 80% because counting is approximate: concurrent requests can overshoot a little,
 and D1 rows written are estimated (4 per row inserted or deleted, 1 per counter). Days and
 months are UTC. The D1 write cap covers what the event cap alone can't: a flood of metrics
-uploads (a conservative reservation of about 21 rows written each, including the write journal)
+uploads (a conservative reservation of about 25 rows written each, including the write journal
+and transient digest fences)
 would otherwise exhaust D1 within the R2 caps. PUT attempts reserve operation/byte counters before
 R2 and retain those operation charges on failure; confirmed cleanup releases only stored bytes.
 
@@ -338,8 +351,8 @@ Each alert lists all current counters and caps.
 
 **Typical usage.** MetricKit delivers about one metrics payload per install per day, 10–30 KB.
 1,000 sharing installs make about 30k R2 writes a month (3% of the free tier) and keep 1–3 GB
-with the 90-day metrics retention. Diagnostics and reports are rare. In D1 that reserves about 21k rows
-written a day for payloads, plus about 4 per event (10 events per install per day would be 40k).
+with the 90-day metrics retention. Diagnostics and reports are rare. In D1 that reserves about 25k rows
+written a day for payloads, plus about 4 per event, 2 per fenced event batch and counter writes.
 The Worker never reads R2, so there are no Class B operations in normal operation; only your own
 downloads with `wrangler r2 object get` count.
 
@@ -391,6 +404,9 @@ npx wrangler dev --test-scheduled   # then: curl 'localhost:8787/cdn-cgi/handler
 ### Upgrading an existing deployment to the erasure protocol
 
 Hosted CI must pass before an owner-authorized deployment. This change does not deploy itself.
+`0005` is not deployed: its final definition creates digest-only tombstones directly; no raw-UUID
+tombstone conversion or new deployment secret is required. Apply the final migration, not an
+earlier draft of it.
 For `0005`, put intake **and erasure** behind maintenance and pause the old scheduled job, then
 drain/verify the end of old Worker invocations. Apply the additive migration before deploying
 the matching Worker; restore routes/cron only when no old writer can run. If that cannot be

@@ -6,7 +6,24 @@ import { deleteObjects } from "./storage";
 
 /** Conservative reservation for journal insert/delete, indexes, and failure-state update. */
 export const OBJECT_WRITE_WRITES = 12;
+/** One unindexed transient check row inserted and immediately deleted by its trigger. */
+export const ERASURE_FENCE_WRITES = 2;
 const ABANDONED_MS = 60 * 60 * 1000;
+
+declare const digestBrand: unique symbol;
+export type InstallDigest = string & { readonly [digestBrand]: true };
+
+/** Call once with the canonical, validated UUID; never send this digest back to the app. */
+export async function installDigest(install: string): Promise<InstallDigest> {
+	const bytes = new TextEncoder().encode(`photos.homespun.telemetry.erasure.v1\0${install}`);
+	const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+	return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("") as InstallDigest;
+}
+
+/** Include in every atomic admission/publication batch; reserve its budget with admission. */
+export function erasureFence(env: Env, digest: InstallDigest | null): D1PreparedStatement[] {
+	return digest === null ? [] : [env.DB.prepare("INSERT INTO erasure_checks (digest) VALUES (?1)").bind(digest)];
+}
 
 export function reserveWrite(env: Env, key: string, install: string | null, size: number, now: Date): D1PreparedStatement {
 	return env.DB.prepare(
@@ -14,8 +31,8 @@ export function reserveWrite(env: Env, key: string, install: string | null, size
 	).bind(key, install, now.toISOString(), size);
 }
 
-export async function assertInstallLive(env: Env, install: string | null): Promise<void> {
-	if (install !== null && await env.DB.prepare("SELECT 1 FROM erased_installs WHERE install = ?1").bind(install).first()) {
+export async function assertInstallLive(env: Env, digest: InstallDigest | null): Promise<void> {
+	if (digest !== null && await env.DB.prepare("SELECT 1 FROM erased_installs WHERE digest = ?1").bind(digest).first()) {
 		throw new HttpError(410, "install erased");
 	}
 }

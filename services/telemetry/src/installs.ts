@@ -2,7 +2,7 @@
 
 import { Budget, limitsFrom, WRITES_PER_ROW, withWrites } from "./budget";
 import { deleteObjects } from "./storage";
-import { accountCleanup } from "./writes";
+import { accountCleanup, installDigest } from "./writes";
 
 /**
  * DELETE /v1/installs/<install>: removes every event, payload and report of the install,
@@ -10,8 +10,9 @@ import { accountCleanup } from "./writes";
  * Delete only snapshotted rows after their objects; interrupted writers keep cleanup pointers.
  */
 export async function deleteInstall(install: string, env: Env): Promise<Response> {
+	const digest = await installDigest(install);
 	const fenced = await env.DB.batch([
-		env.DB.prepare("INSERT OR IGNORE INTO erased_installs (install) VALUES (?1)").bind(install),
+		env.DB.prepare("INSERT OR IGNORE INTO erased_installs (digest) VALUES (?1)").bind(digest),
 		env.DB.prepare("UPDATE object_writes SET state = 'cleanup' WHERE install = ?1 AND state = 'pending'").bind(install),
 	]);
 	await accountCleanup(env, fenced[0].meta.changes * 2 + fenced[1].meta.changes * WRITES_PER_ROW);

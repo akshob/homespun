@@ -1,7 +1,10 @@
 -- SPDX-License-Identifier: AGPL-3.0-only
 -- An install UUID is a consent generation. Never resurrect an erased generation.
--- Tombstones are permanent, contain no timestamps or links to other identities.
-CREATE TABLE erased_installs (install TEXT PRIMARY KEY NOT NULL);
+-- Tombstones retain only a domain-separated SHA-256 digest, permanently.
+-- No raw UUID, timestamp, or link to any other identity is retained here.
+CREATE TABLE erased_installs (
+	digest TEXT PRIMARY KEY NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*')
+);
 
 -- Reserve/index every object BEFORE issuing its PUT. Only its writer can certify
 -- that the PUT settled; a crashed writer's cleanup pointer must remain retryable.
@@ -17,17 +20,13 @@ CREATE TABLE object_writes (
 CREATE INDEX object_writes_install ON object_writes (install);
 CREATE INDEX object_writes_cleanup ON object_writes (state, checked);
 
--- These checks run in the same D1 transaction as admission and its budget charge,
--- not as a racy read before a suspension. Existing v1 rows/columns remain valid.
-CREATE TRIGGER events_erasure BEFORE INSERT ON events
-WHEN EXISTS (SELECT 1 FROM erased_installs WHERE install = NEW.install)
+-- The Worker derives the digest before constructing statements and inserts a check
+-- inside each admission/publication batch. A refusal rolls back the entire D1 batch,
+-- including its budget charge. The AFTER trigger discards the check immediately:
+-- no digest copies or raw UUIDs need to be added to existing content tables.
+CREATE TABLE erasure_checks (digest TEXT NOT NULL);
+CREATE TRIGGER erasure_check BEFORE INSERT ON erasure_checks
+WHEN EXISTS (SELECT 1 FROM erased_installs WHERE digest = NEW.digest)
 BEGIN SELECT RAISE(ABORT, 'homespun_erased_install'); END;
-CREATE TRIGGER payloads_erasure BEFORE INSERT ON payloads
-WHEN EXISTS (SELECT 1 FROM erased_installs WHERE install = NEW.install)
-BEGIN SELECT RAISE(ABORT, 'homespun_erased_install'); END;
-CREATE TRIGGER reports_erasure BEFORE INSERT ON reports
-WHEN EXISTS (SELECT 1 FROM erased_installs WHERE install = NEW.install)
-BEGIN SELECT RAISE(ABORT, 'homespun_erased_install'); END;
-CREATE TRIGGER object_writes_erasure BEFORE INSERT ON object_writes
-WHEN EXISTS (SELECT 1 FROM erased_installs WHERE install = NEW.install)
-BEGIN SELECT RAISE(ABORT, 'homespun_erased_install'); END;
+CREATE TRIGGER erasure_check_clear AFTER INSERT ON erasure_checks
+BEGIN DELETE FROM erasure_checks WHERE rowid = NEW.rowid; END;

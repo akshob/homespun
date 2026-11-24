@@ -4,7 +4,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { Budget, r2Put, withWrites } from "../src/budget";
 import { runRetention } from "../src/retention";
-import { OBJECT_WRITE_WRITES, reserveWrite } from "../src/writes";
+import { installDigest, OBJECT_WRITE_WRITES, reserveWrite } from "../src/writes";
 import diagnosticPayload from "./fixtures/diagnostic-payload.json";
 import metricPayload from "./fixtures/metric-payload.json";
 import { APP, DEVICE, barrier, fakeMail, interceptDatabase, newInstall, objectText, post, rows, send, sendWith } from "./helpers";
@@ -62,6 +62,24 @@ describe("DELETE /v1/installs/<install>", () => {
 
 	it("returns 204 when nothing exists for the install", async () => {
 		expect((await send("DELETE", `/v1/installs/${newInstall()}`)).status).toBe(204);
+	});
+
+	it("retains only the stable domain-separated digest as the permanent tombstone", async () => {
+		const install = "8a7e7c1c-6b7a-4a55-9d3e-0c1b2a3d4e5f";
+		// SHA-256 of UTF-8 "photos.homespun.telemetry.erasure.v1", NUL, then the UUID.
+		const expected = "c412e093d58de6479b17f3d9b65aaaa6ff18a64493f98c2b11dc1b9e2096128e";
+		expect(await installDigest(install)).toBe(expected);
+		await seed(install);
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		expect(await rows("SELECT * FROM erased_installs WHERE digest = ?1", expected)).toEqual([{ digest: expected }]);
+		expect(await rows("SELECT * FROM erasure_checks")).toEqual([]);
+		// A repeated erasure derives the same marker; a different generation remains independent.
+		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		expect(await rows("SELECT * FROM erased_installs WHERE digest = ?1", expected)).toEqual([{ digest: expected }]);
+		const kept = newInstall();
+		await seed(kept);
+		expect(await installDigest(kept)).not.toBe(expected);
+		expect((await counts(kept)).payloads).toBe(2);
 	});
 
 	it("rejects an invalid install id", async () => {
@@ -174,7 +192,7 @@ describe("DELETE /v1/installs/<install>", () => {
 		}, "DELETE", `/v1/installs/${install}`);
 		expect(failed.status).toBe(500);
 		expect((await counts(install)).payloads).toBe(2);
-		expect(await rows("SELECT install FROM erased_installs WHERE install = ?1", install)).toHaveLength(1);
+		expect(await rows("SELECT digest FROM erased_installs WHERE digest = ?1", await installDigest(install))).toHaveLength(1);
 		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
 		for (const key of keys) expect(await objectText(key)).toBeNull();
 	});
@@ -213,11 +231,14 @@ describe("DELETE /v1/installs/<install>", () => {
 		const intake = sendWith({ DB: db, BUCKET: bucket }, "POST", `/v1/${kind}`, { install, app: APP, device: DEVICE, ...content });
 		await gate.reached;
 		expect((await send("DELETE", `/v1/installs/${install}`)).status).toBe(204);
+		const usageAfterErasure = await rows("SELECT key, value FROM usage ORDER BY key");
 		gate.release();
 		expect((await intake).status).toBe(410);
 		expect(await counts(install)).toEqual({ events: 0, payloads: 0, reports: 0 });
 		expect(await rows("SELECT r2_key FROM object_writes WHERE install = ?1", install)).toHaveLength(0);
+		expect(await rows("SELECT * FROM erasure_checks")).toEqual([]);
 		expect(puts).toBe(0);
+		expect(await rows("SELECT key, value FROM usage ORDER BY key")).toEqual(usageAfterErasure);
 	});
 
 	it("retains a failed publication/cleanup pointer for cron instead of orphaning its object", async () => {

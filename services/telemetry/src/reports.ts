@@ -3,7 +3,15 @@
 import { Budget, busy, r2Put, WRITES_PER_ROW, withWrites } from "./budget";
 import { badRequest, HttpError, isObject, json, type JsonBody } from "./http";
 import { isInstall, onlyKeys, parseApp, parseDevice, type AppInfo, type DeviceInfo } from "./validate";
-import { assertInstallLive, cleanOwnWrite, OBJECT_WRITE_WRITES, reserveWrite } from "./writes";
+import {
+	assertInstallLive,
+	cleanOwnWrite,
+	ERASURE_FENCE_WRITES,
+	erasureFence,
+	installDigest,
+	OBJECT_WRITE_WRITES,
+	reserveWrite,
+} from "./writes";
 
 /** Unambiguous symbols for report ids: no 0/O, 1/I/L. */
 export const REPORT_ID_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -54,12 +62,17 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 	const email = parseEmail(value.email);
 	const diagnostics = value.diagnostics ?? null;
 	if (diagnostics !== null && !isObject(diagnostics)) badRequest("diagnostics: must be an object");
-	await assertInstallLive(env, install);
+	const digest = install === null ? null : await installDigest(install);
+	await assertInstallLive(env, digest);
+	const fenceWrites = digest === null ? 0 : ERASURE_FENCE_WRITES;
 
 	const now = new Date();
 	const budget = await Budget.load(env, now);
-	// Worst case: the row, a fallback update, and the R2 and email counters.
-	const mostWrites = withWrites({ ...r2Put(body.bytes), dayEmails: 1 }, WRITES_PER_ROW + OBJECT_WRITE_WRITES + 1).dayWrites!;
+	// Worst case: the row, write journal, two fences, a fallback update, and counters.
+	const mostWrites = withWrites(
+		{ ...r2Put(body.bytes), dayEmails: 1 },
+		WRITES_PER_ROW + OBJECT_WRITE_WRITES + 2 * fenceWrites + 1,
+	).dayWrites!;
 	if (!budget.allows({ dayWrites: mostWrites })) {
 		await budget.markRefused(env.DB, ["d1"]);
 		throw busy(now);
@@ -83,7 +96,11 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 			0,
 		),
 		...(useR2 ? [reserveWrite(env, reportKey(candidate), install, body.bytes, now)] : []),
-		budget.add(env.DB, withWrites(useR2 ? r2Put(body.bytes) : {}, WRITES_PER_ROW + (useR2 ? OBJECT_WRITE_WRITES : 0))),
+		budget.add(env.DB, withWrites(
+			useR2 ? r2Put(body.bytes) : {},
+			WRITES_PER_ROW + fenceWrites + (useR2 ? OBJECT_WRITE_WRITES + fenceWrites : 0),
+		)),
+		...erasureFence(env, digest),
 	]);
 
 	const updates: D1PreparedStatement[] = [];
@@ -100,15 +117,19 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 			catch (cleanupError) { console.error(`report ${id}: cleanup deferred: ${describe(cleanupError)}`); }
 		}
 		if (r2Key) {
-			const [published] = await env.DB.batch([
-				env.DB.prepare(`UPDATE reports SET r2_key = ?2, size = ?3 WHERE id = ?1
-					AND EXISTS (SELECT 1 FROM object_writes WHERE r2_key = ?2 AND state = 'pending')`).bind(id, r2Key, body.bytes),
-				env.DB.prepare(`DELETE FROM object_writes WHERE r2_key = ?2
-					AND EXISTS (SELECT 1 FROM reports WHERE id = ?1 AND r2_key = ?2)`).bind(id, r2Key),
-			]);
-			if (published.meta.changes === 0) {
-				await cleanOwnWrite(env, r2Key);
-				throw new HttpError(410, "write retired");
+			try {
+				const [published] = await env.DB.batch([
+					env.DB.prepare(`UPDATE reports SET r2_key = ?2, size = ?3 WHERE id = ?1
+						AND EXISTS (SELECT 1 FROM object_writes WHERE r2_key = ?2 AND state = 'pending')`).bind(id, r2Key, body.bytes),
+					env.DB.prepare(`DELETE FROM object_writes WHERE r2_key = ?2
+						AND EXISTS (SELECT 1 FROM reports WHERE id = ?1 AND r2_key = ?2)`).bind(id, r2Key),
+					...erasureFence(env, digest),
+				]);
+				if (published.meta.changes === 0) throw new HttpError(410, "write retired");
+			} catch (error) {
+				try { await cleanOwnWrite(env, r2Key); }
+				catch (cleanupError) { console.error(`report ${id}: cleanup deferred: ${describe(cleanupError)}`); }
+				throw error;
 			}
 		}
 	} else {
@@ -117,7 +138,7 @@ export async function handleReport(body: JsonBody, env: Env): Promise<Response> 
 		updates.push(...budget.flag(env.DB, ["r2"]));
 	}
 
-	await assertInstallLive(env, install);
+	await assertInstallLive(env, digest);
 	let emailed = false;
 	if (budget.allows({ dayEmails: 1 })) {
 		const report = { id, received, r2Key, notInR2, install, app, device, message, email, diagnostics };

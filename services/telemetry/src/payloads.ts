@@ -14,7 +14,15 @@ import {
 import { sendCrashEmail } from "./crashmail";
 import { badRequest, HttpError, isObject, json, type JsonBody } from "./http";
 import { onlyKeys, parseApp, parseDevice, parseInstall } from "./validate";
-import { assertInstallLive, cleanOwnWrite, OBJECT_WRITE_WRITES, reserveWrite } from "./writes";
+import {
+	assertInstallLive,
+	cleanOwnWrite,
+	ERASURE_FENCE_WRITES,
+	erasureFence,
+	installDigest,
+	OBJECT_WRITE_WRITES,
+	reserveWrite,
+} from "./writes";
 
 export type PayloadKind = "metrics" | "diagnostics";
 export const PAYLOAD_KINDS: readonly PayloadKind[] = ["metrics", "diagnostics"];
@@ -54,7 +62,8 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 	if (value.payload === undefined || value.payload === null) badRequest("payload: required");
 	if (!isObject(value.payload)) badRequest("payload: must be an object");
 	const summary = kind === "diagnostics" ? summarizeDiagnostics(value.payload) : null;
-	await assertInstallLive(env, install);
+	const digest = await installDigest(install);
+	await assertInstallLive(env, digest);
 
 	const now = new Date();
 	const budget = new Budget(limitsFrom(env), now);
@@ -71,7 +80,8 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 	if (sentToday.n >= PAYLOADS_PER_INSTALL_DAY[kind]) {
 		return json({ accepted: 0, reason: "limit" }, 202);
 	}
-	const deltas = withWrites(r2Put(body.bytes), WRITES_PER_ROW + OBJECT_WRITE_WRITES);
+	const rowWrites = WRITES_PER_ROW + OBJECT_WRITE_WRITES + 2 * ERASURE_FENCE_WRITES;
+	const deltas = withWrites(r2Put(body.bytes), rowWrites);
 	if (!budget.allows(deltas, LOW_PRIORITY_PERCENT)) {
 		const refused: Flag[] = [];
 		if (!budget.allows(r2Put(body.bytes), LOW_PRIORITY_PERCENT)) refused.push("r2");
@@ -82,7 +92,7 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 
 	// Only the first payload with crashes or hangs per install and day may be emailed.
 	const crashing = summary !== null && (summary.crashDiagnostics > 0 || summary.hangDiagnostics > 0);
-	const withEmail = withWrites({ ...r2Put(body.bytes), dayEmails: 1, dayCrashEmails: 1 }, WRITES_PER_ROW + OBJECT_WRITE_WRITES);
+	const withEmail = withWrites({ ...r2Put(body.bytes), dayEmails: 1, dayCrashEmails: 1 }, rowWrites);
 	const emailCrash =
 		crashing &&
 		sentToday.crashing === 0 &&
@@ -95,7 +105,7 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 	const received = now.toISOString();
 	const key = `${kind}/${utcDay(now).replaceAll("-", "/")}/${install}/${id}.json`;
 
-	await env.DB.batch([reserveWrite(env, key, install, body.bytes, now), budget.add(env.DB, counted)]);
+	await env.DB.batch([reserveWrite(env, key, install, body.bytes, now), budget.add(env.DB, counted), ...erasureFence(env, digest)]);
 	try {
 		await env.BUCKET.put(key, body.text, { httpMetadata: { contentType: "application/json" } });
 		const [published] = await env.DB.batch([
@@ -115,6 +125,7 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 			),
 			env.DB.prepare("DELETE FROM object_writes WHERE r2_key = ?1 AND EXISTS (SELECT 1 FROM payloads WHERE id = ?2)")
 				.bind(key, id),
+			...erasureFence(env, digest),
 		]);
 		if (published.meta.changes === 0) throw new HttpError(410, "write retired");
 	} catch (error) {
@@ -123,7 +134,7 @@ export async function handlePayload(kind: PayloadKind, body: JsonBody, env: Env)
 		catch (cleanupError) { console.error("payload cleanup deferred", cleanupError); }
 		throw error;
 	}
-	await assertInstallLive(env, install);
+	await assertInstallLive(env, digest);
 	if (emailCrash) await sendCrashEmail(env, { install, r2Key: key, app, device, payload: value.payload, summary: summary! });
 	return json({ accepted: 1 }, 202);
 }
