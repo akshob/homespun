@@ -32,6 +32,8 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
     @Binding var path: [Route]
     /// What the detail shows when nothing has been opened (the newest run, Server Check).
     var defaultRoute: Route?
+    /// Editors can retain the existing route while ordinary detail pages still fold to the list.
+    var retainsOnFold: (Route) -> Bool = { _ in false }
     /// The list, given the sidebar's selection (none in a stack, where its links push).
     @ViewBuilder var root: (Binding<Route?>?) -> Root
     @ViewBuilder var destination: (Route) -> Destination
@@ -61,7 +63,7 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
     private func folded() {
         guard unfolded, sizeClass != .regular else { return }
         unfolded = false
-        path = []
+        if !path.contains(where: retainsOnFold) { path = [] }
     }
 
     /// The sidebar's selection is the detail column's first screen; choosing another starts it afresh.

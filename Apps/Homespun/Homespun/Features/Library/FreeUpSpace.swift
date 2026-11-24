@@ -8,6 +8,31 @@ struct FreeUpPair: Hashable, Identifiable, Sendable {
     var id: String { original }
 }
 
+@MainActor @Observable
+final class FreeUpReview {
+    var selected: FreeUpPair?
+    var showingComparison = false
+    let comparison = CompareModel()
+
+    var path: [FreeUpPair] {
+        get { showingComparison ? selected.map { [$0] } ?? [] : [] }
+        set {
+            showingComparison = !newValue.isEmpty
+            if let pair = newValue.last { selected = pair }
+        }
+    }
+
+    func select(_ pair: FreeUpPair) {
+        selected = pair
+        showingComparison = true
+    }
+
+    func reconcile(_ pairs: [FreeUpPair]) {
+        if selected.map({ !pairs.contains($0) }) ?? true { selected = pairs.first }
+        if pairs.isEmpty { showingComparison = false }
+    }
+}
+
 /// Free Up Space (DESIGN 02·3.1–3.5): explains, checks each original with the server again, lets
 /// iOS ask, and shows what was freed. Each compact copy can be compared with its original first
 /// (the first time, before anything is removed, that's the point), and any item can keep its
@@ -19,9 +44,8 @@ struct FreeUpSpaceScreen: View {
     let scope: Set<String>?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @State private var path: [FreeUpPair] = []
+    @State private var review = FreeUpReview()
     @State private var pairs: [FreeUpPair] = []
-    @State private var selected: FreeUpPair?
     @State private var detent: PresentationDetent
 
     init(controller: LibraryController, scope: Set<String>?) {
@@ -41,72 +65,79 @@ struct FreeUpSpaceScreen: View {
     }
 
     var body: some View {
-        Group {
-            if sizeClass == .regular, reviewing, !pairs.isEmpty { whole } else { stacked }
+        // The native stack and its Back history survive both adaptive layouts.
+        NavigationStack(path: Binding(get: { review.path }, set: { review.path = $0 })) {
+            FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, selected: review.selected,
+                             close: { dismiss() }) { review.select($0) }
+                .navigationTitle("Free Up Space")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { closeButton }
+                .navigationDestination(for: FreeUpPair.self) { pair in
+                    if sizeClass == .regular, reviewing, !pairs.isEmpty {
+                        whole.navigationBarBackButtonHidden().toolbar { closeButton }
+                    } else {
+                        CompareView(model: AppModel.current, compactIdentifier: pair.compact, comparison: review.comparison)
+                            .safeAreaBar(edge: .bottom) {
+                                KeepOriginalButton(controller: controller, pair: pair) { review.showingComparison = false }
+                                    .padding(.horizontal, 24).padding(.bottom, 8)
+                            }
+                            .toolbar { closeButton }
+                    }
+                }
         }
         .presentationDetents(controller.settings.trialConfirmed ? [.medium, .large] : [.large], selection: $detent)
         .interactiveDismissDisabled(controller.isRemoving)
         .task(id: originals) { await loadPairs() }
+        .onChange(of: sizeClass, initial: true) { _, size in
+            if size == .regular, reviewing, review.selected != nil { review.showingComparison = true }
+        }
+        .onChange(of: reviewing) { _, reviewing in
+            if !reviewing {
+                review.showingComparison = false
+                review.comparison.close()
+            }
+        }
+        .onChange(of: review.path) { _, path in if !path.isEmpty { detent = .large } }
+        .onDisappear { review.comparison.close() }
     }
 
     private var closeButton: some ToolbarContent {
-        ToolbarItem(placement: .cancellationAction) {
+        ToolbarItem(id: "remove.close", placement: .cancellationAction) {
             if !controller.isRemoving {
                 Button("Close", systemImage: "xmark") { dismiss() }.accessibilityIdentifier("remove.close")
             }
         }
     }
 
-    /// One sheet; a photo's Compare opens inside it (Back returns to the review).
-    private var stacked: some View {
-        NavigationStack(path: $path) {
-            FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, close: { dismiss() }) { path.append($0) }
-                .navigationTitle("Free Up Space")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar { closeButton }
-                .navigationDestination(for: FreeUpPair.self) { pair in
-                    CompareView(model: AppModel.current, compactIdentifier: pair.compact)
-                        .safeAreaBar(edge: .bottom) {
-                            KeepOriginalButton(controller: controller, pair: pair) { path.removeAll() }
-                                .padding(.horizontal, 24).padding(.bottom, 8)
-                        }
-                }
-        }
-        .onChange(of: path) { _, path in if !path.isEmpty { detent = .large } }
-    }
-
     /// The whole screen of the open iPhone Duo: held wide, the review as a column beside the item
     /// compared side by side; held tall, the comparison above and the review below it.
     private var whole: some View {
-        NavigationStack {
-            GeometryReader { proxy in
-                if proxy.size.height > proxy.size.width {
-                    VStack(spacing: 0) {
-                        comparison
-                        Divider()
-                        FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, selected: selected, brief: true,
-                                         close: { dismiss() }) { selected = $0 }
-                            .frame(height: min(300, proxy.size.height * 0.34))
-                    }
-                } else {
-                    HStack(spacing: 0) {
-                        FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, selected: selected, grid: true,
-                                         close: { dismiss() }) { selected = $0 }
-                            .frame(width: min(400, max(320, proxy.size.width * 0.36)))
-                        Divider()
-                        comparison
-                    }
+        GeometryReader { proxy in
+            if proxy.size.height > proxy.size.width {
+                VStack(spacing: 0) {
+                    comparison
+                    Divider()
+                    FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, selected: review.selected, brief: true,
+                                     close: { dismiss() }) { review.select($0) }
+                        .frame(height: min(300, proxy.size.height * 0.34))
+                }
+            } else {
+                HStack(spacing: 0) {
+                    FreeUpSpacePanel(controller: controller, scope: scope, pairs: pairs, selected: review.selected, grid: true,
+                                     close: { dismiss() }) { review.select($0) }
+                        .frame(width: min(400, max(320, proxy.size.width * 0.36)))
+                    Divider()
+                    comparison
                 }
             }
-            .navigationTitle("Free Up Space")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { closeButton }
         }
+        .navigationTitle("Free Up Space")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     @ViewBuilder private var comparison: some View {
-        if let selected {
-            CompareView(model: AppModel.current, compactIdentifier: selected.compact, standalone: false)
+        if let selected = review.selected {
+            CompareView(model: AppModel.current, compactIdentifier: selected.compact, standalone: false, comparison: review.comparison)
                 .id(selected)
                 .safeAreaBar(edge: .bottom) {
                     KeepOriginalButton(controller: controller, pair: selected) { advance(from: selected) }
@@ -121,18 +152,20 @@ struct FreeUpSpaceScreen: View {
     private func advance(from kept: FreeUpPair) {
         guard let index = pairs.firstIndex(of: kept) else { return }
         let rest = pairs.filter { $0 != kept }
-        selected = rest.isEmpty ? nil : rest[min(index, rest.count - 1)]
+        review.selected = rest.isEmpty ? nil : rest[min(index, rest.count - 1)]
     }
 
     /// Each original's compact copy, from the ledger.
     private func loadPairs() async {
         let wanted = originals
         let ledger = await controller.job.ledger.snapshot()
+        guard !Task.isCancelled else { return }
         let found = wanted.compactMap { original in
             ledger[original].map { FreeUpPair(original: original, compact: $0.compactIdentifier) }
         }
         pairs = found
-        if selected.map({ !found.contains($0) }) ?? true { selected = found.first }
+        review.reconcile(found)
+        if sizeClass == .regular, reviewing, review.selected != nil { review.showingComparison = true }
     }
 }
 
@@ -336,11 +369,14 @@ struct FreeUpSpacePanel: View {
     /// The compact copies in a row that scrolls sideways (UIKit: a reused cell per copy on screen).
     private var strip: some View {
         ThumbnailRow(items: thumbnails, library: controller.library, side: 72, spacing: 8,
-                     accessibility: (FreeUpThumbnails.label, FreeUpThumbnails.identifier)) { compare(pairs[$0]) }
+                     accessibility: (FreeUpThumbnails.label, FreeUpThumbnails.identifier),
+                     itemAccessibility: FreeUpThumbnails.accessibility(library: controller.library, count: pairs.count)) {
+            compare(pairs[$0])
+        }
     }
 
     private var thumbnails: [ThumbnailRow.Item] {
-        pairs.map { ThumbnailRow.Item(id: $0.original, photo: $0.compact, marked: true, selected: $0 == selected) }
+        FreeUpThumbnails.items(pairs, selected: selected)
     }
 
     // MARK: Checking
@@ -395,14 +431,16 @@ struct FreeUpSpacePanel: View {
     @ViewBuilder private var actions: some View {
         switch controller.removal {
         case .idle:
-            if !originals.isEmpty {
+            let approved = Set(originals)
+            let approvedCount = approved.count
+            if !approved.isEmpty {
                 VStack(spacing: 8) {
                     Button {
                         // Looked at (or not) before anything is removed: the answer is this tap.
                         if trial { settings.trialConfirmed = true }
-                        Task { await controller.freeUp(only: scope) }
+                        Task { await controller.freeUp(only: approved) }
                     } label: {
-                        Text((trial ? "They Look Right · " : "") + "Free Up \(count) Original\(count == 1 ? "" : "s")")
+                        Text((trial ? "They Look Right · " : "") + "Free Up \(approvedCount) Original\(approvedCount == 1 ? "" : "s")")
                             .frame(maxWidth: .infinity)
                     }
                     .primaryAction()

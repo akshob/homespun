@@ -66,6 +66,7 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
     private var actions: GridActions
     private var data = GridData()
     private var dataVersion = -1
+    private var contentVersion = 0
     private var accessoryInset: CGFloat
     private let layout = GridLayout()
     private var collectionView: UICollectionView!
@@ -167,6 +168,8 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         _ = counts.takeChangedSections()
         watchData()
         watchState()
+        contentVersion = library.contentVersion
+        watchContent()
         watchCounts()
         if PerfMonitor.shared.enabled {
             PerfMonitor.shared.blankProbe = { [weak self] in self?.blankCells() ?? (0, 0) }
@@ -361,6 +364,25 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                 guard let self else { return }
                 stateChanged()
                 watchState()
+            }
+        }
+    }
+
+    private func watchContent() {
+        withObservationTracking {
+            _ = library.contentVersion
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let changed = library.changedContent(since: contentVersion)
+                contentVersion = library.contentVersion
+                thumbnails.invalidate(changed)
+                for case let cell as GridCell in collectionView.visibleCells {
+                    guard let id = cell.item, changed.contains(id) else { continue }
+                    cell.invalidateImage()
+                    cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
+                }
+                watchContent()
             }
         }
     }

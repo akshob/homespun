@@ -45,17 +45,22 @@ final class ThumbnailLoader {
 
     /// Starts loading an item's thumbnail: `deliver` gets a quick one, then the sharp one.
     func request(_ id: String, deliver: @escaping @MainActor @Sendable (UIImage) -> Void) -> Request? {
+        let revision = library.contentRevision(id)
+        let guarded: @MainActor @Sendable (UIImage) -> Void = { [weak self] image in
+            guard self?.library.contentRevision(id) == revision else { return }
+            deliver(image)
+        }
         if let catalog {
             let side = pixels.width
-            return .catalog(Task { if let image = await catalog.thumbnail(id, side: side), !Task.isCancelled { deliver(image) } })
+            return .catalog(Task { if let image = await catalog.thumbnail(id, side: side), !Task.isCancelled { guarded(image) } })
         }
         guard let asset = asset(id) else { return nil }
         return .photos(manager.requestImage(for: asset, targetSize: pixels, contentMode: .aspectFill, options: Self.options()) { image, _ in
             guard let image else { return }
             if Thread.isMainThread {
-                MainActor.assumeIsolated { deliver(image) }
+                MainActor.assumeIsolated { guarded(image) }
             } else {
-                Task { @MainActor in deliver(image) }
+                Task { @MainActor in guarded(image) }
             }
         })
     }
@@ -86,6 +91,11 @@ final class ThumbnailLoader {
 
     func stopPreheatingAll() {
         stopPreheating(Array(cached.keys))
+    }
+
+    func invalidate(_ ids: Set<String>) {
+        stopPreheating(Array(ids))
+        for id in ids { assets[id] = nil }
     }
 
     private func asset(_ id: String) -> PHAsset? {

@@ -112,6 +112,11 @@ actor DemoServer {
     }
 
     let folder: URL
+    nonisolated let generation: String
+    nonisolated let clientSession: URLSession
+    private var retired = false
+    private var admitted = 0
+    private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
     /// How long its answers take, as a share of a server's on the Wi‑Fi (0 in tests).
     let pace: Double
     private var state: State
@@ -122,6 +127,9 @@ actor DemoServer {
 
     init(folder: URL, pace: Double = 1, bundledCompact: @escaping @Sendable (String) -> [ServerAPI.ResourceRole: URL]?) {
         self.folder = folder
+        let generation = UUID().uuidString
+        self.generation = generation
+        clientSession = Self.makeSession(generation: generation)
         self.pace = pace
         self.bundledCompact = bundledCompact
         let decoder = JSONDecoder()
@@ -146,7 +154,18 @@ actor DemoServer {
     // MARK: Answering
 
     func handle(method: String, url: URL, token: String?, body: Data) async -> Response {
+        guard !retired else { return Self.error(503, "This demo has ended.") }
+        admitted += 1
+        defer {
+            admitted -= 1
+            if admitted == 0 {
+                let waiters = retirementWaiters
+                retirementWaiters = []
+                waiters.forEach { $0.resume() }
+            }
+        }
         if pace > 0 { try? await Task.sleep(for: .seconds(Self.delay(method: method, path: url.path) * pace)) }
+        guard !retired, !Task.isCancelled else { return Self.error(503, "This demo has ended.") }
         let parts = url.path.split(separator: "/").map(String.init)
         guard parts.count >= 3, parts[0] == "api", parts[1] == "v1" else { return Self.error(404, "Not found.") }
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -157,6 +176,11 @@ actor DemoServer {
         } catch {
             return Self.error(400, "Homespun Demo couldn't read that request.")
         }
+    }
+
+    func stopAndWait() async {
+        retired = true
+        if admitted > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
     }
 
     private static func delay(method: String, path: String) -> Double {
@@ -697,11 +721,16 @@ actor DemoServer {
     }
 
     /// The session the demo's client uses: its protocol answers, so sessions copied from it reach the demo too.
-    static let session: URLSession = {
+    nonisolated static var session: URLSession { running.withLock { $0?.clientSession ?? offlineSession } }
+    private nonisolated static let offlineSession = makeSession(generation: nil)
+    nonisolated static let generationHeader = "X-Homespun-Demo-Generation"
+
+    private nonisolated static func makeSession(generation: String?) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DemoURLProtocol.self] + (configuration.protocolClasses ?? [])
+        if let generation { configuration.httpAdditionalHeaders = [generationHeader: generation] }
         return URLSession(configuration: configuration)
-    }()
+    }
 }
 
 /// Hands requests for the demo's server (`DemoServer.host`) to it, inside the app: through
@@ -718,9 +747,15 @@ final class DemoURLProtocol: URLProtocol, @unchecked Sendable {
         let body = Self.body(of: request)
         // The loader and its client, handed to the task that answers (URLProtocol predates Sendable).
         let loader = Unchecked(value: (protocol: self as URLProtocol, client: client))
+        let server = DemoServer.running.withLock { server -> DemoServer? in
+            guard let server else { return nil }
+            if let generation = request.value(forHTTPHeaderField: DemoServer.generationHeader),
+               generation != server.generation { return nil }
+            return server
+        }
         answering = Task {
             let answer: DemoServer.Response
-            if let server = DemoServer.running.withLock({ $0 }), let url = request.url {
+            if let server, let url = request.url {
                 let token = request.value(forHTTPHeaderField: "Authorization").map { String($0.dropFirst("Bearer ".count)) }
                 answer = await server.handle(method: request.httpMethod ?? "GET", url: url, token: token, body: body)
             } else {

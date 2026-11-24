@@ -3,7 +3,9 @@ import AVFoundation
 import Foundation
 import HomespunCore
 import HomespunTestSupport
+import Photos
 import Testing
+import UIKit
 @testable import Homespun
 
 /// The viewer's words, its one action, where Compare gets the original, and the split line.
@@ -280,6 +282,215 @@ import Testing
         try await Task.sleep(for: .seconds(1))
         #expect(abs(original.currentTime().seconds - compact.currentTime().seconds) < 0.1)
         #expect(pair.heard == .compact && original.isMuted && !compact.isMuted)
+    }
+
+    @Test func reviewKeepsOneNonFirstSelectionAndItsComparisonOwner() {
+        let pairs = (0..<3).map { FreeUpPair(original: "original-\($0)", compact: "copy-\($0)") }
+        let review = FreeUpReview()
+        review.reconcile(pairs)
+        review.path = [pairs[2]]
+        let comparison = review.comparison
+        comparison.mode = .original
+        comparison.split = 0.27
+        review.reconcile(pairs)
+        #expect(review.selected == pairs[2] && review.path == [pairs[2]])
+        #expect(review.comparison === comparison && comparison.mode == .original && comparison.split == 0.27)
+        review.path = []
+        #expect(review.selected == pairs[2])
+        review.showingComparison = true
+        #expect(review.path == [pairs[2]])
+        review.reconcile(Array(pairs.prefix(2)))
+        #expect(review.selected == pairs[0])
+    }
+
+    @Test func linkedZoomSurvivesResizeAndReplacementOfTheCanvas() {
+        let link = ZoomLink()
+        func canvas(_ size: CGSize) -> ZoomScrollView {
+            let view = ZoomScrollView(content: UIView())
+            view.aspect = CGSize(width: 1600, height: 1200)
+            link.add(view)
+            view.frame = CGRect(origin: .zero, size: size)
+            view.layoutIfNeeded()
+            return view
+        }
+        let original = canvas(CGSize(width: 600, height: 500))
+        original.apply(ZoomPosition(scale: 2, middle: CGPoint(x: 0.5, y: 0.55)))
+        let replacement = canvas(CGSize(width: 350, height: 400))
+        #expect(abs(replacement.zoomScale - 2) < 0.001)
+        #expect(abs(replacement.position.middle.y - 0.55) < 0.01)
+        replacement.frame.size = CGSize(width: 400, height: 350)
+        replacement.layoutIfNeeded()
+        #expect(abs(replacement.zoomScale - 2) < 0.001)
+        #expect(abs(replacement.position.middle.y - 0.55) < 0.01)
+    }
+
+    @MainActor private final class DelayedDetails {
+        private var value: CheckedContinuation<ItemDetails, Never>?
+        private var started: CheckedContinuation<Void, Never>?
+
+        func read() async -> ItemDetails {
+            await withCheckedContinuation {
+                value = $0
+                started?.resume()
+                started = nil
+            }
+        }
+
+        func waitForStart() async {
+            if value != nil { return }
+            await withCheckedContinuation { started = $0 }
+        }
+
+        func finish(_ bytes: Int) {
+            value?.resume(returning: ItemDetails(shown: MediaFacts(bytes: bytes)))
+            value = nil
+        }
+    }
+
+    @Test func inspectorClearsOldFactsAndRejectsLateResultsFromThePreviousItem() async {
+        let loader = ItemDetails.ItemDetailsLoader()
+        await loader.load(id: "first") { ItemDetails(shown: MediaFacts(bytes: 10)) }
+        let old = DelayedDetails(), new = DelayedDetails()
+        let older = Task { await loader.load(id: "first") { await old.read() } }
+        await old.waitForStart()
+        let newer = Task { await loader.load(id: "second") { await new.read() } }
+        await new.waitForStart()
+        #expect(loader.id == "second" && loader.details == nil)
+        new.finish(200)
+        await newer.value
+        old.finish(100)
+        await older.value
+        #expect(loader.id == "second" && loader.details?.shown.bytes == 200)
+    }
+
+    private final class RequestProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled: [Int32] = []
+        private var callback: (@Sendable (Int) -> Void)?
+        func cancel(_ id: Int32) { lock.withLock { cancelled.append(id) } }
+        var ids: [Int32] { lock.withLock { cancelled } }
+        func remember(_ callback: @escaping @Sendable (Int) -> Void) { lock.withLock { self.callback = callback } }
+        func complete(_ value: Int) {
+            let pending = lock.withLock { callback }
+            pending?(value)
+        }
+    }
+
+    @Test func photoRequestsResolveOnceAcrossEarlyCompletionAndCancellation() async {
+        let probe = RequestProbe()
+        let early = ItemMedia.PhotoRequest<Int>(cancelled: -1, cancel: { probe.cancel($0) })
+        let success = await withCheckedContinuation { continuation in
+            #expect(early.begin(continuation))
+            early.finish(7)
+            early.install(41)
+            early.cancel()
+            early.finish(8)
+        }
+        #expect(success == 7 && probe.ids.isEmpty)
+
+        let lateID = ItemMedia.PhotoRequest<Int>(cancelled: -1, cancel: { probe.cancel($0) })
+        let stopped = await withCheckedContinuation { continuation in
+            #expect(lateID.begin(continuation))
+            lateID.cancel()
+            lateID.install(42)
+            lateID.finish(9)
+        }
+        #expect(stopped == -1 && probe.ids == [42])
+
+        for _ in 0..<20 {
+            let pending = ItemMedia.PhotoRequest<Int>(cancelled: -1, cancel: { _ in })
+            let result = await withCheckedContinuation { continuation in
+                #expect(pending.begin(continuation))
+                pending.install(43)
+                DispatchQueue.concurrentPerform(iterations: 2) { index in
+                    if index == 0 { pending.finish(10) } else { pending.cancel() }
+                }
+            }
+            #expect(result == -1 || result == 10)
+        }
+    }
+
+    @Test func cancellingTheCallingTaskCancelsItsPhotoKitRequestAndIgnoresALateCallback() async {
+        let probe = RequestProbe()
+        let started = AsyncStream<Void>.makeStream()
+        let task = Task {
+            await ItemMedia.PhotoRequest<Int>.value(cancelled: -1, cancel: { probe.cancel($0) }) {
+                finish in
+                probe.remember(finish)
+                started.continuation.yield()
+                return 44
+            }
+        }
+        var iterator = started.stream.makeAsyncIterator()
+        _ = await iterator.next()
+        task.cancel()
+        #expect(await task.value == -1 && probe.ids == [44])
+        probe.complete(99)
+        started.continuation.finish()
+    }
+
+    @Test func nameDraftDoesNotReloadOverAnUnsavedEdit() {
+        let device = ServerAPI.DeviceInfo(id: "this", name: "Original", folder: "Original",
+                                          pairedAt: nil, lastSeenAt: nil, isThisDevice: true)
+        let draft = DeviceNameDraft()
+        draft.receive(device)
+        draft.name = "An unfinished name"
+        var reload = device
+        reload.name = "Server name"
+        draft.receive(reload)
+        #expect(draft.name == "An unfinished name" && draft.device == device && draft.wantsFocus)
+    }
+
+    private final class MemoryItem: LibraryItem {
+        let localIdentifier: String
+        let picture: UIImage
+        let creationDate: Date? = nil
+        let pixelWidth = 64
+        let pixelHeight = 64
+        let duration = 0.0
+        let isFavorite = false
+        let isHidden = false
+        let itemKind: PhotoLibrary.Kind? = .photo
+        let isEdited = false
+
+        init(_ id: String, _ picture: UIImage) {
+            localIdentifier = id
+            self.picture = picture
+        }
+
+        func mediaFacts() -> (main: MediaFacts, motion: Int?) { (MediaFacts(width: 64, height: 64), nil) }
+        @MainActor func image(size: CGSize?, fast: Bool) async -> UIImage? { picture }
+        @MainActor func livePhoto(size: CGSize) async -> PHLivePhoto? { nil }
+        @MainActor func playerItem() async -> Result<AVPlayerItem, Error> { .failure(CancellationError()) }
+        @MainActor func player() async -> AVPlayer? { nil }
+    }
+
+    @Test func sameIDContentEditRefreshesThePageAndOnlyItsCachedPlaceholder() async throws {
+        func picture(_ color: UIColor) -> UIImage {
+            UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64)).image { context in
+                color.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+            }
+        }
+        let original = MemoryItem("edited", picture(.red)), untouched = MemoryItem("untouched", picture(.green))
+        let edited = MemoryItem("edited", picture(.blue))
+        let images = ItemImages()
+        images.resize(CGSize(width: 64, height: 64))
+        images.keep(ids: ["edited", "untouched"], around: 0) { $0 == "edited" ? original : untouched }
+        try #require(await eventually { images.image("edited") != nil && images.image("untouched") != nil })
+        let neighbor = images.image("untouched")
+        let cell = PhotoPageCell(frame: CGRect(x: 0, y: 0, width: 64, height: 64))
+        cell.show(id: "edited", item: { original }, current: true, label: "Photo", placeholder: images.image("edited"),
+                  images: images, onZoom: { _ in })
+        let canvas = try #require(cell.contentView.subviews.compactMap { $0 as? ZoomScrollView }.first?.content as? PhotoContent)
+        try #require(await eventually { canvas.image != nil })
+        let oldPicture = canvas.image?.pngData()
+        images.invalidate(["edited"])
+        #expect(images.image("untouched") === neighbor)
+        images.keep(ids: ["edited", "untouched"], around: 0) { $0 == "edited" ? edited : untouched }
+        cell.show(id: "edited", item: { edited }, current: true, label: "Photo", placeholder: nil, images: images, onZoom: { _ in })
+        try #require(await eventually { canvas.image != nil && canvas.image?.pngData() != oldPicture })
+        #expect(images.image("untouched") === neighbor)
     }
 
     private func eventually(_ condition: () -> Bool) async -> Bool {

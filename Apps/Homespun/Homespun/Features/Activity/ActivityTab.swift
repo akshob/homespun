@@ -168,7 +168,10 @@ struct ActivityTab: View {
         let items = model.history.needsAttention
         guard !items.isEmpty else { return [] }
         let states = model.job.states, library = model.library.library.state
-        return items.filter { library.positions[$0.assetID] != nil && states[$0.assetID]?.isOpen != true }
+        return items.filter {
+            library.positions[$0.assetID] != nil && states[$0.assetID]?.isOpen != true
+                && !model.automatic.keptAsIs.contains($0.assetID)
+        }
     }
 }
 

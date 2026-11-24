@@ -51,6 +51,23 @@ struct ItemDetails: Equatable {
         return details
     }
 
+    @MainActor @Observable
+    final class ItemDetailsLoader {
+        private(set) var id: String?
+        private(set) var details: ItemDetails?
+        private var generation = 0
+
+        func load(id: String, read: @MainActor () async -> ItemDetails) async {
+            generation &+= 1
+            let mine = generation
+            self.id = id
+            details = nil
+            let loaded = await read()
+            guard !Task.isCancelled, generation == mine, self.id == id else { return }
+            details = loaded
+        }
+    }
+
     /// Under Sizes: where the motion was compressed and what freeing up saves.
     func footer(server: String, backedUp: Bool) -> String? {
         var parts: [String] = []
@@ -72,7 +89,8 @@ struct ItemDetailsSheet: View {
     /// Closes it: an inspector (a column on the open iPhone Duo, a sheet on a phone) isn't dismissed
     /// like a sheet (`dismiss` there would leave the item).
     var close: (() -> Void)?
-    @State private var details: ItemDetails?
+    @State private var loader = ItemDetails.ItemDetailsLoader()
+    @State private var decisionProblem: String?
     @Environment(\.dismiss) private var dismiss
 
     private func done() {
@@ -86,13 +104,14 @@ struct ItemDetailsSheet: View {
     private var server: String { model.library.serverName }
     private var immich: Bool { model.settings.server?.mode == .immich }
     private var backedUp: Bool { cell.original != nil }
+    private var details: ItemDetails? { loader.id == cell.id ? loader.details : nil }
 
     private var problem: Problem? {
         switch job {
         case .failed(let message)?: .failed(message)
         case .unchanged(let message)?: .kept(message)
         case .notYet(let message)? where cell.badge == .none: .notYet(message)
-        default: nil
+        default: model.automatic.keptAsIs.contains(cell.id) ? .kept(LibraryController.keptAsIsReason) : nil
         }
     }
 
@@ -112,7 +131,10 @@ struct ItemDetailsSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .task { details = await ItemDetails.load(model: model, cell: cell) }
+        .task(id: cell.id) {
+            decisionProblem = nil
+            await loader.load(id: cell.id) { await ItemDetails.load(model: model, cell: cell) }
+        }
     }
 
     // MARK: Where it is, and sizes
@@ -207,12 +229,22 @@ struct ItemDetailsSheet: View {
                     card("exclamationmark.triangle.fill", Theme.red, "Couldn't back up", message, spokenTone: "Problem")
                     tryAgain(blocked)
                     Button("Keep As Is") {
-                        model.automatic.keepAsIs(cell.id)
-                        done()
+                        Task {
+                            if await model.library.keepAsIs(cell.id) {
+                                done()
+                            } else {
+                                decisionProblem = model.library.keepProblem
+                                    ?? "This item's state changed. Close Details to see its current status."
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity)
-                    .accessibilityHint("Homespun stops trying to back it up. The original stays on this iPhone.")
+                    .accessibilityHint("Resolves this attention item and skips automatic retries. Nothing is removed. Make Compact Copy can try again.")
                     .accessibilityIdentifier("details.keep")
+                    Text("This clears its current attention state and skips automatic retries. Nothing is removed; "
+                         + "Make Compact Copy can try again.")
+                        .font(.footnote).foregroundStyle(Theme.secondaryLabel)
+                    if let decisionProblem { Text(decisionProblem).foregroundStyle(Theme.red) }
                 case .kept(let message):
                     card("equal.circle", Theme.secondaryLabel, "Kept as is", message, spokenTone: nil)
                 case .notYet(let message):

@@ -20,6 +20,7 @@ final class GridCell: UICollectionViewCell {
     private var request: GridThumbnails.Request?
     /// The picture shown is the sharp one (not Photos' quick first one).
     private var sharp = false
+    private var revision = 0
     private weak var loader: GridThumbnails?
     private var pixels: CGFloat = 0
     private var info: MediaInfo?
@@ -56,7 +57,8 @@ final class GridCell: UICollectionViewCell {
     /// Shows an item: its picture (asked for if it's another item or another size), then its state.
     func show(_ item: String, info: MediaInfo?, loader: GridThumbnails, pixels: CGFloat, keepImage: Bool = false) {
         self.info = info
-        if item != self.item || pixels != self.pixels || request == nil && !sharp {
+        let revision = loader.revision(item)
+        if item != self.item || pixels != self.pixels || revision != self.revision || request == nil && !sharp {
             if item != self.item, !keepImage {
                 // Another item's picture never stays on: blank until this one's arrives (a new size
                 // keeps the old picture meanwhile).
@@ -67,6 +69,7 @@ final class GridCell: UICollectionViewCell {
             cancelRequest()
             self.item = item
             self.pixels = pixels
+            self.revision = revision
             self.loader = loader
             sharp = false
             request = loader.request(item, pixels: pixels) { [weak self] image, final in
@@ -174,6 +177,11 @@ final class GridCell: UICollectionViewCell {
     private func cancelRequest() {
         if let request { loader?.cancel(request) }
         request = nil
+    }
+
+    func invalidateImage() {
+        cancelRequest()
+        sharp = false
     }
 
     private static let dateStyle = Date.FormatStyle(date: .abbreviated, time: .shortened)

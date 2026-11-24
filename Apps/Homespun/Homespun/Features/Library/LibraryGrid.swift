@@ -40,7 +40,7 @@ enum Badge: Equatable, Sendable {
         case .compactCopy: "A Homespun compact copy."
         case .waiting: "Waiting to be backed up."
         case .working: "Being backed up."
-        case .kept: "Kept as is: it couldn't be made smaller, so the original stays."
+        case .kept: "Kept as is: the original stays on this iPhone. See Details for why."
         case .failed: "Something needs your attention. See Activity."
         case .copyLater: "The original is safe at home. Its compact copy comes once it's older, so photos you delete "
             + "before then never come back."
@@ -419,7 +419,23 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private var library: [String] = []
     @ObservationIgnored private var album = Set<String>()
     @ObservationIgnored private var observing = false
+    @ObservationIgnored private var retired = false
+    @ObservationIgnored private var catalogObservation: CatalogObservation?
     @ObservationIgnored private var changedIDs: Set<String>? = []
+    private(set) var contentVersion = 0
+    @ObservationIgnored private var contentRevisions: [String: Int] = [:]
+
+    func changedContent(since version: Int) -> Set<String> {
+        Set(contentRevisions.compactMap { $0.value > version ? $0.key : nil })
+    }
+
+    func contentRevision(_ id: String) -> Int { contentRevisions[id, default: 0] }
+
+    func invalidateContent(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        contentVersion &+= 1
+        for id in ids { contentRevisions[id] = contentVersion }
+    }
 
     func takeChangedIDs() -> Set<String>? {
         defer { changedIDs = [] }
@@ -491,6 +507,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     /// Reads the whole library (at launch, or when access changes) in the background.
     func reload() async {
+        guard !retired else { return }
         if let catalog {
             await read(catalog)
             return
@@ -549,16 +566,38 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     private func read(_ catalog: any ItemCatalog) async {
         if !observing {
             observing = true
-            catalog.observe { [weak self] in Task { @MainActor in await self?.readAgain(catalog) } }
+            catalogObservation = catalog.observe { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self, let catalog = self.catalog else { return }
+                    await self.readAgain(catalog)
+                }
+            }
         }
+
         let contents = await Task.detached(priority: .userInitiated) { catalog.contents() }.value
         apply(contents)
         libraryRead = true
         await rebuild()
     }
 
+    func stopObserving() {
+        retired = true
+        generation &+= 1
+        building?.cancel()
+        catalogObservation?.cancel()
+        catalogObservation = nil
+        if observing, catalog == nil { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
+        observing = false
+    }
+
+    isolated deinit {
+        if observing, catalog == nil { PHPhotoLibrary.shared().unregisterChangeObserver(self) }
+    }
+
     private func readAgain(_ catalog: any ItemCatalog) async {
+        guard !retired else { return }
         let contents = await Task.detached(priority: .userInitiated) { catalog.contents() }.value
+        guard !retired else { return }
         apply(contents)
         changedContents()
     }
@@ -666,6 +705,8 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         var changed = false
         if let assets, let details = change.changeDetails(for: assets) {
             let after = details.fetchResultAfterChanges
+            invalidateContent(Set(details.changedObjects.map(\.localIdentifier)))
+            mediaCache = [:]
             if !rereading, let ids = Self.applying(details, to: library) {
                 setAssets(after, ids: ids)
                 var monthsChanged = false
@@ -706,6 +747,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// The badges follow, once for a batch of imports or removals (they send many changes), and
     /// the snapshot for the next launch is written.
     private func changedContents() {
+        guard !retired else { return }
         saveSnapshot()
         onChange?()
     }

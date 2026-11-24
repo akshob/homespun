@@ -54,7 +54,7 @@ struct PairPage: View {
         .task(id: attempt) { await run() }
         .onDisappear(perform: withdraw)
         .sheet(isPresented: $scanning) {
-            ScanPage { link in
+            ScanPage(permissionsAllowed: !flow.settings.isDemo) { link in
                 scanning = false
                 // After the scanner's sheet has gone, so the confirmation can be presented.
                 Task {
@@ -237,7 +237,7 @@ struct PairPage: View {
                 Text("Codes work once, for 10 minutes after you run the command, or 2 minutes after the first check.")
                     .font(.footnote).foregroundStyle(Theme.secondaryLabel).padding(.horizontal, 16)
             }
-            if PairingScanner.isSupported {
+            if !flow.settings.isDemo, PairingScanner.isSupported {
                 SecondaryButton(title: "Scan the QR Code Instead", systemImage: "qrcode.viewfinder", id: "pair.scan") {
                     scanning = true
                 }

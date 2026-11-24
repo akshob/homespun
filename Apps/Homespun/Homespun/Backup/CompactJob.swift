@@ -89,6 +89,9 @@ final class CompactJob {
     @ObservationIgnored private var phaseChanges: [String: State?] = [:]
     /// The item being worked on, so progress messages find it without searching every item.
     @ObservationIgnored private var current: (id: UUID, index: Int)?
+    @ObservationIgnored private var runner: Task<Void, Never>?
+    @ObservationIgnored private var retired = false
+    @ObservationIgnored private var preparationWaiters: [CheckedContinuation<Void, Never>] = []
     private(set) var isRunning = false
     /// Paused between items: the item being worked on finishes, the rest wait (Activity 2.1).
     private(set) var isPaused = false
@@ -100,10 +103,12 @@ final class CompactJob {
     var history: RunHistory?
     let settings: AppSettings
     let ledger: CompactLedger
+    private let suppliedCompactor: (any Compacting)?
 
-    init(settings: AppSettings, ledger: CompactLedger = CompactLedger()) {
+    init(settings: AppSettings, ledger: CompactLedger = CompactLedger(), compactor: (any Compacting)? = nil) {
         self.settings = settings
         self.ledger = ledger
+        suppliedCompactor = compactor
     }
 
     /// The items whose phase changed since the last call (nil: no longer in the job), latest state each.
@@ -186,6 +191,7 @@ final class CompactJob {
     /// Without a `trigger`, items picked during setup count as the first task, later ones as manual.
     /// `backUpOnly`: of these, the recent items automatic mode backs up now and compacts later.
     func enqueue(_ assetIdentifiers: [String], trigger: RunHistory.Trigger? = nil, backUpOnly: Set<String> = []) async {
+        guard !retired else { return }
         let trigger = trigger ?? (settings.onboardingComplete ? .manual : .firstTask)
         let wanted = assetIdentifiers.filter { states[$0]?.isOpen != true }
         guard !wanted.isEmpty else { return }
@@ -195,12 +201,17 @@ final class CompactJob {
             Self.prepare(wanted, trigger: trigger, backUpOnly: backUpOnly, photos: photos)
         }.value
         preparing -= 1
+        if preparing == 0 {
+            let waiters = preparationWaiters
+            preparationWaiters = []
+            waiters.forEach { $0.resume() }
+        }
         let stopped = stoppedWhilePreparing, dropped = droppedWhilePreparing
         if preparing == 0 {
             stoppedWhilePreparing = false
             droppedWhilePreparing = []
         }
-        guard !stopped else { return }
+        guard !stopped, !retired else { return }
         // Queued meanwhile by another pick: once is enough.
         let added = prepared.filter { states[$0.assetIdentifier]?.isOpen != true && !dropped.contains($0.assetIdentifier) }
         guard !added.isEmpty else { return }
@@ -221,7 +232,7 @@ final class CompactJob {
         bumpPhase()
         if !isRunning {
             isRunning = true
-            Task { await run() }
+            runner = Task { await run() }
         }
     }
 
@@ -272,6 +283,19 @@ final class CompactJob {
         bumpPhase()
     }
 
+    /// Rejects new work immediately. The current item finishes its admitted side effects.
+    func retire() {
+        retired = true
+        stop()
+    }
+
+    /// A lifetime boundary, unlike Stop: no admitted writer remains when this returns.
+    func stopAndWait() async {
+        retire()
+        await runner?.value
+        if preparing > 0 { await withCheckedContinuation { preparationWaiters.append($0) } }
+    }
+
     func pause() {
         guard isRunning else { return }
         isPaused = true
@@ -293,6 +317,15 @@ final class CompactJob {
             }
         }
         resync()
+    }
+
+    /// Projects the person's Keep As Is decision into the current attention state.
+    @discardableResult
+    func resolveFailure(_ identifier: String) -> Bool {
+        guard case .failed? = states[identifier],
+              let index = items.lastIndex(where: { $0.assetIdentifier == identifier }) else { return false }
+        setState(index, .unchanged(AutomaticMode.keptAsIsReason))
+        return true
     }
 
     private func run() async {
@@ -322,7 +355,7 @@ final class CompactJob {
             runProgress.current = .init(asset: items[index].assetIdentifier, name: items[index].name)
             let state: State
             do {
-                guard let compactor = settings.compactor(ledger: ledger) else {
+                guard let compactor = suppliedCompactor ?? settings.compactor(ledger: ledger) else {
                     throw ServerClient.Failure(status: 0, message: "Connect your Homespun Server first.")
                 }
                 let asset = items[index].assetIdentifier, compactNow = !items[index].backUpOnly

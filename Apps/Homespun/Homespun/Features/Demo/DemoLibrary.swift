@@ -104,12 +104,13 @@ final class DemoItem: LibraryItem, Sendable {
 
     @MainActor func livePhoto(size: CGSize) async -> PHLivePhoto? {
         guard let motion else { return nil }
-        return await withCheckedContinuation { continuation in
-            let once = Once(continuation)
+        return await ItemMedia.PhotoRequest<Unchecked<PHLivePhoto?>>.value(
+            cancelled: Unchecked(value: nil), cancel: { PHLivePhoto.cancelRequest(withRequestID: $0) }
+        ) { finish in
             PHLivePhoto.request(withResourceFileURLs: [files[.photo] ?? main, motion], placeholderImage: nil, targetSize: size,
                                 contentMode: .aspectFit) { photo, info in
                 if (info[PHLivePhotoInfoIsDegradedKey] as? Bool) == true, photo != nil { return }
-                once.resume(Unchecked(value: photo))
+                finish(Unchecked(value: photo))
             }
         }.value
     }
@@ -117,26 +118,13 @@ final class DemoItem: LibraryItem, Sendable {
     @MainActor func player() async -> AVPlayer? { AVPlayer(url: main) }
     @MainActor func playerItem() async -> Result<AVPlayerItem, Error> { .success(AVPlayerItem(url: main)) }
 
-    /// Resumes a continuation once, whatever calls it first.
-    private final class Once: @unchecked Sendable {
-        private let lock = NSLock()
-        private var continuation: CheckedContinuation<Unchecked<PHLivePhoto?>, Never>?
-        init(_ continuation: CheckedContinuation<Unchecked<PHLivePhoto?>, Never>) { self.continuation = continuation }
-
-        func resume(_ value: Unchecked<PHLivePhoto?>) {
-            lock.lock()
-            let pending = continuation
-            continuation = nil
-            lock.unlock()
-            pending?.resume(returning: value)
-        }
-    }
 }
 
 /// Pictures of the demo's items, decoded off the main thread a couple at a time (so a screen of them
 /// never starves the app) and kept for a while.
 enum DemoPictures {
     private static let decoding = Limiter(2)
+    private static let generation = Mutex(0)
     nonisolated(unsafe) private static let cache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.totalCostLimit = 64 << 20
@@ -145,6 +133,7 @@ enum DemoPictures {
 
     /// `file`: the item's own (a video's first frame), or its grid picture.
     static func image(of item: DemoItem, maxEdge: Int, from file: URL) async -> UIImage? {
+        let mine = generation.withLock { $0 }
         let key = "\(file.path)@\(maxEdge)" as NSString
         if let cached = cache.object(forKey: key) { return cached }
         let main = file, video = file.pathExtension.uppercased() == "MOV"
@@ -168,11 +157,20 @@ enum DemoPictures {
             }
             return picture.map(UIImage.init(cgImage:))
         }.value
-        if let image { cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4)) }
+        generation.withLock { current in
+            if current == mine, let image {
+                cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4))
+            }
+        }
         return image
     }
 
-    static func forget() { cache.removeAllObjects() }
+    static func forget() {
+        generation.withLock {
+            $0 &+= 1
+            cache.removeAllObjects()
+        }
+    }
 
     /// At most `count` at once; the rest wait their turn.
     actor Limiter {
@@ -227,10 +225,21 @@ final class DemoLibrary: ItemCatalog, Sendable {
     let samples: [DemoSample]
     private let media: URL
     private let state: Mutex<State>
-    private let observers = Mutex<[@Sendable () -> Void]>([])
+    private let observers = Mutex<[UUID: @Sendable () -> Void]>([:])
     private let ask: @Sendable (Question) async -> Bool
     /// Each sample's main file's SHA-256, worked out when first needed.
     private let hashes = Mutex<[String: String]?>(nil)
+    private let retired = Mutex(false)
+    var isRetired: Bool { retired.withLock { $0 } }
+
+    func retire() { retired.withLock { $0 = true } }
+
+    func whileActive<Value>(_ body: () throws -> Value) throws -> Value {
+        try retired.withLock {
+            guard !$0 else { throw CancellationError() }
+            return try body()
+        }
+    }
 
     init(folder: URL, media: URL, ask: @escaping @Sendable (Question) async -> Bool) {
         self.folder = folder
@@ -243,17 +252,27 @@ final class DemoLibrary: ItemCatalog, Sendable {
 
     var snapshot: State { state.withLock { $0 } }
 
-    private func change(_ body: (inout State) -> Void) {
-        let saved = state.withLock { state -> State in
-            body(&state)
-            return state
+    @discardableResult
+    private func change(_ body: (inout State) -> Void) -> Bool {
+        let changed = retired.withLock { retired -> Bool in
+            guard !retired else { return false }
+            let saved = state.withLock { state -> State in
+                body(&state)
+                return state
+            }
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? JSONEncoder().encode(saved).write(to: folder.appendingPathComponent("library.json"), options: .atomic)
+            return true
         }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        try? JSONEncoder().encode(saved).write(to: folder.appendingPathComponent("library.json"), options: .atomic)
-        for observer in observers.withLock({ $0 }) { observer() }
+        if changed { for observer in observers.withLock({ Array($0.values) }) { observer() } }
+        return changed
     }
 
-    func observe(_ changed: @escaping @Sendable () -> Void) { observers.withLock { $0.append(changed) } }
+    func observe(_ changed: @escaping @Sendable () -> Void) -> CatalogObservation {
+        let id = UUID()
+        observers.withLock { $0[id] = changed }
+        return CatalogObservation { [weak self] in self?.observers.withLock { $0[id] = nil } }
+    }
 
     // MARK: Items
 
@@ -308,6 +327,7 @@ final class DemoLibrary: ItemCatalog, Sendable {
 
     /// Saves a compact copy of `original` from these downloaded files (moved into the library).
     func addCompactCopy(of original: String, files: [ServerAPI.ResourceRole: URL]) async throws -> String {
+        guard !isRetired else { throw CancellationError() }
         let number = state.withLock { state -> Int in
             state.made += 1
             return state.made
@@ -324,14 +344,15 @@ final class DemoLibrary: ItemCatalog, Sendable {
         }
         let main = place.appendingPathComponent(((files[.video] ?? files[.photo])?.lastPathComponent) ?? "")
         let size = await Self.dimensions(of: main)
-        change { $0.copies[id] = Copy(id: id, original: original, files: names, width: size.width, height: size.height) }
+        guard change({ $0.copies[id] = Copy(id: id, original: original, files: names, width: size.width, height: size.height) })
+        else { throw CancellationError() }
         return id
     }
 
     /// Brings a freed-up original back (Restore Original); it keeps its identifier.
     func restore(_ original: String) -> String? {
         guard sample(original) != nil else { return nil }
-        change { $0.removed.remove(original) }
+        guard change({ $0.removed.remove(original) }) else { return nil }
         return original
     }
 
@@ -402,17 +423,19 @@ final class DemoLibrary: ItemCatalog, Sendable {
     /// Asks as iOS would (saying it's pretend), then takes the items out of the demo's library. Saying
     /// no throws, as Photos does.
     func delete(_ ids: [String]) async throws {
+        guard !isRetired else { throw CancellationError() }
         let items = ids.compactMap(demoItem)
         guard !items.isEmpty else { return }
         guard await ask(Self.question(deleting: items)) else { throw PHPhotosError(.userCancelled) }
         let gone = Set(items.map(\.localIdentifier))
-        change { state in
+        let changed = change { state in
             for id in gone {
                 if let copy = state.copies.removeValue(forKey: id) {
                     for file in copy.files.values { try? FileManager.default.removeItem(at: self.folder.appendingPathComponent(file)) }
                 } else {
                     state.removed.insert(id)
                 }
+                if !changed { throw CancellationError() }
             }
         }
     }

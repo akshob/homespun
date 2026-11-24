@@ -209,10 +209,15 @@ struct LibraryView: View, Equatable {
 
     /// What `top` says, so the grid draws and measures it again only when that changes.
     private var topKey: String {
-        let notice = controller.access == .limited ? "limited" : !settings.isPaired ? "setup" : ""
+        let notice = Self.noticeKey(problem: settings.connectionProblem, limited: controller.access == .limited,
+                                    paired: settings.isPaired)
         let empty = !store.isEmpty ? "" : controller.library.count == 0 ? "none"
             : filter == .notBackedUp && media == .all ? "done.\(controller.serverName)" : "nothing.\(filter.rawValue)"
         return [notice, empty].filter { !$0.isEmpty }.joined(separator: " ")
+    }
+
+    static func noticeKey(problem: String?, limited: Bool, paired: Bool) -> String {
+        problem.map { "connection.\($0)" } ?? (limited ? "limited" : !paired ? "setup" : "")
     }
 
     /// Grid Size and pinching: timed from here to the new grid on screen.

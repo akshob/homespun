@@ -250,7 +250,7 @@ final class DemoModeUITests: XCTestCase {
         attach("Preparing")
         app.buttons["demo.prepare.cancel"].tap()
         XCTAssertTrue(preparing.waitForNonExistence(timeout: 10))
-        XCTAssertTrue(demo.exists && demo.isEnabled, "Cancel didn't return to Welcome")
+        XCTAssertTrue(demo.exists && demo.wait(for: \.isEnabled, toEqual: true, timeout: 15), "Cancel didn't return to Welcome")
         XCTAssertFalse(app.buttons["demo.menu"].exists, "Cancel started the demo")
 
         demo.tap()
