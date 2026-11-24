@@ -143,16 +143,25 @@ enum ProcessRunner {
         // The parent must not keep an extra write end open while waiting for EOF.
         try? output.fileHandleForWriting.close()
         try? errors.fileHandleForWriting.close()
+        // A synchronous caller may occupy every cooperative worker. Joining future
+        // work on a shared Dispatch root queue can then deadlock even after tool exit.
+        // Each blocking pipe reader needs its own independently scheduled thread.
         drains.enter()
-        DispatchQueue.global(qos: .utility).async {
+        let outputReader = Thread {
+            defer { drains.leave() }
             stdout.read(output.fileHandleForReading, limit: max(0, outputLimit), tail: false,
                         onOverflow: { cancellation.cancel() })
-            drains.leave()
         }
         drains.enter()
-        DispatchQueue.global(qos: .utility).async {
+        let errorReader = Thread {
+            defer { drains.leave() }
             stderr.read(errors.fileHandleForReading, limit: maximumDiagnosticBytes, tail: true)
-            drains.leave()
+        }
+        outputReader.name = "photos.homespun.process.stdout"
+        errorReader.name = "photos.homespun.process.stderr"
+        for reader in [outputReader, errorReader] {
+            reader.qualityOfService = .utility
+            reader.start()
         }
         process.waitUntilExit()
         cancellation.finish()
