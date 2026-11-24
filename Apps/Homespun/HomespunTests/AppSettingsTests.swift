@@ -6,6 +6,51 @@ import Testing
 @testable import Homespun
 
 @MainActor @Suite(.serialized) struct AppSettingsTests {
+    @Test func workspaceConfigurationRejectsCoercionInsteadOfUsingMeasuredDefaults() {
+        let invalid: [Any] = [
+            NSNumber(value: true), NSNumber(value: false), NSNumber(value: 1.5), NSNumber(value: Float(-2.5)),
+            NSNumber(value: Double.leastNonzeroMagnitude), NSNumber(value: Double(1).nextUp), NSNumber(value: Double.nan),
+            NSNumber(value: Double.infinity), NSNumber(value: -Double.infinity),
+            NSNumber(value: Double(Int64.max)), NSNumber(value: Double(Int64.min).nextDown),
+            NSNumber(value: UInt64.max), NSDecimalNumber.notANumber, NSDecimalNumber(string: "9223372036854775808"),
+            NSDecimalNumber(string: "-9223372036854775809"), NSDecimalNumber(string: "9007199254740992.5"),
+            "3",
+        ]
+        for key in ["backupWorkspaceBytes", "backupMinimumAvailableBytes", "backupFinalizationReserveBytes", "backupMaximumTransfers"] {
+            for value in invalid {
+                #expect(throws: BackupSpaceFailure.invalidPolicy) {
+                    try AppSettings.backupSpacePolicy(available: 8_192, configuredValue: { $0 == key ? value : nil })
+                }
+            }
+        }
+    }
+
+    @Test func workspaceConfigurationPreservesExactIntegersAndDefaultsOnlyForAbsentValues() throws {
+        let available: Int64 = 8_192
+        let derived = try AppSettings.backupSpacePolicy(available: available, configuredValue: { _ in nil })
+        #expect(derived.maximumTransientBytes == available / 4)
+        #expect(derived.minimumAvailableBytes == available / 8)
+        #expect(derived.finalizationReserveBytes == derived.maximumTransientBytes / 4)
+        let values: [String: NSNumber] = [
+            "backupWorkspaceBytes": NSNumber(value: Int64.max),
+            "backupMinimumAvailableBytes": NSNumber(value: Double(0)),
+            "backupFinalizationReserveBytes": NSNumber(value: Float(0)),
+            "backupMaximumTransfers": NSNumber(value: Double(3)),
+        ]
+        let configured = try AppSettings.backupSpacePolicy(available: available, configuredValue: { values[$0] })
+        #expect(configured.maximumTransientBytes == Int64.max && configured.minimumAvailableBytes == 0)
+        #expect(configured.finalizationReserveBytes == 0 && configured.maximumTransfers == 3)
+        let decimal = try AppSettings.backupSpacePolicy(available: available, configuredValue: {
+            $0 == "backupWorkspaceBytes" ? NSDecimalNumber(string: "9223372036854775807") : nil
+        })
+        #expect(decimal.maximumTransientBytes == Int64.max)
+        #expect(throws: BackupSpaceFailure.invalidPolicy) {
+            try AppSettings.backupSpacePolicy(available: available, configuredValue: {
+                $0 == "backupMaximumTransfers" ? NSNumber(value: 129) : nil
+            })
+        }
+    }
+
     @Test(arguments: [errSecSuccess, errSecItemNotFound])
     func legacyReviewCodeCleanupRunsOnlyOnce(_ status: OSStatus) {
         let name = "keychain-cleanup-\(UUID().uuidString)"
