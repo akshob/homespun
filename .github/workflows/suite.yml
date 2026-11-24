@@ -29,7 +29,11 @@ jobs:
     name: Server (Linux)
     if: inputs.server
     runs-on: ubuntu-24.04
-    container: swift:6.3-noble
+    container:
+      image: swift:6.3-noble
+      # Temporary diagnostic permission: only this hosted container's owned test process.
+      # Keep the default seccomp profile and PID namespace; never use --privileged.
+      options: --cap-add=SYS_PTRACE
     timeout-minutes: 45
     env:
       # The server notices it's in a container (/.dockerenv) and acts like a Docker install; the tests

@@ -4,6 +4,7 @@ import shutil
 import signal
 import unittest
 from unittest.mock import patch
+from unittest.mock import Mock, call
 from uuid import uuid4
 
 import server_runtime_diagnostics as diagnostics
@@ -41,6 +42,39 @@ class ServerRuntimeDiagnosticsTests(unittest.TestCase):
             process.send(signal.SIGQUIT)
         send.assert_called_once_with(11, signal.SIGQUIT, None, 0)
         numeric.assert_not_called()
+
+    def test_native_probe_does_not_attach_after_the_owned_target_exits(self):
+        root = Path(__file__).resolve().parents[1] / "ci-results" / f"runtime-test-{uuid4().hex}"
+        root.mkdir(parents=True)
+        target = Mock(pid=123)
+        target.alive.return_value = False
+        try:
+            with patch.object(diagnostics.shutil, "which", return_value="/usr/bin/lldb"), \
+                 patch.object(diagnostics.subprocess, "Popen") as launch:
+                diagnostics.native_stacks(target, root / "lldb.txt", float("inf"))
+            launch.assert_not_called()
+            self.assertEqual(target.send.call_args_list, [call(signal.SIGSTOP), call(signal.SIGCONT)])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_failed_debugger_acquisition_is_joined_and_the_target_is_resumed(self):
+        root = Path(__file__).resolve().parents[1] / "ci-results" / f"runtime-test-{uuid4().hex}"
+        root.mkdir(parents=True)
+        target = Mock(pid=123)
+        target.alive.return_value = True
+        debugger = Mock()
+        try:
+            with patch.object(diagnostics.shutil, "which", return_value="/usr/bin/lldb"), \
+                 patch.object(diagnostics, "read_at", return_value="State:\tT (stopped)\n"), \
+                 patch.object(diagnostics.subprocess, "Popen", return_value=debugger), \
+                 patch.object(diagnostics, "OwnedTree", side_effect=RuntimeError("synthetic capture failure")):
+                with self.assertRaises(RuntimeError):
+                    diagnostics.native_stacks(target, root / "lldb.txt", float("inf"))
+            debugger.kill.assert_called_once()
+            debugger.wait.assert_called_once_with(timeout=1)
+            self.assertEqual(target.send.call_args_list, [call(signal.SIGSTOP), call(signal.SIGCONT)])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_focused_timeout_does_not_skip_the_real_full_suite_or_pass_the_job(self):
         root = Path(__file__).resolve().parents[1] / "ci-results" / f"runtime-test-{uuid4().hex}"
