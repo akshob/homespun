@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import CoreFoundation
 import Foundation
 import HomespunCore
 import Observation
@@ -204,25 +205,52 @@ final class AppSettings {
         return nil
     }
 
-    /// Defaults derive from the device's measured available space, not an unlimited selection.
-    /// The primitive re-measures actual capacity at every reservation. These remain user-overridable.
+    /// These measured-capacity defaults are unvalidated production policy, not physical bounds.
+    /// The reservation primitive re-measures capacity; absent overrides alone use these defaults.
     func backupSpacePolicy(store: BackupStore) async throws -> BackupSpacePolicy {
         try await store.open()
         let files = store.files
         let observation = try await Task.detached { try files.spaceObservation() }.value
         guard let available = observation.availableBytes, available > 0 else { throw BackupSpaceFailure.capacityUnavailable }
+        return try Self.backupSpacePolicy(available: available, configuredValue: { defaults.object(forKey: $0) })
+    }
+
+    static func backupSpacePolicy(available: Int64, configuredValue: (String) -> Any?) throws -> BackupSpacePolicy {
+        guard available > 0 else { throw BackupSpaceFailure.capacityUnavailable }
         func configured(_ key: String, fallback: Int64) throws -> Int64 {
-            guard let raw = defaults.object(forKey: key) else { return fallback }
-            guard let number = raw as? NSNumber else { throw BackupSpaceFailure.invalidPolicy }
-            return number.int64Value
+            guard let raw = configuredValue(key) else { return fallback }
+            return try backupSpaceInteger(raw)
         }
         let maximum = try configured("backupWorkspaceBytes", fallback: max(1, available / 4))
         let minimum = try configured("backupMinimumAvailableBytes", fallback: available / 8)
         let finalization = try configured("backupFinalizationReserveBytes", fallback: maximum / 4)
         let transfers = try configured("backupMaximumTransfers", fallback: 3)
-        guard let maximumTransfers = Int(exactly: transfers) else { throw BackupSpaceFailure.invalidPolicy }
+        guard maximum > 0, minimum >= 0, finalization >= 0, (1...128).contains(transfers),
+              let maximumTransfers = Int(exactly: transfers) else { throw BackupSpaceFailure.invalidPolicy }
         return .init(maximumTransientBytes: maximum, minimumAvailableBytes: minimum,
                      finalizationReserveBytes: finalization, maximumTransfers: maximumTransfers)
+    }
+
+    private nonisolated static func backupSpaceInteger(_ raw: Any) throws -> Int64 {
+        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            throw BackupSpaceFailure.invalidPolicy
+        }
+        // Decimal fractions must not become integers by rounding through Double.
+        if number is NSDecimalNumber {
+            guard let integer = Int64(number.stringValue) else { throw BackupSpaceFailure.invalidPolicy }
+            return integer
+        }
+        switch String(cString: number.objCType) {
+        case "f", "d":
+            let value = number.doubleValue
+            guard value.isFinite, let integer = Int64(exactly: value) else { throw BackupSpaceFailure.invalidPolicy }
+            return integer
+        case "c", "s", "i", "l", "q", "C", "S", "I", "L", "Q":
+            guard let integer = Int64(number.stringValue) else { throw BackupSpaceFailure.invalidPolicy }
+            return integer
+        default:
+            throw BackupSpaceFailure.invalidPolicy
+        }
     }
 
     var client: ServerClient? {
