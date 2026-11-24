@@ -30,9 +30,12 @@ temporary instrumentation after the root cause has been established and validate
 
 For the separate Apple-runtime investigation, macOS package tests build first, then run the
 unfiltered suite through `apple_runtime_diagnostics.py package` with a five-minute failing ceiling
-(the job still has its original 45-minute limit). An owned `xctest`/package-test child is sampled by
+(the job still has its original 45-minute limit). An owned `xctest`/package-test child, including
+Swift Testing's `swiftpm-testing-helper` bundle loader, is sampled by
 `/usr/bin/sample <pid> 2 10` before cleanup; `package-results-<run>` keeps `package.log` and
-`ci-results/apple-runtime/package/`. On a failed `ui.sh` run only, before stopping the test server
+`ci-results/apple-runtime/package/`. `owned-processes.json` lists descendant PIDs and executable
+basenames (no arguments); `samples.json` explicitly distinguishes test-runner samples from the
+uninformative SwiftPM-parent fallback. On a failed `ui.sh` run only, before stopping the test server
 or deleting its data, `diagnostics.server` saves `<name>-server-failure/server-state.json`,
 `server.sample.txt` and `capture.json` with the normal UI failure artifacts. Captures require
 GitHub-hosted macOS, microsecond process birth/executable identities, owned ancestry and the
