@@ -297,15 +297,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - name: Every job that ran passed
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          results = {name: job["result"] for name, job in json.loads(os.environ["NEEDS"]).items()}
-          print("\n".join(f"{name}: {result}" for name, result in results.items()))
-          bad = [name for name, result in results.items() if result in ("failure", "cancelled")]
-          if bad:
-              raise SystemExit(f"Not passed: {', '.join(bad)}")
-          PY
+        run: python3 ci/job_results.py
