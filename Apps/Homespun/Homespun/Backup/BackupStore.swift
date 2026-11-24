@@ -85,6 +85,7 @@ actor BackupStore {
         var problem: Problem?
         var bindingPaused: Bool?
         var notBefore: Date?
+        var promotionCommandID: UUID?
         var createdAt: Date
         var updatedAt: Date
     }
@@ -217,9 +218,12 @@ actor BackupStore {
             var admitted: [UUID] = []
             for identifier in selected {
                 let existing = try connection.rows("""
-                    SELECT body FROM operations WHERE namespace = ? AND item = ? AND binding = ?
-                    AND desired = 'active' AND delivery != 'imported_verified' AND backup != 'failed'
-                    ORDER BY rowid DESC LIMIT 1
+                    SELECT o.body FROM operations o JOIN lineages l
+                    ON l.namespace = o.namespace AND l.item = o.item AND l.current_operation = o.id
+                    AND l.generation = json_extract(CAST(o.body AS TEXT), '$.lineage')
+                    WHERE o.namespace = ? AND o.item = ? AND o.binding = ?
+                    AND o.desired = 'active' AND o.delivery != 'imported_verified' AND o.backup != 'failed'
+                    ORDER BY o.rowid DESC LIMIT 1
                     """, [.text(namespace), .text(identifier), .text(bindingID.uuidString)]).first
                 let operation: Operation
                 if let existing {
@@ -228,8 +232,9 @@ actor BackupStore {
                     if compact, !queued.wantsCompact {
                         queued.wantsCompact = true
                         queued.updatedAt = now
-                        try Self.write(queued, connection)
                     }
+                    try Self.ensureCompactPromotion(&queued, connection)
+                    try Self.write(queued, connection)
                     operation = queued
                 } else {
                     let previous = try connection.rows("SELECT generation FROM lineages WHERE namespace = ? AND item = ?",
@@ -238,6 +243,7 @@ actor BackupStore {
                     guard oldGeneration < Int64.max else { throw Failure.unsupportedSchema }
                     let generation = oldGeneration + 1
                     let id = UUID()
+                    try Self.supersedeCurrent(namespace: namespace, item: identifier, connection)
                     operation = Operation(id: id, namespace: namespace, itemID: identifier, lineage: generation,
                                           bindingID: bindingID, origin: binding.origin, profile: profile,
                                           wantsCompact: compact, createdAt: now, updatedAt: now)
@@ -273,7 +279,8 @@ actor BackupStore {
     func claim(_ id: UUID, stage: Stage) throws -> Lease? {
         try db().transaction { connection in
             guard var operation = try Self.operation(id, connection) else { throw Failure.missingOperation }
-            guard operation.desired == .active, operation.lease == nil else { return nil }
+            guard operation.desired == .active, operation.lease == nil,
+                  try Self.isCurrent(operation, connection) else { return nil }
             guard try !connection.rows("SELECT id FROM bindings WHERE id = ? AND retired = 0",
                                        [.text(operation.bindingID.uuidString)]).isEmpty else { throw Failure.retiredBinding }
             switch stage {
@@ -295,12 +302,12 @@ actor BackupStore {
     func release(_ lease: Lease) throws {
         try db().transaction { connection in
             guard var operation = try Self.operation(lease.operationID, connection) else { throw Failure.missingOperation }
+            try Self.releaseReservations(lease, connection)
             guard operation.lease == lease else { return }
             operation.lease = nil
+            if lease.stage == .preparation, operation.backup == .preparing { operation.backup = .selected }
             operation.updatedAt = Date()
             try Self.write(operation, connection)
-            try connection.execute("DELETE FROM reservations WHERE operation = ? AND stage = 'preparation'",
-                                   [.text(operation.id.uuidString)])
         }
     }
 
@@ -308,12 +315,18 @@ actor BackupStore {
         try db().transaction { connection in
             guard var operation = try Self.operation(operationID, connection) else { throw Failure.missingOperation }
             guard operation.epoch < Int64.max else { throw Failure.unsupportedSchema }
+            if desired == .active {
+                guard try Self.isCurrent(operation, connection), try Self.bindingUsable(operation, connection) else {
+                    throw Failure.staleOperation
+                }
+            }
             operation.desired = desired
             operation.bindingPaused = nil
             operation.notBefore = nil
             operation.epoch += 1
             operation.lease = nil
             operation.updatedAt = Date()
+            try Self.ensureCompactPromotion(&operation, connection)
             try Self.write(operation, connection)
         }
     }
@@ -724,19 +737,19 @@ actor BackupStore {
                         try write(operation, connection)
                     }
                 }
-                for row in try connection.rows("SELECT t.body FROM transfers t JOIN sessions s ON s.id = t.session") {
-                    var transfer = try decode(Transfer.self, row.blob("body"))
-                    guard !transfer.state.terminal, transfer.state != .intent else { continue }
-                    transfer.state = .unknown
-                    try write(transfer, connection)
-                }
-                try connection.execute("DELETE FROM reservations WHERE stage IN ('preparation', 'finalization')")
-                try connection.execute("""
-                    UPDATE photo_effects SET phase = 'uncertain',
-                    body = CAST(json_set(CAST(body AS TEXT), '$.phase', 'uncertain') AS BLOB)
-                    WHERE phase = 'mutating'
-                    """)
             }
+            for row in try connection.rows("SELECT body FROM transfers") {
+                var transfer = try decode(Transfer.self, row.blob("body"))
+                guard !transfer.state.terminal, transfer.state != .intent else { continue }
+                transfer.state = .unknown
+                try write(transfer, connection)
+            }
+            try connection.execute("DELETE FROM reservations WHERE stage IN ('preparation', 'finalization')")
+            try connection.execute("""
+                UPDATE photo_effects SET phase = 'uncertain',
+                body = CAST(json_set(CAST(body AS TEXT), '$.phase', 'uncertain') AS BLOB)
+                WHERE phase = 'mutating'
+                """)
             try connection.execute("""
                 INSERT INTO meta (key, value) VALUES ('process', ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -760,7 +773,8 @@ actor BackupStore {
 
     static func checked(_ lease: Lease, _ connection: BackupDatabase.Connection) throws -> Operation {
         guard let operation = try operation(lease.operationID, connection), operation.lease == lease,
-              operation.epoch == lease.epoch, operation.desired == .active else { throw Failure.staleOperation }
+              operation.epoch == lease.epoch, operation.desired == .active,
+              try isCurrent(operation, connection), try bindingUsable(operation, connection) else { throw Failure.staleOperation }
         return operation
     }
 
@@ -784,18 +798,22 @@ actor BackupStore {
               receipt.revision > 0 else { throw Failure.invalidReceipt }
         if let previous = operation.receipt {
             guard previous.requestID == receipt.requestID, previous.version == receipt.version else { throw Failure.invalidReceipt }
-            if receipt.revision < previous.revision { return .stale }
-            if receipt.revision == previous.revision {
-                guard receipt == previous else { throw Failure.conflictingReceipt }
+            if receipt.revision < previous.revision {
+                if try ensureCompactPromotion(&operation, connection) { try write(operation, connection) }
                 return .stale
             }
-            guard let bindingRow = try connection.rows("SELECT body FROM bindings WHERE id = ?",
-                                                       [.text(operation.bindingID.uuidString)]).first else {
-                throw Failure.retiredBinding
+            if receipt.revision == previous.revision {
+                guard receipt == previous else { throw Failure.conflictingReceipt }
+                if try ensureCompactPromotion(&operation, connection) { try write(operation, connection) }
+                return .stale
             }
-            let binding = try decode(Binding.self, bindingRow.blob("body"))
-            guard receipt.retention != .external || binding.mode == .immich else { throw Failure.invalidReceipt }
         }
+        guard let bindingRow = try connection.rows("SELECT body FROM bindings WHERE id = ?",
+                                                   [.text(operation.bindingID.uuidString)]).first else {
+            throw Failure.retiredBinding
+        }
+        let binding = try decode(Binding.self, bindingRow.blob("body"))
+        guard receipt.retention != .external || binding.mode == .immich else { throw Failure.invalidReceipt }
         if receipt.backup == .retained {
             guard [.permanent, .deferred, .external].contains(receipt.retention),
                   proves(manifest, receipt.originals) else { throw Failure.invalidReceipt }
@@ -808,6 +826,7 @@ actor BackupStore {
         operation.backup = receipt.backup
         operation.compact = receipt.compact
         operation.updatedAt = Date()
+        try ensureCompactPromotion(&operation, connection)
         try write(operation, connection)
         return .applied
     }
@@ -824,7 +843,7 @@ actor BackupStore {
             """, [.text(intent.id.uuidString), .text(intent.operationID.uuidString), .blob(try encode(intent))])
     }
 
-    private static func enqueue(_ item: OutboxItem, _ connection: BackupDatabase.Connection) throws {
+    static func enqueue(_ item: OutboxItem, _ connection: BackupDatabase.Connection) throws {
         try connection.execute("INSERT OR IGNORE INTO outbox (id, operation, body) VALUES (?, ?, ?)",
                                [.text(item.id.uuidString), .text(item.operationID.uuidString), .blob(try encode(item))])
     }
@@ -882,6 +901,7 @@ extension BackupStore.Operation {
         problem = try values.decodeIfPresent(BackupStore.Problem.self, forKey: .problem)
         bindingPaused = try values.decodeIfPresent(Bool.self, forKey: .bindingPaused)
         notBefore = try values.decodeIfPresent(Date.self, forKey: .notBefore)
+        promotionCommandID = try values.decodeIfPresent(UUID.self, forKey: .promotionCommandID)
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         updatedAt = try values.decode(Date.self, forKey: .updatedAt)
     }

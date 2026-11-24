@@ -21,8 +21,11 @@ extension BackupStore {
                 operation.bindingID = newID
                 operation.epoch += 1
                 operation.lease = nil
-                if operation.bindingPaused == true, operation.desired == .paused { operation.desired = .active }
+                let current = try Self.isCurrent(operation, connection)
+                if current, operation.bindingPaused == true, operation.desired == .paused { operation.desired = .active }
+                if !current, operation.desired == .active { operation.desired = .paused }
                 operation.bindingPaused = nil
+                try Self.ensureCompactPromotion(&operation, connection)
                 try Self.write(operation, connection)
             }
             for row in try connection.rows("SELECT body FROM outbox") {
