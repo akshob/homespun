@@ -6,12 +6,13 @@ struct HomespunApp: App {
     init() {
         PerfMonitor.mainStarted = CACurrentMediaTime()
         Task.detached(priority: .utility) { Keychain.removeLegacyReviewCode() }
-        AppModel.registerBackgroundRun()
-        Journey.configureTips()
-        MetricsReceiver.shared.start()
-        _ = SessionMarker.shared
         // A demo left on when the app last closed carries on (its launches aren't recorded).
         _ = DemoMode.shared
+        Telemetry.shared.resolveDiagnosticNamespace()
+        AppModel.registerBackgroundRun()
+        Journey.configureTips()
+        _ = SessionMarker.shared
+        MetricsReceiver.shared.start()
         Telemetry.shared.record(.appLaunch())
     }
 

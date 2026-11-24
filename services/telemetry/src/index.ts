@@ -30,6 +30,7 @@ export default {
 			return await route(request, env);
 		} catch (error) {
 			if (error instanceof HttpError) return errorResponse(error);
+			if (String(error).includes("homespun_erased_install")) return errorResponse(new HttpError(410, "install erased"));
 			console.error("internal error", error);
 			return errorResponse(new HttpError(500, "internal error"));
 		}

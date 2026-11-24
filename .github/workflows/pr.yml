@@ -1,4 +1,5 @@
-# Quick checks of a pull request to main (about 20–25 minutes): only what it changes (ci/plan.py):
+# Quick checks of a pull request, including dependent release layers (about 20–25 minutes):
+# only what it changes (ci/plan.py):
 # the server on Linux, the telemetry Worker, the website, the app's build and unit tests, and two
 # short UI runs side by side: iPhone (`quick`) and iPhone Duo open in every pose (`quick-duo`).
 # Watch-related changes also run the timed watch regression.
@@ -9,7 +10,6 @@ name: PR
 
 on:
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:

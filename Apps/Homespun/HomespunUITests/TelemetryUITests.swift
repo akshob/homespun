@@ -127,6 +127,16 @@ final class TelemetryUITests: XCTestCase {
         attach(app, "Stopped sharing")
     }
 
+    /// The launch/demo namespace is resolved before the cold-crash question or diagnostic intake.
+    @MainActor func test5DemoLaunchNeverAttributesAColdCrashToTheRealSession() throws {
+        let app = try launch(["-resetDemo", "-startDemo", "-holdDemoPreparation",
+                              "-simulateUncleanExit", "YES", "-crashPrompt", "YES"])
+        XCTAssertTrue(app.buttons["demo.prepare.cancel"].waitForExistence(timeout: 20), "demo did not prepare")
+        XCTAssertFalse(app.alerts["Homespun quit unexpectedly"].exists)
+        attach(app, "Demo launch without a real crash question")
+        app.terminate()
+    }
+
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = name
