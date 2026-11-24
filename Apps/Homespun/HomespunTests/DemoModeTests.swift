@@ -245,6 +245,45 @@ import UIKit
         try #require(library.samples.first { $0.kind == kind })
     }
 
+    @Test func durablePreparationIsBoundedAndUncertainImportsRequireAUniqueCompleteMatch() async throws {
+        let fixture = try await Fixture.make()
+        let library = fixture.session.library
+        let photo = try sample(library, "photo")
+        let files = BackupFiles(root: fixture.folder.appendingPathComponent("prepared"))
+        try files.prepare()
+        let id = UUID(), directory = try files.prepareStaging(operationID: id)
+        let size = try library.preparationBytes(photo.id, mode: .files)
+        await #expect(throws: PhotoLibrary.Failure.self) {
+            try await library.prepareBackup(photo.id, mode: .files, directory: directory,
+                                            maximumBytes: size - 1, progress: { _ in })
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+        let observation = try library.observePhotosEffect(restoring: false)
+        let prepared = try await library.prepareBackup(photo.id, mode: .files, directory: directory,
+                                                       maximumBytes: size, progress: { _ in })
+        for resource in prepared.resources {
+            #expect(resource.url == files.stagedFile(operationID: id, fileID: resource.fileID))
+        }
+        #expect(PhotoKitSource.sameResources(prepared.manifest.resources, try await library.resourceFingerprints(photo.id)))
+        let first = try await library.importCompact(prepared.resources, metadata: prepared.metadata)
+        guard case .unique(let recovered, _) = try await library.reconcilePhotosEffect(
+            expected: prepared.manifest.resources, observation: observation, createdIdentifier: nil)
+        else { Issue.record("The single complete import wasn't recovered"); return }
+        #expect(recovered == first)
+
+        let next = try files.prepareStaging(operationID: UUID())
+        let again = try await library.prepareBackup(photo.id, mode: .files, directory: next,
+                                                    maximumBytes: size, progress: { _ in })
+        _ = try await library.importCompact(again.resources, metadata: again.metadata)
+        guard case .blocked = try await library.reconcilePhotosEffect(
+            expected: prepared.manifest.resources, observation: observation, createdIdentifier: nil)
+        else { Issue.record("Ambiguous complete matches must not be guessed"); return }
+        guard case .unique(let known, _) = try await library.reconcilePhotosEffect(
+            expected: prepared.manifest.resources, observation: observation, createdIdentifier: first)
+        else { Issue.record("The recorded creation fact should remain usable"); return }
+        #expect(known == first)
+    }
+
     /// The samples are drawn or cloned for this launch: 30 photos and videos over several years, a Live Photo with
     /// its motion, videos, a screenshot; oldest first, with months for the grid's headers.
     @Test func samplesAreListedOldestFirst() async throws {

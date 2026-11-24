@@ -75,6 +75,17 @@ protocol PhotoSource: Sendable {
     func delete(_ ids: [String]) async throws
     /// Sizes by kind and what isn't backed up (setup's first task).
     func measure(excluding backedUp: Set<String>) -> LibraryMeasure.Result
+    func preparationBytes(_ id: String, mode: ServerAPI.StorageMode) throws -> Int
+    func prepareBackup(_ id: String, mode: ServerAPI.StorageMode, directory: URL, maximumBytes: Int,
+                       progress: @escaping @Sendable (String) -> Void) async throws -> PreparedPhoto
+    func resourceFingerprints(_ id: String) async throws -> [ServerAPI.ResourceDescriptor]
+    func sourceGeneration(_ id: String) throws -> PhotoGeneration
+    func observePhotosEffect(restoring: Bool) throws -> PhotosObservation
+    func reconcilePhotosEffect(expected: [ServerAPI.ResourceDescriptor], observation: PhotosObservation,
+                               createdIdentifier: String?) async throws -> PhotosReconciliation
+    func importCompact(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String
+    func restoreResources(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String
+    func removeApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult
 
     // Automatic mode: where the library's history is now, and what changed since.
     func changeToken() -> Data?
