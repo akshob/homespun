@@ -80,7 +80,7 @@ final class LongRun {
             let box = TaskBox(task: task)
             Task { @MainActor in
                 guard LongRun.shared.runID == runID else {
-                    task.setTaskCompleted(success: false)
+                    box.task.setTaskCompleted(success: false)
                     return
                 }
                 await LongRun.shared.follow(box, job: AppModel.shared.job, runID: runID)
