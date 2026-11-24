@@ -1,6 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import CryptoKit
+import Darwin
+import Synchronization
+
+private final class ForegroundTaskOwner: Sendable {
+    private struct State { var task: URLSessionTask?; var cancelled = false }
+    private let state = Mutex(State())
+    func install(_ task: URLSessionTask) {
+        let cancelled = state.withLock { value in value.task = task; return value.cancelled }
+        if cancelled { task.cancel() }
+    }
+    func cancel() {
+        let task = state.withLock { value in value.cancelled = true; return value.task }
+        task?.cancel()
+    }
+    func finish() {
+        let task = state.withLock { value in defer { value.task = nil }; return value.task }
+        task?.cancel()
+    }
+}
 
 struct BackupUploadPosition: Equatable, Sendable {
     var offset: Int64
@@ -21,10 +41,9 @@ protocol BackupRemote: Sendable {
     func completeUpload(_ uploadID: UUID) async throws -> BackupAPI.Receipt
     func changes(after cursor: Int64, epoch: String) async throws -> BackupAPI.Changes
     func snapshot(continuation: String?) async throws -> BackupAPI.Snapshot
-    /// The caller must capture the returned temporary file into the protected inbox before suspending.
-    func download(generation: UUID, resource: ServerAPI.CompactResource) async throws -> URL
+    func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws
     func downloadOriginal(version: BackupAPI.Version, requestID: UUID,
-                          resource: ServerAPI.ResourceDescriptor) async throws -> URL
+                          resource: ServerAPI.ResourceDescriptor, to file: URL) async throws
     func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof
     func acknowledge(_ acknowledgement: BackupAPI.DeliveryAcknowledgement) async throws
 }
@@ -119,41 +138,64 @@ struct ServerClientV2: BackupRemote {
         try await json("snapshot", query: continuation.map { [.init(name: "continuation", value: $0)] } ?? [])
     }
 
-    func download(generation: UUID, resource: ServerAPI.CompactResource) async throws -> URL {
+    func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws {
         let request = try transport.request("derivatives/\(generation.uuidString)/resources/\(resource.role.rawValue)", apiVersion: 2)
-        let (file, response) = try await transport.download(for: request)
-        do {
-            _ = try transport.check(Data(), response, accepting: [200])
-            guard let http = response as? HTTPURLResponse, let etag = http.value(forHTTPHeaderField: "ETag"),
-                  !etag.hasPrefix("W/"), etag == "\"\(resource.sha256.lowercased())\"",
-                  try PhotoLibrary.size(of: file) == resource.size, resource.size > 0 else {
-                throw Self.failure("The downloaded compact resource does not match its immutable generation.")
-            }
+        try await stream(request, size: resource.size, sha256: resource.sha256, to: file)
+    }
 
-            func downloadOriginal(version: BackupAPI.Version, requestID: UUID,
-                                  resource: ServerAPI.ResourceDescriptor) async throws -> URL {
-                let request = try transport.request(
-                    "assets/\(version.assetID)/versions/\(version.manifestID)/resources/\(resource.role.rawValue)",
-                    apiVersion: 2, query: [.init(name: "request_id", value: requestID.uuidString)])
-                let (file, response) = try await transport.download(for: request)
-                do {
-                    _ = try transport.check(Data(), response, accepting: [200])
-                    guard let response = response as? HTTPURLResponse,
-                          response.value(forHTTPHeaderField: "ETag") == "\"\(resource.sha256.lowercased())\"",
-                          resource.size > 0, try PhotoLibrary.size(of: file) == resource.size else {
-                        throw Self.failure("The downloaded original does not match the retained version.")
-                    }
-                    return file
-                } catch {
-                    try? FileManager.default.removeItem(at: file)
-                    throw error
+    func downloadOriginal(version: BackupAPI.Version, requestID: UUID,
+                          resource: ServerAPI.ResourceDescriptor, to file: URL) async throws {
+        let request = try transport.request(
+            "assets/\(version.assetID)/versions/\(version.manifestID)/resources/\(resource.role.rawValue)",
+            apiVersion: 2, query: [.init(name: "request_id", value: requestID.uuidString)])
+        try await stream(request, size: resource.size, sha256: resource.sha256, to: file)
+    }
+
+    /// No task delegate is replaced: existing TLS/redirect handlers remain authoritative. Only
+    /// bounded buffers are written, after headers match the parent-reserved immutable resource.
+    private func stream(_ request: URLRequest, size: Int, sha256: String, to file: URL) async throws {
+        guard size > 0, file.isFileURL else { throw Self.failure("Invalid reserved download resource.") }
+        let owner = ForegroundTaskOwner()
+        try await withTaskCancellationHandler {
+            try await transport.run(request) { session, request in
+                let (bytes, response) = try await session.bytes(for: request)
+                owner.install(bytes.task)
+                defer { owner.finish() }
+                _ = try transport.check(Data(), response, accepting: [200])
+                guard let response = response as? HTTPURLResponse,
+                      response.expectedContentLength == Int64(size),
+                      response.value(forHTTPHeaderField: "ETag") == "\"\(sha256.lowercased())\"",
+                      response.value(forHTTPHeaderField: "Content-Encoding").map({ $0 == "identity" }) ?? true else {
+                    throw Self.failure("The response does not match this immutable resource.")
                 }
+                try Task.checkCancellation()
+                let descriptor = Darwin.open(file.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+                guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
+                let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+                defer { try? handle.close() }
+                try BackupFiles.protect(file)
+                var buffer = Data(), received = 0, hash = SHA256()
+                buffer.reserveCapacity(64 << 10)
+                func write() throws {
+                    try Task.checkCancellation()
+                    try handle.write(contentsOf: buffer)
+                    hash.update(data: buffer)
+                    buffer.removeAll(keepingCapacity: true)
+                }
+                for try await byte in bytes {
+                    guard received < size else { throw Self.failure("The resource exceeded its reserved size.") }
+                    buffer.append(byte)
+                    received += 1
+                    if buffer.count == 64 << 10 { try write() }
+                }
+                if !buffer.isEmpty { try write() }
+                guard received == size, hash.finalize().map({ String(format: "%02x", $0) }).joined() == sha256.lowercased() else {
+                    throw Self.failure("The complete resource size and SHA-256 did not verify.")
+                }
+                try handle.synchronize()
+                try handle.close()
             }
-            return file
-        } catch {
-            try? FileManager.default.removeItem(at: file)
-            throw error
-        }
+        } onCancel: { owner.cancel() }
     }
 
     func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof {
