@@ -77,7 +77,8 @@ public struct FFmpegVideoCompressor: Sendable {
 
     #if os(Linux) || os(macOS)
     public func compress(input: URL, output: URL) throws -> VideoCompressionResult {
-        guard try MediaFiles.size(of: input) > 0 else { throw VideoCompressionError.emptyInput }
+        let sourceBytes = try MediaFiles.size(of: input)
+        guard sourceBytes > 0 else { throw VideoCompressionError.emptyInput }
         let probe = try VideoProbe.read(input)
         if probe.contentIdentifier != nil {
             throw VideoCompressionError.unsupported("Live Photo motion must be compressed with AVFoundation")
@@ -93,7 +94,21 @@ public struct FFmpegVideoCompressor: Sendable {
 
         // An advancing multi-hour video is allowed to run. Only a stalled frame/media-time
         // counter is bounded; total duration is deliberately not a timeout.
-        try ProcessRunner.run(arguments(input: input, output: partial, probe: probe), progressTimeout: 30 * 60)
+        var encode = arguments(input: input, output: partial, probe: probe)
+        let (outputLimit, overflow) = sourceBytes.multipliedReportingOverflow(by: 2)
+        guard !overflow else { throw VideoCompressionError.encodingFailed("Input exceeds the supported working-space bound") }
+        encode.insert(contentsOf: ["-fs", String(outputLimit)], at: encode.count - 1)
+        try ProcessRunner.run(encode, progressTimeout: 30 * 60)
+        if try MediaFiles.size(of: partial) >= sourceBytes {
+            // The output-size bound may stop a non-beneficial transcode early. Validate all
+            // source frames before keeping it; never mistake that stop for a complete encode.
+            try ProcessRunner.run(["ffmpeg", "-v", "error", "-nostdin", "-xerror", "-threads", "2",
+                "-max_alloc", "268435456", "-progress", "pipe:1", "-stats_period", "30",
+                "-i", input.path, "-map", "0:v:0", "-f", "null", "-"], progressTimeout: 30 * 60)
+            try FileManager.default.removeItem(at: partial)
+            let copy = try MediaFiles.publishCopy(of: input, to: output)
+            return .init(mode: .originalKeptNotSmaller, sha256: copy.sha256, size: copy.size)
+        }
         let result = try VideoProbe.read(partial)
         let box = profile.videoSize(width: probe.width, height: probe.height)
         guard result.width <= box.width, result.height <= box.height else {
@@ -111,8 +126,9 @@ public struct FFmpegVideoCompressor: Sendable {
             throw VideoCompressionError.durationMismatch("\(label) \(source ?? 0)s vs \(compressed ?? 0)s")
         }
         try ProcessRunner.run(["ffmpeg", "-v", "error", "-nostdin", "-xerror", "-threads", "2",
-                               "-filter_threads", "1", "-max_alloc", "268435456", "-i", partial.path,
-                               "-map", "0:v:0", "-f", "null", "-"])
+                               "-filter_threads", "1", "-max_alloc", "268435456", "-progress", "pipe:1",
+                               "-stats_period", "30", "-i", partial.path,
+                               "-map", "0:v:0", "-f", "null", "-"], progressTimeout: 30 * 60)
 
         if try MediaFiles.size(of: partial) >= MediaFiles.size(of: input) {
             let copy = try MediaFiles.publishCopy(of: input, to: output)
