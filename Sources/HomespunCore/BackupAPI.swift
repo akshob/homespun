@@ -37,6 +37,12 @@ public enum BackupAPI {
                   resources.allSatisfy({ $0.size > 0 && BackupAPI.isSHA256($0.sha256) }) else {
                 throw ValidationError.invalidManifest
             }
+            var total = 0
+            for resource in resources {
+                let (next, overflow) = total.addingReportingOverflow(resource.size)
+                guard !overflow else { throw ValidationError.invalidManifest }
+                total = next
+            }
             let roles = Set(resources.map(\.role))
             let primary: ServerAPI.ResourceRole = kind == .video ? .video : .photo
             guard roles.contains(primary), kind != .livePhoto || roles.contains(.pairedVideo) else {
