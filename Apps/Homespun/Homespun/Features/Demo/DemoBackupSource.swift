@@ -64,6 +64,16 @@ extension DemoLibrary {
                      }.sorted { $0.role.rawValue < $1.role.rawValue })
     }
 
+    func backupMetadata(_ id: String) throws -> BackupPhotoMetadata {
+        guard !isRetired, let item = demoItem(id) else { throw PhotoLibrary.Failure.notFound }
+        return .init(sourceID: id, kind: item.kind.api, creationDate: item.creationDate, locationArchive: nil,
+                     favorite: item.isFavorite, hidden: false, albums: [], generation: try sourceGeneration(id))
+    }
+
+    func applyBackupMetadata(_ id: String, metadata: BackupPhotoMetadata) async throws {
+        guard !isRetired, demoItem(id) != nil else { throw PhotoLibrary.Failure.notFound }
+    }
+
     func observePhotosEffect(restoring: Bool) throws -> PhotosObservation {
         guard !isRetired else { throw CancellationError() }
         return .init(token: nil, baseline: restoring ? Set(allIdentifiers()) : albumMembers(), restoring: restoring)
@@ -96,7 +106,7 @@ extension DemoLibrary {
     func importCompact(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String {
         guard !isRetired else { throw CancellationError() }
         return try await addCompactCopy(of: metadata.sourceID,
-                                       files: Dictionary(uniqueKeysWithValues: files.map { ($0.descriptor.role, $0.url) }))
+                                       files: Dictionary(uniqueKeysWithValues: files.map { ($0.descriptor.role, $0.url) }), move: false)
     }
 
     func restoreResources(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String {
@@ -105,12 +115,20 @@ extension DemoLibrary {
     }
 
     func removeApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult {
+        try await deleteApproved(approvals, compact: false)
+    }
+
+    func keepApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult {
+        try await deleteApproved(approvals, compact: true)
+    }
+
+    private func deleteApproved(_ approvals: [PhotosRemovalApproval], compact: Bool) async throws -> PhotosRemovalResult {
         guard !isRetired else { throw CancellationError() }
         var valid = Set<String>(), invalid = Set<String>()
         for approval in approvals {
             if (try? sourceGeneration(approval.original.identifier)) == approval.original,
                (try? sourceGeneration(approval.compact.identifier)) == approval.compact {
-                valid.insert(approval.original.identifier)
+                valid.insert(compact ? approval.compact.identifier : approval.original.identifier)
             } else {
                 invalid.insert(approval.original.identifier)
             }

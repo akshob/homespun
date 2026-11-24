@@ -60,7 +60,7 @@ struct ServerCompactor: Compacting {
                  progress: @escaping @Sendable (String) -> Void) async throws -> CompactOutcome {
         guard let asset = PhotoLibrary.asset(localIdentifier) else { throw PhotoLibrary.Failure.notFound }
         guard let kind = PhotoLibrary.kind(of: asset) else { throw PhotoLibrary.Failure.unsupported("Audio items are not supported.") }
-        if let reason = await PhotoLibrary.skipReason(for: asset, ledger: ledger) { return .unchanged(reason) }
+        if let reason = try await PhotoLibrary.skipReason(for: asset, ledger: ledger) { return .unchanged(reason) }
         let resources = try Self.resources(of: asset, mode: mode)
 
         let work = try PhotoLibrary.workDirectory()

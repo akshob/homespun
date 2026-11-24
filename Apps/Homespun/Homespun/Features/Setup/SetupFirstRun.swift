@@ -24,6 +24,7 @@ struct EstimatePage: View {
     let flow: SetupFlow
     @State private var storage: ServerAPI.StorageInfo?
     @State private var choosingFolder = false
+    @State private var measureProblem: String?
 
     private var settings: AppSettings { flow.settings }
     private var library: LibraryController { flow.library ?? AppModel.current.library }
@@ -37,7 +38,11 @@ struct EstimatePage: View {
                 page(estimate)
             } else {
                 SetupScaffold(title: "Looking at your library…", subtitle: "On this iPhone. Nothing is uploaded.") {
-                    ProgressView().frame(maxWidth: .infinity).padding(.top, 24)
+                    if let measureProblem {
+                        InlineNotice(tone: .error, title: "Backup history couldn't be read", message: measureProblem) {
+                            Button("Try Again") { Task { await measure() } }
+                        }
+                    } else { ProgressView().frame(maxWidth: .infinity).padding(.top, 24) }
                 }
             }
         }
@@ -54,7 +59,9 @@ struct EstimatePage: View {
 
     private func measure() async {
         guard flow.estimate == nil else { return }
-        let backedUp = Set(await library.job.ledger.snapshot().keys)
+        let backedUp: Set<String>
+        do { backedUp = Set(try await library.job.ledger.snapshot().keys); measureProblem = nil }
+        catch { measureProblem = error.localizedDescription; return }
         async let folder = settings.client?.storage()
         let result = await LibraryMeasure.measure(excluding: backedUp, photos: settings.photos)
         storage = try? await folder
@@ -313,6 +320,7 @@ struct FirstTaskPage: View {
         case .notYet?: .waiting
         case .failed?: .failed
         case .backedUp?: .copyLater
+        case .processing?: .processing
         }
     }
 
@@ -347,11 +355,14 @@ struct ReceiptPage: View {
     var onCompare: ((String) -> Void)?
     @State private var entries: [String: CompactLedger.Entry] = [:]
     @State private var outcome: OriginalRemover.Report?
+    @State private var historyProblem: String?
 
     private var library: LibraryController { flow.library ?? AppModel.current.library }
     private var name: String { flow.serverName }
     /// What made it home, in the task's order.
-    private var safe: [String] { flow.taskIDs.filter { entries[$0]?.serverAssetID != nil } }
+    private var safe: [String] {
+        flow.taskIDs.filter { entries[$0]?.verifiedCompact == true && entries[$0]?.origin == library.job.activeOrigin }
+    }
     private var originalBytes: Int { safe.reduce(0) { $0 + (entries[$1]?.originalBytes ?? 0) } }
     private var compactBytes: Int { safe.reduce(0) { $0 + (entries[$1]?.compactBytes ?? 0) } }
     private var left: Int { flow.taskIDs.count - safe.count }
@@ -379,6 +390,9 @@ struct ReceiptPage: View {
 
     var body: some View {
         SetupScaffold(symbol: "checkmark.circle.fill", symbolColor: Theme.teal, title: title) {
+            if let historyProblem {
+                InlineNotice(tone: .error, title: "Backup history needs attention", message: historyProblem)
+            }
             if let started = flow.taskStarted {
                 Text("Done in \(SetupAdvisor.duration((flow.taskFinished ?? .now).timeIntervalSince(started))) · each "
                      + "original checked by SHA-256")
@@ -430,7 +444,8 @@ struct ReceiptPage: View {
                 .disabled(checking != nil)
         }
         .task {
-            entries = await library.job.ledger.snapshot()
+            do { entries = try await library.job.ledger.snapshot(); historyProblem = nil }
+            catch { entries = [:]; historyProblem = error.localizedDescription }
             sample = safe.first { [.photo, .livePhoto].contains(library.settings.photos.item($0)?.itemKind) }
         }
     }

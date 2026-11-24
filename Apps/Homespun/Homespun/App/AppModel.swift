@@ -25,6 +25,7 @@ final class AppModel {
     /// Keeps the widgets and the Apple Watch current. The demo shares the publisher, which shows
     /// demo facts only when the person's own Homespun has no paired server.
     let status: StatusPublisher?
+    private var historyLoad: Task<Void, Never>?
 
     private init() {
         premium = Premium()
@@ -40,7 +41,7 @@ final class AppModel {
             ? StatusPublisher(settings: settings, library: library, history: history, automatic: automatic,
                               premium: premium) : nil
         let history = history
-        Task { await history.load() }
+        historyLoad = Task { await history.load() }
     }
 
     /// The demo's: everything kept in its folder and settings (`DemoSession`).
@@ -57,28 +58,60 @@ final class AppModel {
                                     copyFinder: copyFinder)
         self.status = status
         let history = history
-        Task { await history.load() }
+        historyLoad = Task { await history.load() }
+    }
+
+    func suspendForDemo() async {
+        automatic.suspendAdmissions()
+        await job.suspendAndWait()
+        await WakeSystem.enrollment.pauseAndWait()
+        WakeSystem.updateRegistration()
+    }
+
+    func resumeAfterDemo() async {
+        job.resumeExecution()
+        automatic.resumeAdmissions()
+        do { try await WakeSystem.resume() } catch { WakeSystem.enrollment.enrollmentFailed() }
+    }
+
+    func closeDemoStore() async throws {
+        await historyLoad?.value
+        try await job.ledger.store.close()
+    }
+
+    nonisolated static func schedulePendingBackup() {
+        let request = BGProcessingTaskRequest(identifier: AutomaticMode.taskID)
+        request.requiresExternalPower = true
+        request.requiresNetworkConnectivity = true
+        try? BGTaskScheduler.shared.submit(request)
     }
 
     /// Registers the background run; must happen before the app finishes launching.
     nonisolated static func registerBackgroundRun() {
-        guard ReleaseFeatures.automaticMode else {
-            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: AutomaticMode.taskID)
-            return
-        }
         BGTaskScheduler.shared.register(forTaskWithIdentifier: AutomaticMode.taskID, using: nil) { task in
             let box = TaskBox(task: task)
+            let completion = LongRun.Completion { success in box.task.setTaskCompleted(success: success) }
             let work = Task { @MainActor in
+                guard DemoMode.shared.model == nil, DemoMode.shared.origin == nil, !DemoMode.shared.settling else {
+                    completion.finish(success: false)
+                    return
+                }
                 let model = AppModel.shared
-                await model.premium.refresh()
-                let summary = await model.automatic.run(settings: model.settings, job: model.job, premium: model.premium,
-                                                        notify: true)
+                do {
+                    try await model.job.runOpportunity()
+                    if model.automatic.enabled, !Task.isCancelled {
+                        await model.premium.refresh()
+                        _ = await model.automatic.run(settings: model.settings, job: model.job, premium: model.premium, notify: true)
+                        try await model.job.runOpportunity()
+                    }
+                } catch { model.job.showQueueProblem(error) }
                 // The widgets and the watch show what the run did (the screen isn't there to start them).
                 if model.settings.isPaired, !Task.isCancelled { await model.library.refreshReady() }
                 await model.status?.publishNow()
-                box.task.setTaskCompleted(success: summary.skipped == nil)
+                if !Task.isCancelled { model.automatic.schedule() }
+                completion.finish(success: !Task.isCancelled)
             }
-            task.expirationHandler = { work.cancel() }
+            task.expirationHandler = { if completion.finish(success: false) { work.cancel() } }
         }
     }
 

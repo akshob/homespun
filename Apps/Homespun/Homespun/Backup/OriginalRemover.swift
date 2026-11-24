@@ -21,8 +21,8 @@ struct OriginalRemover: Sendable {
 
     /// Originals still in the library that have a server copy and a compact copy on record,
     /// optionally only these.
-    func candidates(only: Set<String>? = nil) async -> [(original: String, entry: CompactLedger.Entry)] {
-        let backed = await ledger.serverBacked().filter { only?.contains($0.original) ?? true }
+    func candidates(only: Set<String>? = nil) async throws -> [(original: String, entry: CompactLedger.Entry)] {
+        let backed = try await ledger.serverBacked().filter { only?.contains($0.original) ?? true }
         let present = PhotoLibrary.existing(backed.map(\.original))
         return backed.filter { present.contains($0.original) }
     }
@@ -33,7 +33,7 @@ struct OriginalRemover: Sendable {
                         progress: @escaping @Sendable (String) -> Void) async throws -> Report {
         var report = Report()
         var approved: [(asset: PHAsset, name: String, bytes: Int)] = []
-        let candidates = Array(await candidates(only: only).prefix(limit ?? .max))
+        let candidates = Array(try await candidates(only: only).prefix(limit ?? .max))
         for (index, candidate) in candidates.enumerated() {
             guard let asset = PhotoLibrary.asset(candidate.original), let assetID = candidate.entry.serverAssetID else { continue }
             let name = PhotoLibrary.describe(candidate.original)?.name ?? "Item"

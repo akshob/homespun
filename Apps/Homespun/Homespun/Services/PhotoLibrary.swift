@@ -359,7 +359,8 @@ enum PhotoLibrary {
 
     /// Adds the original bytes with the compact copy's library attributes and albums.
     static func restore(_ files: [(role: ServerAPI.ResourceRole, url: URL)], favorite: Bool, hidden: Bool,
-                        albums: [String], metadata: RestoreMetadata, filenames: [URL: String] = [:]) async throws -> String {
+                        albums: [String], metadata: RestoreMetadata, filenames: [URL: String] = [:],
+                        shouldMoveFile: Bool = true) async throws -> String {
         let typed = files.compactMap { file in type(for: file.role).map { (type: $0, url: file.url) } }
         guard !typed.isEmpty else { throw Failure.importFailed("nothing to add") }
         let collections = AlbumsReference(albums: PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: albums,
@@ -374,7 +375,7 @@ enum PhotoLibrary {
                     options.uniformTypeIdentifier = options.originalFilename.flatMap {
                         UTType(filenameExtension: ($0 as NSString).pathExtension)?.identifier
                     }
-                    options.shouldMoveFile = true
+                    options.shouldMoveFile = shouldMoveFile
                     request.addResource(with: file.type, fileURL: file.url, options: options)
                 }
                 if case .library(let date, let location) = metadata {
@@ -452,12 +453,12 @@ enum PhotoLibrary {
     /// to this iPhone, or in the Homespun album). The server also refuses copies it made.
     /// (A copy made on this iPhone by the old on-phone mode doesn't count: the original still
     /// needs backing up.)
-    static func skipReason(for asset: PHAsset, ledger: CompactLedger) async -> String? {
-        if let entry = await ledger.entry(for: asset.localIdentifier), entry.serverAssetID != nil,
+    static func skipReason(for asset: PHAsset, ledger: CompactLedger) async throws -> String? {
+        if let entry = try await ledger.entry(for: asset.localIdentifier), entry.serverAssetID != nil,
            self.asset(entry.compactIdentifier) != nil {
             return "Already has a compact copy"
         }
-        if await ledger.isCompactCopy(asset.localIdentifier) || isCompactCopy(asset) {
+        if try await ledger.isCompactCopy(asset.localIdentifier) || isCompactCopy(asset) {
             return "This is a Homespun compact copy"
         }
         return nil

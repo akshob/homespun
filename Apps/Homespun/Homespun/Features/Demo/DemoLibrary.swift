@@ -326,7 +326,7 @@ final class DemoLibrary: ItemCatalog, Sendable {
     // MARK: Changes
 
     /// Saves a compact copy of `original` from these downloaded files (moved into the library).
-    func addCompactCopy(of original: String, files: [ServerAPI.ResourceRole: URL]) async throws -> String {
+    func addCompactCopy(of original: String, files: [ServerAPI.ResourceRole: URL], move: Bool = true) async throws -> String {
         guard !isRetired else { throw CancellationError() }
         let number = state.withLock { state -> Int in
             state.made += 1
@@ -339,7 +339,8 @@ final class DemoLibrary: ItemCatalog, Sendable {
         for (role, url) in files {
             let destination = place.appendingPathComponent(url.lastPathComponent)
             try? FileManager.default.removeItem(at: destination)
-            try FileManager.default.moveItem(at: url, to: destination)
+            if move { try FileManager.default.moveItem(at: url, to: destination) }
+            else { try FileManager.default.copyItem(at: url, to: destination) }
             names[role.rawValue] = "copies/\(number)/\(url.lastPathComponent)"
         }
         let main = place.appendingPathComponent(((files[.video] ?? files[.photo])?.lastPathComponent) ?? "")

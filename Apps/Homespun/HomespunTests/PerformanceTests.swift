@@ -213,7 +213,7 @@ struct PerformanceTests {
         // Creating it reads nothing (the app creates it while launching, on the main thread).
         let create = median(runs: 9) { _ = CompactLedger(url: url) }
         #expect(create < 1, "creating the ledger took \(create) ms")
-        let load = await medianAsync(runs: 3) { _ = await CompactLedger(url: url).snapshot() }
+        let load = try await medianAsync(runs: 3) { _ = try await CompactLedger(url: url).snapshot() }
         print("ledger of \(big.ledger.count) entries: first read \(String(format: "%.0f", load)) ms")
         #expect(load < 400, "reading the ledger took \(load) ms")
         let ledger = CompactLedger(url: url)

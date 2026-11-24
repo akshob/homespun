@@ -77,9 +77,14 @@ final class AutomaticMode {
     /// Runs in the background, and notifies, through iOS (off for the demo, whose runs happen only
     /// while it's on screen).
     private let system: Bool
+    private var admissionGeneration = 0
+    private var canonicalKept: Set<String>?
+    private var suspended = false
 
-    var enabled: Bool { ReleaseFeatures.automaticMode && state.enabled }
-    var keptAsIs: Set<String> { state.keptAsIs }
+    var enabled: Bool { ReleaseFeatures.automaticMode && state.enabled && !suspended }
+    var keptAsIs: Set<String> { canonicalKept ?? state.keptAsIs }
+
+    func useCanonicalDecisions(_ kept: Set<String>) { canonicalKept = kept }
     /// Backs up everything not backed up yet, not only items added since it was turned on.
     var backsUpEverything: Bool { state.since == .distantPast }
 
@@ -106,6 +111,7 @@ final class AutomaticMode {
     /// `existing`: also back up what's already on the iPhone, not only new items.
     func enable(existing: Bool) async {
         guard ReleaseFeatures.automaticMode else { return }
+        admissionGeneration &+= 1
         Telemetry.shared.record(.featureUsed("automatic", existing ? "on.everything" : "on.new"))
         state.enabled = true
         state.since = existing ? .distantPast : Date()
@@ -123,6 +129,7 @@ final class AutomaticMode {
     /// Changes what it backs up without starting over.
     func setScope(everything: Bool) {
         guard everything != backsUpEverything else { return }
+        admissionGeneration &+= 1
         state.since = everything ? .distantPast : Date()
         save()
     }
@@ -132,6 +139,7 @@ final class AutomaticMode {
     /// The slider: shorter compacts more on the next run; longer only affects items not compacted yet.
     func setCompactSchedule(_ schedule: CompactSchedule) {
         guard schedule != state.schedule else { return }
+        admissionGeneration &+= 1
         Telemetry.shared.record(.featureUsed("cutoff", "\(schedule.days)d" + (schedule.keepFavorites ? ".favorites" : "")))
         state.schedule = schedule
         save()
@@ -151,28 +159,22 @@ final class AutomaticMode {
     }
 
     func disable() {
+        admissionGeneration &+= 1
         Telemetry.shared.record(.featureUsed("automatic", "off"))
         state.enabled = false
         save()
-        if system { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskID) }
+        if system { AppModel.schedulePendingBackup() }
     }
 
     /// The user chose Keep As Is for an item that couldn't be backed up: it isn't tried again.
-    @discardableResult func keepAsIs(_ id: String) -> Bool {
-        let previous = state
-        state.keptAsIs.insert(id)
-        state.settled.insert(id)
-        guard save() else { state = previous; return false }
-        return true
+    func keepAsIs(_ id: String, ledger: CompactLedger) async throws {
+        try await ledger.store.setKeptDecision([id], namespace: ledger.namespace, kept: true)
+        canonicalKept = try await ledger.decisions()
     }
 
-    func retryKept(_ ids: [String]) {
-        let retrying = state.keptAsIs.intersection(ids)
-        guard !retrying.isEmpty else { return }
-        state.keptAsIs.subtract(retrying)
-        state.settled.subtract(retrying)
-        for id in retrying { state.attempts[id] = nil }
-        save()
+    func retryKept(_ ids: [String], ledger: CompactLedger) async throws {
+        try await ledger.store.setKeptDecision(ids, namespace: ledger.namespace, kept: false)
+        canonicalKept = try await ledger.decisions()
     }
 
     /// Asks iOS for a background run: on power and network, an hour or more from now.
@@ -220,43 +222,17 @@ final class AutomaticMode {
                                   limit: Self.batch)
     }
 
-    /// Recent items backed up without a compact copy that the person deleted on this iPhone (cleaned
-    /// them up): the server moves their originals to its trash, and they're never compacted. Only
-    /// what Photos reports as deleted counts, and only while it still can't be found (hidden items
-    /// included): an item Homespun merely can't see (hidden, limited access, a restored backup with
-    /// other identifiers) is never reported. Needs Full Access.
+    /// Versioned retained claims are not revoked by a legacy, unversioned deletion hint.
     func reportRemoved(settings: AppSettings, ledger: CompactLedger) async {
-        guard ReleaseFeatures.automaticMode else { return }
-        let photos = photos
-        guard photos.authorization() == .authorized, let client = settings.client else { return }
-        let backedUp = await ledger.backedUpSnapshot()
-        let token = photos.changeToken()
-        let since = state.removalToken
-        let deleted = await Task.detached(priority: .utility) { photos.deleted(since: since) }.value
-        let before = state, now = Date()
-        for id in deleted.ids where state.removed[id] == nil { state.removed[id] = now }
-        if deleted.read { state.removalToken = token }
-        // Recovered from Recently Deleted (or never gone): nothing to tell.
-        let removed = Array(state.removed.keys)
-        let back = await Task.detached(priority: .utility) { photos.existing(removed, includeHidden: true) }.value
-        for id in back { state.removed[id] = nil }
-        state.removed = state.removed.filter { id, date in backedUp[id] != nil || now.timeIntervalSince(date) < 7 * 86_400 }
-        var reported: [String] = []
-        for id in state.removed.keys {
-            guard let entry = backedUp[id] else { continue }
-            // Not reachable now: told next time.
-            guard (try? await client.removedOnDevice(entry.serverAssetID)) != nil else { continue }
-            reported.append(id)
-            state.firstSeen[id] = nil
-        }
-        for id in reported { state.removed[id] = nil }
-        try? await ledger.forgetBackedUp(reported)
-        if state.removed != before.removed || state.removalToken != before.removalToken || !reported.isEmpty { save() }
     }
+
+    func suspendAdmissions() { suspended = true; admissionGeneration &+= 1 }
+    func resumeAdmissions() { suspended = false }
 
     // MARK: Running
 
     struct Summary: Equatable {
+        var queued = 0
         var compacted = 0
         var kept = 0
         var failed = 0
@@ -276,6 +252,12 @@ final class AutomaticMode {
     func run(settings: AppSettings, job: CompactJob, premium: Premium, notify: Bool) async -> Summary {
         var summary = Summary()
         guard enabled, premium.isUnlocked, !running else { return summary }
+        running = true
+        let mine = admissionGeneration
+        defer { running = false }
+        func authorized() -> Bool {
+            enabled && premium.isUnlocked && admissionGeneration == mine && !Task.isCancelled && !settings.isRetired
+        }
         let photos = photos
         guard photos.authorization() == .authorized else {
             summary.skipped = "Homespun needs Full Access to Photos."
@@ -286,64 +268,40 @@ final class AutomaticMode {
             return finish(summary)
         }
         await settings.refreshServerInfo()
-        guard settings.serverStatus == .reachable else {
+        guard authorized() else { return summary }
+        guard settings.serverStatus == .reachable || job.canAdmitOffline else {
             summary.skipped = "The server wasn't reachable."
             return finish(summary)
         }
-        running = true
-        defer { running = false }
-        let remover = settings.remover(ledger: job.ledger)
-        let before = Set(await remover?.candidates().map(\.original) ?? [])
-
         // The token as of now: items added while this run works are found next time.
         let token = photos.changeToken()
         let since = state.token
         let inserted = await Task.detached(priority: .utility) { photos.inserted(since: since) }.value
+        guard authorized() else { return summary }
         state.pending.formUnion(inserted.ids)
         let now = Date()
         for id in inserted.ids where state.firstSeen[id] == nil { state.firstSeen[id] = now }
-        await reportRemoved(settings: settings, ledger: job.ledger)
-        let planLedger = await job.ledger.snapshot(), planBackedUp = await job.ledger.backedUpSnapshot()
-        let snapshot = state, backsUp = settings.server?.mode != .immich
+        do {
+        let planLedger = try await job.ledger.snapshot(), planBackedUp = try await job.ledger.backedUpSnapshot()
+        let kept = try await job.ledger.decisions()
+        guard authorized() else { return summary }
+        canonicalKept = kept
+        var snapshot = state
+        snapshot.keptAsIs = kept
+        let backsUp = settings.server?.mode != .immich
         let plan = await Task.detached(priority: .utility) {
             Self.plan(snapshot, ledger: planLedger, backedUp: planBackedUp, added: snapshot.pending, backsUp: backsUp, photos: photos)
         }.value
+        guard authorized() else { return summary }
         let picked = plan.compact + plan.backUp
         if !picked.isEmpty {
-            await job.enqueue(picked, trigger: .automatic, backUpOnly: Set(plan.backUp))
-            // Wait for these items (the job may also hold items the user picked).
-            func busy() -> Bool {
-                let states = job.states
-                return picked.contains { [.waiting, .working].contains(states[$0]?.phase) }
-            }
-            while busy(), !Task.isCancelled { try? await Task.sleep(for: .milliseconds(500)) }
-            if Task.isCancelled { job.stopWaiting(Set(picked)) }
-            let states = job.states
-            var failed: [String] = []
-            for id in picked {
-                switch states[id] {
-                case .saved?: summary.compacted += 1
-                case .backedUp?: summary.backedUp += 1
-                case .unchanged?:
-                    summary.kept += 1
-                    state.settled.insert(id)
-                case .notYet?: summary.notYet += 1
-                case .failed?: failed.append(id)
-                default: break
-                }
-            }
-            // Failures count against an item only while the server was there; a server that
-            // went to sleep isn't the item's fault.
-            if !failed.isEmpty {
-                summary.failed = failed.count
-                await settings.refreshServerInfo()
-                if settings.serverStatus == .reachable {
-                    for id in failed { state.attempts[id, default: 0] += 1 }
-                }
-            }
+            let accepted = await job.enqueue(picked, trigger: .automatic, backUpOnly: Set(plan.backUp), authorized: authorized)
+            summary.queued = accepted.count
+            state.pending.subtract(accepted)
         }
         // Forget added items that are done, gone, backed up (they're tracked there), or given up on.
-        let ledger = await job.ledger.snapshot(), backedUp = await job.ledger.backedUpSnapshot()
+        guard authorized() else { return summary }
+        let ledger = try await job.ledger.snapshot(), backedUp = try await job.ledger.backedUpSnapshot()
         let pending = Array(state.pending)
         let (copies, album, existing) = await Task.detached(priority: .utility) {
             (Set(ledger.values.map(\.compactIdentifier)), photos.albumMembers(),
@@ -351,17 +309,18 @@ final class AutomaticMode {
         }.value
         state.pending = state.pending.filter { id in
             existing.contains(id) && ledger[id]?.serverAssetID == nil && backedUp[id] == nil && !copies.contains(id)
-                && !album.contains(id) && !state.settled.contains(id) && !state.keptAsIs.contains(id)
+                && !album.contains(id) && !state.settled.contains(id) && !kept.contains(id)
                 && (state.attempts[id] ?? 0) < Self.maximumAttempts
         }
         // First-seen dates matter only until the compact copy (and never beyond the longest cutoff).
         let oldest = now.addingTimeInterval(-Double((CompactSchedule.stops.last ?? 90) + 10) * 86_400)
         state.firstSeen = state.firstSeen.filter { id, date in ledger[id] == nil && date > oldest }
         if inserted.read { state.token = token }
-        let after = Set(await remover?.candidates().map(\.original) ?? [])
-        summary.removable = after.count
-        summary.newlyRemovable = after.subtracting(before).count
-        if notify, system, state.notifies, summary.newlyRemovable > 0 { await Self.notify(summary) }
+        } catch {
+            summary.skipped = error.localizedDescription
+            job.showQueueProblem(error)
+        }
+        guard authorized() else { return summary }
         return finish(summary)
     }
 
@@ -376,6 +335,7 @@ final class AutomaticMode {
     nonisolated static func describe(_ summary: Summary) -> String {
         if let skipped = summary.skipped { return "Skipped: \(skipped)" }
         var parts: [String] = []
+        if summary.queued > 0 { parts.append("\(summary.queued) queued durably; compact copies are discovered independently") }
         if summary.compacted > 0 { parts.append("\(summary.compacted) backed up and compacted") }
         if summary.backedUp > 0 { parts.append("\(summary.backedUp) backed up, compact copies later") }
         if summary.kept > 0 { parts.append("\(summary.kept) kept as is") }

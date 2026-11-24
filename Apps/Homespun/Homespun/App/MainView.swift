@@ -26,6 +26,7 @@ struct RootView: View {
         .tint(Theme.accent)
         .task {
             if !settings.isDemo { await model.status?.clearDepartedDemo() }
+            if settings.isPaired { await model.job.refreshQueue() }
         }
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
         .modifier(QuitUnexpectedly(model: model))
@@ -39,6 +40,7 @@ struct RootView: View {
             #endif
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
+            model.job.setVisible(phase == .active)
             // From the first moment on screen (onChange alone misses the launch).
             if phase == .active {
                 SessionMarker.shared.active()
@@ -94,6 +96,7 @@ struct RootView: View {
                 wasBackground = true
                 SessionMarker.shared.background()
                 model.automatic.schedule()
+                if !settings.isDemo { AppModel.schedulePendingBackup() }
                 model.status?.publishInBackground()
                 Telemetry.shared.flushInBackground()
             default: break

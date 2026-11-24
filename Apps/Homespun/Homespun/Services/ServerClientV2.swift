@@ -41,11 +41,18 @@ protocol BackupRemote: Sendable {
     func completeUpload(_ uploadID: UUID) async throws -> BackupAPI.Receipt
     func changes(after cursor: Int64, epoch: String) async throws -> BackupAPI.Changes
     func snapshot(continuation: String?) async throws -> BackupAPI.Snapshot
-    func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws
+    func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws -> HTTPURLResponse
     func downloadOriginal(version: BackupAPI.Version, requestID: UUID,
-                          resource: ServerAPI.ResourceDescriptor, to file: URL) async throws
+                          resource: ServerAPI.ResourceDescriptor, to file: URL) async throws -> HTTPURLResponse
     func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof
     func acknowledge(_ acknowledgement: BackupAPI.DeliveryAcknowledgement) async throws
+    func enrollWake(_ sender: WakeRelayAPI.Sender) async throws
+}
+
+extension BackupRemote {
+    func enrollWake(_ sender: WakeRelayAPI.Sender) async throws {
+        throw BackupStageFailure.blocked("This connection does not support optional wake enrollment.")
+    }
 }
 
 /// Foreground-only v2 requests use the same pre-credential TLS gate, redirect refusal and admitted
@@ -96,6 +103,7 @@ struct ServerClientV2: BackupRemote {
     }
 
     func uploadPosition(_ uploadID: UUID) async throws -> BackupUploadPosition {
+        try authenticated()
         let request = try transport.request("uploads/\(uploadID.uuidString)", method: "HEAD", apiVersion: 2)
         let (data, response) = try await transport.data(for: request)
         _ = try transport.check(data, response, accepting: [200, 204])
@@ -110,6 +118,7 @@ struct ServerClientV2: BackupRemote {
     }
 
     func append(_ bytes: Data, uploadID: UUID, offset: Int64) async throws -> Int64 {
+        try authenticated()
         guard !bytes.isEmpty, bytes.count <= Self.maximumBufferedChunk, offset >= 0,
               offset <= Int64.max - Int64(bytes.count) else {
             throw Self.failure("The upload chunk exceeds its bounded foreground allowance.")
@@ -138,25 +147,26 @@ struct ServerClientV2: BackupRemote {
         try await json("snapshot", query: continuation.map { [.init(name: "continuation", value: $0)] } ?? [])
     }
 
-    func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws {
+    func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws -> HTTPURLResponse {
         let request = try transport.request("derivatives/\(generation.uuidString)/resources/\(resource.role.rawValue)", apiVersion: 2)
-        try await stream(request, size: resource.size, sha256: resource.sha256, to: file)
+        return try await stream(request, size: resource.size, sha256: resource.sha256, to: file)
     }
 
     func downloadOriginal(version: BackupAPI.Version, requestID: UUID,
-                          resource: ServerAPI.ResourceDescriptor, to file: URL) async throws {
+                          resource: ServerAPI.ResourceDescriptor, to file: URL) async throws -> HTTPURLResponse {
         let request = try transport.request(
             "assets/\(version.assetID)/versions/\(version.manifestID)/resources/\(resource.role.rawValue)",
             apiVersion: 2, query: [.init(name: "request_id", value: requestID.uuidString)])
-        try await stream(request, size: resource.size, sha256: resource.sha256, to: file)
+        return try await stream(request, size: resource.size, sha256: resource.sha256, to: file)
     }
 
     /// No task delegate is replaced: existing TLS/redirect handlers remain authoritative. Only
     /// bounded buffers are written, after headers match the parent-reserved immutable resource.
-    private func stream(_ request: URLRequest, size: Int, sha256: String, to file: URL) async throws {
+    private func stream(_ request: URLRequest, size: Int, sha256: String, to file: URL) async throws -> HTTPURLResponse {
+        try authenticated()
         guard size > 0, file.isFileURL else { throw Self.failure("Invalid reserved download resource.") }
         let owner = ForegroundTaskOwner()
-        try await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler {
             try await transport.run(request) { session, request in
                 let (bytes, response) = try await session.bytes(for: request)
                 owner.install(bytes.task)
@@ -194,6 +204,7 @@ struct ServerClientV2: BackupRemote {
                 }
                 try handle.synchronize()
                 try handle.close()
+                return response
             }
         } onCancel: { owner.cancel() }
     }
@@ -206,6 +217,7 @@ struct ServerClientV2: BackupRemote {
     }
 
     func acknowledge(_ acknowledgement: BackupAPI.DeliveryAcknowledgement) async throws {
+        try authenticated()
         var request = try transport.request("deliveries/\(acknowledgement.deliveryID.uuidString)/ack", method: "POST", apiVersion: 2)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try ServerAPI.encoder.encode(acknowledgement)
@@ -213,9 +225,23 @@ struct ServerClientV2: BackupRemote {
         _ = try transport.check(data, response, accepting: [200, 204])
     }
 
+    func enrollWake(_ sender: WakeRelayAPI.Sender) async throws {
+        try authenticated()
+        var request = try transport.request("wake/enrollment", method: "POST", apiVersion: 2)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try ServerAPI.encoder.encode(sender)
+        let (data, response) = try await transport.data(for: request)
+        _ = try transport.check(data, response, accepting: [204])
+        guard let response = response as? HTTPURLResponse,
+              response.value(forHTTPHeaderField: "ETag") == "\"\(sender.generationID.uuidString)\"" else {
+            throw BackupStore.Failure.invalidReceipt
+        }
+    }
+
     private func json<Value: Decodable>(_ path: String, method: String = "GET",
                                         body: (some Encodable)? = Optional<Int>.none,
                                         query: [URLQueryItem] = []) async throws -> Value {
+        try authenticated()
         var request = try transport.request(path, method: method, apiVersion: 2, query: query)
         if let body {
             request.httpBody = try ServerAPI.encoder.encode(body)
@@ -228,6 +254,15 @@ struct ServerClientV2: BackupRemote {
 
     private static func integer(_ name: String, _ response: HTTPURLResponse) -> Int64? {
         response.value(forHTTPHeaderField: name).flatMap(Int64.init)
+    }
+
+    private func authenticated() throws {
+        switch transport.trust {
+        case .system: return
+        case .pinned(let pins) where !pins.isEmpty: return
+        case .demo where baseURL.host == DemoServer.host: return
+        default: throw ServerPairing.IdentityFailure()
+        }
     }
 
     private static func failure(_ message: String) -> ServerClient.Failure {

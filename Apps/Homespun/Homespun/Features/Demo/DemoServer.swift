@@ -117,6 +117,7 @@ actor DemoServer {
     private var retired = false
     private var admitted = 0
     private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
+    private let backup: DemoBackupServer
     /// How long its answers take, as a share of a server's on the Wi‑Fi (0 in tests).
     let pace: Double
     private var state: State
@@ -132,6 +133,7 @@ actor DemoServer {
         clientSession = Self.makeSession(generation: generation)
         self.pace = pace
         self.bundledCompact = bundledCompact
+        backup = DemoBackupServer(folder: folder.appendingPathComponent("v2"), pace: pace, bundled: bundledCompact)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         state = (try? decoder.decode(State.self, from: Data(contentsOf: folder.appendingPathComponent("state.json")))) ?? State()
@@ -153,7 +155,7 @@ actor DemoServer {
 
     // MARK: Answering
 
-    func handle(method: String, url: URL, token: String?, body: Data) async -> Response {
+    func handle(method: String, url: URL, token: String?, body: Data, headers: [String: String] = [:]) async -> Response {
         guard !retired else { return Self.error(503, "This demo has ended.") }
         admitted += 1
         defer {
@@ -167,6 +169,21 @@ actor DemoServer {
         if pace > 0 { try? await Task.sleep(for: .seconds(Self.delay(method: method, path: url.path) * pace)) }
         guard !retired, !Task.isCancelled else { return Self.error(503, "This demo has ended.") }
         let parts = url.path.split(separator: "/").map(String.init)
+        if parts.count >= 3, parts[0] == "api", parts[1] == "v2" {
+            guard let token, let device = state.devices.first(where: { $0.token == token }) else {
+                return Self.error(401, "Pair this device with the demo first.")
+            }
+            return await backup.handle(method: method, url: url, owner: device.id, headers: headers, body: body)
+        }
+        if method == "GET", parts == ["api", "v1", "storage"],
+           let token, let device = state.devices.first(where: { $0.token == token }) {
+            var information = storage(device)
+            let statistics = await backup.statistics()
+            information.storedCount += statistics.count
+            information.storedBytes += statistics.bytes
+            information.freeBytes = information.freeBytes.map { max(0, $0 - statistics.bytes) }
+            return (try? Self.json(information)) ?? Self.error(500, "The demo storage status couldn't be read.")
+        }
         guard parts.count >= 3, parts[0] == "api", parts[1] == "v1" else { return Self.error(404, "Not found.") }
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         do {
@@ -180,6 +197,7 @@ actor DemoServer {
 
     func stopAndWait() async {
         retired = true
+        await backup.stopAndWait()
         if admitted > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
     }
 
@@ -766,7 +784,8 @@ final class DemoURLProtocol: URLProtocol, @unchecked Sendable {
             let answer: DemoServer.Response
             if let server, let url = request.url {
                 let token = request.value(forHTTPHeaderField: "Authorization").map { String($0.dropFirst("Bearer ".count)) }
-                answer = await server.handle(method: request.httpMethod ?? "GET", url: url, token: token, body: body)
+                answer = await server.handle(method: request.httpMethod ?? "GET", url: url, token: token, body: body,
+                                             headers: request.allHTTPHeaderFields ?? [:])
             } else {
                 answer = DemoServer.error(503, "The demo isn't on.")
             }

@@ -70,14 +70,14 @@ private let now = Date(timeIntervalSince1970: 1_800_000_000)
     try await ledger.recordBackedUp(original: "a", serverAssetID: "sha-a", originalBytes: 100)
     try await ledger.recordBackedUp(original: "b", serverAssetID: "sha-b", originalBytes: 200)
     let reopened = CompactLedger(url: url)
-    #expect(Set(await reopened.backedUpSnapshot().keys) == ["a", "b"])
-    #expect(await reopened.snapshot().isEmpty)
+    #expect(Set(try await reopened.backedUpSnapshot().keys) == ["a", "b"])
+    #expect(try await reopened.snapshot().isEmpty)
     try await reopened.record(original: "a", compact: "copy-a", originalBytes: 100, compactBytes: 20, serverAssetID: "sha-a")
     try await reopened.forgetBackedUp(["b"])
-    #expect(await CompactLedger(url: url).backedUpSnapshot().isEmpty)
+    #expect(try await CompactLedger(url: url).backedUpSnapshot().isEmpty)
     // Something with a compact copy isn't recorded as waiting for one.
     try await reopened.recordBackedUp(original: "a", serverAssetID: "sha-a", originalBytes: 100)
-    #expect(await reopened.backedUpSnapshot().isEmpty)
+    #expect(try await reopened.backedUpSnapshot().isEmpty)
 }
 
 /// The grid shows "Backed up" for them: not in Not Backed Up, not free-able, but Back Up can make
