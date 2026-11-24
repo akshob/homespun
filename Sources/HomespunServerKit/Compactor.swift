@@ -5,9 +5,22 @@ import HomespunMedia
 
 /// Runs blocking file and encoder work off the cooperative thread pool.
 func detached<T: Sendable>(_ body: @escaping @Sendable () throws -> T) async throws -> T {
-    try await withCheckedThrowingContinuation { continuation in
+    #if os(Linux) || os(macOS)
+    let cancellation = MediaProcessCancellation()
+    return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(with: Result { try cancellation.run(body) })
+            }
+        }
+    } onCancel: {
+        cancellation.cancel()
+    }
+    #else
+    return try await withCheckedThrowingContinuation { continuation in
         DispatchQueue.global(qos: .utility).async { continuation.resume(with: Result { try body() }) }
     }
+    #endif
 }
 
 /// Makes compact copies from local originals. Photos use the platform backend (libvips or

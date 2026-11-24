@@ -23,12 +23,15 @@ public enum ServerCommand {
                              (default "Camera Roll"), instead of leaving them where they are.
                              --dry-run only checks the files; --jobs N reads N files at a time
                              (default 4).
+                             Stop the serving process first; offline imports require exclusive
+                             ownership of this catalog, including in-place linking.
 
         Options (or environment variables):
           --data DIR         Where the catalog, compact copies, and work files live (HOMESPUN_DATA).
           --originals DIR    Where originals go, a folder per phone (HOMESPUN_ORIGINALS); default
                              DIR/originals in the data folder. Once set, change it from the app,
-                             which moves every original there.
+                             which copies and checks every original, then switches folders.
+                             Previous copies are retained pending safe cleanup.
           --port N           Port, default 8787 (HOMESPUN_PORT).
           --name NAME        Name shown in the app, default this computer's name (HOMESPUN_NAME).
           HOMESPUN_HOST      Address to listen on; default 127.0.0.1, install-service uses 0.0.0.0.

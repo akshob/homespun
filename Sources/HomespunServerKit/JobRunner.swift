@@ -57,9 +57,16 @@ public final class JobRunner: Service, Sendable {
     @discardableResult
     func runNext() async throws -> Bool {
         guard let job = try await catalog.claim(owner: owner, lease: 3600, connectors: connectors) else { return false }
+        return try await catalog.mutations.withClaim(job.assetID) {
+            try await self.runClaimed(job)
+            return true
+        }
+    }
+
+    private func runClaimed(_ job: Job) async throws {
         if job.type.hasPrefix(ConnectorHub.jobPrefix) {
             try await copy(job)
-            return true
+            return
         }
         do {
             switch job.type {
@@ -68,6 +75,8 @@ public final class JobRunner: Service, Sendable {
             default: throw Compactor.Unprocessable(description: "unknown job \(job.type)")
             }
             try await catalog.finish(job)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as Compactor.Unprocessable {
             logger.warning("asset \(job.assetID): \(error)")
             try await catalog.setState(job.assetID, .failed, message: error.description)
@@ -78,7 +87,6 @@ public final class JobRunner: Service, Sendable {
                 try await catalog.setState(job.assetID, .failed, message: "Gave up after repeated errors: \(error)")
             }
         }
-        return true
     }
 
     /// Processes jobs until none is ready (for tests and tools).
@@ -89,28 +97,45 @@ public final class JobRunner: Service, Sendable {
     private func compressStored(_ assetID: String) async throws {
         guard let asset = try await catalog.asset(assetID) else { return }
         let resources = try await catalog.resources(assetID)
-        guard resources.allSatisfy({ $0.state == .verified && ($0.storedPath != nil || $0.externalPath != nil) }) else {
+        guard asset.permanent, asset.state != .trashed, !asset.purging,
+              !resources.isEmpty, resources.allSatisfy({ $0.state == .verified && ($0.storedPath != nil || $0.externalPath != nil) }) else {
             throw Compactor.Unprocessable(description: "originals are incomplete")
         }
-        var sources: [Role: URL] = [:]
-        for resource in resources {
-            if let path = resource.externalPath {
-                // Kept where it was before Homespun, so it may have changed since: check it first.
-                let url = URL(fileURLWithPath: path)
-                let check = try? await detached { (try Fingerprint.sha256(of: url), try Self.size(of: url)) }
-                guard check?.0 == resource.sha256, check?.1 == resource.size else {
-                    try await catalog.markResource(assetID, role: resource.role, state: .mismatch)
-                    throw Compactor.Unprocessable(description: "The original at \(path) is missing or changed.")
-                }
-                sources[resource.role] = url
-            } else {
-                guard let url = await originals.url(resource.storedPath!) else {
-                    throw Compactor.Unprocessable(description: "bad stored path")
-                }
-                sources[resource.role] = url
-            }
-        }
+        let cache = storage.cache(assetID + "-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cache) }
+        let sources = try await stage(resources, assetID: assetID, into: cache)
         try await compactAndStore(asset, resources: resources, sources: sources)
+    }
+
+    /// Root readers hold a lease only while taking a checked local snapshot, never throughout
+    /// an encode or connector network operation. Renaming/switching roots then cannot invalidate
+    /// a worker's input paths.
+    private func stage(_ resources: [ResourceRecord], assetID: String, into cache: URL) async throws -> [Role: URL] {
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        return try await originals.place { root in
+            var sources: [Role: URL] = [:]
+            let current = try await self.catalog.resources(assetID)
+            for expected in resources {
+                guard let resource = current.first(where: { $0.role == expected.role }),
+                      resource.generation == expected.generation, resource.sha256 == expected.sha256, resource.size == expected.size else {
+                    throw Catalog.StaleResource()
+                }
+                let source: URL
+                if let path = resource.externalPath { source = URL(fileURLWithPath: path) }
+                else if let path = resource.storedPath, let resolved = OriginalsStore.resolve(path, in: root) { source = resolved }
+                else { throw Compactor.Unprocessable(description: "bad stored path") }
+                guard (try? Self.size(of: source)) == resource.size else {
+                    throw Compactor.Unprocessable(description: "The original at \(source.path) is missing or changed.")
+                }
+                let file = cache.appendingPathComponent(resource.role.rawValue + "-" + Storage.sanitized(resource.filename))
+                let copied = try await detached { try Fingerprint.copy(from: source, to: file) }
+                guard copied.size == resource.size, copied.sha256 == resource.sha256 else {
+                    throw Compactor.Unprocessable(description: "The original at \(source.path) is missing or changed.")
+                }
+                sources[resource.role] = file
+            }
+            return sources
+        }
     }
 
     /// Copies one item to a connector. A `failed` copy is final; `retryLater` waits without
@@ -124,6 +149,8 @@ public final class JobRunner: Service, Sendable {
                 try await self.originals(asset, resources, cache: cache)
             }
             try await catalog.finish(job)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch ConnectorError.failed(let message) {
             logger.warning("copy of \(job.assetID) to \(connector) failed: \(message)")
             try await hub.copyFailed(connector, assetID: job.assetID, message: message, final: true)
@@ -148,20 +175,7 @@ public final class JobRunner: Service, Sendable {
         }
         var urls: [Role: URL] = [:]
         if resources.allSatisfy({ $0.storedPath != nil || $0.externalPath != nil }) {
-            for resource in resources {
-                if let path = resource.externalPath {
-                    // Kept where it was before Homespun: make sure it's still there and whole.
-                    let url = URL(fileURLWithPath: path)
-                    guard (try? Self.size(of: url)) == resource.size else {
-                        throw ConnectorError.retryLater("The original at \(path) is missing or changed.", after: 3600)
-                    }
-                    urls[resource.role] = url
-                } else {
-                    guard let url = await originals.url(resource.storedPath!) else { throw ConnectorError.failed("bad stored path") }
-                    urls[resource.role] = url
-                }
-            }
-            return urls
+            return try await stage(resources, assetID: asset.id, into: cache)
         }
         guard let immich = await immichState.client else {
             throw ConnectorError.failed("Immich is not connected to this server any more.")
@@ -245,8 +259,8 @@ public final class JobRunner: Service, Sendable {
     private func compactAndStore(_ asset: AssetRecord, resources: [ResourceRecord], sources: [Role: URL]) async throws {
         try await catalog.setState(asset.id, .compressing)
         let base = resources.first { $0.role == (asset.kind == .video ? .video : .photo) }?.filename ?? asset.id
-        let directory = storage.compact(asset.id)
-        try? FileManager.default.removeItem(at: directory)
+        // A previous output can still be downloading. Never erase it to publish a new result.
+        let directory = storage.compact(asset.id + "-" + UUID().uuidString)
         let outcome = try await compactor.compact(kind: asset.kind, sources: sources, baseName: base, into: directory)
         var files: [CompactRecord] = []
         for file in outcome.files {

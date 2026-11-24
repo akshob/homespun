@@ -31,6 +31,21 @@ struct LibraryImport: Sendable {
     /// Imports every line of the manifest (JSON Lines). Bad lines and missing or changed files are
     /// reported through `report` and skipped; running again picks them up once fixed.
     func run(manifest: URL, report: @escaping @Sendable (String) -> Void) async throws -> Summary {
+        // There is deliberately no "live import" file path. Even in-place linking mutates
+        // retention/catalog state and must not race a serving process's asset claims.
+        let ownership = dryRun ? nil : try ServerOwnership(dataDirectory: catalog.dataDirectory)
+        defer { withExtendedLifetime(ownership) {} }
+        if !dryRun {
+            guard try await catalog.setting(OriginalsMover.setting) == nil else {
+                throw Problem(description: "The originals folder is being moved; finish that move before importing.")
+            }
+            if let path = try await catalog.setting(OriginalsStore.setting) {
+                try await DeviceRename.recover(catalog: catalog, root: URL(fileURLWithPath: path, isDirectory: true))
+                let store = copyInto ?? OriginalsStore(root: URL(fileURLWithPath: path, isDirectory: true))
+                try await store.refreshRoot(catalog: catalog)
+                try await Trash(catalog: catalog, originals: store, storage: Storage(root: catalog.dataDirectory)).recover()
+            }
+        }
         var contents = try String(contentsOf: manifest, encoding: .utf8)
         if contents.hasPrefix("\u{FEFF}") { contents.removeFirst() }
         // Characters, not bytes: "\r\n" is one Character, so split on any line break.
