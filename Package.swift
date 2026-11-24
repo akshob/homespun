@@ -13,6 +13,7 @@ let package = Package(
         // The server as a library, for server binaries that add their own connectors.
         .library(name: "HomespunServerKit", targets: ["HomespunServerKit"]),
         .executable(name: "homespun-server", targets: ["HomespunServer"]),
+        .executable(name: "homespun-notify", targets: ["HomespunNotify"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.9.0"),
@@ -65,11 +66,13 @@ let package = Package(
                 .product(name: "QRCodeGenerator", package: "swift-qrcode-generator"),
             ],
             exclude: ["LICENSE"]),
-        .executableTarget(name: "HomespunServer", dependencies: ["HomespunServerKit"], exclude: ["LICENSE"]),
+        .executableTarget(name: "HomespunServer", dependencies: ["HomespunServerKit"], exclude: ["LICENSE", "Notify"]),
+        .executableTarget(name: "HomespunNotify", dependencies: ["HomespunServerKit"], path: "Sources/HomespunServer/Notify"),
         .testTarget(name: "HomespunCoreTests", dependencies: ["HomespunCore"]),
         .testTarget(name: "HomespunServerTests", dependencies: [
             "HomespunServerKit",
             "HomespunTestSupport",
+            .product(name: "Crypto", package: "swift-crypto"),
             .product(name: "HummingbirdTesting", package: "hummingbird"),
             .product(name: "AsyncHTTPClient", package: "async-http-client"),
             .product(name: "NIOSSL", package: "swift-nio-ssl"),
