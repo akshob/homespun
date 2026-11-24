@@ -2191,10 +2191,11 @@ private struct PauseMotionUpload: RouterMiddleware {
         #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == [plan.from])
         try FileManager.default.removeItem(at: root.appendingPathComponent(plan.from))
     }
+}
 
-    // MARK: Versioned foreground backup protocol
+// MARK: Versioned foreground backup protocol
 
-    func backupTestRequest(_ client: some TestClientProtocol, token: String, data: Data,
+func backupTestRequest(_ client: some TestClientProtocol, token: String, data: Data,
                                    kind: ServerAPI.AssetKind = .photo, compact: Bool = false,
                                    retention: BackupAPI.RetentionPolicy = .permanent) async throws
         -> (BackupAPI.Request, BackupAPI.Receipt) {
@@ -2209,7 +2210,7 @@ private struct PauseMotionUpload: RouterMiddleware {
         return (request, try response.decode(BackupAPI.Receipt.self))
     }
 
-    private func backupTestPatch(_ client: some TestClientProtocol, token: String, upload: UUID, offset: Int,
+private func backupTestPatch(_ client: some TestClientProtocol, token: String, upload: UUID, offset: Int,
                                  data: Data) async throws -> TestResponse {
         var headers = HTTPFields()
         headers[.authorization] = "Bearer \(token)"
@@ -2219,7 +2220,7 @@ private struct PauseMotionUpload: RouterMiddleware {
                                         headers: headers, body: ByteBuffer(bytes: data))
     }
 
-    func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt: BackupAPI.Receipt,
+func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt: BackupAPI.Receipt,
                                   role: Role = .photo, data: Data) async throws -> BackupAPI.Receipt {
         let id = UUID()
         let response = try await client.call("/api/v2/uploads", .post, token: token,
@@ -2236,7 +2237,7 @@ private struct PauseMotionUpload: RouterMiddleware {
         return try completed.decode(BackupAPI.Receipt.self)
     }
 
-    @Test func versionedAdmissionIsIdempotentPrincipalScopedAndRetainsBeforeCompact() async throws {
+@Test func versionedAdmissionIsIdempotentPrincipalScopedAndRetainsBeforeCompact() async throws {
         let fixture = try await Fixture()
         try await fixture.test { client, token in
             #expect(try await client.call("/api/v2/capabilities").status == .unauthorized)
@@ -2245,7 +2246,8 @@ private struct PauseMotionUpload: RouterMiddleware {
             let (request, first) = try await backupTestRequest(client, token: token, data: Data("original".utf8))
             #expect(first.revision > 0 && first.retention == .pending && first.backup == .uploading)
             let replay = try await client.call("/api/v2/backup-requests", .post, token: token, json: request)
-            #expect(replay.status == .ok && (try replay.decode(BackupAPI.Receipt.self)) == first)
+            #expect(replay.status == .ok)
+            #expect(try replay.decode(BackupAPI.Receipt.self) == first)
             var different = request
             different.compact = true
             let conflict = try await client.call("/api/v2/backup-requests", .post, token: token, json: different)
@@ -2273,7 +2275,7 @@ private struct PauseMotionUpload: RouterMiddleware {
         }
     }
 
-    @Test func versionedOffsetsReconcileAfterRestartAndBadBytesNeverBecomeRetained() async throws {
+@Test func versionedOffsetsReconcileAfterRestartAndBadBytesNeverBecomeRetained() async throws {
         let fixture = try await Fixture()
         try await fixture.test { client, token in
             let bytes = Data("durable-original-bytes".utf8)
@@ -2317,7 +2319,7 @@ private struct PauseMotionUpload: RouterMiddleware {
         }
     }
 
-    @Test func versionedFeedSnapshotsAreConsistentAndReceiptRevisionsNeverRegress() async throws {
+@Test func versionedFeedSnapshotsAreConsistentAndReceiptRevisionsNeverRegress() async throws {
         let fixture = try await Fixture()
         try await fixture.test { client, token in
             var receipts: [BackupAPI.Receipt] = []
@@ -2364,7 +2366,7 @@ private struct PauseMotionUpload: RouterMiddleware {
         }
     }
 
-    @Test func versionedPublicationRecoversAndOldManifestsSurviveMovesAndV1Edits() async throws {
+@Test func versionedPublicationRecoversAndOldManifestsSurviveMovesAndV1Edits() async throws {
         let fixture = try await Fixture()
         try await fixture.test { client, token in
             let bytes = Data("journaled-original".utf8)
@@ -2420,8 +2422,8 @@ private struct PauseMotionUpload: RouterMiddleware {
         }
     }
 
-    @Test(.enabled(if: ffmpegAvailable), .timeLimit(.minutes(2)))
-    func versionedPhotoProgressesDuringVideoAndStaleWorkersCannotPublishOrAckAnotherConsumer() async throws {
+@Test(.enabled(if: ffmpegAvailable), .timeLimit(.minutes(2)))
+func versionedPhotoProgressesDuringVideoAndStaleWorkersCannotPublishOrAckAnotherConsumer() async throws {
         let fixture = try await Fixture()
         let media = try await Media.make(in: fixture.directory)
         try await fixture.test { client, token in
@@ -2478,7 +2480,7 @@ private struct PauseMotionUpload: RouterMiddleware {
         }
     }
 
-    @Test func versionedDeferredAndImmichRequestsNeverIssuePermanentProofs() async throws {
+@Test func versionedDeferredAndImmichRequestsNeverIssuePermanentProofs() async throws {
         let local = try await Fixture()
         try await local.test { client, token in
             let (_, deferred) = try await backupTestRequest(client, token: token, data: Data("deferred".utf8), retention: .deferred)
@@ -2488,7 +2490,19 @@ private struct PauseMotionUpload: RouterMiddleware {
                 .post, token: token, json: deferred.version).status == .conflict)
         }
 
-        extension Catalog {
+        let external = try await Fixture(immich: .init(url: URL(string: "http://127.0.0.1:1")!, apiKey: "synthetic-unused-key"))
+        try await external.test { client, token in
+            #expect(try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self).uploadProtocols.isEmpty)
+            let (_, blocked) = try await backupTestRequest(client, token: token, data: Data("external".utf8))
+            #expect(blocked.backup == .verifying && blocked.retention == .external)
+            #expect(try await client.call("/api/v2/uploads", .post, token: token,
+                json: BackupAPI.UploadRequest(uploadID: UUID(), requestID: blocked.requestID, version: blocked.version, role: .photo)).status == .unprocessableContent)
+            #expect(try await client.call("/api/v2/assets/\(blocked.version.assetID)/versions/\(blocked.version.manifestID)/verify",
+                .post, token: token, json: blocked.version).status != .ok)
+        }
+}
+
+extension Catalog {
             func expireBackupLeaseForTest(_ job: BackupJob) throws {
                 try database.execute("UPDATE backup_jobs SET expires_at = '2000-01-01T00:00:00Z' WHERE id = ?", [.text(job.id)])
             }
@@ -2498,7 +2512,7 @@ private struct PauseMotionUpload: RouterMiddleware {
             }
         }
 
-        @Test func reclaimedWorkerFencesRejectEveryStaleTransitionWithoutLosingRetention() async throws {
+@Test func reclaimedWorkerFencesRejectEveryStaleTransitionWithoutLosingRetention() async throws {
             let fixture = try await Fixture()
             try await fixture.test { client, token in
                 let bytes = Data("fenced".utf8)
@@ -2541,7 +2555,7 @@ private struct PauseMotionUpload: RouterMiddleware {
             }
         }
 
-        @Test func versionedUploadAdmissionBackpressuresBeforeAllocatingOversizedResources() async throws {
+@Test func versionedUploadAdmissionBackpressuresBeforeAllocatingOversizedResources() async throws {
             let fixture = try await Fixture()
             try await fixture.test { client, token in
                 let caps = try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self)
@@ -2557,8 +2571,9 @@ private struct PauseMotionUpload: RouterMiddleware {
                 #expect(try upload.decode(ServerAPI.ErrorBody.self).error.code == "storage_backpressure")
                 #expect(try FileManager.default.contentsOfDirectory(atPath: fixture.server.storage.staging.path).isEmpty)
             }
+}
 
-            @Test func rootMutationCannotMoveItsOwnCatalogAndOwnershipFile() async throws {
+@Test func rootMutationCannotMoveItsOwnCatalogAndOwnershipFile() async throws {
                 let fixture = try await Fixture(originals: ".")
                 try await fixture.test { client, _ in
                     let code = try await fixture.server.newPairingCode()
@@ -2570,8 +2585,9 @@ private struct PauseMotionUpload: RouterMiddleware {
                     #expect(FileManager.default.fileExists(atPath: fixture.server.storage.catalog.path))
                     #expect(try await fixture.server.catalog.setting(DeviceRename.journal) == nil)
                 }
+}
 
-                @Test func versionedAdmissionProtectsAndReverifiesLegacyCandidatesInsteadOfTrustingV1Status() async throws {
+@Test func versionedAdmissionProtectsAndReverifiesLegacyCandidatesInsteadOfTrustingV1Status() async throws {
                     let fixture = try await Fixture()
                     try await fixture.test { client, token in
                         let bytes = Data("legacy-reuse".utf8), hash = Fingerprint.sha256(of: bytes)
@@ -2602,13 +2618,13 @@ private struct PauseMotionUpload: RouterMiddleware {
                     }
                 }
 
-                @Test func serverStorageAccountingRejectsOverflowInsteadOfWrapping() throws {
+@Test func serverStorageAccountingRejectsOverflowInsteadOfWrapping() throws {
                     #expect(try StorageBytes.sum([10, 20, 30]) == 60)
                     #expect(throws: APIError.self) { try StorageBytes.sum([Int.max, 1]) }
                     #expect(throws: APIError.self) { try StorageBytes.add(Int64.max, 1) }
                 }
 
-                @Test func permanentVersionedClaimQuarantinesAPlannedLegacyTrashMoveWithoutExpiry() async throws {
+@Test func permanentVersionedClaimQuarantinesAPlannedLegacyTrashMoveWithoutExpiry() async throws {
                     let fixture = try await Fixture()
                     try await fixture.test { client, token in
                         let bytes = Data("permanent-before-trash-commit".utf8), hash = Fingerprint.sha256(of: bytes)
@@ -2633,8 +2649,9 @@ private struct PauseMotionUpload: RouterMiddleware {
                         #expect(try await client.call("/api/v2/backup-requests/\(receipt.requestID)", token: token)
                             .decode(BackupAPI.Receipt.self).retention == .permanent)
                     }
+}
 
-                    @Test(.timeLimit(.minutes(1))) func versionedAdmissionDoesNotWaitForALegacyEncoderAssetClaim() async throws {
+@Test(.timeLimit(.minutes(1))) func versionedAdmissionDoesNotWaitForALegacyEncoderAssetClaim() async throws {
                         let fixture = try await Fixture()
                         try await fixture.test { client, token in
                             let bytes = Data("admit-without-encoder-wait".utf8), asset = Fingerprint.sha256(of: bytes)
@@ -2653,18 +2670,3 @@ private struct PauseMotionUpload: RouterMiddleware {
                             try await encoder.value
                         }
                     }
-                }
-            }
-        }
-        let external = try await Fixture(immich: .init(url: URL(string: "http://127.0.0.1:1")!, apiKey: "synthetic-unused-key"))
-        try await external.test { client, token in
-            #expect(try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self).uploadProtocols.isEmpty)
-            let (_, blocked) = try await backupTestRequest(client, token: token, data: Data("external".utf8))
-            #expect(blocked.backup == .verifying && blocked.retention == .external)
-            #expect(try await client.call("/api/v2/uploads", .post, token: token,
-                json: BackupAPI.UploadRequest(uploadID: UUID(), requestID: blocked.requestID, version: blocked.version, role: .photo)).status == .unprocessableContent)
-            #expect(try await client.call("/api/v2/assets/\(blocked.version.assetID)/versions/\(blocked.version.manifestID)/verify",
-                .post, token: token, json: blocked.version).status != .ok)
-        }
-    }
-}
