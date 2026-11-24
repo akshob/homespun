@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import os
 
 struct BackupFiles: Sendable {
     let root: URL
@@ -38,6 +39,32 @@ struct BackupFiles: Sendable {
         let directory = staging.appendingPathComponent(operationID.uuidString, isDirectory: true)
         try Self.directory(directory, excludedFromBackup: true)
         return directory
+    }
+
+    func spaceObservation() throws -> BackupSpaceObservation {
+        let capacity = try root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage
+        var total: Int64 = 0
+        let enumerationError = OSAllocatedUnfairLock<(any Error)?>(initialState: nil)
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        for folder in [staging, inbox, resume] {
+            guard let iterator = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: Array(keys),
+                errorHandler: { _, error in enumerationError.withLock { $0 = error }; return false }) else {
+                throw Failure.invalidFile
+            }
+            for case let url as URL in iterator {
+                let values = try url.resourceValues(forKeys: keys)
+                guard values.isSymbolicLink != true else { throw Failure.invalidFile }
+                if values.isRegularFile == true {
+                    guard let size = values.fileSize, size >= 0 else { throw Failure.invalidFile }
+                    let (next, overflow) = total.addingReportingOverflow(Int64(size))
+                    guard !overflow else { throw BackupSpaceFailure.workingSpaceRequired }
+                    total = next
+                }
+            }
+            if let error = enumerationError.withLock({ $0 }) { throw error }
+        }
+        return .init(availableBytes: capacity, transientBytes: total)
     }
 
     static func protect(_ url: URL) throws {
