@@ -295,15 +295,15 @@ struct BackupRoutes: Sendable {
               profile.audioBitrateKbps <= configuration.profile.audioBitrateKbps else {
             throw unsupported("The requested recipe exceeds this server's configured resource/quality limits.")
         }
-
-        private func externalSpace(_ manifest: BackupAPI.Manifest) throws {
-            let bytes = try StorageBytes.sum(manifest.resources.map(\.size))
-            guard bytes <= configuration.maximumStagingBytes, let free = OriginalsStore.space(at: storage.root.path).free,
-                  free >= configuration.minimumFreeBytes, bytes <= free - configuration.minimumFreeBytes else {
-                throw APIError(.serviceUnavailable, code: "storage_backpressure", message: "Insufficient capacity for a full external byte scrub.")
-            }
-        }
         return recipe
+    }
+
+    private func externalSpace(_ manifest: BackupAPI.Manifest) throws {
+        let bytes = try StorageBytes.sum(manifest.resources.map(\.size))
+        guard bytes <= configuration.maximumStagingBytes, let free = OriginalsStore.space(at: storage.root.path).free,
+              free >= configuration.minimumFreeBytes, bytes <= free - configuration.minimumFreeBytes else {
+            throw APIError(.serviceUnavailable, code: "storage_backpressure", message: "Insufficient capacity for a full external byte scrub.")
+        }
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ request: Request) async throws -> T {

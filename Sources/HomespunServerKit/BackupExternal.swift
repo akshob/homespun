@@ -325,7 +325,7 @@ extension Catalog {
     }
 
     func externalCacheCleanup() throws -> [String] {
-        try database.transaction {
+        return try database.transaction {
             let rows = try database.query("""
                 SELECT id, directory FROM backup_external_sets s WHERE s.available = 1
                   AND NOT EXISTS(SELECT 1 FROM backup_jobs j WHERE j.external_set_id = s.id AND j.status IN ('queued', 'leased', 'retry_wait'))
@@ -334,10 +334,10 @@ extension Catalog {
             for row in rows { try database.execute("UPDATE backup_external_sets SET available = 0 WHERE id = ?", [.text(row["id"]!.string!)]) }
             return rows.map { $0["directory"]!.string! }
         }
+    }
 
-        func externalCacheDirectories() throws -> Set<String> {
-            Set(try database.query("SELECT directory FROM backup_external_sets WHERE available = 1").map { $0["directory"]!.string! })
-        }
+    func externalCacheDirectories() throws -> Set<String> {
+        Set(try database.query("SELECT directory FROM backup_external_sets WHERE available = 1").map { $0["directory"]!.string! })
     }
 }
 
