@@ -2245,6 +2245,8 @@ func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt:
             #expect(caps.uploadProtocols == [.foregroundOffset])
             let (request, first) = try await backupTestRequest(client, token: token, data: Data("original".utf8))
             #expect(first.revision > 0 && first.retention == .pending && first.backup == .uploading)
+            #expect(first.version.descriptorGeneration > 0)
+            #expect(first.originals.allSatisfy { $0.state == .missing && $0.verifiedAt == nil })
             let replay = try await client.call("/api/v2/backup-requests", .post, token: token, json: request)
             #expect(replay.status == .ok)
             #expect(try replay.decode(BackupAPI.Receipt.self) == first)
@@ -2265,6 +2267,12 @@ func backupTestUpload(_ client: some TestClientProtocol, token: String, receipt:
             let retained = try await backupTestUpload(client, token: token, receipt: first, data: Data("original".utf8))
             #expect(retained.backup == .retained && retained.retention == .permanent && retained.derivative == nil)
             #expect(retained.revision > first.revision && retained.compact == .requested)
+            #expect(retained.originals.allSatisfy {
+                $0.state == .verified && $0.receivedBytes == $0.size && $0.size > 0 && $0.verifiedAt != nil
+            })
+            let changes = try await client.call("/api/v2/changes?after=0&epoch=\(caps.origin.historyEpoch)", token: token)
+                .decode(BackupAPI.Changes.self)
+            #expect(changes.changes.last { $0.receipt.requestID == first.requestID }?.receipt == retained)
             let cancelled = try await client.call("/api/v2/backup-requests/\(first.requestID)/commands", .post, token: token,
                 json: BackupAPI.Command(operationID: UUID(), version: first.version, action: .cancel)).decode(BackupAPI.Receipt.self)
             #expect(cancelled.backup == .retained && cancelled.retention == .permanent)

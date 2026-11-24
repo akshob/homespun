@@ -10,6 +10,7 @@ struct BackupObject: Sendable {
     var size: Int
     var sha256: String
     var path: String?
+    var verifiedAt: Date? = nil
 }
 
 struct BackupUpload: Sendable {
@@ -214,7 +215,7 @@ extension Catalog {
             if try database.query("SELECT id FROM backup_manifests WHERE id = ?", [.text(manifestID)]).isEmpty {
                 let previous = try database.query("SELECT MAX(generation) AS n FROM backup_manifests WHERE asset_id = ?",
                                                    [.text(assetID)]).first?["n"]?.int
-                let generation = try previous.map { try StorageBytes.add(Int64($0), 1) } ?? 0
+                let generation = try previous.map { try StorageBytes.add(Int64($0), 1) } ?? 1
                 try database.execute("""
                     INSERT INTO backup_manifests(id, asset_id, generation, kind, manifest_json, device_id, capture_date, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -267,7 +268,8 @@ extension Catalog {
         try database.query("SELECT * FROM backup_objects WHERE manifest_id = ? ORDER BY role", [.text(manifest)]).compactMap { row -> BackupObject? in
             guard let role = Role(rawValue: row["role"]?.string ?? "") else { return nil }
             return BackupObject(manifest: manifest, role: role, filename: row["filename"]?.string ?? "",
-                                size: row["size"]?.int ?? 0, sha256: row["sha256"]?.string ?? "", path: row["stored_path"]?.string)
+                                size: row["size"]?.int ?? 0, sha256: row["sha256"]?.string ?? "", path: row["stored_path"]?.string,
+                                verifiedAt: Timestamp.date(row["verified_at"]?.string))
         }
     }
 
@@ -327,23 +329,37 @@ extension Catalog {
     func backupReceipt(_ id: String, principal: String) throws -> BackupAPI.Receipt {
         let row = try backupRequestRow(id, principal: principal), version = try backupVersion(id, principal: principal)
         let objects = try backupObjects(version.manifestID)
-        let complete = !objects.isEmpty && objects.allSatisfy { $0.path != nil }
         let external = row["source"]?.string == "external"
         let binding = try setting("backup.external_binding")
         let externalVerified = try binding.map { try externalResourcesVerified(version.manifestID, binding: $0) } ?? false
+        let externalVerification: [Role: Date]
+        if external, let binding {
+            let rows = try database.query("""
+                SELECT role, verified_at FROM backup_external_resources WHERE manifest_id = ? AND binding = ?
+                """, [.text(version.manifestID), .text(binding)])
+            externalVerification = Dictionary(uniqueKeysWithValues: rows.compactMap { row -> (Role, Date)? in
+                guard let rawRole = row["role"]?.string, let role = Role(rawValue: rawRole),
+                      let date = Timestamp.date(row["verified_at"]?.string) else { return nil }
+                return (role, date)
+            })
+        } else {
+            externalVerification = [:]
+        }
         let policy = try database.query("SELECT policy FROM backup_claims WHERE request_id = ?", [.text(id)]).first?["policy"]?.string
         var derivative: BackupAPI.Derivative?
         if let generation = row["derivative_id"]?.string, row["wants_compact"]?.int == 1 {
             derivative = try backupDerivative(generation, principal: principal)
         }
         let originals: [ServerAPI.ResourceStatus] = objects.map {
-            let verified = external ? externalVerified : $0.path != nil
+            let verifiedAt = external ? externalVerification[$0.role] : $0.verifiedAt
+            let verified = (external ? externalVerified : $0.path != nil) && verifiedAt != nil
             return .init(role: $0.role, sha256: $0.sha256, size: $0.size, state: verified ? .verified : .missing,
-                  receivedBytes: verified ? $0.size : 0, verifiedAt: nil)
+                  receivedBytes: verified ? $0.size : 0, verifiedAt: verified ? verifiedAt : nil)
         }
+        let complete = !originals.isEmpty && originals.allSatisfy { $0.state == .verified }
         return .init(requestID: UUID(uuidString: id)!, operationID: UUID(uuidString: row["operation_id"]!.string!)!,
                      version: version, revision: Int64(row["revision"]?.int ?? 0),
-                     backup: external ? (binding == nil ? .blocked : externalVerified ? .retained : .verifying) : complete ? .retained : .uploading,
+                     backup: external ? (binding == nil ? .blocked : complete ? .retained : .verifying) : complete ? .retained : .uploading,
                      compact: BackupAPI.CompactState(rawValue: row["compact_state"]?.string ?? "") ?? .requested,
                      retention: external ? .external : complete ? (policy == "permanent" ? .permanent : .deferred) : .pending,
                      originals: originals, derivative: derivative,
