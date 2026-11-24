@@ -864,7 +864,7 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
     let linux = ServiceInstaller.plan(executable: "/opt/hs/homespun-server", environment: environment, os: .linux,
                                       home: home, userID: 1000, user: "alex")
     #expect(linux.path.path == "/home/alex/.config/systemd/user/homespun.service")
-    #expect(linux.contents.contains("ExecStart=/opt/hs/homespun-server serve")
+    #expect(linux.contents.contains("ExecStart=:\"/opt/hs/homespun-server\" serve")
             && linux.contents.contains("Environment=\"HOMESPUN_DATA=/srv/homespun\""))
     #expect(linux.commands.contains(["systemctl", "--user", "enable", "--now", "homespun.service"]))
     let mac = ServiceInstaller.plan(executable: "/Users/alex/hs & co/homespun-server", environment: environment, os: .macOS,
@@ -875,6 +875,17 @@ final class FakeApprover: PairingApprover, @unchecked Sendable {
     #expect((plist?["EnvironmentVariables"] as? [String: String])?["HOMESPUN_DATA"] == "/srv/homespun")
     #expect(mac.prepare == [["launchctl", "bootout", "gui/501/photos.homespun.server"]])
     #expect(mac.commands == [["launchctl", "bootstrap", "gui/501", mac.path.path]])
+}
+
+@Test func systemdServicePreservesLiteralPathsAndEnvironment() {
+    let plan = ServiceInstaller.plan(
+        executable: "/home/al ex%u/$cash/ser\\ver\"x",
+        environment: ["HOMESPUN_DATA": "/srv/Photos %h \"quoted\"\\back\nnext", "HOMESPUN_NAME": "cost $5"],
+        os: .linux, home: URL(fileURLWithPath: "/home/al ex%u"), userID: 1000, user: "alex")
+    #expect(plan.contents.contains(#"ExecStart=:"/home/al ex%%u/$cash/ser\\ver\"x" serve"#))
+    #expect(plan.contents.contains(#"Environment="HOMESPUN_DATA=/srv/Photos %%h \"quoted\"\\back\nnext""#))
+    #expect(plan.contents.contains(#"Environment="HOMESPUN_NAME=cost $5""#))
+    #expect(!plan.contents.contains("\nnext"))
 }
 
 @Test func pairingInstructionsAndSelfCheck() async throws {

@@ -181,6 +181,10 @@ struct NASGuidePage: View {
                 InlineNotice(tone: .info, title: "Synology j and se models can't run Docker",
                              message: "Use a Mac or a Linux computer instead.")
             }
+            InlineNotice(tone: .info, title: "Create both folders first",
+                         message: "Create a data folder beside the compose file and \(brand.folder) on your mounted "
+                            + "photos share. Set user to the IDs shown by id on the NAS, and give that user read and write "
+                            + "access to both folders. Docker stops if either folder is missing; it won't create it for you.")
             let steps = brand.steps
             ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                 NumberedStep(number: index + 1, title: step) {
@@ -229,8 +233,16 @@ extension NASBrand {
               HOMESPUN_NAME: Homespun
               HOMESPUN_HARDWARE: \(self == .other ? "NAS" : "\(name) NAS")
             volumes:
-              - ./data:/data
-              - \(folder):/originals
+              - type: bind
+                source: ./data
+                target: /data
+                bind:
+                  create_host_path: false
+              - type: bind
+                source: \(folder)
+                target: /originals
+                bind:
+                  create_host_path: false
               - /var/run/dbus:/var/run/dbus:ro
             security_opt:
               - apparmor:unconfined
