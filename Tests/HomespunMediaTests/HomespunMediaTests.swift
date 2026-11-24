@@ -28,6 +28,10 @@ import Darwin
     #expect(args.contains("libx265") && args.contains("hvc1") && args.contains("scale=1280:720"))
     #expect(args[args.firstIndex(of: "-crf")! + 1] == "28")
     #expect(args.contains("0:1") && args.last == "/out.mov" && args.contains("mov"))
+    let selected = VideoProbe(width: 1280, height: 720, videoDuration: 1, containerDuration: 1,
+                              audioStreams: [2, 5], videoStreamIndex: 3)
+    let decode = FFmpegVideoCompressor.decodeArguments(URL(fileURLWithPath: "/input.mov"), probe: selected)
+    #expect(decode.contains("0:3") && decode.contains("0:2") && decode.contains("0:5") && !decode.contains("0:v:0"))
 }
 
 @Test func durationToleranceAllowsAudioTailButNotTruncation() {
