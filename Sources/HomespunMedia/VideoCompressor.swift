@@ -49,7 +49,7 @@ public struct FFmpegVideoCompressor: Sendable {
 
     public func arguments(input: URL, output: URL, probe: VideoProbe) -> [String] {
         let size = profile.videoSize(width: probe.width, height: probe.height)
-        var arguments = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", input.path,
+        var arguments = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror", "-y", "-i", input.path,
                          "-map", "0:\(probe.videoStreamIndex)"]
         for index in probe.audioStreams { arguments += ["-map", "0:\(index)"] }
         // HLG (including iPhone Dolby Vision 8.4, whose base layer is HLG) stays 10-bit HLG;

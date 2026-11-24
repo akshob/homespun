@@ -37,9 +37,13 @@ public struct HomespunServer: Sendable {
         self.logger = logger
         storage = Storage(root: configuration.dataDirectory)
         try storage.prepare()
+        // Observational CLI construction is allowed beside the live server, but cannot change
+        // its root settings, recover journals, or release worker leases.
+        let initialization = try? ServerOwnership(dataDirectory: configuration.dataDirectory)
+        defer { withExtendedLifetime(initialization) {} }
         let (tls, created) = try TLSStore.loadOrCreate(data: configuration.dataDirectory)
         identity = try TLSIdentityBox(tls)
-        if tls.notAfter.timeIntervalSinceNow < 90 * 86400 {
+        if initialization != nil, tls.notAfter.timeIntervalSinceNow < 90 * 86400 {
             do { try identity.update(TLSStore.renew(data: configuration.dataDirectory)) }
             catch { identity.record(error: String(describing: error)); logger.error("Can't renew the server certificate: \(error)") }
         }
@@ -49,14 +53,21 @@ public struct HomespunServer: Sendable {
             logger.notice("HOMESPUN_PUBLIC_URL now uses HTTPS; the port is unchanged.")
         }
         catalog = try Catalog(path: storage.catalog.path)
-        try await catalog.assignMissingFolders()
-        let root = try await Self.originalsRoot(catalog: catalog, configured: configuration.originalsDirectory,
-                                                default: storage.originals, logger: logger)
-        if try !Storage.prepareOriginals(root) {
+        let root: URL
+        if initialization != nil {
+            try await catalog.assignMissingFolders()
+            root = try await Self.originalsRoot(catalog: catalog, configured: configuration.originalsDirectory,
+                                               default: storage.originals, logger: logger)
+        } else {
+            root = try await catalog.setting(OriginalsStore.setting).map { URL(fileURLWithPath: $0, isDirectory: true) }
+                ?? configuration.originalsDirectory ?? storage.originals
+        }
+        let renamePending = try await catalog.setting(DeviceRename.journal) != nil
+        let trashPending = try await !catalog.trashJournals().isEmpty
+        let recoveryPending = renamePending || trashPending
+        if initialization != nil, !recoveryPending, try !Storage.prepareOriginals(root) {
             logger.error("the originals folder \(root.path) isn't available (is its disk connected?)")
         }
-        // Stopped mid-rename of a phone: its folders go back where the catalog says they are.
-        try await DeviceRename.recover(catalog: catalog, root: root)
         originals = OriginalsStore(root: root)
         mover = OriginalsMover(catalog: catalog, store: originals, dataDirectory: configuration.dataDirectory, logger: logger)
         immichState = try await ImmichState(catalog: catalog, fallback: configuration.immich)
@@ -87,7 +98,10 @@ public struct HomespunServer: Sendable {
             root = configured ?? fallback
         }
         if let configured, configured != root.standardizedFileURL {
-            if try await catalog.storedOriginalCount() == 0 {
+            let renamePending = try await catalog.setting(DeviceRename.journal) != nil
+            let movePending = try await catalog.setting(OriginalsMover.setting) != nil
+            let trashPending = try await !catalog.trashJournals().isEmpty
+            if try await catalog.storedOriginalCount() == 0, !renamePending, !movePending, !trashPending {
                 root = configured
             } else {
                 logger.notice("originals are in \(root.path); ignoring --originals \(configured.path) (move them from the app)")
@@ -103,8 +117,15 @@ public struct HomespunServer: Sendable {
         [OneDriveConnector(clientID: configuration.onedriveClientID)]
     }
 
+    /// Low-level router for tests or an already-owned lifecycle. Use `application()` or `run()`
+    /// to serve: constructing an Application from this router alone does not install recovery.
     public func router() -> Router<HomespunRequestContext> {
+        router(startup: nil)
+    }
+
+    private func router(startup: ServingStartup?) -> Router<HomespunRequestContext> {
         let router = Router(context: HomespunRequestContext.self)
+        if let startup { router.add(middleware: ServingAdmission(startup: startup)) }
         router.add(middleware: LogRequestsMiddleware(.info))
         routes.add(to: router)
         return router
@@ -113,21 +134,24 @@ public struct HomespunServer: Sendable {
     /// For tests that call routes directly; never serve it without the TLS listener.
     public func testRouter() -> Router<HomespunRequestContext> { router() }
 
-    /// Serves until stopped. Other commands (pair, import, …) run beside a serving server, so
-    /// only this releases job leases: nothing holds one before these runners start.
+    /// Serves until stopped, using the same ownership/recovery lifecycle as `application()`.
     public func run() async throws {
-        try await catalog.releaseLeases()
-        await mover.resume()
         try await application().runService()
     }
 
     public func application(logger: Logger = Logger(label: "homespun")) -> some ApplicationProtocol {
         // The idle timeout closes uploads that stall (a phone leaving Wi-Fi), releasing their lock.
-        Application(router: router(), server: transport,
+        let startup = ServingStartup()
+        let workers: [any Service] = [runner, copier, TLSMaintenance(data: configuration.dataDirectory, identity: identity, logger: logger)]
+            + advertiser()
+        var application = Application(router: router(startup: startup), server: transport,
                     configuration: .init(address: .hostname(configuration.host, port: configuration.port),
                                          serverName: "homespun"),
-                    services: [runner, copier, TLSMaintenance(data: configuration.dataDirectory, identity: identity, logger: logger)]
-                        + advertiser(), logger: logger)
+                    services: [OwnedServerServices(dataDirectory: configuration.dataDirectory, catalog: catalog,
+                                                   originals: originals, storage: storage, mover: mover,
+                                                   startup: startup, services: workers, logger: logger)], logger: logger)
+        application.beforeServerStarts { try await startup.wait() }
+        return application
     }
 
     private func advertiser() -> [any Service] {
@@ -215,12 +239,23 @@ public struct HomespunServer: Sendable {
 
     /// Runs queued jobs until none is ready.
     public func drainJobs() async throws {
+        let ownership = try ServerOwnership(dataDirectory: configuration.dataDirectory)
+        defer { withExtendedLifetime(ownership) {} }
+        try await originals.refreshRoot(catalog: catalog)
+        try await DeviceRename.recover(catalog: catalog, root: await originals.root)
+        try await Trash(catalog: catalog, originals: originals, storage: storage).recover()
         try await runner.drain()
         try await copier.drain()
     }
 
     /// Deletes what has been in the trash for 30 days (the job runner does this hourly).
     func emptyTrash(now: Date = Date()) async throws -> Int {
-        try await Trash(catalog: catalog, originals: originals, storage: storage).empty(now: now, logger: logger)
+        let ownership = try ServerOwnership(dataDirectory: configuration.dataDirectory)
+        defer { withExtendedLifetime(ownership) {} }
+        try await originals.refreshRoot(catalog: catalog)
+        try await DeviceRename.recover(catalog: catalog, root: await originals.root)
+        let trash = Trash(catalog: catalog, originals: originals, storage: storage)
+        try await trash.recover()
+        return try await trash.empty(now: now, logger: logger)
     }
 }

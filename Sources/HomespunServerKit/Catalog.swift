@@ -34,6 +34,7 @@ struct ResourceRecord: Equatable, Sendable {
     var externalPath: String? = nil
     /// Where an original copied in by `homespun-server import --copy` came from.
     var importedFrom: String? = nil
+    var generation = 0
 }
 
 struct CompactRecord: Equatable, Sendable {
@@ -56,6 +57,9 @@ struct AssetRecord: Equatable, Sendable {
     /// The phone asked to back it up without a compact copy for now.
     var holdCompact = false
     var trashedAt: String?
+    var generation = 0
+    var permanent = true
+    var purging = false
 }
 
 struct Job: Equatable, Sendable {
@@ -69,10 +73,13 @@ struct Job: Equatable, Sendable {
 /// single writer; file and network work happens outside it.
 public actor Catalog {
     let database: SQLiteDatabase
+    nonisolated let dataDirectory: URL
+    nonisolated let mutations = AssetMutations()
     static let maximumAttempts = 3
     static let pairingFailureLimit = 10
 
     public init(path: String) throws {
+        dataDirectory = URL(fileURLWithPath: path).deletingLastPathComponent()
         // Owner-only: the catalog holds token hashes and the Immich API key. SQLite gives its
         // -wal and -shm files the database's permissions.
         let files = FileManager.default
@@ -223,6 +230,32 @@ public actor Catalog {
         """
         ALTER TABLE devices ADD COLUMN install_id TEXT;
         CREATE INDEX devices_install_id ON devices (install_id);
+        """,
+        // Legacy intent is ambiguous, including legacy trash: retain it, never infer that it
+        // was disposable from hold_compact/state. Only newly admitted explicit deferrals expire.
+        """
+        ALTER TABLE assets ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE assets ADD COLUMN permanent INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE assets ADD COLUMN purging INTEGER NOT NULL DEFAULT 0;
+        UPDATE assets SET message = 'Retained after a server upgrade; this original will not expire. Back it up again to restore it from the server trash.'
+            WHERE state = 'trashed';
+        ALTER TABLE resources ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+        CREATE TABLE resource_history (
+            id INTEGER PRIMARY KEY,
+            asset_id TEXT NOT NULL,
+            device_id TEXT,
+            role TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            stored_path TEXT,
+            external_path TEXT,
+            imported_from TEXT,
+            retired_at TEXT NOT NULL
+        );
+        CREATE INDEX resource_history_path ON resource_history (stored_path);
+        CREATE INDEX resource_history_device ON resource_history (device_id);
+        CREATE INDEX resource_history_sha256 ON resource_history (sha256);
         """,
     ]
 
@@ -410,9 +443,18 @@ public actor Catalog {
     /// original is among `copied`; otherwise switches nothing and returns those that aren't.
     func switchOriginals(to root: String, copied: Set<String>) throws -> [String] {
         try database.transaction {
-            let missing = try database.query("SELECT stored_path FROM resources WHERE stored_path IS NOT NULL")
-                .compactMap { $0["stored_path"]?.string }.filter { !copied.contains($0) }
+            let missing = try storedOriginals().map(\.path).filter { !copied.contains($0) }
             guard missing.isEmpty else { return missing }
+            if let previous = try setting(OriginalsStore.setting), previous != root {
+                var roots: [String] = []
+                if let saved = try setting(OriginalsMover.previousRootsSetting) {
+                    roots = try JSONDecoder().decode([String].self, from: Data(saved.utf8))
+                }
+                roots.removeAll { $0 == root }
+                if !roots.contains(previous) { roots.append(previous) }
+                try setSetting(OriginalsMover.previousRootsSetting,
+                               String(decoding: try JSONEncoder().encode(roots), as: UTF8.self))
+            }
             try setSetting(OriginalsStore.setting, root)
             try setSetting(OriginalsMover.setting, nil)
             return []
@@ -420,17 +462,34 @@ public actor Catalog {
     }
 
     func storedOriginalCount() throws -> Int {
-        try database.query("SELECT count(*) AS n FROM resources WHERE stored_path IS NOT NULL").first?["n"]?.int ?? 0
+        try storedOriginals().count
     }
 
     /// Every original stored in the originals folder (path relative to it), for moving them.
     func storedOriginals() throws -> [(assetID: String, role: Role, path: String, size: Int, sha256: String)] {
-        try database.query("SELECT asset_id, role, stored_path, size, sha256 FROM resources WHERE stored_path IS NOT NULL ORDER BY rowid")
-            .compactMap { row in
-                guard let asset = row["asset_id"]?.string, let path = row["stored_path"]?.string,
-                      let sha256 = row["sha256"]?.string else { return nil }
-                return (asset, Role(rawValue: row["role"]?.string ?? "") ?? .other, path, row["size"]?.int ?? 0, sha256)
+        var known: [String: (assetID: String, role: Role, path: String, size: Int, sha256: String)] = [:]
+        for row in try database.query("""
+            SELECT asset_id, role, stored_path, size, sha256 FROM resources WHERE stored_path IS NOT NULL
+            UNION ALL
+            SELECT asset_id, role, stored_path, size, sha256 FROM resource_history WHERE stored_path IS NOT NULL
+            """) {
+            guard let asset = row["asset_id"]?.string, let path = row["stored_path"]?.string,
+                  let sha256 = row["sha256"]?.string else { continue }
+            let size = row["size"]?.int ?? 0
+            if let old = known[path], old.sha256 != sha256 || old.size != size {
+                throw OriginalsMover.Failure(description: "Conflicting original references at \(path); repair the catalog before moving.")
             }
+            known[path] = (asset, Role(rawValue: row["role"]?.string ?? "") ?? .other, path, size, sha256)
+        }
+        return known.values.sorted { $0.path < $1.path }
+    }
+
+    func pathReferenceCount(_ path: String) throws -> Int {
+        let row = try database.query("""
+            SELECT (SELECT count(*) FROM resources WHERE stored_path = ?) +
+                   (SELECT count(*) FROM resource_history WHERE stored_path = ?) AS n
+            """, [.text(path), .text(path)]).first
+        return row?["n"]?.int ?? 0
     }
 
     func device(tokenHash: String) throws -> DeviceRecord? {
@@ -466,6 +525,12 @@ public actor Catalog {
                     try database.execute("UPDATE resources SET stored_path = ? WHERE asset_id = ? AND role = ?",
                                          [.text(moved), .text(asset), .text(role)])
                 }
+                for row in try database.query("SELECT id, stored_path FROM resource_history WHERE device_id = ?", [.text(id)]) {
+                    guard let key = row["id"]?.int, let path = row["stored_path"]?.string,
+                          let moved = DeviceRename.moved(path, from: from, to: folder) else { continue }
+                    try database.execute("UPDATE resource_history SET stored_path = ? WHERE id = ?",
+                                         [.text(moved), .integer(Int64(key))])
+                }
             }
             try setSetting(journal, nil)
         }
@@ -477,7 +542,8 @@ public actor Catalog {
         let rows = try database.query("""
             SELECT DISTINCT r.stored_path FROM resources r JOIN assets a ON a.id = r.asset_id
             WHERE a.device_id = ? AND r.stored_path LIKE '.trash/%'
-            """, [.text(id)])
+            UNION SELECT stored_path FROM resource_history WHERE device_id = ? AND stored_path LIKE '.trash/%'
+            """, [.text(id), .text(id)])
         return Array(Set(rows.compactMap { row -> String? in
             guard let path = row["stored_path"]?.string, let original = Trash.restored(path) else { return nil }
             return String(path.dropLast(original.count + 1))
@@ -500,7 +566,24 @@ public actor Catalog {
 
     // MARK: Assets
 
-    enum RegisterOutcome: Equatable { case created, unchanged, changed }
+    enum RegisterOutcome: Equatable, Sendable { case created, unchanged, changed }
+
+    struct StaleResource: Error {}
+
+    private func archiveResource(_ assetID: String, role: Role) throws {
+        try database.execute("""
+            INSERT INTO resource_history
+                (asset_id, device_id, role, filename, size, sha256, stored_path, external_path, imported_from, retired_at)
+            SELECT r.asset_id, a.device_id, r.role, r.filename, r.size, r.sha256, r.stored_path,
+                   r.external_path, r.imported_from, ? FROM resources r JOIN assets a ON a.id = r.asset_id
+            WHERE r.asset_id = ? AND r.role = ? AND (r.stored_path IS NOT NULL OR r.external_path IS NOT NULL)
+            """, [.text(Timestamp.string()), .text(assetID), .text(role.rawValue)])
+    }
+
+    func preserveSharedOriginal(_ assetID: String, role: Role, path: String) throws {
+        guard try database.query("SELECT id FROM resource_history WHERE stored_path = ? LIMIT 1", [.text(path)]).isEmpty else { return }
+        try archiveResource(assetID, role: role)
+    }
 
     /// Inserts the asset or reconciles its resources with a new description. Resources whose
     /// size or SHA-256 changed (for example, after an edit) must be supplied again, and any
@@ -510,15 +593,24 @@ public actor Catalog {
         let now = Timestamp.string()
         let outcome: RegisterOutcome = try database.transaction {
             let existing = try database.query("SELECT id FROM assets WHERE id = ?", [.text(assetID)])
+            if let asset = try asset(assetID), asset.purging {
+                throw Trash.Failure(description: "This item's expired trash is being purged; retry after cleanup.")
+            }
             if existing.isEmpty {
                 try database.execute(
                     """
-                    INSERT INTO assets (id, kind, capture_date, state, device_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO assets (id, kind, capture_date, state, device_id, created_at, updated_at, permanent, hold_compact)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [.text(assetID), .text(request.kind.rawValue), request.captureDate.map(Timestamp.string).sqlValue,
-                     .text(initialState.rawValue), .text(device), .text(now), .text(now)])
+                     .text(initialState.rawValue), .text(device), .text(now), .text(now),
+                     .integer(request.wantsCompact ? 1 : 0), .integer(request.wantsCompact ? 0 : 1)])
             }
+            if request.wantsCompact { try retainPermanently(assetID) }
+            // Scheduling and retention are separate: a deferral can delay work, never revoke
+            // a previously established permanent backup.
+            try database.execute("UPDATE assets SET hold_compact = ? WHERE id = ?",
+                                 [.integer(request.wantsCompact ? 0 : 1), .text(assetID)])
             var changed = false
             let current = Dictionary(uniqueKeysWithValues: try resources(assetID).map { ($0.role, $0) })
             for resource in request.resources {
@@ -531,24 +623,26 @@ public actor Catalog {
                     continue
                 }
                 changed = changed || !existing.isEmpty
+                try archiveResource(assetID, role: resource.role)
                 try database.execute(
                     """
-                    INSERT OR REPLACE INTO resources (asset_id, role, filename, size, sha256, sha1, state, received_bytes)
-                    VALUES (?, ?, ?, ?, ?, ?, 'missing', 0)
+                    INSERT OR REPLACE INTO resources (asset_id, role, filename, size, sha256, sha1, state, received_bytes, generation)
+                    VALUES (?, ?, ?, ?, ?, ?, 'missing', 0, ?)
                     """,
                     [.text(assetID), .text(resource.role.rawValue), .text(resource.filename), .integer(Int64(resource.size)),
-                     .text(sha256), sha1.sqlValue])
+                     .text(sha256), sha1.sqlValue, .integer(Int64((current[resource.role]?.generation ?? -1) + 1))])
             }
             let kept = Set(request.resources.map(\.role))
             for role in current.keys where !kept.contains(role) {
                 changed = true
+                try archiveResource(assetID, role: role)
                 try database.execute("DELETE FROM resources WHERE asset_id = ? AND role = ?",
                                      [.text(assetID), .text(role.rawValue)])
             }
             if changed {
                 try database.execute("DELETE FROM compact WHERE asset_id = ?", [.text(assetID)])
                 try database.execute(
-                    "UPDATE assets SET state = ?, message = NULL, imported_at = NULL, updated_at = ? WHERE id = ?",
+                    "UPDATE assets SET state = ?, message = NULL, imported_at = NULL, updated_at = ?, generation = generation + 1 WHERE id = ?",
                     [.text(initialState.rawValue), .text(now), .text(assetID)])
             }
             return existing.isEmpty ? .created : changed ? .changed : .unchanged
@@ -582,6 +676,7 @@ public actor Catalog {
                     ORDER BY CASE r.role WHEN 'photo' THEN 0 WHEN 'video' THEN 1 ELSE 2 END LIMIT 1) AS name
             FROM made_copies m
             WHERE m.sha256 = ? AND NOT EXISTS (SELECT 1 FROM resources r WHERE r.sha256 = m.sha256)
+              AND NOT EXISTS (SELECT 1 FROM resource_history h WHERE h.sha256 = m.sha256)
             """, [.text(sha256)]).first, let assetID = row["asset_id"]?.string else { return nil }
         return (assetID, row["name"]?.string)
     }
@@ -621,7 +716,7 @@ public actor Catalog {
                            [.text(path), .text(path), .integer(Int64(size))]).first?["asset_id"]?.string
     }
 
-    enum ImportOutcome: Equatable { case imported, linked }
+    enum ImportOutcome: Equatable, Sendable { case imported, linked }
 
     /// Records an item whose originals stay at their paths and whose compact copies were made
     /// elsewhere (and are already on the phone). An item already here keeps its originals and
@@ -640,6 +735,10 @@ public actor Catalog {
                 }
             }
             let exists = !(try database.query("SELECT id FROM assets WHERE id = ?", [.text(assetID)]).isEmpty)
+            if let asset = try asset(assetID), asset.purging || asset.state == .trashed {
+                throw Trash.Failure(description: "Restore this item's server trash before linking an imported copy.")
+            }
+            if exists { try retainPermanently(assetID) }
             if !exists {
                 try database.execute(
                     """
@@ -696,23 +795,70 @@ public actor Catalog {
             message: row["message"]?.string,
             deviceCompresses: (row["device_compresses"]?.string ?? "").split(separator: ",")
                 .compactMap { Role(rawValue: String($0)) },
-            holdCompact: (row["hold_compact"]?.int ?? 0) != 0, trashedAt: row["trashed_at"]?.string)
+            holdCompact: (row["hold_compact"]?.int ?? 0) != 0, trashedAt: row["trashed_at"]?.string,
+            generation: row["generation"]?.int ?? 0, permanent: (row["permanent"]?.int ?? 1) != 0,
+            purging: (row["purging"]?.int ?? 0) != 0)
     }
 
     /// Whether the phone wants a compact copy now (`false`: back it up, compact it later).
     func setHoldCompact(_ assetID: String, _ hold: Bool) throws {
-        try database.execute("UPDATE assets SET hold_compact = ? WHERE id = ?", [.integer(hold ? 1 : 0), .text(assetID)])
+        if !hold { try retainPermanently(assetID) }
+        try database.execute("UPDATE assets SET hold_compact = ? WHERE id = ?",
+                             [.integer(hold ? 1 : 0), .text(assetID)])
+    }
+
+    func retainPermanently(_ assetID: String) throws {
+        try database.execute("UPDATE assets SET permanent = 1, hold_compact = 0 WHERE id = ? AND purging = 0", [.text(assetID)])
+    }
+
+    func proofEligible(_ assetID: String) throws -> Bool {
+        guard let asset = try asset(assetID), asset.permanent, !asset.purging, asset.state != .trashed,
+              asset.trashedAt == nil, try setting(Trash.journal(assetID)) == nil else { return false }
+        let resources = try resources(assetID)
+        return !resources.isEmpty && resources.allSatisfy { $0.storedPath.flatMap(Trash.restored) == nil }
+    }
+
+    func trashJournals() throws -> [String] {
+        try database.query("SELECT value FROM settings WHERE key LIKE 'trash.mutation.%' ORDER BY key")
+            .compactMap { $0["value"]?.string }
+    }
+
+    func saveTrashMutation(_ id: String, generation: Int, action: Trash.Plan.Action, text: String) throws {
+        try database.transaction {
+            guard let asset = try asset(id), asset.generation == generation, !asset.purging,
+                  try setting(Trash.journal(id)) == nil else {
+                throw Trash.Failure(description: "This item's trash state changed or already needs recovery.")
+            }
+            switch action {
+            case .remove:
+                guard !asset.permanent, asset.holdCompact, [.stored, .receiving].contains(asset.state) else {
+                    throw Trash.Failure(description: "A permanent or changed backup cannot enter the trash.")
+                }
+            case .purge:
+                guard !asset.permanent, asset.state == .trashed else {
+                    throw Trash.Failure(description: "A permanent or restored backup cannot be purged.")
+                }
+            case .restore: break
+            }
+            try setSetting(Trash.journal(id), text)
+            if action == .purge { try database.execute("UPDATE assets SET purging = 1 WHERE id = ?", [.text(id)]) }
+        }
     }
 
     /// Moves an asset to or out of the trash: its stored paths change, and so does its state.
-    func setTrashed(_ assetID: String, paths: [Role: String], at date: String?, state: ServerAPI.AssetState) throws {
+    func setTrashed(_ assetID: String, generation: Int, paths: [Role: String], at date: String?, state: ServerAPI.AssetState) throws {
         try database.transaction {
+            guard let asset = try asset(assetID), asset.generation == generation, !asset.purging,
+                  date == nil || !asset.permanent else {
+                throw Trash.Failure(description: "The asset changed during its trash mutation; its journal was kept.")
+            }
             for (role, path) in paths {
                 try database.execute("UPDATE resources SET stored_path = ? WHERE asset_id = ? AND role = ?",
                                      [.text(path), .text(assetID), .text(role.rawValue)])
             }
             try database.execute("UPDATE assets SET state = ?, message = NULL, trashed_at = ?, updated_at = ? WHERE id = ?",
                                  [.text(state.rawValue), date.sqlValue, .text(Timestamp.string()), .text(assetID)])
+            try setSetting(Trash.journal(assetID), nil)
         }
         log(date == nil ? "asset_restored" : "asset_trashed", asset: assetID)
     }
@@ -727,28 +873,30 @@ public actor Catalog {
 
     /// Trashed assets whose time is up.
     func trashed(before date: String) throws -> [String] {
-        try database.query("SELECT id FROM assets WHERE state = 'trashed' AND trashed_at < ?", [.text(date)])
+        try database.query("SELECT id FROM assets WHERE state = 'trashed' AND permanent = 0 AND trashed_at < ?", [.text(date)])
             .compactMap { $0["id"]?.string }
     }
 
     /// Everything waiting in the trash: count and bytes.
     func trashTotals() throws -> (count: Int, bytes: Int64) {
-        let row = try database.query("""
-            SELECT COUNT(DISTINCT a.id) AS count, COALESCE(SUM(r.size), 0) AS bytes FROM assets a
-            LEFT JOIN resources r ON r.asset_id = a.id WHERE a.state = 'trashed'
-            """).first
-        return (row?["count"]?.int ?? 0, Int64(row?["bytes"]?.int ?? 0))
+        let originals = try storedOriginals().filter { Trash.restored($0.path) != nil }
+        let ids = try database.query("SELECT id FROM assets WHERE state = 'trashed'").compactMap { $0["id"]?.string }
+        return (Set(ids + originals.map(\.assetID)).count, originals.reduce(0) { $0 + Int64($1.size) })
     }
 
     /// Forgets an asset whose trash time is up (its files are already deleted).
-    func deleteAsset(_ assetID: String) throws {
+    func deleteAsset(_ assetID: String, generation: Int) throws {
         try database.transaction {
+            guard let asset = try asset(assetID), asset.generation == generation, !asset.permanent, asset.purging else {
+                throw Trash.Failure(description: "This original is retained, not claimed for purging.")
+            }
             try database.execute("DELETE FROM jobs WHERE asset_id = ?", [.text(assetID)])
             try database.execute("DELETE FROM connector_copies WHERE asset_id = ?", [.text(assetID)])
             try database.execute("DELETE FROM compact WHERE asset_id = ?", [.text(assetID)])
             try database.execute("DELETE FROM assets WHERE id = ?", [.text(assetID)])
+            try setSetting(Trash.journal(assetID), nil)
         }
-        log("asset_deleted", asset: assetID, detail: "removed on the phone; trash emptied")
+        log("asset_deleted", asset: assetID, detail: "deferred trash expired; historical/shared originals retained")
     }
 
     func resources(_ assetID: String) throws -> [ResourceRecord] {
@@ -759,7 +907,8 @@ public actor Catalog {
                 state: ServerAPI.ResourceState(rawValue: row["state"]?.string ?? "") ?? .missing,
                 receivedBytes: row["received_bytes"]?.int ?? 0, storedPath: row["stored_path"]?.string,
                 immichAssetID: row["immich_asset_id"]?.string, verifiedAt: row["verified_at"]?.string,
-                externalPath: row["external_path"]?.string, importedFrom: row["imported_from"]?.string)
+                externalPath: row["external_path"]?.string, importedFrom: row["imported_from"]?.string,
+                generation: row["generation"]?.int ?? 0)
         }
     }
 
@@ -773,7 +922,7 @@ public actor Catalog {
     func status(_ assetID: String) throws -> ServerAPI.AssetStatus? {
         guard let asset = try asset(assetID) else { return nil }
         let ready = asset.state == .ready || asset.state == .imported
-        let trashedUntil = asset.state == .trashed
+        let trashedUntil = asset.state == .trashed && !asset.permanent
             ? Timestamp.date(asset.trashedAt).map { $0.addingTimeInterval(Trash.keep) } : nil
         return ServerAPI.AssetStatus(
             assetID: assetID, kind: asset.kind, state: asset.state, message: asset.message,
@@ -793,17 +942,43 @@ public actor Catalog {
     }
 
     func markResource(_ assetID: String, role: Role, state: ServerAPI.ResourceState, storedPath: String? = nil,
-                      immichAssetID: String? = nil) throws {
+                      immichAssetID: String? = nil, expected: ResourceRecord? = nil, assetGeneration: Int? = nil) throws {
         let verified = state == .verified ? Timestamp.string() : nil
+        var predicate = "asset_id = ? AND role = ?"
+        var values: [SQLValue] = [
+            .text(state.rawValue), verified.sqlValue, storedPath.sqlValue, immichAssetID.sqlValue,
+            .text(state.rawValue), .text(state.rawValue), .text(assetID), .text(role.rawValue)
+        ]
+        if let expected {
+            guard let assetGeneration, expected.role == role else { throw StaleResource() }
+            predicate += """
+                 AND sha256 = ? AND size = ? AND generation = ?
+                 AND (SELECT generation FROM assets WHERE id = resources.asset_id) = ?
+                """
+            values += [.text(expected.sha256), .integer(Int64(expected.size)),
+                       .integer(Int64(expected.generation)), .integer(Int64(assetGeneration))]
+        }
         try database.execute(
             """
             UPDATE resources SET state = ?, verified_at = ?,
                 stored_path = coalesce(?, stored_path), immich_asset_id = coalesce(?, immich_asset_id),
                 received_bytes = CASE WHEN ? = 'verified' THEN size WHEN ? = 'partial' THEN received_bytes ELSE 0 END
-            WHERE asset_id = ? AND role = ?
+            WHERE \(predicate)
             """,
-            [.text(state.rawValue), verified.sqlValue, storedPath.sqlValue, immichAssetID.sqlValue,
-             .text(state.rawValue), .text(state.rawValue), .text(assetID), .text(role.rawValue)])
+            values)
+        if expected != nil, database.changes != 1 {
+            // Publication may have reached disk before an unexpected writer changed the manifest.
+            // Keep those good old bytes indexed rather than deleting them or losing the reference.
+            if let expected, let storedPath {
+                try database.execute("""
+                    INSERT INTO resource_history
+                        (asset_id, device_id, role, filename, size, sha256, stored_path, retired_at)
+                    VALUES (?, (SELECT device_id FROM assets WHERE id = ?), ?, ?, ?, ?, ?, ?)
+                    """, [.text(assetID), .text(assetID), .text(expected.role.rawValue), .text(expected.filename),
+                           .integer(Int64(expected.size)), .text(expected.sha256), .text(storedPath), .text(Timestamp.string())])
+            }
+            throw StaleResource()
+        }
         log("resource_\(state.rawValue)", asset: assetID, detail: role.rawValue)
     }
 
@@ -829,7 +1004,7 @@ public actor Catalog {
                           file.sha1.sqlValue])
             }
             try database.execute(
-                "UPDATE assets SET state = ?, message = ?, device_compresses = ?, updated_at = ? WHERE id = ?",
+                "UPDATE assets SET state = ?, message = ?, device_compresses = ?, updated_at = ?, permanent = 1 WHERE id = ?",
                 [.text(state.rawValue), message.sqlValue, .text(deviceCompresses.map(\.rawValue).joined(separator: ",")),
                  .text(Timestamp.string()), .text(assetID)])
         }
@@ -838,7 +1013,10 @@ public actor Catalog {
 
     func markImported(_ assetID: String, device: String) throws -> Bool {
         try database.execute(
-            "UPDATE assets SET state = 'imported', imported_at = ?, updated_at = ? WHERE id = ? AND state IN ('ready', 'imported')",
+            """
+            UPDATE assets SET state = 'imported', permanent = 1, hold_compact = 0, imported_at = ?, updated_at = ?
+            WHERE id = ? AND state IN ('ready', 'imported') AND trashed_at IS NULL AND purging = 0
+            """,
             [.text(Timestamp.string()), .text(Timestamp.string()), .text(assetID)])
         let changed = database.changes > 0
         if changed { log("asset_imported", asset: assetID, device: device) }

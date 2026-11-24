@@ -2,6 +2,11 @@
 import Foundation
 import Testing
 @testable import HomespunMedia
+#if os(Linux)
+import Glibc
+#elseif os(macOS)
+import Darwin
+#endif
 
 @Test func probeKeepsOnlyDecodableAudio() throws {
     let json = """
@@ -33,6 +38,51 @@ import Testing
 }
 
 #if os(Linux) || os(macOS)
+@Test func cancelledCodecDiscoveryDoesNotPoisonLaterProbes() {
+    let cache = FFmpegCodecs.Cache()
+    #expect(cache.read { throw CancellationError() } == nil)
+    let listing = Data("Codecs:\n -------\n DEV.L. hevc HEVC\n DEA.L. aac AAC\n".utf8)
+    #expect(cache.read { listing } == ["hevc", "aac"])
+    #expect(cache.read { throw CancellationError() } == ["hevc", "aac"])
+}
+
+@Test(.timeLimit(.minutes(1))) func processRunnerDrainsBothPipesAndBoundsDiagnostics() throws {
+    let output = try ProcessRunner.run(["sh", "-c", "head -c 1048576 /dev/zero >&2; printf complete"])
+    #expect(String(decoding: output, as: UTF8.self) == "complete")
+    do {
+        try ProcessRunner.run(["sh", "-c", "head -c 1048576 /dev/zero >&2; printf diagnostic-tail >&2; exit 7"])
+        Issue.record("Expected a nonzero process exit")
+    } catch let failure as ProcessFailure {
+        #expect(failure.status == 7)
+        #expect(failure.stderr.utf8.count <= ProcessRunner.maximumDiagnosticBytes)
+        #expect(failure.stderr.hasSuffix("diagnostic-tail"))
+    }
+    #expect(throws: ProcessFailure.self) {
+        try ProcessRunner.run(["sh", "-c", "head -c 4096 /dev/zero"], outputLimit: 1024)
+    }
+}
+
+@Test(.timeLimit(.minutes(1))) func processCancellationTerminatesAndReapsOnlyItsOwnedChild() async throws {
+    let cancellation = MediaProcessCancellation()
+    defer { cancellation.cancel() }
+    let work = Task.detached {
+        try cancellation.run { try ProcessRunner.run(["sh", "-c", "trap '' TERM; exec sleep 60"]) }
+    }
+    while cancellation.processID == nil { try await Task.sleep(for: .milliseconds(10)) }
+    let pid = try #require(cancellation.processID)
+    cancellation.cancel()
+    do {
+        _ = try await work.value
+        Issue.record("Cancellation must not succeed")
+    } catch is CancellationError {}
+    var status: Int32 = 0
+    #expect(waitpid(pid, &status, WNOHANG) == -1 && errno == ECHILD)
+    #expect(cancellation.processID == nil)
+    #expect(throws: CancellationError.self) {
+        try cancellation.run { try ProcessRunner.run(["sh", "-c", "exit 0"]) }
+    }
+}
+
 @Test(.enabled(if: ProcessRunner.available("ffmpeg")))
 func compressesSyntheticVideoEndToEnd() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

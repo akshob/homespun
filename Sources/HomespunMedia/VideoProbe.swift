@@ -106,11 +106,30 @@ public struct VideoProbe: Equatable, Sendable {
 /// The codecs this ffmpeg can decode: `ffmpeg -codecs` lists them with "D" first.
 public enum FFmpegCodecs {
     #if os(Linux) || os(macOS)
-    public static let decodable: Set<String>? = {
-        guard let data = try? ProcessRunner.run(["ffmpeg", "-hide_banner", "-codecs"]) else { return nil }
-        let found = parse(String(decoding: data, as: UTF8.self))
-        return found.isEmpty ? nil : found
-    }()
+    private static let cache = Cache()
+    public static var decodable: Set<String>? {
+        cache.read { try ProcessRunner.run(["ffmpeg", "-hide_banner", "-codecs"]) }
+    }
+
+    /// A cancelled first job must not cache an unknown codec list for the server's lifetime.
+    final class Cache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Set<String>?
+
+        func read(_ load: () throws -> Data) -> Set<String>? {
+            lock.lock()
+            let cached = value
+            lock.unlock()
+            if let cached { return cached }
+            guard let data = try? load() else { return nil }
+            let found = FFmpegCodecs.parse(String(decoding: data, as: UTF8.self))
+            guard !found.isEmpty else { return nil }
+            lock.lock()
+            value = found
+            lock.unlock()
+            return found
+        }
+    }
     #endif
 
     static func parse(_ listing: String) -> Set<String> {

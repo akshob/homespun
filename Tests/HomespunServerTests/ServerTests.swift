@@ -1209,10 +1209,10 @@ final class ProblemLog: @unchecked Sendable {
         try String(decoding: try ServerAPI.encoder.encode(ServerAPI.ImportItem(
             kind: .photo, captureDate: nil, originals: [.init(role: .photo, path: source.path)], copies: [])), as: UTF8.self)
             .write(to: manifest, atomically: true, encoding: .utf8)
-        let problems = ProblemLog()
-        let blocked = try await LibraryImport(catalog: fixture.server.catalog, copyInto: fixture.server.originals)
-            .run(manifest: manifest) { problems.add($0) }
-        #expect(blocked.problems == 1 && problems.lines.first?.contains("being moved") == true)
+        await #expect(throws: LibraryImport.Problem.self) {
+            try await LibraryImport(catalog: fixture.server.catalog, copyInto: fixture.server.originals)
+                .run(manifest: manifest) { _ in }
+        }
         #expect(!FileManager.default.fileExists(atPath: volume.appendingPathComponent("Camera Roll").path))
         try await fixture.server.catalog.setSetting(OriginalsMover.setting, nil)
 
@@ -1223,8 +1223,8 @@ final class ProblemLog: @unchecked Sendable {
         let movedFile = moved.appendingPathComponent("Test iPhone 2/2024/05/IMG_0001.JPG")
         #expect(try Data(contentsOf: movedFile) == Data(contentsOf: media.photo))
         #expect((try FileManager.default.attributesOfItem(atPath: movedFile.path)[.posixPermissions] as? NSNumber)?.intValue == 0o440)
-        #expect(!FileManager.default.fileExists(atPath: stored.path))
-        #expect(try FileManager.default.contentsOfDirectory(atPath: volume.path).filter { !$0.hasPrefix(".") }.isEmpty)
+        #expect(try Data(contentsOf: stored) == Data(contentsOf: media.photo))
+        #expect(storage.move?.message?.contains("cleanup is pending") == true)
         #expect(try await client.call("/api/v1/assets/\(photo.sha256)/verify", .post, token: token)
             .decode(ServerAPI.Verification.self).allVerified)
 
@@ -1723,4 +1723,453 @@ final class ProblemLog: @unchecked Sendable {
     #expect(DeviceRename.moved("Older/a.jpg", from: "Old", to: "New") == nil)
     #expect(Storage.folderName(" .Akshob’s iPhone. ") == "Akshob’s iPhone" && Storage.folderName("a/b:c") == "abc")
     #expect(Storage.folderName("Test iPhone") == "Test iPhone" && Storage.folderName("..") == "")
+}
+
+// MARK: Storage ownership, descriptor and retention regressions
+
+private actor StorageTestGate {
+    private var opened = false
+    func open() { opened = true }
+    func wait() async throws {
+        while !opened { try await Task.sleep(for: .milliseconds(10)) }
+    }
+}
+
+private func waitForAssetWaiter(_ id: String, catalog: Catalog) async throws {
+    while await catalog.mutations.waiting[id, default: 0] == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
+private actor PausedResourceBody {
+    var bytes: ByteBuffer?
+    let entered: StorageTestGate
+    let resume: StorageTestGate
+    init(bytes: ByteBuffer, entered: StorageTestGate, resume: StorageTestGate) {
+        self.bytes = bytes
+        self.entered = entered
+        self.resume = resume
+    }
+    func next() async throws -> ByteBuffer? {
+        guard let bytes else { return nil }
+        self.bytes = nil
+        await entered.open()
+        try await resume.wait()
+        return bytes
+    }
+}
+
+private struct PauseMotionUpload: RouterMiddleware {
+    let entered: StorageTestGate
+    let resume: StorageTestGate
+    func handle(_ request: Request, context: HomespunRequestContext,
+                next: (Request, HomespunRequestContext) async throws -> Response) async throws -> Response {
+        guard request.uri.path.hasSuffix("/resources/paired_video") else { return try await next(request, context) }
+        let bytes = try await request.body.collect(upTo: 1 << 20)
+        let paused = PausedResourceBody(bytes: bytes, entered: entered, resume: resume)
+        var request = request
+        request.body = RequestBody(asyncSequence: AsyncThrowingStream<ByteBuffer, any Error>(unfolding: {
+            try await paused.next()
+        }))
+        return try await next(request, context)
+    }
+}
+
+@Test(.timeLimit(.minutes(1))) func applicationOwnsRecoveryAndObserversCannotUndoALiveRename() async throws {
+    let fixture = try await Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let server = fixture.server, root = await server.originals.root
+    let old = root.appendingPathComponent("Old"), new = root.appendingPathComponent("New")
+    try FileManager.default.createDirectory(at: new, withIntermediateDirectories: true)
+    let plan = DeviceRename.Plan(device: "interrupted", from: "Old", to: "New", trash: [], via: nil, hadFolder: true)
+    let text = String(decoding: try JSONEncoder().encode(plan), as: UTF8.self)
+    try await server.catalog.setSetting(DeviceRename.journal, text)
+    // Application, not only the CLI run() entry point, recovers before admitting requests.
+    try await server.application().test(.router) { _ in
+        #expect(FileManager.default.fileExists(atPath: old.path))
+        #expect(try await server.catalog.setting(DeviceRename.journal) == nil)
+        #expect(throws: ServerOwnership.Busy.self) {
+            _ = try ServerOwnership(dataDirectory: server.configuration.dataDirectory)
+        }
+        // The live rename window: disk changed, catalog/journal not committed yet.
+        try await server.catalog.setSetting(DeviceRename.journal, text)
+        try FileManager.default.moveItem(at: old, to: new)
+        let observer = try await Fixture(directory: fixture.directory)
+        _ = try await observer.server.newPairingCode()
+        _ = try await observer.server.catalog.devices()
+        _ = observer.server.fingerprint
+        #expect(FileManager.default.fileExists(atPath: new.path))
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+        #expect(try await server.catalog.setting(DeviceRename.journal) == text)
+        await #expect(throws: ServerOwnership.Busy.self) {
+            try await LibraryImport(catalog: observer.server.catalog)
+                .run(manifest: fixture.directory.appendingPathComponent("unused.jsonl")) { _ in }
+        }
+    }
+    // All workers, including the mover, are stopped before ownership is released.
+    _ = try ServerOwnership(dataDirectory: server.configuration.dataDirectory)
+}
+
+@Test func observationalConstructionDoesNotReleaseLiveJobLeases() async throws {
+    let fixture = try await Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let catalog = fixture.server.catalog
+    let device = try await catalog.claimApprovedDevice(
+        .init(id: UUID().uuidString, name: "Phone", createdAt: "", lastSeenAt: nil, revokedAt: nil),
+        tokenHash: Pairing.hash("token"))
+    let bytes = Data("original".utf8), hash = Fingerprint.sha256(of: bytes)
+    let request = ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil, resources: [
+        .init(role: .photo, filename: "a.jpg", size: bytes.count, sha256: hash)
+    ])
+    _ = try await catalog.register(request, assetID: hash, device: device.id, initialState: .queued)
+    try await catalog.enqueue("compress", assetID: hash)
+    _ = try #require(try await catalog.claim(owner: "live", lease: 3600))
+    let ownership = try ServerOwnership(dataDirectory: fixture.server.configuration.dataDirectory)
+    defer { withExtendedLifetime(ownership) {} }
+    _ = try await Fixture(directory: fixture.directory)
+    #expect(try await catalog.jobStatus("compress", assetID: hash) == "leased")
+}
+
+@Test func renameRecoveryKeepsMissingMountMalformedAndCollisionJournals() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let catalog = try Catalog(path: directory.appendingPathComponent("catalog.db").path)
+    let root = directory.appendingPathComponent("disconnected")
+    let plan = DeviceRename.Plan(device: "d", from: "Old", to: "New", trash: [], via: nil, hadFolder: true)
+    let text = String(decoding: try JSONEncoder().encode(plan), as: UTF8.self)
+    try await catalog.setSetting(DeviceRename.journal, text)
+    await #expect(throws: (any Error).self) { try await DeviceRename.recover(catalog: catalog, root: root) }
+    #expect(try await catalog.setting(DeviceRename.journal) == text)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    // A connected but empty mount point is not evidence that recovery completed.
+    await #expect(throws: (any Error).self) { try await DeviceRename.recover(catalog: catalog, root: root) }
+    #expect(try await catalog.setting(DeviceRename.journal) == text)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("Old"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("New"), withIntermediateDirectories: true)
+    await #expect(throws: (any Error).self) { try await DeviceRename.recover(catalog: catalog, root: root) }
+    #expect(try await catalog.setting(DeviceRename.journal) == text)
+    try FileManager.default.removeItem(at: root.appendingPathComponent("Old"))
+    try await DeviceRename.recover(catalog: catalog, root: root)
+    #expect(try await catalog.setting(DeviceRename.journal) == nil)
+    try await catalog.setSetting(DeviceRename.journal, "{malformed")
+    await #expect(throws: (any Error).self) { try await DeviceRename.recover(catalog: catalog, root: root) }
+    #expect(try await catalog.setting(DeviceRename.journal) == "{malformed")
+}
+
+@Test func originalsMutationIsExclusiveAndAStaleOwnerCannotReleaseItsSuccessor() async throws {
+    let fixture = try await Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let store = fixture.server.originals
+    let first = try await store.reserveMutation()
+    try await store.makeExclusive(first)
+    await #expect(throws: (any Error).self) { try await store.reserveMutation() }
+    await #expect(throws: (any Error).self) {
+        try await fixture.server.mover.start(to: fixture.directory.appendingPathComponent("Other").path)
+    }
+    await store.releaseMutation(first)
+    let second = try await store.reserveMutation()
+    await store.releaseMutation(first)
+    await #expect(throws: (any Error).self) { try await store.reserveMutation() }
+    await store.releaseMutation(second)
+    let root = await store.root
+    #expect(try await store.place { $0 } == root)
+}
+
+@Test(.timeLimit(.minutes(1))) func registrationCannotReplaceADescriptorBehindASuspendedUpload() async throws {
+    let fixture = try await Fixture()
+    let still = Data("still".utf8), motion1 = Data("old motion".utf8), motion2 = Data("replacement motion".utf8)
+    let primary = ServerAPI.ResourceDescriptor(role: .photo, filename: "a.jpg", size: still.count, sha256: Fingerprint.sha256(of: still))
+    let old = ServerAPI.ResourceDescriptor(role: .pairedVideo, filename: "a.mov", size: motion1.count, sha256: Fingerprint.sha256(of: motion1))
+    let replacement = ServerAPI.ResourceDescriptor(role: .pairedVideo, filename: "a.mov", size: motion2.count,
+                                                    sha256: Fingerprint.sha256(of: motion2))
+    try await fixture.test { client, token in
+        let id = primary.sha256, catalog = fixture.server.catalog
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+            kind: .livePhoto, captureDate: nil, resources: [primary, old], compact: false))
+        let expected = try #require(try await catalog.resources(id).first { $0.role == .pairedVideo })
+        let generation = try #require(try await catalog.asset(id)).generation
+        let entered = StorageTestGate(), resume = StorageTestGate()
+        let router = Router(context: HomespunRequestContext.self)
+        router.add(middleware: PauseMotionUpload(entered: entered, resume: resume))
+        fixture.server.routes.add(to: router)
+        try await Application(router: router).test(.router) { uploading in
+            let upload = Task {
+                try await uploading.call("/api/v1/assets/\(id)/resources/paired_video?offset=0",
+                                         .put, token: token, body: motion1)
+            }
+            try await entered.wait()
+            let register = Task {
+                try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+                    kind: .livePhoto, captureDate: nil, resources: [primary, replacement], compact: false))
+            }
+            try await waitForAssetWaiter(id, catalog: catalog)
+            #expect(try await catalog.resources(id).first { $0.role == .pairedVideo }?.sha256 == old.sha256)
+            await resume.open()
+            #expect(try await upload.value.status == .ok)
+            #expect(try await register.value.status == .ok)
+        }
+        let current = try #require(try await catalog.resources(id).first { $0.role == .pairedVideo })
+        #expect(current.sha256 == replacement.sha256 && current.state == .missing && current.storedPath == nil)
+        // The independent CAS still refuses a stale completion, even if a future caller omits coordination.
+        await #expect(throws: Catalog.StaleResource.self) {
+            try await catalog.markResource(id, role: .pairedVideo, state: .verified,
+                                           expected: expected, assetGeneration: generation)
+        }
+        #expect(try await catalog.resources(id).first { $0.role == .pairedVideo }?.state == .missing)
+        #expect(try await catalog.storedOriginals().contains { $0.sha256 == old.sha256 })
+        let device = try #require(try await catalog.devices().first)
+        _ = try await catalog.register(.init(kind: .photo, captureDate: nil, resources: [primary], compact: false),
+                                       assetID: id, device: device.id, initialState: .receiving)
+        _ = try await catalog.register(.init(kind: .livePhoto, captureDate: nil, resources: [primary, old], compact: false),
+                                       assetID: id, device: device.id, initialState: .receiving)
+        // Even removing and re-adding the identical descriptor cannot revive an old completion.
+        await #expect(throws: Catalog.StaleResource.self) {
+            try await catalog.markResource(id, role: .pairedVideo, state: .verified,
+                                           expected: expected, assetGeneration: generation)
+        }
+    }
+}
+
+@Test func supersededOriginalsRemainIndexedAccountedForRenamedAndMoved() async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let catalog = fixture.server.catalog
+        let primaryBytes = Data("primary".utf8), oldBytes = Data("old secondary".utf8), newBytes = Data("new secondary".utf8)
+        let photo = ServerAPI.ResourceDescriptor(role: .photo, filename: "a.jpg", size: primaryBytes.count,
+                                                 sha256: Fingerprint.sha256(of: primaryBytes))
+        func secondary(_ bytes: Data) -> ServerAPI.ResourceDescriptor {
+            .init(role: .alternatePhoto, filename: "edit.jpg", size: bytes.count, sha256: Fingerprint.sha256(of: bytes))
+        }
+        func register(_ resources: [ServerAPI.ResourceDescriptor]) async throws {
+            _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+                kind: .photo, captureDate: nil, resources: resources, compact: false))
+        }
+        func upload(_ role: String, _ bytes: Data) async throws {
+            #expect(try await client.call("/api/v1/assets/\(photo.sha256)/resources/\(role)?offset=0",
+                                         .put, token: token, body: bytes).status == .ok)
+        }
+        try await register([photo, secondary(oldBytes)])
+        try await upload("photo", primaryBytes)
+        try await upload("alternate_photo", oldBytes)
+        try await register([photo, secondary(newBytes)])
+        try await upload("alternate_photo", newBytes)
+        try await register([photo])
+        let indexed = try await catalog.storedOriginals()
+        #expect(indexed.count == 3 && Set(indexed.map(\.sha256)) == Set([photo.sha256, secondary(oldBytes).sha256, secondary(newBytes).sha256]))
+        try await catalog.rememberCopies(photo.sha256, [.init(role: .alternatePhoto, sha256: secondary(oldBytes).sha256)])
+        #expect(try await catalog.madeCopy(sha256: secondary(oldBytes).sha256) == nil)
+        let info = try await client.call("/api/v1/storage", token: token).decode(ServerAPI.StorageInfo.self)
+        #expect(info.storedBytes == Int64(primaryBytes.count + oldBytes.count + newBytes.count))
+        let device = try #require(try await catalog.devices().first)
+        #expect(try await client.call("/api/v1/devices/\(device.id)", .patch, token: token,
+                                     json: ServerAPI.RenameDeviceRequest(name: "Renamed")).status == .ok)
+        #expect(try await catalog.storedOriginals().allSatisfy { $0.path.hasPrefix("Renamed/") })
+        let previousRoot = await fixture.server.originals.root
+        let target = fixture.directory.appendingPathComponent("Moved")
+        try await fixture.server.mover.start(to: target.path)
+        await fixture.server.mover.wait()
+        #expect(await fixture.server.mover.status?.state == .done)
+        let reopened = try Catalog(path: fixture.server.storage.catalog.path)
+        #expect(try await reopened.storedOriginals().count == 3)
+        let previous = try #require(try await reopened.setting(OriginalsMover.previousRootsSetting))
+        #expect(try JSONDecoder().decode([String].self, from: Data(previous.utf8)) == [previousRoot.path])
+        for item in try await reopened.storedOriginals() {
+            #expect(try Fingerprint.sha256(of: target.appendingPathComponent(item.path)) == item.sha256)
+        }
+    }
+}
+
+@Test(.timeLimit(.minutes(1))) func staleRemovalCannotTrashADownloadedPermanentBackupWithoutAnImportAck() async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let data = Data("original".utf8), id = Fingerprint.sha256(of: data), catalog = fixture.server.catalog
+        let resource = ServerAPI.ResourceDescriptor(role: .photo, filename: "a.jpg", size: data.count, sha256: id)
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+            kind: .photo, captureDate: nil, resources: [resource], compact: false))
+        _ = try await client.call("/api/v1/assets/\(id)/resources/photo?offset=0", .put, token: token, body: data)
+        let observed = try #require(try await catalog.asset(id))
+        let resume = StorageTestGate()
+        let staleRemoval = Task {
+            try await resume.wait()
+            try await Trash(catalog: catalog, originals: fixture.server.originals, storage: fixture.server.storage).remove(observed)
+        }
+        let code = try await fixture.server.newPairingCode()
+        let other = try await client.call("/api/v1/pair", .post, json: ServerAPI.PairRequest(code: code, deviceName: "Other iPhone"))
+            .decode(ServerAPI.PairResponse.self).token
+        _ = try await client.call("/api/v1/assets", .post, token: other, json: ServerAPI.RegisterAssetRequest(
+            kind: .photo, captureDate: nil, resources: [resource]))
+        // A failed/lost imported acknowledgement cannot determine retention.
+        #expect(try await client.call("/api/v1/assets/\(id)/imported", .post, token: other).status == .conflict)
+        let compactBytes = Data("compact".utf8), directory = fixture.server.storage.compact(id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let compact = directory.appendingPathComponent("a.jpg")
+        try compactBytes.write(to: compact)
+        try await catalog.storeCompact(id, [.init(role: .photo, filename: "a.jpg", size: compactBytes.count,
+            sha256: Fingerprint.sha256(of: compactBytes), path: fixture.server.storage.relative(compact))],
+            deviceCompresses: [], state: .ready, message: nil)
+        #expect(try await client.call("/api/v1/assets/\(id)/compact/photo", token: other).data == compactBytes)
+        await resume.open()
+        await #expect(throws: APIError.self) { try await staleRemoval.value }
+        #expect(try await client.call("/api/v1/assets/\(id)/verify", .post, token: other)
+            .decode(ServerAPI.Verification.self).allVerified)
+        #expect(try await fixture.server.emptyTrash(now: Date().addingTimeInterval(31 * 86_400)) == 0)
+        // A later explicit deferral also cannot revoke another request's permanent claim.
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+            kind: .photo, captureDate: nil, resources: [resource], compact: false))
+        #expect(try await client.call("/api/v1/assets/\(id)/removed", .post, token: token).status == .conflict)
+        #expect(try await catalog.asset(id)?.permanent == true)
+    }
+}
+
+@Test(.timeLimit(.minutes(1))) func expiredPurgeRechecksItsClaimAfterARestoreWins() async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let bytes = Data("deferred original".utf8), id = Fingerprint.sha256(of: bytes)
+        let catalog = fixture.server.catalog
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+            kind: .photo, captureDate: nil, resources: [.init(role: .photo, filename: "a.jpg", size: bytes.count, sha256: id)], compact: false))
+        _ = try await client.call("/api/v1/assets/\(id)/resources/photo?offset=0", .put, token: token, body: bytes)
+        #expect(try await client.call("/api/v1/assets/\(id)/verify", .post, token: token).status == .conflict)
+        #expect(try await catalog.asset(id)?.permanent == false)
+        _ = try await client.call("/api/v1/assets/\(id)/removed", .post, token: token)
+        #expect(try await client.call("/api/v1/assets/\(id)/verify", .post, token: token).status == .conflict)
+        let entered = StorageTestGate(), resume = StorageTestGate()
+        let restore = Task {
+            try await catalog.mutations.withClaim(id) {
+                await entered.open()
+                try await resume.wait()
+                try await Trash(catalog: catalog, originals: fixture.server.originals, storage: fixture.server.storage).restoreClaimed(id)
+            }
+        }
+        try await entered.wait()
+        let purge = Task { try await fixture.server.emptyTrash(now: Date().addingTimeInterval(31 * 86_400)) }
+        try await waitForAssetWaiter(id, catalog: catalog)
+        await resume.open()
+        try await restore.value
+        #expect(try await purge.value == 0)
+        #expect(try await catalog.asset(id)?.state == .stored)
+        let path = try #require(try await catalog.resources(id).first?.storedPath)
+        let url = try #require(await fixture.server.originals.url(path))
+        #expect(try Data(contentsOf: url) == bytes)
+    }
+}
+
+@Test func retentionMigrationDoesNotGuessLegacyDeferredIntent() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let path = directory.appendingPathComponent("legacy.db").path, old = try SQLiteDatabase(path: directory.appendingPathComponent("legacy.db").path)
+    for migration in Catalog.migrations.prefix(10) { try old.executeScript(migration) }
+    try old.execute("PRAGMA user_version = 10")
+    let stored = String(repeating: "a", count: 64), trashed = String(repeating: "b", count: 64)
+    for (id, state) in [(stored, "stored"), (trashed, "trashed")] {
+        try old.execute("""
+            INSERT INTO assets (id, kind, state, created_at, updated_at, hold_compact, trashed_at)
+            VALUES (?, 'photo', ?, '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', 1, ?)
+            """, [.text(id), .text(state), state == "trashed" ? .text("2020-01-01T00:00:00Z") : .null])
+    }
+    let catalog = try Catalog(path: path)
+    #expect(try await catalog.asset(stored)?.permanent == true)
+    #expect(try await catalog.asset(trashed)?.permanent == true)
+    #expect(try await catalog.trashed(before: Timestamp.string()).isEmpty)
+    #expect(try await !catalog.proofEligible(trashed))
+    #expect(try await catalog.status(trashed)?.trashedUntil == nil)
+    #expect(try await catalog.status(trashed)?.message?.contains("will not expire") == true)
+}
+
+@Test func closingAdmissionKeepsTheFileLeaseUntilAdmittedRequestsExit() async throws {
+    let fixture = try await Fixture()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let startup = ServingStartup()
+    do {
+        let ownership = try ServerOwnership(dataDirectory: fixture.server.configuration.dataDirectory)
+        await startup.complete(.success(()), ownership: ownership)
+    }
+    do {
+        let admitted = try await startup.admit()
+        defer { withExtendedLifetime(admitted) {} }
+        await startup.close()
+        await #expect(throws: HTTPError.self) { try await startup.admit() }
+        #expect(throws: ServerOwnership.Busy.self) {
+            _ = try ServerOwnership(dataDirectory: fixture.server.configuration.dataDirectory)
+        }
+    }
+    _ = try ServerOwnership(dataDirectory: fixture.server.configuration.dataDirectory)
+}
+
+@Test func interruptedTrashMoveKeepsItsJournalUntilTheDiskReturns() async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let bytes = Data("original".utf8), id = Fingerprint.sha256(of: bytes), catalog = fixture.server.catalog
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: ServerAPI.RegisterAssetRequest(
+            kind: .photo, captureDate: nil, resources: [.init(role: .photo, filename: "a.jpg", size: bytes.count, sha256: id)], compact: false))
+        _ = try await client.call("/api/v1/assets/\(id)/resources/photo?offset=0", .put, token: token, body: bytes)
+        let resource = try #require(try await catalog.resources(id).first)
+        let path = try #require(resource.storedPath), root = await fixture.server.originals.root
+        let target = Trash.trashed(path, assetID: id)
+        let plan = Trash.Plan(asset: id, generation: 0, action: .remove,
+                              entries: [.init(role: .photo, from: path, to: target, sha256: id, size: bytes.count, copy: false)],
+                              at: Timestamp.string())
+        let text = String(decoding: try JSONEncoder().encode(plan), as: UTF8.self)
+        try await catalog.saveTrashMutation(id, generation: 0, action: .remove, text: text)
+        let destination = root.appendingPathComponent(target)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: root.appendingPathComponent(path), to: destination)
+        let away = fixture.directory.appendingPathComponent("away")
+        try FileManager.default.moveItem(at: root, to: away)
+        let unavailable = Trash(catalog: catalog, originals: OriginalsStore(root: root), storage: fixture.server.storage)
+        await #expect(throws: (any Error).self) { try await unavailable.recover() }
+        #expect(try await catalog.setting(Trash.journal(id)) == text)
+        #expect(!FileManager.default.fileExists(atPath: root.path))
+        try FileManager.default.moveItem(at: away, to: root)
+        let restarted = Trash(catalog: catalog, originals: OriginalsStore(root: root), storage: fixture.server.storage)
+        try await restarted.recover()
+        #expect(try await catalog.setting(Trash.journal(id)) == nil)
+        #expect(try await catalog.asset(id)?.state == .trashed)
+        #expect(try await catalog.resources(id).first?.storedPath == target)
+        #expect(try Data(contentsOf: destination) == bytes)
+    }
+}
+
+@Test func purgingRefusesRestoreAndPreservesAnIndexedHistoricalReference() async throws {
+    let fixture = try await Fixture()
+    try await fixture.test { client, token in
+        let bytes = Data("shared object".utf8), id = Fingerprint.sha256(of: bytes), catalog = fixture.server.catalog
+        let request = ServerAPI.RegisterAssetRequest(kind: .photo, captureDate: nil,
+            resources: [.init(role: .photo, filename: "a.jpg", size: bytes.count, sha256: id)], compact: false)
+        _ = try await client.call("/api/v1/assets", .post, token: token, json: request)
+        _ = try await client.call("/api/v1/assets/\(id)/resources/photo?offset=0", .put, token: token, body: bytes)
+        _ = try await client.call("/api/v1/assets/\(id)/removed", .post, token: token)
+        let path = try #require(try await catalog.resources(id).first?.storedPath)
+        try await catalog.preserveSharedOriginal(id, role: .photo, path: path)
+        let plan = Trash.Plan(asset: id, generation: 0, action: .purge,
+                              entries: [.init(role: .photo, from: path, sha256: id, size: bytes.count, copy: false)])
+        try await catalog.saveTrashMutation(id, generation: 0, action: .purge,
+            text: String(decoding: try JSONEncoder().encode(plan), as: UTF8.self))
+        #expect(try await client.call("/api/v1/assets", .post, token: token, json: request).status == .serviceUnavailable)
+        #expect(try await client.call("/api/v1/assets/\(id)/verify", .post, token: token).status == .conflict)
+        let restarted = OriginalsStore(root: await fixture.server.originals.root)
+        try await Trash(catalog: catalog, originals: restarted, storage: fixture.server.storage).recover()
+        #expect(try await catalog.asset(id) == nil)
+        #expect(try await catalog.storedOriginals().contains { $0.path == path })
+        let url = try #require(await fixture.server.originals.url(path))
+        #expect(try Data(contentsOf: url) == bytes)
+        #expect(try await catalog.trashTotals().bytes == Int64(bytes.count))
+    }
+}
+
+@Test func caseOnlyRenameRecoveryHandlesBothIntermediateAndFinalNames() async throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let catalog = try Catalog(path: directory.appendingPathComponent("catalog.db").path)
+    let root = directory.appendingPathComponent("originals")
+    let plan = DeviceRename.Plan(device: "d", from: "Phone", to: "phone", trash: [],
+                                  via: ".homespun-rename-test", hadFolder: true)
+    let text = String(decoding: try JSONEncoder().encode(plan), as: UTF8.self)
+    for interrupted in [plan.to, try #require(plan.via)] {
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(interrupted), withIntermediateDirectories: true)
+        try await catalog.setSetting(DeviceRename.journal, text)
+        try await DeviceRename.recover(catalog: catalog, root: root)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == [plan.from])
+        try FileManager.default.removeItem(at: root.appendingPathComponent(plan.from))
+    }
 }
