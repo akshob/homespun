@@ -12,6 +12,18 @@ pull request; the extended suite runs after the merge; everything runs every nig
 | `testflight.yml` | on demand, by the owner, who approves each run | only for a commit that passed the extended suite (`release-guard.py`); archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
 | `docker.yml` | `main` and version tags, when the server changes | the server's Docker image |
 
+While investigating the Linux runtime stall, `server_runtime_diagnostics.py` runs the three process
+regressions separately (45 seconds each), then the **unchanged, unfiltered** `swift test --skip-build`
+suite (five-minute diagnostic ceiling), even if a focused phase failed. A stall remains a failure.
+Before stopping only its owned descendants, it captures `/proc` thread/pipe/signal state and requests
+Swift's noninteractive, sanitized all-thread backtrace with SIGQUIT (up to 20 seconds to capture,
+then five seconds to reap). Signals use acquired Linux
+pidfds, never process names or reusable numeric PIDs (only the parent's unreaped direct child can
+be stopped if acquiring pidfd ownership itself failed). The `server-runtime-<workflow id>` artifact
+(five days) includes every phase log, snapshots, resource limits and outcomes; the job summary lists
+the phase results. No credentials/environment values or real server data are captured. Remove this
+temporary instrumentation after the root cause has been established and validated.
+
 Pushing a branch runs nothing: open a draft pull request for the build and unit tests, mark it ready
 for the quick checks, or use Run workflow.
 

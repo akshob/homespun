@@ -42,7 +42,7 @@ jobs:
       - name: Libraries and tools
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libvips-dev libsqlite3-dev libheif-plugin-libde265 ffmpeg
+          apt-get install -y --no-install-recommends libvips-dev libsqlite3-dev libheif-plugin-libde265 ffmpeg python3
       - uses: actions/cache@v4
         with:
           path: .build
@@ -50,12 +50,17 @@ jobs:
           restore-keys: linux-build-${{ hashFiles('Package.resolved') }}-
       - name: Build
         run: swift build --build-tests
-      - name: Test
-        run: |
-          swift test --skip-build 2>&1 | tee test.log
-          echo "### Server (Linux)" >> $GITHUB_STEP_SUMMARY
-          grep -E "Test run with|✘" test.log | tail -20 | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
-          ! grep -q "✘" test.log
+      - name: Test (focused process diagnostics, then the full suite)
+        run: python3 ci/server_runtime_diagnostics.py
+      - name: Keep Linux runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-runtime-${{ github.run_id }}
+          path: |
+            ci-results/server-runtime
+            test.log
+          retention-days: 5
       - name: TLS upload performance
         if: inputs.performance
         env:
