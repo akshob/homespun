@@ -180,3 +180,41 @@ private struct BackupStoreFixture {
     let afterDowngrade = BackupStore(directory: directory, legacyURL: legacy)
     await #expect(throws: BackupStore.Failure.legacyChanged) { try await afterDowngrade.open() }
 }
+
+@Test func stagedTransferReferencesFenceCleanupAndCompletedReplayDoesNotLeakAReference() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let resource = try #require(try await fixture.store.resources(fixture.operationID).first)
+    let session = BackupStore.TransferSession(id: UUID(), bindingID: fixture.binding.id,
+        identifier: "foreground.test.\(UUID().uuidString)", installationID: UUID())
+    try await fixture.store.registerSession(session)
+    let transfer = BackupStore.Transfer(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        sessionID: session.id, kind: .upload, version: fixture.receipt.version, expected: fixture.original,
+        resourceID: resource.fileID, uploadID: UUID())
+    try await fixture.store.stageTransfer(transfer)
+    try await fixture.store.releaseOriginalSpools(fixture.operationID)
+    #expect(try await fixture.store.claimCleanup().isEmpty)
+    try await fixture.store.attachTask(transferID: transfer.id, sessionID: session.id, taskID: 7)
+    try await fixture.store.startTransfer(transfer.id)
+    try await fixture.store.finishTransfer(transfer.id, state: .completed)
+    try await fixture.store.stageTransfer(transfer)
+    let cleanup = try await fixture.store.claimCleanup()
+    #expect(cleanup.map(\.fileID) == [resource.fileID])
+    let replacement = BackupStore.Transfer(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        sessionID: session.id, kind: .upload, version: fixture.receipt.version, expected: fixture.original,
+        resourceID: resource.fileID, uploadID: UUID())
+    await #expect(throws: BackupStore.Failure.invalidReceipt) { try await fixture.store.stageTransfer(replacement) }
+    try await fixture.store.cleanedResource(resource.fileID)
+    #expect(try await fixture.store.claimCleanup().isEmpty)
+}
+
+@Test func unprovenNativeBackgroundSessionsCannotBeRegistered() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let session = BackupStore.TransferSession(id: UUID(), bindingID: fixture.binding.id,
+        identifier: "background.test", installationID: UUID(), background: true)
+    await #expect(throws: BackupStore.Failure.nativeTransferUnavailable) {
+        try await fixture.store.registerSession(session)
+    }
+    #expect(try await fixture.store.sessions().isEmpty)
+}
