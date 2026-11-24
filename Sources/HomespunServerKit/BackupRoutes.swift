@@ -18,17 +18,29 @@ enum BackupDurability {
         guard fsync(descriptor) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
-    static func publish(_ url: URL, root: URL) throws {
+    static func publish(_ url: URL, root: URL,
+                        syncDirectory: (URL) throws -> Void = BackupDurability.directory) throws {
+        var parent = url.deletingLastPathComponent().standardizedFileURL
+        let boundary = root.standardizedFileURL.pathComponents
+        guard url.isFileURL, root.isFileURL, !boundary.isEmpty,
+              parent.pathComponents.starts(with: boundary) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
         try handle.synchronize()
-        var parent = url.deletingLastPathComponent().standardizedFileURL
-        let root = root.standardizedFileURL
-        guard parent == root || parent.path.hasPrefix(root.path + "/") else { throw CocoaError(.fileWriteInvalidFileName) }
         while true {
-            try directory(parent)
-            if parent == root { break }
-            parent.deleteLastPathComponent()
+            let components = parent.pathComponents
+            guard components.starts(with: boundary) else { throw CocoaError(.fileWriteInvalidFileName) }
+            try syncDirectory(parent)
+            // URL equality includes the directory hint/trailing slash. The same
+            // filesystem boundary must stop the walk regardless of either hint.
+            if components == boundary { return }
+            let next = parent.deletingLastPathComponent().standardizedFileURL
+            guard next.pathComponents.count < components.count else {
+                throw CocoaError(.fileWriteInvalidFileName)
+            }
+            parent = next
         }
     }
 }

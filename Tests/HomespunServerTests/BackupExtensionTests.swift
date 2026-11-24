@@ -7,6 +7,40 @@ import HummingbirdTesting
 import Testing
 @testable import HomespunServerKit
 
+@Test(arguments: [false, true])
+func durablePublicationStopsAtTheConfiguredRootRegardlessOfDirectoryHint(_ directoryHint: Bool) throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let path = directory.appendingPathComponent("originals").path
+    let root = URL(fileURLWithPath: path, isDirectory: directoryHint)
+    let file = URL(fileURLWithPath: path + "/one/two/original.bin")
+    try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("synthetic-original".utf8).write(to: file)
+    let expected = [path + "/one/two", path + "/one", path]
+    var visited: [String] = []
+    try BackupDurability.publish(file, root: root) { candidate in
+        // Fail promptly if a regression escapes the boundary instead of hanging
+        // the cooperative pool (the filesystem root is its own parent).
+        guard visited.count < expected.count else { throw CocoaError(.fileWriteInvalidFileName) }
+        visited.append(candidate.path)
+    }
+    #expect(visited == expected)
+}
+
+@Test func durablePublicationRejectsASiblingWithTheSamePathPrefixBeforeSyncing() throws {
+    let directory = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let root = directory.appendingPathComponent("originals", isDirectory: true)
+    let outside = directory.appendingPathComponent("originals-other/original.bin")
+    try FileManager.default.createDirectory(at: outside.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("synthetic-original".utf8).write(to: outside)
+    var synced = false
+    #expect(throws: CocoaError.self) {
+        try BackupDurability.publish(outside, root: root) { _ in synced = true }
+    }
+    #expect(!synced)
+}
+
 @Test func backupCatalogCodecsDoNotMutateWireDatesOrAcronymKeys() throws {
     let bytes = Data("codec-original".utf8)
     let request = BackupAPI.Request(operationID: UUID(), origin: .init(serverID: "server", historyEpoch: "epoch"),
