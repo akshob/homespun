@@ -16,8 +16,12 @@ While investigating the Linux runtime stall, `server_runtime_diagnostics.py` run
 regressions separately (45 seconds each), then the **unchanged, unfiltered** `swift test --skip-build`
 suite (five-minute diagnostic ceiling), even if a focused phase failed. A stall remains a failure.
 Before stopping only its owned descendants, it captures `/proc` thread/pipe/signal state and requests
-Swift's noninteractive, sanitized all-thread backtrace with SIGQUIT (up to 20 seconds to capture,
-then five seconds to reap). Signals use acquired Linux
+an LLDB stack-only dump followed by Swift's noninteractive, sanitized backtrace with SIGQUIT
+(the same shared 20-second capture window, then five seconds to reap). The hosted Linux test
+container temporarily has `SYS_PTRACE` for this dump, not a privileged container, host PID namespace
+or disabled seccomp. LLDB freezes a pidfd-owned target before attaching, prints no argument values,
+and is stopped/joined before the target resumes. Per-thread status/stat records expose signal masks
+and CPU time if the runtime crash handler cannot suspend other threads. Signals use acquired Linux
 pidfds, never process names or reusable numeric PIDs (only the parent's unreaped direct child can
 be stopped if acquiring pidfd ownership itself failed). The `server-runtime-<workflow id>` artifact
 (five days) includes every phase log, snapshots, resource limits and outcomes; the job summary lists

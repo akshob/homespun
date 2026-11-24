@@ -161,7 +161,7 @@ def snapshot(tree, destination):
                 threads = sorted(process.entries("task"), key=int)
                 file.write(f"\n{len(threads)} threads (first 256 kernel snapshots):\n")
                 for thread in threads[:256]:
-                    for name in ("comm", "wchan", "stack", "syscall"):
+                    for name in ("comm", "stat", "status", "wchan", "stack", "syscall"):
                         try:
                             value = read_at(process.directory, f"task/{thread}/{name}", 8192)
                             file.write(f"TID {thread} {name}: {value.rstrip()}\n")
@@ -190,6 +190,70 @@ def stop_owned(tree):
             process.send(signal.SIGKILL)
         except OSError as error:
             print(f"Owned PID {process.pid} cleanup failed: {error}", flush=True)
+
+
+def lldb_command(executable, pid):
+    # Set both formats before attaching: LLDB's default thread summary can show
+    # arguments even when no explicit "frame variable" command is requested.
+    frame = r"frame #${frame.index}: ${frame.pc} ${module.file.basename}`${function.name-without-args}\n"
+    thread = r"thread #${thread.index}: tid=${thread.id} ${thread.name} ${thread.stop-reason}\n"
+    return [executable, "--no-lldbinit", "--batch",
+            "--one-line-before-file", f"settings set frame-format '{frame}'",
+            "--one-line-before-file", f"settings set thread-format '{thread}'",
+            "--attach-pid", str(pid), "--one-line", "thread list",
+            "--one-line", "thread backtrace all", "--one-line", "process detach"]
+
+
+def native_stacks(target, destination, deadline):
+    executable = shutil.which("lldb")
+    if executable is None:
+        destination.write_text("LLDB is unavailable; retaining procfs and runtime backtrace fallbacks.\n")
+        return
+    debugger = tree = None
+    target.send(signal.SIGSTOP)
+    try:
+        # A stopped, still-owned target cannot normally exit and reuse its numeric
+        # PID while LLDB attaches. Never attach if stop/identity observation failed.
+        stopped = False
+        until = min(deadline, time.monotonic() + 2)
+        while target.alive() and time.monotonic() < until:
+            status = read_at(target.directory, "status")
+            state = next((line.split()[1] for line in status.splitlines()
+                          if line.startswith("State:")), "")
+            if state in ("T", "t"):
+                stopped = True
+                break
+            time.sleep(0.05)
+        if not stopped or not target.alive():
+            destination.write_text("Owned target did not stop; refusing a numeric-PID attach.\n")
+            return
+        temporary = destination.parent / "lldb-work"
+        temporary.mkdir(exist_ok=True)
+        with destination.open("wb") as output:
+            debugger = subprocess.Popen(lldb_command(executable, target.pid),
+                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                env={**os.environ, "TMPDIR": str(temporary.resolve())})
+            tree = OwnedTree(debugger.pid)
+            while debugger.poll() is None and time.monotonic() < deadline:
+                tree.refresh()
+                time.sleep(0.1)
+            if debugger.poll() is None:
+                output.write(b"\nLLDB reached its bounded capture deadline.\n")
+    finally:
+        # Stop debugger helpers before resuming the target so no late numeric-PID
+        # attach can outlive the pidfd-owned stopped process.
+        if tree is not None:
+            stop_owned(tree)
+        elif debugger is not None:
+            debugger.kill()
+        if debugger is not None:
+            try:
+                debugger.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        if tree is not None:
+            tree.close()
+        target.send(signal.SIGCONT)
 
 
 def run_phase(name, maximum_seconds, selector, base):
@@ -232,13 +296,18 @@ def run_phase(name, maximum_seconds, selector, base):
                     if not targets:
                         targets = [item for item in tree.processes.values()
                                    if item.pid == process.pid]
+                    until = time.monotonic() + 20
                     for target in targets:
+                        try:
+                            native_stacks(target, directory / f"lldb-{target.pid}.txt",
+                                          min(until, time.monotonic() + 12))
+                        except (OSError, RuntimeError) as error:
+                            (directory / f"lldb-{target.pid}-error.txt").write_text(str(error) + "\n")
                         print(f"[{name}] SIGQUIT to owned PID {target.pid} for Swift's "
                               "noninteractive all-thread crash backtrace.", flush=True)
                         target.send(signal.SIGQUIT)
                     # The runtime reporter is itself a descendant. Give it a bounded
-                    # opportunity to finish, then retain a second kernel snapshot.
-                    until = time.monotonic() + 20
+                    # opportunity within the original shared capture window.
                     while process.poll() is None and time.monotonic() < until:
                         tree.refresh()
                         flush_log(reader)
