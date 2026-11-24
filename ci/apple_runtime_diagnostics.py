@@ -187,6 +187,25 @@ def descendants(owner):
             if (current := identity(pid)) and owned(current, owner)]
 
 
+def capture_package_stall(owner, output):
+    children = descendants(owner)
+    (output / "owned-processes.json").write_text(json.dumps([
+        {"pid": child["pid"], "ppid": child["ppid"], "executable": Path(child["exe"]).name}
+        for child in children], indent=2) + "\n")
+    # macOS Swift Testing dlopens the package bundle in swiftpm-testing-helper;
+    # the actual runner need not be named xctest or HomespunPackageTests.
+    runners = [child for child in children
+               if Path(child["exe"]).name in ("xctest", "HomespunPackageTests",
+                   "swiftpm-testing-helper", "swiftpm-xctest-helper")
+               or Path(child["exe"]).name.endswith(".xctest")]
+    if runners:
+        return [{"pid": child["pid"], "role": "test_runner",
+                 "sample": sample_owned(child, owner, output / f"xctest-{child['pid']}.sample.txt")}
+                for child in runners]
+    return [{"pid": owner["pid"], "role": "swiftpm_only_missing_test_runner",
+             "sample": sample_owned(identity(owner["pid"]), owner, output / "swiftpm.sample.txt")}]
+
+
 def package():
     output = Path("ci-results/apple-runtime/package")
     output.mkdir(parents=True, exist_ok=True)
@@ -213,16 +232,7 @@ def package():
                     next_heartbeat = now + 15
                 if now - began >= 300:
                     timed_out = True
-                    samples = []
-                    children = descendants(owner)
-                    for child in children:
-                        if (Path(child["exe"]).name in ("xctest", "HomespunPackageTests")
-                                or Path(child["exe"]).name.endswith(".xctest")):
-                            samples.append({"pid": child["pid"], "sample": sample_owned(
-                                child, owner, output / f"xctest-{child['pid']}.sample.txt")})
-                    if not samples:
-                        samples.append({"pid": process.pid, "sample": sample_owned(
-                            identity(process.pid), owner, output / "swiftpm.sample.txt")})
+                    samples = capture_package_stall(owner, output)
                     (output / "samples.json").write_text(json.dumps(samples, indent=2) + "\n")
                     break
                 time.sleep(0.5)

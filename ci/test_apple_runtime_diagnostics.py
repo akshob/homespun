@@ -70,6 +70,27 @@ class AppleRuntimeDiagnosticsTests(unittest.TestCase):
         self.assertFalse(pending.exists())
         self.assertFalse((self.root / "sample.txt").exists())
 
+    def test_swift_testing_bundle_loader_is_sampled_instead_of_its_waiting_swiftpm_parent(self):
+        owner = {"pid": 10}
+        helper = {"pid": 42, "ppid": 10, "exe": "/toolchain/libexec/swift/pm/swiftpm-testing-helper"}
+        codec = {"pid": 43, "ppid": 42, "exe": "/tools/ffmpeg"}
+        with patch.object(diagnostics, "descendants", return_value=[helper, codec]), \
+             patch.object(diagnostics, "sample_owned", return_value="captured") as sample:
+            result = diagnostics.capture_package_stall(owner, self.root)
+        sample.assert_called_once_with(helper, owner, self.root / "xctest-42.sample.txt")
+        self.assertEqual(result, [{"pid": 42, "role": "test_runner", "sample": "captured"}])
+        inventory = json.loads((self.root / "owned-processes.json").read_text())
+        self.assertEqual(inventory[0]["executable"], "swiftpm-testing-helper")
+        self.assertNotIn("/toolchain", json.dumps(inventory))
+
+    def test_missing_runner_is_explicitly_identified_as_parent_only_evidence(self):
+        owner = {"pid": 10}
+        with patch.object(diagnostics, "descendants", return_value=[]), \
+             patch.object(diagnostics, "identity", return_value=owner), \
+             patch.object(diagnostics, "sample_owned", return_value="captured"):
+            result = diagnostics.capture_package_stall(owner, self.root)
+        self.assertEqual(result[0]["role"], "swiftpm_only_missing_test_runner")
+
     def test_synthetic_guard_rejects_real_data_and_symlinked_catalogs(self):
         with self.assertRaises(ValueError):
             diagnostics.synthetic_path(self.root / "real", self.root / "state")
