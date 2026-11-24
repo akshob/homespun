@@ -16,12 +16,15 @@
   </header>
   <main>
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated November 20, 2026</p>
+    <p class="updated">Last updated November 24, 2026</p>
 
     <p><strong>In short:</strong> Your photos and videos stay on your iPhone or go to a server that you run. The
-      developer of Homespun never receives them. The app has no accounts, ads, or tracking, and it never sells or
-      shares your data. If you choose to share analytics, the developer receives anonymous usage counts and crash
-      reports; if you send a problem report, the developer receives what you write.</p>
+      developer of Homespun never receives them. The app has no accounts, ads, or tracking, and it never sells your
+      data. If you choose to share analytics, the developer receives anonymous usage counts and crash reports;
+      if you send a problem report, the developer receives what you write. A separately configured optional wake
+      service in version 1.1.0 uses a device push token only after you opt in, as described below.</p>
+    <p>Version 1.0.0 remains the public App Store release while version 1.1.0 is prepared.
+      Features identified as 1.1.0 below are not enabled in the 1.0.0 app.</p>
 
     <h2>Your photo library</h2>
     <p>With your permission, the Homespun app reads the photos and videos you choose and saves compact copies
@@ -48,7 +51,30 @@
     <p>If you separately configure a cloud connector on your server, that server sends originals to the service
       you choose. OneDrive sign-in uses a code on Microsoft's website; its tokens stay on your server. The
       developer receives no originals or sign-in details. These connectors are configured separately on the server,
-      not in the 1.0.0 app.</p>
+      not in the 1.0.0 app. Version 1.1.0 adds Premium controls for OneDrive Cloud Copies in the app; the transfer
+      and Microsoft credentials still remain on your server.</p>
+    <p>Version 1.1.0 keeps pending backup choices, verified-copy records and recovery intent in protected local
+      storage. Those logical records can be included in the device backup you configure with Apple. Reconstructible
+      transfer files and resume data are excluded from that backup; pairing and wake credentials stay in
+      device-only Keychain. Restoring a device backup does not restore a native network task or its credentials.</p>
+
+    <h2>Optional background wakeups in version 1.1.0</h2>
+    <p>Background Wakeups is off unless you explicitly enable it, and is unavailable in builds without a configured
+      wake service. It is separate from sharing analytics, Premium ownership and permission to show local alerts.
+      Your iPhone sends its Apple Push Notification service (APNs) token to the configured Homespun wake relay.
+      Your own server receives only an opaque route and a scoped send credential, never that device token or
+      the developer's APNs signing key.</p>
+    <p>A wake hint contains only an opaque generation and a random nonce. It contains no media, hashes, file names,
+      server names or LAN addresses, item counts or progress. The relay sends Apple a generic background hint;
+      the app then authenticates your server and checks its authoritative results. Apple may delay, coalesce or
+      drop a hint. It does not carry a photo, authorize an import or deletion, or guarantee background execution.</p>
+    <p>Pending tokenless enrollments expire after one day. Active device-token enrollments expire after 90 days
+      without a device refresh, or are removed after opt-out or an invalid-token response. Disabling wakeups fences
+      new enrollment and retains private deletion handles until the relay acknowledges cleanup. A delayed
+      activation cannot recreate an erased enrollment. Apple may already have accepted an in-flight generic hint;
+      receiving it does not re-enable consent. The relay application does not keep request or token logs.
+      Network infrastructure still processes connection IP addresses to deliver and protect HTTPS requests;
+      these addresses are not included in hint payloads or used for analytics.</p>
 
     <h2>Analytics you choose to share</h2>
     <p>Homespun asks once, during setup, whether you want to share anonymous analytics with its developer, and you
@@ -86,6 +112,8 @@
       Homespun doesn't read or change your Photos library, records no analytics, sends no problem reports, and pairs
       with no real server. Leaving deletes the demo's settings and records; the drawn samples stay until the next launch.
       Your own server's settings and records stay unchanged.</p>
+    <p>Local demo-time intervals are kept only to exclude delayed or mixed iOS diagnostics from sharing. These
+      intervals stay on the iPhone. The demo never enrolls for remote notifications.</p>
 
     <h2>Where it goes and how long it's kept</h2>
     <p>Analytics, crash reports, and problem reports go to a service the developer runs on Cloudflare
@@ -98,6 +126,14 @@
       identifier: to delete one, email
       <!--email_off--><a href="mailto:support@homespun.photos">support@homespun.photos</a><!--/email_off-->
       with its report number. You can also use that address to request deletion of any report.</p>
+    <p>The updated erasure service retains a permanent anti-replay marker containing only a domain-separated
+      SHA-256 digest of the random analytics install identifier, without the raw identifier, a timestamp or
+      links to other identifiers. This marker is used only to stop late uploads recreating erased data.
+      Separately, cleanup records for an unsettled upload may retain its object reference, associated random
+      install identifier, size and times beyond normal retention, potentially indefinitely until settlement and
+      cleanup can be proven. Erasure acknowledges fencing and deletion of observed content, not instantaneous
+      physical deletion of writes still in flight; their finishing writer or scheduled reconciliation removes
+      late objects. No report or diagnostic content is retained in the anti-replay marker.</p>
 
     <h2>This website</h2>
     <p>This website uses no cookies, analytics, or third-party scripts. It is hosted by Cloudflare, which
@@ -105,9 +141,12 @@
       <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>.</p>
 
     <h2>Purchases</h2>
-    <p>Version 1.0.0 has no in-app purchases and sends no purchase events. Its privacy manifest conservatively
-      retains a purchase-history declaration for code reserved for a later version. If purchases become available,
-      this policy will describe their handling before that version ships.</p>
+    <p>Version 1.0.0 has no in-app purchases and sends no purchase events. Version 1.1.0 enables a one-time Premium
+      purchase with Family Sharing for Automatic Mode, widgets, Apple Watch and OneDrive Cloud Copies.
+      Apple processes payment; the developer never receives card or payment-account details. The app checks
+      entitlement on the device. Only if you share analytics can anonymous Premium feature or purchase-result
+      events be included; no transaction identifier or Apple Account is sent in those events. Manual backup,
+      quality settings, verification and Free Up Space remain free.</p>
 
     <h2>Changes</h2>
     <p>If this policy changes, the new version will be posted on this page with a new date.</p>

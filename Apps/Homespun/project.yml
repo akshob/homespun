@@ -63,6 +63,7 @@ targets:
         # The App Group the app shares with its widgets (Homespun.entitlements).
         HomespunAppGroup: group.$(HOMESPUN_BUNDLE_ID)
         HomespunReleaseFeatures: $(HOMESPUN_RELEASE_FEATURES)
+        HomespunWakeRelayURL: ""
     dependencies:
       - package: HomespunPackage
         product: HomespunCore

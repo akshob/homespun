@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# Selected only for an explicitly configured, separately approved relay deployment.
+include: [project-features.yml]
+targets:
+  Homespun:
+    info:
+      properties:
+        HomespunWakeRelayURL: "${HOMESPUN_WAKE_RELAY_URL}"
+        UIBackgroundModes:REPLACE: [processing, remote-notification]
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Homespun/Resources/HomespunWake.entitlements
+      configs:
+        Debug:
+          HOMESPUN_APNS_ENVIRONMENT: development
+        Profile:
+          HOMESPUN_APNS_ENVIRONMENT: development
+        Release:
+          HOMESPUN_APNS_ENVIRONMENT: production
