@@ -178,9 +178,9 @@ import UIKit
 
         let next = DemoServer(folder: fixture.folder.appendingPathComponent("next-server"), pace: 0, bundledCompact: { _ in nil })
         DemoServer.running.withLock { $0 = next }
-        await #expect(throws: ServerClient.Failure.self) { try await oldClient.info() }
+        await #expect(throws: ServerClient.Failure.self) { try await oldClient.health() }
         let current = ServerClient(baseURL: DemoServer.baseURL, trust: .demo)
-        #expect(try await current.info().name == DemoServer.name)
+        #expect(try await current.health().tls == true)
         #expect(await next.snapshot.assets.isEmpty)
     }
 
