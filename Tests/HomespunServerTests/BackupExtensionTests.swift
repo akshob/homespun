@@ -7,6 +7,30 @@ import HummingbirdTesting
 import Testing
 @testable import HomespunServerKit
 
+@Test func backupCatalogCodecsDoNotMutateWireDatesOrAcronymKeys() throws {
+    let bytes = Data("codec-original".utf8)
+    let request = BackupAPI.Request(operationID: UUID(), origin: .init(serverID: "server", historyEpoch: "epoch"),
+        manifest: .init(kind: .photo, resources: [.init(role: .photo, filename: "a.jpg", size: bytes.count,
+            sha256: Fingerprint.sha256(of: bytes), sha1: Fingerprint.sha1(of: bytes))]),
+        profile: testProfile, captureDate: Date(timeIntervalSince1970: 1_700_000_000))
+    let before = try ServerAPI.encoder.encode(request)
+    _ = try Catalog.backupIntentHash(request)
+    let stored = try Catalog.backupJSON(request)
+    #expect(try Catalog.backupDecode(BackupAPI.Request.self, stored) == request)
+    let after = try ServerAPI.encoder.encode(request)
+    #expect(after == before)
+    let object = try #require(JSONSerialization.jsonObject(with: after) as? [String: Any])
+    #expect(object["capture_date"] is String)
+    #expect(try ServerAPI.decoder.decode(BackupAPI.Request.self, from: after) == request)
+
+    let legacy = JSONEncoder()
+    legacy.keyEncodingStrategy = .convertToSnakeCase
+    legacy.dateEncodingStrategy = .millisecondsSince1970
+    let legacyJSON = String(decoding: try legacy.encode(request), as: UTF8.self)
+    #expect(try Catalog.backupDecode(BackupAPI.Request.self, legacyJSON) == request)
+    #expect(try ServerAPI.encoder.encode(request) == before)
+}
+
 extension Catalog {
     func makeBackupCopiesDueForTest() throws {
         try database.execute("UPDATE backup_connector_jobs SET available_at = '2000-01-01T00:00:00Z' WHERE status = 'retry_wait'")
