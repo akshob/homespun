@@ -245,8 +245,10 @@ private actor FakeWakeSender: WakeHintSending {
     let disabled = try await Fixture()
     let sender = WakeRelayAPI.Sender(routeID: UUID(), generationID: UUID(), token: PairingCrypto.encode(Data(repeating: 8, count: 32)))
     try await disabled.test { client, token in
-        #expect(try await client.call("/api/v2/wake/enrollment", .post, token: token, json: sender).status == .serviceUnavailable)
-        #expect(try await disabled.server.catalog.wakeRouteCountForTest() == 0)
+        let response = try await client.call("/api/v2/wake/enrollment", .post, token: token, json: sender)
+        let count = try await disabled.server.catalog.wakeRouteCountForTest()
+        #expect(response.status == .serviceUnavailable)
+        #expect(count == 0)
     }
     let relay = URL(string: "https://relay.example.invalid")!
     let fixture = try await Fixture(wakeRelay: relay)
