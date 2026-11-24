@@ -47,7 +47,7 @@ struct WakeSettingsView: View {
         .task {
             guard !demo else { return }
             do { try enrollment.load() }
-            catch { error = error.localizedDescription }
+            catch { self.error = error.localizedDescription }
         }
     }
 
@@ -60,7 +60,7 @@ struct WakeSettingsView: View {
                 error = nil
             } catch {
                 if !value { WakeSystem.updateRegistration(for: enrollment) }
-                error = error.localizedDescription
+                self.error = error.localizedDescription
             }
         }
     }
