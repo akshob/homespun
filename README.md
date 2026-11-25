@@ -77,6 +77,9 @@ the pair as a Live Photo.
 - Outputs are written to a temporary name, verified (dimensions, audio tracks,
   duration within 0.5 s or 1%, full decode), then published. A video that does not
   get smaller keeps the original.
+- Live Photo motion held unchanged still has to decode before its byte-identical copy is
+  published. Cancellation stops its reader/writer and joins the media lanes before removing
+  the unpublished file.
 
 ## Build and test
 
@@ -496,6 +499,11 @@ motion still requires AVFoundation on the phone, never FFmpeg pairing. Delivery 
 are client-generated UUIDs posted to `/api/v2/deliveries/<id>/ack`; acknowledgements only account for
 delivery. Fresh `/api/v2/assets/<asset>/versions/<manifest>/verify` accepts `BackupAPI.Version` and
 requires that device's permanent local claim. No endpoint falls back to mutable v1 proof.
+
+Fresh Linux-delegated Live Photo motion remains blocked in the staged 1.1 pipeline until
+hard-bounded on-iPhone encoding is available. An already verified staged motion resource can
+be reused; otherwise the original stays retained and no Photos import starts. Motion integrity
+and cancellation checks do not enable that encoding gate or native background transfers.
 
 Immich remains read-only. Its independently scheduled acquisition downloads and checks every
 expected original resource by positive size and SHA-256, using SHA-1/search only to locate it.

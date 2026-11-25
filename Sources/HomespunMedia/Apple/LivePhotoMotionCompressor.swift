@@ -33,6 +33,11 @@ public struct LivePhotoMotionCompressor: Sendable {
     }
 
     public func compress(input: URL, output: URL) async throws -> VideoCompressionResult {
+        try await compress(input: input, output: output, observer: .init())
+    }
+
+    func compress(input: URL, output: URL, observer: AVSupport.MotionObserver) async throws -> VideoCompressionResult {
+        try Task.checkCancellation()
         guard try MediaFiles.size(of: input) > 0 else { throw VideoCompressionError.emptyInput }
         let asset = AVURLAsset(url: input)
         let tracks = try await asset.load(.tracks)
@@ -63,7 +68,9 @@ public struct LivePhotoMotionCompressor: Sendable {
             }
         }
         if !held.isEmpty {
-            let copy = try MediaFiles.publishCopy(of: input, to: output)
+            _ = try await AVSupport.decodeVideo(input, cancellable: true, didDecodeFrame: observer.didDecodeFrame)
+            try Task.checkCancellation()
+            let copy = try MediaFiles.publishCopy(of: input, to: output, beforePublish: { try Task.checkCancellation() })
             return VideoCompressionResult(mode: .originalKeptHeld, sha256: copy.sha256, size: copy.size,
                                           heldReasons: Array(Set(held)).sorted())
         }
@@ -151,7 +158,9 @@ public struct LivePhotoMotionCompressor: Sendable {
             }
         }
 
-        try await AVSupport.transfer(reader: reader, writer: writer, pairs: pairs)
+        try Task.checkCancellation()
+        try await AVSupport.transferMotion(reader: reader, writer: writer, pairs: pairs, observer: observer)
+        try Task.checkCancellation()
 
         let result = AVURLAsset(url: partial)
         let resultTracks = try await result.load(.tracks)
@@ -164,6 +173,7 @@ public struct LivePhotoMotionCompressor: Sendable {
         }
         var resultAssociations = 0
         for track in resultTracks {
+            try Task.checkCancellation()
             for type in try await track.load(.availableTrackAssociationTypes) {
                 resultAssociations += try await track.loadAssociatedTracks(ofType: type).count
             }
@@ -194,14 +204,16 @@ public struct LivePhotoMotionCompressor: Sendable {
             where !VideoVerification.durationsMatch(before, after, absolute: 0.1, relative: 0) {
             throw VideoCompressionError.durationMismatch("\(label) \(before)s vs \(after)s")
         }
-        _ = try await AVSupport.decodeVideo(partial)
+        _ = try await AVSupport.decodeVideo(partial, cancellable: true, didDecodeFrame: observer.didDecodeFrame)
+        try Task.checkCancellation()
 
         if try MediaFiles.size(of: partial) >= MediaFiles.size(of: input) {
-            let copy = try MediaFiles.publishCopy(of: input, to: output)
+            let copy = try MediaFiles.publishCopy(of: input, to: output, beforePublish: { try Task.checkCancellation() })
             return VideoCompressionResult(mode: .originalKeptNotSmaller, sha256: copy.sha256, size: copy.size)
         }
         let digest = try Fingerprint.sha256(of: partial)
         let size = try MediaFiles.size(of: partial)
+        try Task.checkCancellation()
         try MediaFiles.publish(partial, to: output)
         return VideoCompressionResult(mode: .transcoded, sha256: digest, size: size)
     }

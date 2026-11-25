@@ -170,6 +170,12 @@ enum AVSupport {
 
     /// Copies sample buffers from each reader output to its writer input until all finish.
     final class SamplePump: @unchecked Sendable {
+        struct Control: Sendable {
+            var stopped: @Sendable () -> Bool
+            var failed: @Sendable () -> Void
+            var didAppend: @Sendable (AVMediaType) -> Void
+        }
+
         /// One reader output feeding one writer input. Its state is only touched on its own queue.
         private final class Lane: @unchecked Sendable {
             let output: AVAssetReaderOutput
@@ -185,6 +191,7 @@ enum AVSupport {
         }
 
         private let lanes: [Lane]
+        private let group = DispatchGroup()
 
         init(_ pairs: [(AVAssetReaderOutput, AVAssetWriterInput)]) {
             lanes = pairs.enumerated().map { Lane($1.0, $1.1, index: $0) }
@@ -192,20 +199,63 @@ enum AVSupport {
 
         func run() async {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                let group = DispatchGroup()
-                for lane in lanes {
-                    group.enter()
-                    lane.input.requestMediaDataWhenReady(on: lane.queue) {
-                        while !lane.finished && lane.input.isReadyForMoreMediaData {
-                            if let sample = lane.output.copyNextSampleBuffer(), lane.input.append(sample) { continue }
-                            lane.finished = true
-                            lane.input.markAsFinished()
-                            group.leave()
+                start { withExtendedLifetime(self) { continuation.resume() } }
+            }
+        }
+
+        /// Single-use. Ordinary video omits control and retains its existing transfer policy.
+        func start(control: Control? = nil, completion: @escaping @Sendable () -> Void) {
+            for _ in lanes { group.enter() }
+            for lane in lanes {
+                lane.input.requestMediaDataWhenReady(on: lane.queue) { [weak self, weak lane] in
+                    guard let self, let lane else { return }
+                    while !lane.finished && lane.input.isReadyForMoreMediaData {
+                        if control?.stopped() == true {
+                            self.finish(lane, markAsFinished: false)
+                            return
                         }
+                        guard let sample = lane.output.copyNextSampleBuffer() else {
+                            self.finish(lane, markAsFinished: control?.stopped() != true)
+                            return
+                        }
+                        if control?.stopped() == true {
+                            self.finish(lane, markAsFinished: false)
+                            return
+                        }
+                        guard lane.input.append(sample) else {
+                            control?.failed()
+                            self.finish(lane, markAsFinished: control == nil)
+                            return
+                        }
+                        control?.didAppend(lane.input.mediaType)
                     }
                 }
-                group.notify(queue: .global()) { continuation.resume() }
             }
+            group.notify(queue: .global(), execute: completion)
+        }
+
+        /// Wakes even lanes whose inputs will never become ready after another lane fails.
+        func stop() {
+            for lane in lanes {
+                lane.queue.async { self.finish(lane, markAsFinished: false) }
+            }
+        }
+
+        func fence(completion: @escaping @Sendable () -> Void) {
+            let fence = DispatchGroup()
+            for lane in lanes {
+                fence.enter()
+                lane.queue.async { fence.leave() }
+            }
+            fence.notify(queue: .global(), execute: completion)
+        }
+
+        private func finish(_ lane: Lane, markAsFinished: Bool) {
+            guard !lane.finished else { return }
+            lane.finished = true
+            if markAsFinished { lane.input.markAsFinished() }
+            // Do not signal completion from inside a still-running media callback.
+            lane.queue.async { self.group.leave() }
         }
     }
 
@@ -231,7 +281,9 @@ enum AVSupport {
     }
 
     /// Decodes every frame of the first video track; returns the frame count.
-    static func decodeVideo(_ url: URL) async throws -> Int {
+    static func decodeVideo(_ url: URL, cancellable: Bool = false,
+                            didDecodeFrame: @escaping @Sendable () -> Void = {}) async throws -> Int {
+        if cancellable { try Task.checkCancellation() }
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw VideoCompressionError.noVideoStream
@@ -242,17 +294,63 @@ enum AVSupport {
         ])
         output.alwaysCopiesSampleData = false
         reader.add(output)
-        guard reader.startReading() else {
-            throw VideoCompressionError.verificationFailed("decode: \(String(describing: reader.error))")
+        let decoder = VideoDecoder(reader: reader, output: output)
+        if cancellable {
+            return try await withTaskCancellationHandler {
+                try decoder.decode(cancellable: true, didDecodeFrame: didDecodeFrame)
+            } onCancel: {
+                decoder.cancel()
+            }
         }
-        var frames = 0
-        while let sample = output.copyNextSampleBuffer() {
-            if CMSampleBufferGetImageBuffer(sample) != nil { frames += 1 }
+        return try decoder.decode(cancellable: false, didDecodeFrame: didDecodeFrame)
+    }
+
+    /// Only start/cancel may race. Reading is synchronous on the caller, so its return joins
+    /// the decode loop; cancelling the reader also interrupts an outstanding sample read.
+    private final class VideoDecoder: @unchecked Sendable {
+        let reader: AVAssetReader
+        let output: AVAssetReaderTrackOutput
+        private let lock = NSLock()
+        private var cancelled = false
+
+        init(reader: AVAssetReader, output: AVAssetReaderTrackOutput) {
+            self.reader = reader
+            self.output = output
         }
-        guard reader.status == .completed, frames > 0 else {
-            throw VideoCompressionError.verificationFailed("decode: \(String(describing: reader.error))")
+
+        func cancel() {
+            lock.withLock {
+                cancelled = true
+                reader.cancelReading()
+            }
         }
-        return frames
+
+        func decode(cancellable: Bool, didDecodeFrame: @Sendable () -> Void) throws -> Int {
+            defer { if cancellable { cancel() } }
+            let started = try lock.withLock {
+                if cancelled { throw CancellationError() }
+                if cancellable { try Task.checkCancellation() }
+                return reader.startReading()
+            }
+            guard started else {
+                if cancellable { try Task.checkCancellation() }
+                throw VideoCompressionError.verificationFailed("decode: \(String(describing: reader.error))")
+            }
+            var frames = 0
+            while true {
+                if cancellable { try Task.checkCancellation() }
+                guard let sample = output.copyNextSampleBuffer() else { break }
+                if CMSampleBufferGetImageBuffer(sample) != nil {
+                    frames += 1
+                    didDecodeFrame()
+                }
+            }
+            if cancellable { try Task.checkCancellation() }
+            guard reader.status == .completed, frames > 0 else {
+                throw VideoCompressionError.verificationFailed("decode: \(String(describing: reader.error))")
+            }
+            return frames
+        }
     }
 
     static func duration(of track: AVAssetTrack) async throws -> Double {

@@ -96,38 +96,58 @@ import UIKit
         nonisolated let baseURL: URL
         private let base: any BackupRemote
         private let beforeVerify: @Sendable (BackupAPI.Version) async -> Void
+        private let delegatesMotion: Bool
         private var released: Bool
         private(set) var held = 0
         private(set) var verified: [BackupAPI.Version] = []
 
-        init(_ base: any BackupRemote, delaysReady: Bool = false,
+        init(_ base: any BackupRemote, delaysReady: Bool = false, delegatesMotion: Bool = false,
              beforeVerify: @escaping @Sendable (BackupAPI.Version) async -> Void = { _ in }) {
             self.base = base
             baseURL = base.baseURL
             released = !delaysReady
+            self.delegatesMotion = delegatesMotion
             self.beforeVerify = beforeVerify
         }
+
+        private func delivery(_ receipt: BackupAPI.Receipt) -> BackupAPI.Receipt {
+            guard delegatesMotion, var derivative = receipt.derivative,
+                  derivative.resources.contains(where: { $0.role == .pairedVideo }) else { return receipt }
+            var receipt = receipt
+            derivative.resources.removeAll { $0.role == .pairedVideo }
+            derivative.deviceCompresses = [.pairedVideo]
+            receipt.derivative = derivative
+            return receipt
+        }
+
         func release() { released = true }
         func changes(after cursor: Int64, epoch: String) async throws -> BackupAPI.Changes {
-            let page = try await base.changes(after: cursor, epoch: epoch)
+            var page = try await base.changes(after: cursor, epoch: epoch)
             if !released, page.changes.contains(where: { $0.receipt.compact == .ready }) {
                 held += 1
                 return .init(origin: page.origin, cursor: cursor, hasMore: false, changes: [])
             }
+            page.changes = page.changes.map { .init(sequence: $0.sequence, receipt: delivery($0.receipt)) }
             return page
         }
         func capabilities() async throws -> BackupAPI.Capabilities { try await base.capabilities() }
-        func submit(_ request: BackupAPI.Request) async throws -> BackupAPI.Receipt { try await base.submit(request) }
-        func lookup(operationID: UUID) async throws -> [BackupAPI.Receipt] { try await base.lookup(operationID: operationID) }
-        func status(_ requestID: UUID) async throws -> BackupAPI.Receipt { try await base.status(requestID) }
+        func submit(_ request: BackupAPI.Request) async throws -> BackupAPI.Receipt { delivery(try await base.submit(request)) }
+        func lookup(operationID: UUID) async throws -> [BackupAPI.Receipt] {
+            try await base.lookup(operationID: operationID).map { delivery($0) }
+        }
+        func status(_ requestID: UUID) async throws -> BackupAPI.Receipt { delivery(try await base.status(requestID)) }
         func command(requestID: UUID, _ command: BackupAPI.Command) async throws -> BackupAPI.Receipt {
-            try await base.command(requestID: requestID, command)
+            delivery(try await base.command(requestID: requestID, command))
         }
         func admitUpload(_ request: BackupAPI.UploadRequest) async throws -> BackupAPI.UploadAdmission { try await base.admitUpload(request) }
         func uploadPosition(_ uploadID: UUID) async throws -> BackupUploadPosition { try await base.uploadPosition(uploadID) }
         func append(_ bytes: Data, uploadID: UUID, offset: Int64) async throws -> Int64 { try await base.append(bytes, uploadID: uploadID, offset: offset) }
-        func completeUpload(_ uploadID: UUID) async throws -> BackupAPI.Receipt { try await base.completeUpload(uploadID) }
-        func snapshot(continuation: String?) async throws -> BackupAPI.Snapshot { try await base.snapshot(continuation: continuation) }
+        func completeUpload(_ uploadID: UUID) async throws -> BackupAPI.Receipt { delivery(try await base.completeUpload(uploadID)) }
+        func snapshot(continuation: String?) async throws -> BackupAPI.Snapshot {
+            var page = try await base.snapshot(continuation: continuation)
+            page.receipts = page.receipts.map { delivery($0) }
+            return page
+        }
         func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws -> HTTPURLResponse {
             try await base.download(generation: generation, resource: resource, to: file)
         }
@@ -587,6 +607,69 @@ import UIKit
         #expect(!model.job.isRunning && !model.premium.isUnlocked)
         await model.library.stopAndWait()
         try await model.closeDemoStore()
+    }
+
+    @Test func freshDelegatedLinuxMotionStaysBlockedWithoutImportingOrChangingItsRetainedOriginal() async throws {
+        let fixture = try await Fixture.make()
+        let library = fixture.session.library, ledger = fixture.ledger
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        var context = try await settings.backupContext(store: ledger.store, namespace: ledger.namespace)
+        // The real synthetic server keeps the complete original. Only its delivery is
+        // presented as Linux's photo-only derivative plus delegated pairedVideo.
+        context.remote = ControlledRemote(context.remote, delegatesMotion: true)
+        let coordinator = BackupCoordinator(store: ledger.store, photos: library, namespace: ledger.namespace)
+        do {
+            let live = try sample(library, "live_photo")
+            let identifiers = library.allIdentifiers(), generation = try library.sourceGeneration(live.id)
+            let original = try await library.resourceFingerprints(live.id)
+            let album = library.albumMembers(), questions = fixture.asked.all.count
+            let policy = try await settings.backupSpacePolicy(store: ledger.store)
+            try await coordinator.activate(context, policy: policy)
+            let batch = try await coordinator.admit([live.id], compact: true, trigger: .manual)
+            let id = try #require(batch.operationIDs.first)
+            try await coordinator.runOpportunity()
+            try await coordinator.runOpportunity()
+            let operation = try #require(try await ledger.store.operation(id))
+            let receipt = try #require(operation.receipt), manifest = try #require(operation.manifest)
+            #expect(manifest.kind == .livePhoto && operation.backup == .retained && operation.compact == .ready)
+            #expect(receipt.derivative?.deviceCompresses == [.pairedVideo])
+            #expect(receipt.derivative?.resources.map(\.role) == [.photo])
+            #expect(operation.problem?.code == "stage_failed" && operation.attention && operation.lease == nil)
+            #expect(operation.problem?.stage == .finalization)
+            #expect(operation.problem?.message.contains("bounded on-iPhone motion encoding") == true)
+            #expect(operation.delivery != .importedVerified)
+            let resources = try await ledger.store.resources(id)
+            #expect(resources.allSatisfy { $0.kind != .motion })
+            let motion = try #require(resources.first {
+                $0.kind == .original && $0.descriptor.role == .pairedVideo && $0.availability == .present
+            })
+            let retained = try Fingerprint.digests(of: ledger.store.files.stagedFile(operationID: id, fileID: motion.fileID))
+            #expect(retained.sha256 == motion.descriptor.sha256 && retained.size == motion.descriptor.size)
+            #expect(try await ledger.store.transfers(operationID: id).allSatisfy { $0.kind != .download })
+            #expect(try await ledger.store.importIntent(id) == nil)
+            #expect(try await ledger.store.mappings(namespace: ledger.namespace).isEmpty)
+            #expect(try await ledger.store.outbox().allSatisfy { $0.kind != .deliveryAcknowledgement })
+            #expect(try await ledger.store.effects(namespace: ledger.namespace, unfinished: false).isEmpty)
+            #expect(library.allIdentifiers() == identifiers && library.albumMembers() == album)
+            #expect(try library.sourceGeneration(live.id) == generation)
+            #expect(try await library.resourceFingerprints(live.id) == original)
+            #expect(fixture.asked.all.count == questions)
+            let proof = try await context.remote.verify(receipt.version)
+            #expect(BackupValidation.retained(proof, manifest: manifest, context: context, policy: .permanent))
+            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library)
+            #expect(try await remover.candidates(only: [live.id]).isEmpty)
+            try await coordinator.stopAndWait()
+            try await ledger.store.close()
+        } catch {
+            try? await coordinator.stopAndWait()
+            try? await ledger.store.close()
+            throw error
+        }
     }
 
     @Test func queuedManualWorkSurvivesJoinedRetirementWithoutPremiumOrBlindReimport() async throws {

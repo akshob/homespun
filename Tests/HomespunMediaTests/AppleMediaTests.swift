@@ -233,6 +233,69 @@ private func files(in directory: URL) throws -> [String] {
                                             audioChannels: 1, liveIdentifier: "5E4F1A2B-3C4D-4E5F-8A9B-0C1D2E3F4A5B",
                                             cleanAperture: (1360, 1020))
 
+    private final class MotionBarrier: @unchecked Sendable {
+        private let lock = NSLock()
+        private let gate = DispatchSemaphore(value: 0)
+        private var arrival: CheckedContinuation<Bool, Never>?
+        private var blocked = false
+        private var returned = false
+        private var completed = false
+        private var joined: (AVAssetReader.Status, AVAssetWriter.Status)?
+        private var lateAppends = 0
+        private var prematureCompletion = false
+
+        var snapshot: (returned: Bool, completed: Bool, joined: (AVAssetReader.Status, AVAssetWriter.Status)?,
+                       lateAppends: Int, prematureCompletion: Bool) {
+            lock.withLock { (returned, completed, joined, lateAppends, prematureCompletion) }
+        }
+
+        func appended(_ mediaType: AVMediaType, pause: Bool) {
+            lock.withLock { if joined != nil { lateAppends += 1 } }
+            if pause, mediaType == .video { self.pause() }
+        }
+
+        func pause() {
+            let first = lock.withLock {
+                guard !blocked else { return false }
+                blocked = true
+                arrival?.resume(returning: true)
+                arrival = nil
+                return true
+            }
+            guard first else { return }
+            gate.wait()
+            lock.withLock { returned = true }
+        }
+
+        func waitUntilBlockedOrFinished() async -> Bool {
+            await withCheckedContinuation { continuation in
+                lock.withLock {
+                    if blocked { continuation.resume(returning: true) }
+                    else if completed { continuation.resume(returning: false) }
+                    else { arrival = continuation }
+                }
+            }
+        }
+
+        func didJoin(_ reader: AVAssetReader.Status, _ writer: AVAssetWriter.Status) {
+            lock.withLock {
+                if blocked && !returned { prematureCompletion = true }
+                joined = (reader, writer)
+            }
+        }
+
+        func didFinish() {
+            lock.withLock {
+                if blocked && !returned { prematureCompletion = true }
+                completed = true
+                arrival?.resume(returning: false)
+                arrival = nil
+            }
+        }
+
+        func release() { gate.signal() }
+    }
+
     @Test func reencodesMotionKeepingPairingAndFraming() async throws {
         let directory = try Synthetic.directory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -284,6 +347,113 @@ private func files(in directory: URL) throws -> [String] {
         let result = try await LivePhotoMotionCompressor().compress(
             input: input, output: directory.appendingPathComponent("out.mov"))
         #expect(result.mode == .originalKeptHeld && result.heldReasons == ["hdr"])
+        let output = directory.appendingPathComponent("out.mov")
+        #expect(try Data(contentsOf: output) == Data(contentsOf: input))
+        #expect(try result.sha256 == Fingerprint.sha256(of: input))
+        #expect(try result.size == MediaFiles.size(of: input))
+        #expect(try await LivePhotoMotionCompressor.contentIdentifier(of: output) == spec.liveIdentifier)
+        #expect(try files(in: directory) == ["hdr.mov", "out.mov"])
+    }
+
+    @Test func rejectsHeldMotionWithCorruptMediaButReadableHDRMetadata() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("corrupt-hdr.mov")
+        var spec = Self.motion
+        spec.frames = 15
+        spec.transfer = AVVideoTransferFunction_ITU_R_2100_HLG
+        try await Synthetic.video(at: input, spec)
+        var data = try Data(contentsOf: input)
+        var offset = 0, corrupted = false
+        while offset + 8 <= data.count {
+            func integer(_ range: Range<Int>) -> UInt64 { data[range].reduce(0) { $0 << 8 | UInt64($1) } }
+            var length = integer(offset..<(offset + 4))
+            let type = String(decoding: data[(offset + 4)..<(offset + 8)], as: UTF8.self)
+            var header = 8
+            if length == 1 {
+                try #require(offset + 16 <= data.count)
+                length = integer((offset + 8)..<(offset + 16))
+                header = 16
+            } else if length == 0 { length = UInt64(data.count - offset) }
+            try #require(length >= UInt64(header) && length <= UInt64(data.count - offset))
+            let end = offset + Int(length)
+            if type == "mdat" {
+                // Keep moov/sample tables, the identifier and HLG descriptions intact.
+                data.resetBytes(in: (offset + header)..<end)
+                corrupted = true
+            }
+            offset = end
+        }
+        try #require(corrupted)
+        try data.write(to: input)
+        let asset = AVURLAsset(url: input)
+        #expect(try await AVSupport.contentIdentifier(of: asset) == spec.liveIdentifier)
+        let video = try #require(try await asset.loadTracks(withMediaType: .video).first)
+        let (_, traits) = try await AVSupport.traits(of: video)
+        try #require(traits.isHLG, "The corrupt file must reach the held branch, not fail metadata loading")
+        let output = directory.appendingPathComponent("out.mov")
+        do {
+            _ = try await LivePhotoMotionCompressor().compress(input: input, output: output)
+            Issue.record("An undecodable held original must not be published")
+        } catch let error as VideoCompressionError {
+            guard case .verificationFailed = error else { throw error }
+        }
+        #expect(try files(in: directory) == ["corrupt-hdr.mov"])
+    }
+
+    enum CancellationPhase: CaseIterable, Sendable { case transfer, heldDecode, encodedDecode }
+
+    @Test(arguments: CancellationPhase.allCases)
+    func cancellationJoinsMotionBeforeRemovingItsPartial(_ phase: CancellationPhase) async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("out.mov")
+        var spec = Self.motion
+        spec.frames = 15
+        if phase == .heldDecode { spec.transfer = AVVideoTransferFunction_ITU_R_2100_HLG }
+        try await Synthetic.video(at: input, spec)
+        let barrier = MotionBarrier()
+        let observer = AVSupport.MotionObserver(didAppend: {
+            barrier.appended($0, pause: phase == .transfer)
+        }, didDecodeFrame: {
+            if phase != .transfer { barrier.pause() }
+        }, didJoin: { barrier.didJoin($0, $1) })
+        let task = Task {
+            defer { barrier.didFinish() }
+            return try await LivePhotoMotionCompressor().compress(input: input, output: output, observer: observer)
+        }
+        defer { barrier.release() }
+        guard await barrier.waitUntilBlockedOrFinished() else {
+            _ = try await task.value
+            Issue.record("Motion completed without reaching the controlled in-flight barrier")
+            return
+        }
+        task.cancel()
+        #expect(!barrier.snapshot.completed && !barrier.snapshot.returned,
+                "Cancellation must join the callback, not return while it is suspended")
+        #expect(!FileManager.default.fileExists(atPath: output.path))
+        barrier.release()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(barrier.snapshot.returned && barrier.snapshot.completed && barrier.snapshot.lateAppends == 0)
+        #expect(!barrier.snapshot.prematureCompletion)
+        if phase == .transfer {
+            let joined = try #require(barrier.snapshot.joined)
+            #expect(joined.0 == .cancelled && joined.1 == .cancelled)
+        }
+        #expect(try files(in: directory) == ["in.mov"])
+    }
+
+    @Test func preCancelledMotionDoesNotStartOrPublish() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await LivePhotoMotionCompressor().compress(
+                input: directory.appendingPathComponent("not-opened.mov"),
+                output: directory.appendingPathComponent("out.mov"))
+        }
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(try files(in: directory).isEmpty)
     }
 
     @Test func compressedPairIsStillALivePhoto() async throws {

@@ -8,6 +8,22 @@ import Glibc
 import Darwin
 #endif
 
+@Test func cancelledVerifiedCopyDoesNotPublishOrReplaceAnExistingOutput() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("out.mov")
+    let original = Data("synthetic original".utf8), existing = Data("existing verified output".utf8)
+    try original.write(to: input)
+    try existing.write(to: output)
+    #expect(throws: CancellationError.self) {
+        try MediaFiles.publishCopy(of: input, to: output, beforePublish: { throw CancellationError() })
+    }
+    #expect(try Data(contentsOf: input) == original)
+    #expect(try Data(contentsOf: output) == existing)
+    #expect(!FileManager.default.fileExists(atPath: MediaFiles.partialURL(for: output).path))
+}
+
 @Test func probeKeepsOnlyDecodableAudio() throws {
     let json = """
     {"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","width":1920,"height":1080,"duration":"12.87"},

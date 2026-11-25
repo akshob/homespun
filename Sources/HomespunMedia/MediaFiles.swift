@@ -24,7 +24,8 @@ enum MediaFiles {
 
     /// Copies `input` byte-for-byte to `output` through a temporary name, checks size and
     /// SHA-256, then publishes it. Returns the digest and size.
-    static func publishCopy(of input: URL, to output: URL) throws -> (sha256: String, size: Int) {
+    static func publishCopy(of input: URL, to output: URL,
+                            beforePublish: () throws -> Void = {}) throws -> (sha256: String, size: Int) {
         let partial = partialURL(for: output)
         try? FileManager.default.removeItem(at: partial)
         defer { try? FileManager.default.removeItem(at: partial) }
@@ -34,6 +35,7 @@ enum MediaFiles {
         guard size == (try self.size(of: input)), digest == (try Fingerprint.sha256(of: input)) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: output.path])
         }
+        try beforePublish()
         try publish(partial, to: output)
         return (digest, size)
     }
