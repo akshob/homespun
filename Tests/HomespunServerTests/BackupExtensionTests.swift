@@ -179,7 +179,9 @@ private struct ImportedCopyRecovery: Sendable {
         let lookup = BackupAPI.CopyLookup(origin: capabilities.origin, assetID: try item.originals.assetID(), compact: item.compact)
         var partial = lookup
         partial.compact.resources.removeLast()
-        #expect(try await client.call("/api/v2/copies/resolve", .post, token: token, json: partial).status == .conflict)
+        let incomplete = try await client.call("/api/v2/copies/resolve", .post, token: token, json: partial)
+        #expect(incomplete.status == .badRequest)
+        #expect(try incomplete.decode(ServerAPI.ErrorBody.self).error.code == "invalid_request")
         var changed = lookup
         changed.compact.resources[1].sha256 = String(repeating: "f", count: 64)
         #expect(try await client.call("/api/v2/copies/resolve", .post, token: token, json: changed).status == .conflict)
