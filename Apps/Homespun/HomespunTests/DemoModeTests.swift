@@ -12,7 +12,7 @@ import UIKit
 /// stay in its own folder and settings.
 @MainActor @Suite(.serialized) struct DemoModeTests {
     /// A demo in a folder of its own, its server answering at once, and its question answered by `answer`.
-    final class Fixture {
+    @MainActor final class Fixture {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("demo-\(UUID().uuidString)")
         let settingsName = "demo-test-\(UUID().uuidString)"
         let session: DemoSession
@@ -770,7 +770,8 @@ import UIKit
             let generation = try library.sourceGeneration(original)
             let questions = fixture.asked.all.count
             // SQLite aborts the real transaction, not a stand-in for the keeper's result.
-            try await store.mutateState { try $0.execute(fault.trigger) }
+            let trigger = fault.trigger
+            try await store.mutateState { @Sendable connection in try connection.execute(trigger) }
             await #expect(throws: BackupDatabase.Failure.self) {
                 try await BackupKeeper(ledger: ledger, photos: library).keep([original])
             }
@@ -784,15 +785,19 @@ import UIKit
             #expect(intent.submitted == (fault == .recordPhotosSuccess ? [] : [compactID]))
             #expect(try await store.mappings(namespace: ledger.namespace)[original]?.id == mapping.id)
             #expect(try await ledger.decisions().isEmpty)
-            #expect(try await store.readState { try $0.rows("SELECT 1 FROM legacy_backed_up").isEmpty },
-                    "A failed finalization must roll back even the writes before its decision")
+            let rolledBack = try await store.readState { @Sendable connection in
+                try connection.rows("SELECT 1 FROM legacy_backed_up").isEmpty
+            }
+            #expect(rolledBack, "A failed finalization must roll back even the writes before its decision")
 
             try await store.close()
             let reopened = BackupStore(directory: store.files.root, legacyURL: nil, processID: UUID())
             do {
                 try await reopened.open()
                 #expect(try await reopened.effect(intent.id) == intent)
-                try await reopened.mutateState { try $0.execute("DROP TRIGGER fail_keep_persistence") }
+                try await reopened.mutateState { @Sendable connection in
+                    try connection.execute("DROP TRIGGER fail_keep_persistence")
+                }
                 let resumedLedger = CompactLedger(store: reopened, namespace: ledger.namespace)
                 let asked = fixture.asked
                 let resumedPhotos = DemoLibrary(folder: library.folder, media: fixture.media, ask: { asked.ask($0) })
