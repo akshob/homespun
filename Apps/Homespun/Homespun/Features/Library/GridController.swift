@@ -379,7 +379,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                 thumbnails.invalidate(changed)
                 for case let cell as GridCell in collectionView.visibleCells {
                     guard let id = cell.item, changed.contains(id) else { continue }
-                    cell.invalidateImage()
                     cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
                 }
                 watchContent()

@@ -224,7 +224,8 @@ import UIKit
             let overlap = await automatic.run(settings: settings, job: job, premium: premium, notify: false)
             #expect(overlap == AutomaticMode.Summary())
             #expect(automatic.running, "The overlapping call must not release the first run's ownership")
-            #expect(try await job.ledger.store.operations().isEmpty)
+            let admitted = try await job.ledger.store.operations()
+            #expect(admitted.isEmpty)
         }
         #expect(result.summary.queued == 1 && result.summary.skipped == nil)
         #expect(result.operations.count == 1, "The owning run must still be able to admit its selection")

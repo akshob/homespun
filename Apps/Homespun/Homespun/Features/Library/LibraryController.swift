@@ -364,7 +364,7 @@ final class LibraryController {
         library.apply(job: changes)
         let finished = changes.values.contains { state in
             switch state {
-            case .waiting?, .working?: false
+            case .waiting?, .working?, .processing?: false
             default: true
             }
         }

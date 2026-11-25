@@ -342,6 +342,37 @@ private func abandonedPhotoHandoff(_ files: BackupFiles, operationID: UUID,
     #expect(FileManager.default.fileExists(atPath: known.alias.path))
 }
 
+@MainActor @Test func canonicalPresentationKeepsStagesStableBetweenLeasesAndDoesNotFinishRemoteWork() {
+    let now = Date()
+    var operation = BackupStore.Operation(id: UUID(), namespace: "photos", itemID: "original", lineage: 1,
+        bindingID: UUID(), origin: .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString),
+        profile: .standard, wantsCompact: true, createdAt: now, updatedAt: now)
+    #expect(CompactJob.project(operation, kept: false).phase == .waiting)
+    operation.lease = .init(id: UUID(), operationID: operation.id, epoch: 1, processID: UUID(), stage: .preparation)
+    #expect(CompactJob.project(operation, kept: false).phase == .working)
+    operation.lease = nil
+    for stage in [BackupAPI.BackupState.preparing, .uploading, .verifying] {
+        operation.backup = stage
+        let state = CompactJob.project(operation, kept: false)
+        #expect(state.phase == .working && !state.isFinished)
+    }
+    operation.backup = .retained
+    operation.compact = .processing
+    let remote = CompactJob.project(operation, kept: false)
+    #expect(remote.phase == .processing && !remote.isOpen && !remote.isFinished)
+    operation.compact = .ready
+    for stage in [BackupAPI.DeliveryState.pending, .downloading, .validating, .importPlanned] {
+        operation.delivery = stage
+        let state = CompactJob.project(operation, kept: false)
+        #expect(state.phase == .working && !state.isFinished)
+    }
+    operation.manifest = .init(kind: .photo, resources: [
+        .init(role: .photo, filename: "original.jpg", size: 100, sha256: String(repeating: "a", count: 64)),
+    ])
+    operation.delivery = .importedVerified
+    #expect(CompactJob.project(operation, kept: false).isFinished)
+}
+
 @Test func resultDiscoveryTracksCurrentWorkAndStopsAfterTerminalOutboxesAreDrained() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

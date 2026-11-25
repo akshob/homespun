@@ -22,6 +22,13 @@ final class CompactJob {
         /// Waiting or being worked on.
         var isOpen: Bool { if case .waiting = self { true } else if case .working = self { true } else { false } }
 
+        var isFinished: Bool {
+            switch self {
+            case .waiting, .working, .processing: false
+            default: true
+            }
+        }
+
         /// The state without its message or sizes; enough for the grid's badges.
         var phase: Phase {
             switch self {
@@ -128,6 +135,7 @@ final class CompactJob {
     private(set) var queueProblem: String?
     private(set) var queueLoaded = false
     private(set) var remoteCount = 0
+    private(set) var hasRemoteWork = false
     private(set) var retainedCount = 0
     var activeOrigin: BackupAPI.Origin? {
         guard let context = coordinator.context, settings.matchesBackupBinding(context.binding) else { return nil }
@@ -226,6 +234,7 @@ final class CompactJob {
             if case .saved(let original, _) = state, let intent = try await ledger.store.importIntent(operation.id) {
                 state = .saved(originalBytes: original, compactBytes: intent.expected.reduce(0) { $0 + $1.size })
             }
+            let previous = positions[operation.id].map { items[$0].state }
             let index: Int
             if let old = positions[operation.id] {
                 index = old
@@ -252,6 +261,9 @@ final class CompactJob {
                 noteChange(operation.itemID, state)
                 if state.phase == .saved { terminal = true }
             }
+            if state.isFinished, previous?.isFinished != true, previous != nil || queueLoaded {
+                RenderProbe.count("job.finished")
+            }
             retainedIDs.remove(operation.id); remoteIDs.remove(operation.id); pausedIDs.remove(operation.id)
             if operation.origin == activeOrigin {
                 if operation.backup == .retained { retainedIDs.insert(operation.id) }
@@ -267,6 +279,7 @@ final class CompactJob {
             }
         }
         remoteCount = remoteIDs.count
+        if hasRemoteWork != !remoteIDs.isEmpty { hasRemoteWork = !remoteIDs.isEmpty }
         retainedCount = retainedIDs.count
         pausedCount = pausedIDs.count
         progress.total = items.count
@@ -279,8 +292,8 @@ final class CompactJob {
     }
 
     private func updateProgress(_ progress: inout RunProgress, old: State?, new: State) {
-        if let old, !old.isOpen { progress.done -= 1 }
-        if !new.isOpen { progress.done += 1 }
+        if let old, old.isFinished { progress.done -= 1 }
+        if new.isFinished { progress.done += 1 }
         func adding(_ value: Int, _ delta: Int) -> Int {
             let (next, overflow) = value.addingReportingOverflow(delta)
             return overflow ? (delta >= 0 ? Int.max : 0) : max(0, next)
@@ -304,15 +317,18 @@ final class CompactJob {
         if operation.attention { return .failed(operation.problem?.message ?? "The previous Photos action needs reconciliation before continuing.") }
         if operation.desired == .paused { return .notYet("Paused. This selection is saved and resumes when you choose Resume.") }
         if operation.desired == .cancelled { return .unchanged("Processing was cancelled. Verified originals remain retained.") }
-        if operation.lease != nil { return .working(operation.problem?.message ?? "Working") }
         if operation.backup == .retained {
             if operation.compact == .held { return .unchanged(operation.receipt?.message ?? "Kept as is; the original is backed up.") }
             if operation.compact == .failed { return .failed(operation.receipt?.message ?? "The server couldn't make the compact copy. Its original backup remains.") }
             if !operation.wantsCompact { return .backedUp(originalBytes: operation.manifest?.resources.reduce(0) { $0 + $1.size } ?? 0) }
             if operation.compact != .ready { return .processing("Original backed up; compact copy processing on the server.") }
-            return .waiting
+            return .working(operation.problem?.message ?? "Saving compact copy")
         }
         if operation.backup == .blocked || operation.backup == .failed { return .failed(operation.problem?.message ?? "This backup needs attention.") }
+        // A durable stage survives lease handoffs; local execution ownership is tracked separately.
+        if operation.lease != nil || operation.backup != .selected {
+            return .working(operation.problem?.message ?? "Backing up original")
+        }
         return .waiting
     }
 
@@ -414,6 +430,7 @@ final class CompactJob {
             try await coordinator.detach()
             remoteIDs = []; retainedIDs = []; pausedIDs = []
             remoteCount = 0; retainedCount = 0; pausedCount = 0
+            hasRemoteWork = false
             if !settings.isDemo { try await WakeSystem.enrollment.configure(nil); WakeSystem.updateRegistration() }
             if !suspended, settings.isPaired { await refreshQueue() }
             onBindingChanged?()
