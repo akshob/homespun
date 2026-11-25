@@ -46,6 +46,7 @@ private struct SetupNavigation: View {
     var onCompare: ((String) -> Void)?
     /// The compact copy the receipt's Compare opened (when the caller doesn't handle it).
     @State private var comparing: String?
+    @State private var leavingDemo = false
 
     var body: some View {
         NavigationStack(path: $flow.path) {
@@ -58,9 +59,12 @@ private struct SetupNavigation: View {
                         }
                     }
                 }
-                .demoMarker(flow.settings.isDemo)
-                .navigationDestination(for: SetupFlow.Page.self) { page($0).demoMarker(flow.settings.isDemo) }
+                .demoMarker(flow.settings.isDemo) { leavingDemo = true }
+                .navigationDestination(for: SetupFlow.Page.self) {
+                    page($0).demoMarker(flow.settings.isDemo) { leavingDemo = true }
+                }
         }
+        .leaveDemoAlert(isPresented: $leavingDemo)
         .sheet(item: Binding(get: { comparing.map(ComparedItem.init) }, set: { comparing = $0?.id })) { item in
             NavigationStack {
                 CompareView(model: .current, compactIdentifier: item.id)
