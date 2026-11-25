@@ -133,6 +133,8 @@ final class CompactJob {
     @ObservationIgnored private var retainedIDs = Set<UUID>()
     @ObservationIgnored private var remoteIDs = Set<UUID>()
     @ObservationIgnored private var pendingIDs = Set<UUID>()
+    /// Committed admissions not yet reconciled; a reused ID gets a new coverage token.
+    @ObservationIgnored private(set) var admissionSeeds: [UUID: UUID] = [:]
     @ObservationIgnored private var pausedIDs = Set<UUID>()
     private(set) var pausedCount = 0
     private(set) var queueProblem: String?
@@ -159,6 +161,13 @@ final class CompactJob {
         coordinator = BackupCoordinator(store: ledger.store, photos: settings.photos, namespace: ledger.namespace,
                                         discoverySleep: discoverySleep)
         coordinator.changed = { [weak self] ids in self?.project(ids) }
+        coordinator.admitted = { [weak self] ids, bindingID in
+            guard let self, !self.retired, !self.suspended, let origin = self.activeOrigin,
+                  let binding = self.coordinator.context?.binding, binding.id == bindingID,
+                  binding.origin == origin else { return }
+            for id in ids { self.admissionSeeds[id] = UUID() }
+            self.refreshPending()
+        }
         coordinator.progress = { [weak self] id, message in self?.stageProgress(id, message: message) }
         coordinator.localWork = { [weak self] count in
             guard let self, !self.retired else { return }
@@ -186,10 +195,18 @@ final class CompactJob {
         if ids.isEmpty { reloadProjection = true } else { pendingProjection.formUnion(ids) }
         guard projectionWork == nil, !retired else { return }
         projectionWork = Task {
-            defer { projectionWork = nil }
+            defer {
+                projectionWork = nil
+                if retired || Task.isCancelled {
+                    admissionSeeds = [:]
+                    refreshPending()
+                }
+            }
             do {
                 repeat {
+                    guard !retired, !Task.isCancelled else { return }
                     if reloadProjection || !queueLoaded {
+                        let covered = admissionSeeds
                         reloadProjection = false
                         pendingProjection = []
                         var cursor: Int64 = 0
@@ -197,22 +214,46 @@ final class CompactJob {
                             let page = try await ledger.store.operationPage(namespace: ledger.namespace, after: cursor)
                             cursor = page.cursor
                             try await applyProjection(page.operations)
+                            guard !retired else { return }
                             if !page.hasMore { break }
                             await Task.yield()
                         } while !Task.isCancelled
+                        guard !Task.isCancelled else { return }
                         queueLoaded = true
+                        reconcileAdmissionSeeds(covered)
                     } else {
                         let requested = pendingProjection
+                        let covered = Dictionary(uniqueKeysWithValues: requested.compactMap { id in
+                            admissionSeeds[id].map { (id, $0) }
+                        })
                         pendingProjection = []
                         var operations: [BackupStore.Operation] = []
                         for id in requested {
                             if let operation = try await ledger.store.operation(id) { operations.append(operation) }
+                            else { pendingIDs.remove(id) }
                         }
                         try await applyProjection(operations)
+                        guard !retired, !Task.isCancelled else { return }
+                        reconcileAdmissionSeeds(covered)
                     }
                 } while reloadProjection || !pendingProjection.isEmpty
-            } catch { showQueueProblem(error) }
+            } catch {
+                admissionSeeds = [:]
+                refreshPending()
+                showQueueProblem(error)
+            }
         }
+    }
+
+    private func reconcileAdmissionSeeds(_ covered: [UUID: UUID]) {
+        for (id, token) in covered where admissionSeeds[id] == token { admissionSeeds[id] = nil }
+        refreshPending()
+    }
+
+    private func refreshPending() {
+        let pending = !pendingIDs.isEmpty || !admissionSeeds.isEmpty
+        if hasPendingWork != pending { hasPendingWork = pending }
+        updateBackupFrames()
     }
 
     private func applyProjection(_ operations: [BackupStore.Operation]) async throws {
@@ -305,8 +346,7 @@ final class CompactJob {
         pausedCount = pausedIDs.count
         progress.total = items.count
         runProgress = progress
-        if hasPendingWork != !pendingIDs.isEmpty { hasPendingWork = !pendingIDs.isEmpty }
-        updateBackupFrames()
+        refreshPending()
         if isRunning, !settings.isDemo {
             _ = LongRun.shared.begin(items: progress.total, server: settings.server?.name ?? "your server")
         }
@@ -493,8 +533,8 @@ final class CompactJob {
         let previous = compactInProgress
         compactInProgress = []
         pendingIDs = []
-        hasPendingWork = false
-        updateBackupFrames()
+        admissionSeeds = [:]
+        refreshPending()
         for id in previous { noteChange(id, states[id]) }
     }
 

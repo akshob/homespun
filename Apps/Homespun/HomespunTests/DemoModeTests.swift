@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import Observation
 import Photos
 import Synchronization
 import Testing
@@ -262,6 +263,232 @@ import UIKit
         }
         #expect(result.summary.queued == 0 && result.summary.skipped == nil)
         #expect(result.operations.isEmpty, "A stale producer must not create even a durable admission")
+    }
+
+    private func withAdmissionJob(
+        _ exercise: @MainActor (Fixture, CompactJob, BackupBindingContext) async throws -> Void
+    ) async throws {
+        let fixture = try await Fixture.make()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let job = CompactJob(settings: settings, ledger: fixture.ledger)
+        defer {
+            job.coordinator.admitted = { _, _ in }
+            job.coordinator.changed = { _ in }
+            job.coordinator.localWork = { _ in }
+            job.onPhaseChange = nil
+        }
+        do {
+            let context = try await settings.backupContext(store: job.ledger.store, namespace: job.ledger.namespace)
+            let policy = try await settings.backupSpacePolicy(store: job.ledger.store)
+            try await job.coordinator.activate(context, policy: policy)
+            try await eventually { job.queueLoaded }
+            try await exercise(fixture, job, context)
+        } catch {
+            await job.stopAndWait()
+            try? await job.ledger.store.close()
+            throw error
+        }
+        await job.stopAndWait()
+        try await job.ledger.store.close()
+    }
+
+    @Test func freshAdmissionSeedsBeforeChangedAndTheFirstLocalWork() async throws {
+        try await withAdmissionJob { fixture, job, context in
+            let admitted = job.coordinator.admitted, changed = job.coordinator.changed, localWork = job.coordinator.localWork
+            var events: [String] = []
+            job.coordinator.admitted = { ids, bindingID in
+                admitted(ids, bindingID)
+                events.append("admitted")
+                #expect(bindingID == context.binding.id && !ids.isEmpty && job.hasPendingWork)
+                #expect(job.runProgress.total == 0)
+                // No older driver exists: visibility starts only inside this fresh admission.
+                job.setVisible(true)
+            }
+            job.coordinator.changed = { ids in
+                if !ids.isEmpty { events.append("changed") }
+                await changed(ids)
+            }
+            job.coordinator.localWork = { count in
+                if count > 0, !events.contains("local") {
+                    events.append("local")
+                    #expect(job.hasPendingWork)
+                }
+                localWork(count)
+            }
+            let photo = try sample(fixture.session.library, "photo")
+            _ = try await job.coordinator.admit([photo.id], compact: true, trigger: .manual)
+            try await eventually { events.contains("local") }
+            #expect(Array(events.prefix(3)) == ["admitted", "changed", "local"])
+        }
+    }
+
+    @Test func admissionMetadataFailureDoesNotPublishASeedOrScheduleProjection() async throws {
+        try await withAdmissionJob { fixture, job, _ in
+            let store = job.ledger.store
+            try await store.mutateState { @Sendable connection in
+                try connection.execute("""
+                    CREATE TRIGGER fail_admission_metadata BEFORE INSERT ON meta
+                    WHEN NEW.key LIKE 'admission:%'
+                    BEGIN SELECT RAISE(ABORT, 'injected admission metadata failure'); END
+                    """)
+            }
+            var admitted = false, changed = false
+            let note = job.coordinator.admitted
+            job.coordinator.admitted = { ids, bindingID in admitted = true; note(ids, bindingID) }
+            job.coordinator.changed = { _ in changed = true }
+            let photo = try sample(fixture.session.library, "photo")
+            await #expect(throws: BackupDatabase.Failure.self) {
+                _ = try await job.coordinator.admit([photo.id], compact: true, trigger: .manual)
+            }
+            #expect(!admitted && !changed && job.admissionSeeds.isEmpty && !job.hasPendingWork)
+            #expect(try await store.currentOperations([photo.id], namespace: job.ledger.namespace).count == 1)
+        }
+    }
+
+    @Test func reusedFinishedAdmissionDrainsItsSeedWithoutInventingPendingWork() async throws {
+        try await withAdmissionJob { fixture, job, context in
+            let photo = try sample(fixture.session.library, "photo"), store = job.ledger.store
+            let first = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                bindingID: context.binding.id, profile: .standard, compact: true)
+            try await store.setKeptDecision([photo.id], namespace: job.ledger.namespace, kept: true)
+            await job.coordinator.changed(Set(first.operationIDs))
+            try await eventually { job.states[photo.id]?.phase == .unchanged }
+            let note = job.coordinator.admitted
+            var seeded = false
+            job.coordinator.admitted = { ids, bindingID in
+                note(ids, bindingID)
+                seeded = job.hasPendingWork && !job.admissionSeeds.isEmpty
+            }
+            let reused = try await job.coordinator.admit([photo.id], compact: true, trigger: .automatic)
+            #expect(reused.operationIDs == first.operationIDs && seeded)
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork }
+            #expect(!job.measuresBackupFrames && job.states[photo.id]?.phase == .unchanged)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func requestedCoverageDrainsNilAndNeverProjectedSupersededAdmissions(superseded: Bool) async throws {
+        try await withAdmissionJob { fixture, job, context in
+            var id = UUID()
+            if superseded {
+                let photo = try sample(fixture.session.library, "photo"), store = job.ledger.store
+                let first = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                    bindingID: context.binding.id, profile: .standard, compact: true)
+                id = try #require(first.operationIDs.first)
+                try await store.rememberAdmission(first, trigger: .manual)
+                job.coordinator.admitted([id], context.binding.id)
+                try await store.setDesired(.cancelled, operationID: id)
+                let replacement = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                    bindingID: context.binding.id, profile: .standard, compact: true)
+                #expect(replacement.operationIDs != first.operationIDs)
+                try await store.setKeptDecision([photo.id], namespace: job.ledger.namespace, kept: true)
+            } else {
+                job.coordinator.admitted([id], context.binding.id)
+            }
+            #expect(job.hasPendingWork && job.admissionSeeds[id] != nil)
+            await job.coordinator.changed([id])
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork }
+            #expect(job.items.count == (superseded ? 1 : 0))
+        }
+    }
+
+    @Test func projectionFailureDropsUnownedSeedsAndSurfacesTheQueueProblem() async throws {
+        try await withAdmissionJob { _, job, context in
+            let id = UUID()
+            job.coordinator.admitted([id], context.binding.id)
+            #expect(job.hasPendingWork)
+            try await job.ledger.store.close()
+            await job.coordinator.changed([id])
+            try await eventually { job.queueProblem != nil && job.admissionSeeds.isEmpty && !job.hasPendingWork }
+        }
+    }
+
+    @Test func admissionSeedsRespectSuspensionResumeReloadBindingResetAndRetirement() async throws {
+        try await withAdmissionJob { _, job, context in
+            let id = UUID()
+            job.setVisible(true)
+            job.coordinator.admitted([id], UUID())
+            #expect(job.admissionSeeds.isEmpty)
+            job.coordinator.admitted([id], context.binding.id)
+            #expect(job.hasPendingWork && job.measuresBackupFrames)
+            await job.suspendAndWait()
+            let suspended = job.admissionSeeds
+            #expect(suspended[id] != nil && job.hasPendingWork && !job.measuresBackupFrames)
+            job.coordinator.admitted([UUID()], context.binding.id)
+            #expect(job.admissionSeeds == suspended)
+            job.resumeExecution()
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames }
+            job.coordinator.admitted([id], context.binding.id)
+            job.invalidateBinding()
+            #expect(job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames)
+            job.retire()
+            job.coordinator.admitted([id], context.binding.id)
+            #expect(job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func aSameIDReseedDuringAnOlderProjectionSurvivesItsCoveredTokenCleanup(reload: Bool) async throws {
+        try await withAdmissionJob { fixture, job, context in
+            let photo = try sample(fixture.session.library, "photo"), store = job.ledger.store
+            let batch = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                bindingID: context.binding.id, profile: .standard, compact: true)
+            let id = try #require(batch.operationIDs.first), late = UUID()
+            var notices = 0
+            job.onPhaseChange = { notices += 1 }
+            await job.coordinator.changed([id])
+            try await eventually { notices == 1 }
+            try await store.setKeptDecision([photo.id], namespace: job.ledger.namespace, kept: true)
+            job.coordinator.admitted([id], context.binding.id)
+            let coveredToken = try #require(job.admissionSeeds[id])
+            let bindingID = context.binding.id
+            // This fires inside the real applyProjection, after its reads but before coverage cleanup.
+            withObservationTracking {
+                _ = job.states
+            } onChange: {
+                MainActor.assumeIsolated { job.coordinator.admitted([id, late], bindingID) }
+            }
+            await job.coordinator.changed(reload ? [] : [id])
+            try await eventually { notices == 2 }
+            #expect(job.states[photo.id]?.phase == .unchanged)
+            #expect(job.admissionSeeds[id] != nil && job.admissionSeeds[id] != coveredToken)
+            #expect(job.admissionSeeds[late] != nil && job.hasPendingWork)
+            // The newer admission's requested pass owns both the new token and the nil fetch.
+            await job.coordinator.changed([id, late])
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork }
+        }
+    }
+
+    @Test func fullReloadKeepsCoverageUntilItsLastPage() async throws {
+        try await withAdmissionJob { _, job, context in
+            let ids = (0..<201).map { "admission-coverage-\($0)" }, store = job.ledger.store
+            let batch = try await store.admit(ids, namespace: job.ledger.namespace,
+                bindingID: context.binding.id, profile: .standard, compact: true)
+            try await store.setKeptDecision(ids, namespace: job.ledger.namespace, kept: true)
+            let last = try #require(batch.operationIDs.last)
+            var boundaryCovered = false
+            let lastPageCovered = Mutex<Bool?>(nil)
+            job.onPhaseChange = {
+                if job.items.count == 200 {
+                    boundaryCovered = job.admissionSeeds[last] != nil
+                    withObservationTracking { _ = job.states } onChange: {
+                        MainActor.assumeIsolated {
+                            let covered = job.admissionSeeds[last] != nil
+                            lastPageCovered.withLock { $0 = covered }
+                        }
+                    }
+                }
+            }
+            job.coordinator.admitted([last], context.binding.id)
+            await job.coordinator.changed([])
+            try await eventually { job.items.count == 201 && job.admissionSeeds.isEmpty && !job.hasPendingWork }
+            #expect(boundaryCovered && lastPageCovered.withLock { $0 } == true)
+        }
     }
 
     @Test func foregroundDiscoveryDeliversAfterItsInitialBackoffAndPublishesTheFreeUpOffer() async throws {

@@ -364,7 +364,8 @@ struct StatusAccessory: View {
                     Image(systemName: "arrow.up.circle").font(.body.weight(.semibold)).foregroundStyle(Theme.accent)
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 0) {
-                        Text("Backing up \(min(done + 1, total)) of \(total)").font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(total > 0 ? "Backing up \(min(done + 1, total)) of \(total)" : "Preparing backup")
+                            .font(.subheadline.weight(.semibold)).lineLimit(1)
                         Text(detail).font(.caption).foregroundStyle(Theme.secondaryLabel).lineLimit(1)
                     }
                     Spacer(minLength: 4)
