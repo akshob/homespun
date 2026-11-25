@@ -353,21 +353,30 @@ import UIKit
     @Test func reusedFinishedAdmissionDrainsItsSeedWithoutInventingPendingWork() async throws {
         try await withAdmissionJob { fixture, job, context in
             let photo = try sample(fixture.session.library, "photo"), store = job.ledger.store
-            let first = try await store.admit([photo.id], namespace: job.ledger.namespace,
-                bindingID: context.binding.id, profile: .standard, compact: true)
-            try await store.setKeptDecision([photo.id], namespace: job.ledger.namespace, kept: true)
-            await job.coordinator.changed(Set(first.operationIDs))
-            try await eventually { job.states[photo.id]?.phase == .unchanged }
+            #expect(await job.enqueue([photo.id], backUpOnly: [photo.id]) == [photo.id])
+            try await job.runOpportunity()
+            try await job.runOpportunity()
+            try await eventually { job.states[photo.id]?.isFinished == true && !job.hasPendingWork }
+            let first = try #require(try await store.currentOperations([photo.id], namespace: job.ledger.namespace).first)
+            try #require(first.bindingID == context.binding.id && first.desired == .active)
+            try #require(first.backup == .retained && !first.wantsCompact && first.delivery != .importedVerified)
+            let finished = CompactJob.project(first, kept: false)
+            try #require(finished.isFinished)
+            job.setVisible(true)
+            #expect(!job.measuresBackupFrames)
             let note = job.coordinator.admitted
-            var seeded = false
+            var seeded = false, measuring = false
             job.coordinator.admitted = { ids, bindingID in
                 note(ids, bindingID)
-                seeded = job.hasPendingWork && !job.admissionSeeds.isEmpty
+                seeded = job.hasPendingWork && job.admissionSeeds[first.id] != nil
+                measuring = job.measuresBackupFrames
             }
-            let reused = try await job.coordinator.admit([photo.id], compact: true, trigger: .automatic)
-            #expect(reused.operationIDs == first.operationIDs && seeded)
-            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork }
-            #expect(!job.measuresBackupFrames && job.states[photo.id]?.phase == .unchanged)
+            let reused = try await job.coordinator.admit([photo.id], compact: false, trigger: .automatic)
+            #expect(reused.operationIDs == [first.id])
+            #expect(seeded)
+            #expect(measuring)
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames }
+            #expect(job.states[photo.id] == finished)
         }
     }
 
