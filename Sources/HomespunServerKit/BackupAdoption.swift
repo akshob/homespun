@@ -30,6 +30,24 @@ struct BackupAdoption: Service {
     @discardableResult
     func runNext() async throws -> Bool {
         guard let candidate = try await catalog.nextBackupAdoption(lane: lane) else { return false }
+        try await adopt(candidate)
+        return true
+    }
+
+    /// A bounded foreground recovery uses the same object lock, reservation, byte verification
+    /// and publication as the worker. Already-published objects are never copied again.
+    func retain(request: String, principal: String) async throws {
+        let version = try await catalog.backupVersion(request, principal: principal)
+        for object in try await catalog.backupObjects(version.manifestID) where object.path == nil {
+            guard let source = try await catalog.legacyBackupSource(manifest: version.manifestID, role: object.role) else {
+                throw HTTPError(.conflict, message: "An original is unavailable. Reconnect its archive and run Find Compact Copies again.")
+            }
+            try await adopt(.init(request: request, principal: principal, manifest: version.manifestID,
+                                  role: object.role, sourceAsset: source.asset))
+        }
+    }
+
+    private func adopt(_ candidate: BackupAdoptionCandidate) async throws {
         do {
             try await catalog.mutations.withClaim(candidate.sourceAsset) {
                 try await catalog.retainBackupAdoptionSource(candidate)
@@ -70,6 +88,5 @@ struct BackupAdoption: Service {
             try await catalog.postponeBackupAdoption(candidate)
             throw error
         }
-        return true
     }
 }

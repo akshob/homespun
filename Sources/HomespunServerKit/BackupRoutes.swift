@@ -130,6 +130,31 @@ struct BackupRoutes: Sendable {
                 recipe: .init(profile: configuration.profile, backend: backend, pipelineVersion: 2),
                 externalVerification: binding == nil ? nil : .fullResourceScrub))
         }
+        api.post("copies/resolve") { request, _ in
+            guard await immich.mode == .files else {
+                throw unsupported("Copy recovery needs retained local originals. Keep the copies and reconnect a server holding the original archive.")
+            }
+            let body = try await decode(BackupAPI.CopyLookup.self, request)
+            return try json(try await catalog.resolveBackupCopy(body))
+        }
+        api.post("copies/adopt") { request, context in
+            guard await immich.mode == .files else {
+                throw unsupported("Copy recovery needs retained local originals. No Immich asset has been changed.")
+            }
+            let body = try await decode(BackupAPI.CopyAdoption.self, request)
+            let candidate = try await catalog.resolveBackupCopy(.init(origin: body.request.origin,
+                assetID: body.request.manifest.assetID(), compact: body.compact))
+            guard !body.request.compact, body.request.retention == .permanent,
+                  try candidate.manifest.identifier() == body.request.manifest.identifier() else {
+                throw Catalog.copyRecoveryRequired()
+            }
+            let owner = try principal(context)
+            let (receipt, _) = try await catalog.admitBackup(body.request, principal: owner,
+                recipe: recipe(body.request.profile), external: false, copy: body.compact)
+            try await BackupAdoption(catalog: catalog, storage: storage, originals: originals, budget: budget,
+                configuration: configuration).retain(request: receipt.requestID.uuidString.lowercased(), principal: owner)
+            return try json(try await catalog.backupReceipt(receipt.requestID.uuidString.lowercased(), principal: owner))
+        }
         api.post("backup-requests") { request, context in
             let body = try await decode(BackupAPI.Request.self, request)
             let manifest = try body.manifest.validated()

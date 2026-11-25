@@ -736,6 +736,15 @@ public actor Catalog {
             guard let sha256 = row["sha256"]?.string, let asset = row["asset_id"]?.string else { continue }
             found[sha256] = (asset, Role(rawValue: row["role"]?.string ?? "") ?? .other, true)
         }
+        for row in try database.query("""
+            SELECT o.sha256, m.asset_id, o.role FROM backup_objects o
+            JOIN backup_manifests m ON m.id = o.manifest_id
+            WHERE o.sha256 IN (\(marks)) AND o.stored_path IS NOT NULL AND o.verified_at IS NOT NULL
+            """, values) {
+            guard let hash = row["sha256"]?.string, let asset = row["asset_id"]?.string,
+                  let text = row["role"]?.string, let role = Role(rawValue: text) else { continue }
+            found[hash] = (asset, role, true)
+        }
         var originals: [String: (verified: Bool, bytes: Int)] = [:]
         return try found.sorted { $0.key < $1.key }.map { sha256, match in
             if originals[match.assetID] == nil {

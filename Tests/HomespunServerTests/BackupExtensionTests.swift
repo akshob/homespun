@@ -66,10 +66,161 @@ func durablePublicationStopsAtTheConfiguredRootRegardlessOfDirectoryHint(_ direc
 }
 
 extension Catalog {
+    func copyRecoveryCountsForTest() throws -> [Int] {
+        try ["backup_requests", "backup_claims", "backup_objects", "backup_uploads"].map { table in
+            try database.query("SELECT COUNT(*) AS n FROM \(table)").first!["n"]!.int!
+        }
+    }
+
     func makeBackupCopiesDueForTest() throws {
         try database.execute("UPDATE backup_connector_jobs SET available_at = '2000-01-01T00:00:00Z' WHERE status = 'retry_wait'")
     }
+}
 
+private struct ImportedCopyRecovery: Sendable {
+    var originals: BackupAPI.Manifest
+    var compact: BackupAPI.Manifest
+    var files: [URL]
+
+    static func make(_ fixture: Fixture) async throws -> Self {
+        let archive = fixture.directory.appendingPathComponent("archive")
+        try FileManager.default.createDirectory(at: archive, withIntermediateDirectories: true)
+        var resources: [ResourceRecord] = [], files: [URL] = []
+        for role in [ServerAPI.ResourceRole.photo, .pairedVideo, .alternatePhoto] {
+            let bytes = Data(("synthetic-original-" + role.rawValue).utf8)
+            let file = archive.appendingPathComponent(role.rawValue)
+            try bytes.write(to: file)
+            files.append(file)
+            resources.append(.init(role: role, filename: role.rawValue, size: bytes.count,
+                sha256: Fingerprint.sha256(of: bytes), sha1: nil, state: .verified,
+                receivedBytes: bytes.count, storedPath: nil, immichAssetID: nil,
+                verifiedAt: Timestamp.string(), externalPath: file.path))
+        }
+        let original = BackupAPI.Manifest(kind: .livePhoto, resources: resources.map {
+            .init(role: $0.role, filename: $0.filename, size: $0.size, sha256: $0.sha256)
+        })
+        let compact = BackupAPI.Manifest(kind: .livePhoto, resources: [ServerAPI.ResourceRole.photo, .pairedVideo].map { role in
+            let bytes = Data(("copy-" + role.rawValue).utf8)
+            return .init(role: role, filename: role.rawValue, size: bytes.count, sha256: Fingerprint.sha256(of: bytes))
+        })
+        _ = try await fixture.server.catalog.importExisting(assetID: original.assetID(), kind: original.kind,
+            captureDate: nil, originals: resources, copies: compact.resources.map { .init(role: $0.role, sha256: $0.sha256) })
+        return .init(originals: original, compact: compact, files: files)
+    }
+}
+
+@Test func copyRecoveryAdoptsAllImportedOriginalsWithRealVersionedProofAndIdempotentClaims() async throws {
+    let fixture = try await Fixture()
+    let item = try await ImportedCopyRecovery.make(fixture)
+    try await fixture.test { client, token in
+        let capabilities = try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self)
+        let lookup = BackupAPI.CopyLookup(origin: capabilities.origin, assetID: try item.originals.assetID(), compact: item.compact)
+        #expect(try await client.call("/api/v2/copies/resolve", .post, json: lookup).status == .unauthorized)
+        let candidate = try await client.call("/api/v2/copies/resolve", .post, token: token, json: lookup)
+            .decode(BackupAPI.CopyCandidate.self)
+        #expect(try candidate.manifest.identifier() == item.originals.identifier())
+        #expect(candidate.manifest.resources.count == 3)
+        let request = BackupAPI.Request(operationID: UUID(), origin: capabilities.origin, manifest: candidate.manifest,
+            profile: capabilities.recipe.profile, compact: false)
+        let adoption = BackupAPI.CopyAdoption(request: request, compact: item.compact)
+        let retained = try await client.call("/api/v2/copies/adopt", .post, token: token, json: adoption).decode(BackupAPI.Receipt.self)
+        #expect(retained.backup == .retained && retained.retention == .permanent && retained.derivative == nil)
+        #expect(retained.version.descriptorGeneration > 0 && retained.revision > 0 && retained.originals.count == 3)
+        let proofPath = "/api/v2/assets/\(retained.version.assetID)/versions/\(retained.version.manifestID)/verify"
+        let proof = try await client.call(proofPath, .post, token: token, json: retained.version).decode(BackupAPI.OriginalProof.self)
+        #expect(proof.version == retained.version && proof.retention == .permanent && proof.claimID != nil)
+        #expect(proof.resources.allSatisfy { $0.state == .verified && $0.receivedBytes == $0.size })
+        let counts = try await fixture.server.catalog.copyRecoveryCountsForTest()
+        #expect(counts == [1, 1, 3, 3])
+        let repeated = try await client.call("/api/v2/copies/adopt", .post, token: token, json: adoption).decode(BackupAPI.Receipt.self)
+        #expect(repeated == retained)
+        #expect(try await fixture.server.catalog.copyRecoveryCountsForTest() == counts)
+        #expect(try await client.call("/api/v2/backup-requests?operation_id=\(request.operationID)", token: token)
+            .decode(BackupAPI.Receipt.self) == retained)
+        let reopened = try Catalog(path: fixture.server.storage.catalog.path)
+        let principal = try #require(try await fixture.server.catalog.devices().first?.id)
+        let (replayed, created) = try await reopened.admitBackup(request, principal: principal,
+            recipe: capabilities.recipe, external: false, copy: item.compact)
+        #expect(!created && replayed == retained)
+        #expect(try await reopened.copyRecoveryCountsForTest() == counts)
+        var differentCopy = adoption
+        differentCopy.compact.resources[1].sha256 = Fingerprint.sha256(of: Data("another-equivalent-copy".utf8))
+        try await fixture.server.catalog.rememberCopies(lookup.assetID,
+            [.init(role: differentCopy.compact.resources[1].role, sha256: differentCopy.compact.resources[1].sha256)])
+        let conflict = try await client.call("/api/v2/copies/adopt", .post, token: token, json: differentCopy)
+        #expect(conflict.status == .conflict)
+        #expect(try conflict.decode(ServerAPI.ErrorBody.self).error.code == BackupAPI.ErrorCode.idempotencyConflict)
+        #expect(try await fixture.server.catalog.copyRecoveryCountsForTest() == counts)
+        for (index, file) in item.files.enumerated() {
+            #expect(try Fingerprint.sha256(of: file) == item.originals.resources[index].sha256)
+        }
+
+        let other = try await fixture.pair(client)
+        #expect(try await client.call("/api/v2/backup-requests/\(retained.requestID)", token: other).status == .notFound)
+        #expect(try await client.call(proofPath, .post, token: other, json: retained.version).status == .conflict)
+        let otherReceipt = try await client.call("/api/v2/copies/adopt", .post, token: other, json: adoption).decode(BackupAPI.Receipt.self)
+        #expect(otherReceipt.requestID != retained.requestID && otherReceipt.version == retained.version)
+        #expect(try await fixture.server.catalog.copyRecoveryCountsForTest() == [2, 2, 3, 3])
+
+        // A later original mismatch is caught by the same real proof endpoint used at deletion.
+        let object = try #require(try await fixture.server.catalog.backupObjects(retained.version.manifestID).first)
+        let path = try #require(object.path), url = try #require(await fixture.server.originals.url(path))
+        try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: url.path)
+        try Data(repeating: 0, count: object.size).write(to: url)
+        #expect(try await client.call(proofPath, .post, token: token, json: retained.version).status == .conflict)
+    }
+}
+
+@Test func copyRecoveryRejectsPartialChangedAndStaleEvidenceWithoutTrustingLegacyVerification() async throws {
+    let fixture = try await Fixture()
+    let item = try await ImportedCopyRecovery.make(fixture)
+    try await fixture.test { client, token in
+        let capabilities = try await client.call("/api/v2/capabilities", token: token).decode(BackupAPI.Capabilities.self)
+        let lookup = BackupAPI.CopyLookup(origin: capabilities.origin, assetID: try item.originals.assetID(), compact: item.compact)
+        var partial = lookup
+        partial.compact.resources.removeLast()
+        #expect(try await client.call("/api/v2/copies/resolve", .post, token: token, json: partial).status == .conflict)
+        var changed = lookup
+        changed.compact.resources[1].sha256 = String(repeating: "f", count: 64)
+        #expect(try await client.call("/api/v2/copies/resolve", .post, token: token, json: changed).status == .conflict)
+        var stale = lookup
+        stale.origin.historyEpoch = UUID().uuidString
+        #expect(try await client.call("/api/v2/copies/resolve", .post, token: token, json: stale).status == .conflict)
+        #expect(try await fixture.server.catalog.copyRecoveryCountsForTest() == [0, 0, 0, 0])
+
+        // Source metadata still says verified; current bytes, including secondary originals,
+        // must nevertheless pass the existing immutable adoption/publication path.
+        try Data("changed-secondary".utf8).write(to: item.files[1])
+        let candidate = try await client.call("/api/v2/copies/resolve", .post, token: token, json: lookup)
+            .decode(BackupAPI.CopyCandidate.self)
+        let request = BackupAPI.Request(operationID: UUID(), origin: capabilities.origin, manifest: candidate.manifest,
+            profile: capabilities.recipe.profile, compact: false)
+        let adoption = BackupAPI.CopyAdoption(request: request, compact: item.compact)
+        #expect(try await client.call("/api/v2/copies/adopt", .post, token: token, json: adoption).status == .conflict)
+        let pending = try await client.call("/api/v2/backup-requests?operation_id=\(request.operationID)", token: token)
+            .decode(BackupAPI.Receipt.self)
+        #expect(pending.retention == .pending && pending.backup != .retained)
+        #expect(try await client.call(
+            "/api/v2/assets/\(pending.version.assetID)/versions/\(pending.version.manifestID)/verify",
+            .post, token: token, json: pending.version).status == .conflict)
+        var wrongManifest = adoption
+        wrongManifest.request.manifest.resources[0].size += 1
+        #expect(try await client.call("/api/v2/copies/adopt", .post, token: token, json: wrongManifest).status == .conflict)
+
+        var secondaryVersion = candidate.manifest
+        let secondary = try #require(secondaryVersion.resources.firstIndex { $0.role == .pairedVideo })
+        secondaryVersion.resources[secondary].sha256 = Fingerprint.sha256(of: Data("different-motion-version".utf8))
+        let competing = BackupAPI.Request(operationID: UUID(), origin: capabilities.origin, manifest: secondaryVersion,
+            profile: capabilities.recipe.profile, compact: false)
+        #expect(try await client.call("/api/v2/backup-requests", .post, token: token, json: competing).status == .created)
+        let counts = try await fixture.server.catalog.copyRecoveryCountsForTest()
+        // The primary hash is unchanged, but it cannot select between whole original versions.
+        #expect(try await client.call("/api/v2/copies/resolve", .post, token: token, json: lookup).status == .conflict)
+        #expect(try await fixture.server.catalog.copyRecoveryCountsForTest() == counts)
+    }
+}
+
+extension Catalog {
     func wakeRouteCountForTest() throws -> Int {
         try database.query("SELECT COUNT(*) AS n FROM backup_wake_routes").first!["n"]!.int!
     }

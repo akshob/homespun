@@ -201,10 +201,15 @@ extension Catalog {
     }
 
     func admitBackup(_ request: BackupAPI.Request, principal: String, recipe: BackupAPI.Recipe,
-                     external: Bool) throws -> (BackupAPI.Receipt, Bool) {
+                     external: Bool, copy: BackupAPI.Manifest? = nil) throws -> (BackupAPI.Receipt, Bool) {
         try checkBackupOrigin(request.origin)
         let manifestID = try request.manifest.identifier(), assetID = try request.manifest.assetID()
-        let recipeID = try recipe.identifier(), hash = try Self.backupIntentHash(request)
+        let recipeID = try recipe.identifier()
+        let requestHash = try Self.backupIntentHash(request)
+        let hash = try copy.map { compact in
+            let identity = try compact.identifier()
+            return try Self.backupIntentHash([requestHash, identity])
+        } ?? requestHash
         let operation = request.operationID.uuidString.lowercased()
         return try database.transaction {
             if let old = try database.query("SELECT id, payload_hash FROM backup_requests WHERE principal = ? AND operation_id = ?",
