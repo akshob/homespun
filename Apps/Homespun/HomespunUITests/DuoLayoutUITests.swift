@@ -543,21 +543,16 @@ final class DuoLayoutUITests: XCTestCase {
 
     // MARK: - Poses
 
-    /// Asks `run-class.sh` to fold or turn the simulator, then waits until it has.
+    /// Asks `ui.sh` to fold or turn the simulator and checks this request's result.
     @MainActor private func pose(_ name: String, file: String) {
-        XCTAssertNoThrow(try name.write(toFile: file, atomically: true, encoding: .utf8))
-        let deadline = Date().addingTimeInterval(90)
-        while FileManager.default.fileExists(atPath: file), Date() < deadline { usleep(250_000) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: file), "nobody turned the simulator \(name)")
+        guard requestDuoHostAction(name, requestFile: file, timeout: 90) else { return }
         sleep(3)
     }
 
     /// A screenshot by `run-class.sh` (duoctl): XCTest's own shows the cover, black while the Duo is open.
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {
         guard let file = ProcessInfo.processInfo.environment["DUO_POSE_FILE"] else { return }
-        try? "shot \(name)".write(toFile: file, atomically: true, encoding: .utf8)
-        let deadline = Date().addingTimeInterval(30)
-        while FileManager.default.fileExists(atPath: file), Date() < deadline { usleep(250_000) }
+        requestDuoHostAction("shot \(name)", requestFile: file, timeout: 30)
     }
 }
 

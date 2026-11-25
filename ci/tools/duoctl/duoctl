@@ -115,10 +115,16 @@ def displays(udid):
     return [d for d in data["result"]["displays"] if d.get("name", "").startswith("LCD")]
 
 
-def active_display(udid):
+def find_active_display(udid):
     for display in displays(udid):
         if display.get("active"):
             return display
+
+
+def active_display(udid):
+    display = find_active_display(udid)
+    if display is not None:
+        return display
     raise DuoError("no display is active (is the simulator still booting?)")
 
 
@@ -177,8 +183,8 @@ def set_hinge(udid, degrees, duration=0):
     deadline = time.time() + SCREEN_SWITCH_TIMEOUT
     while time.time() < deadline:
         time.sleep(SETTLE_SECONDS)
-        display = active_display(udid)
-        if expected is None or ("cover" if display.get("primary") else "inner") == expected:
+        display = find_active_display(udid)
+        if display is not None and (expected is None or ("cover" if display.get("primary") else "inner") == expected):
             return
     raise DuoError(f"the {expected} screen did not become active after setting the hinge to {degrees:g}°")
 

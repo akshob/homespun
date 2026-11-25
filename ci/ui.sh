@@ -45,7 +45,10 @@ trap cleanup EXIT
 # iPhone Duo starts closed (the cover); "open" unfolds it first.
 if [[ -n $POSE ]]; then
     stamp simulator.pose.start
-    $DUOCTL -d $SIM $POSE >/dev/null 2>&1
+    if ! $DUOCTL -d $SIM $POSE; then
+        stamp simulator.pose.end
+        exit 1
+    fi
     stamp simulator.pose.end
     timed simulator.pose-wait sleep 15
 fi
@@ -153,25 +156,10 @@ if [[ -n ${STUB_PORT:-} ]]; then
 fi
 if [[ -n ${DUO_POSES:-} ]]; then
     POSEFILE=$DATA/pose-request; SHOTS=$RESULTS/$NAME-shots; rm -rf $SHOTS; mkdir -p $SHOTS
-    pose_call() { timed "pose.$1" $DUOCTL -d $SIM "$@"; }
-    turn() { for i in 1 2 3 4; do pose_call rotate $1 && return; sleep 3; done; }
+    source ${0:A:h}/duo-poses.sh
     ( while true; do
         if [[ -f $POSEFILE ]]; then
-          {
-            n=$(cat $POSEFILE)
-            print -r -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) request: $n"
-            stamp pose.request.start
-            case $n in
-              shot\ *) pose_call screenshot "$SHOTS/${n#shot }.png";;
-              landscape) pose_call hinge 180; turn landscape;;
-              portrait) pose_call hinge 180; turn portrait;;
-              laptop) pose_call hinge 180; turn portrait; pose_call hinge 100;;
-              folded) pose_call hinge 0; timed pose.fold-wait sleep 2; turn portrait;;
-              swipe\ *) read -r command x1 y1 x2 y2 < $POSEFILE; pose_call swipe $x1 $y1 $x2 $y2;;
-            esac
-            stamp pose.request.end
-          } >> $RESULTS/$NAME-poses.log 2>&1
-          rm -f $POSEFILE
+          process_duo_pose_request >> $RESULTS/$NAME-poses.log 2>&1
         fi
         sleep 0.5
       done ) & WATCH=$!

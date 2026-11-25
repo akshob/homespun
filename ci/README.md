@@ -128,6 +128,10 @@ passes: `<segment>-timing.tsv`, logs and each `*.xcresult/database.sqlite3` (no 
 15-second wait, each media generation/import, server readiness/pairing, test execution,
 reboot retry, telemetry and cleanup have separate stamps. Duo pose logs include the UTC
 request time and each tool call's start/end; these overlap test time, not simulator setup.
+Pose requests carry a UUID. The host atomically claims each request and returns that UUID's explicit
+success or failure; disappearance of a request file is not success. Late completions cannot acknowledge
+or remove a newer request. `duoctl` waits through a temporarily inactive display within its existing
+screen-switch deadline; a failed hinge or exhausted rotation retry is reported, not acknowledged.
 The output filter is line-buffered, so test lines and first/last-test stamps arrive live.
 
 The summary's **Timing** table gives seconds per segment: simulator setup, media, server,

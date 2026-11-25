@@ -468,23 +468,18 @@ final class GridScrollUITests: XCTestCase {
     /// Asks `ui.sh` to fold or turn iPhone Duo (nothing elsewhere), then waits until it has.
     @MainActor private func pose(_ name: String) {
         guard let poses else { return }
-        // A timed-out test can leave the driver finishing a fold. Don't overwrite its request.
+        // Let the driver claim an earlier queued request before adding another.
         let prior = Date().addingTimeInterval(90)
         while FileManager.default.fileExists(atPath: poses), Date() < prior { usleep(250_000) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: poses), "the previous simulator request didn't finish")
-        XCTAssertNoThrow(try name.write(toFile: poses, atomically: true, encoding: .utf8))
-        let deadline = Date().addingTimeInterval(90)
-        while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: poses), "nobody turned the simulator \(name)")
+        guard requestDuoHostAction(name, requestFile: poses, timeout: 90) else { return }
         sleep(3)
     }
 
     /// A screenshot by `ui.sh` (XCTest's own shows the cover, black while the Duo is open).
     @MainActor private func shot(_ name: String) {
         guard let poses else { return }
-        try? "shot \(name)".write(toFile: poses, atomically: true, encoding: .utf8)
-        let deadline = Date().addingTimeInterval(30)
-        while FileManager.default.fileExists(atPath: poses), Date() < deadline { usleep(250_000) }
+        requestDuoHostAction("shot \(name)", requestFile: poses, timeout: 30)
     }
 
     /// Waits until the window's frame is as wanted (a slow machine takes a while to fold or turn).

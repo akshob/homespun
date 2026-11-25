@@ -199,10 +199,7 @@ final class ItemPagingUITests: XCTestCase {
 
     /// Asks `ui.sh` to fold or turn the simulator, then waits until it has (as DuoLayoutUITests does).
     @MainActor private func pose(_ name: String, file: String) {
-        XCTAssertNoThrow(try name.write(toFile: file, atomically: true, encoding: .utf8))
-        let deadline = Date().addingTimeInterval(90)
-        while FileManager.default.fileExists(atPath: file), Date() < deadline { usleep(250_000) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: file), "nobody turned the simulator \(name)")
+        guard requestDuoHostAction(name, requestFile: file, timeout: 90) else { return }
         sleep(3)
     }
 }
