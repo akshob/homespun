@@ -239,10 +239,11 @@ final class LibraryController {
         let recovering = Set(backed.filter { $0.value.origin == nil || $0.value.version == nil || $0.value.origin != job.activeOrigin }.keys)
         automatic.useCanonicalDecisions(kept)
         var states = job.states
+        let compactInProgress = job.compactInProgress
         for id in kept where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
         await library.update(ledger: projection.entries, job: states,
                              backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
-                             pendingImports: projection.pendingImports, compactInProgress: job.compactInProgress)
+                             pendingImports: projection.pendingImports, compactInProgress: compactInProgress)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state

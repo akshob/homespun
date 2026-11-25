@@ -75,6 +75,17 @@ import UIKit
             == "Original backed up · compact copy processing on Home Mac")
     }
 
+    @Test func compactProgressDoesNotClaimServerExecutionAfterTheJobMovesOn() {
+        let jobs: [CompactJob.State?] = [.saved(originalBytes: 100, compactBytes: 10), nil,
+                                       .waiting, .notYet("Paused"), .unchanged("Kept"), .failed("Needs attention"),
+                                       .backedUp(originalBytes: 100)]
+        for job in jobs {
+            let sentence = ItemText.sentence(.processing, server: "Home Mac", immich: false, job: job)
+            #expect(sentence == "Original backed up · compact copy in progress")
+            #expect(ItemText.spoken(sentence) == "Original backed up, compact copy in progress.")
+        }
+    }
+
     @Test func compareNeedsACopyAndAnOriginalItCanReach() {
         let ready = LibraryState.Cell(id: "copy", badge: .originalOnPhone, original: "original", canFree: true)
         let atHome = LibraryState.Cell(id: "copy", badge: .backedUp, original: "original", canFree: false)
