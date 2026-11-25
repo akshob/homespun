@@ -13,13 +13,14 @@ private struct BackupStoreFixture {
     let compact: ServerAPI.ResourceDescriptor
     let receipt: BackupAPI.Receipt
 
-    static func make(processID: UUID? = nil, consumerID: String? = nil) async throws -> Self {
+    static func make(processID: UUID? = nil, consumerID: String? = nil,
+                     mode: ServerAPI.StorageMode = .files) async throws -> Self {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let store = BackupStore(directory: directory, legacyURL: nil, processID: processID)
         let binding = BackupStore.Binding(id: UUID(),
             origin: .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString),
             trustEpoch: UUID(), baseURL: URL(string: "https://server.invalid")!, keychainReference: "test-reference",
-            consumerID: consumerID)
+            mode: mode, consumerID: consumerID)
         try await store.bind(binding)
         let batch = try await store.admit(["item"], namespace: "photos", bindingID: binding.id, profile: .standard, compact: true)
         let operationID = try #require(batch.operationIDs.first)
@@ -338,4 +339,36 @@ private struct BackupStoreFixture {
     #expect(try await fixture.store.outbox().isEmpty)
     try await fixture.store.acknowledgeOutbox(first)
     #expect(try await fixture.store.outbox(now: Date(timeIntervalSince1970: 1)).map(\.id) == [second])
+}
+
+@Test func boundedDeferralRemainsRunnableLaterAndClosedStoresCannotReopenOnLateCallbacks() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let batch = try await fixture.store.admit(["waiting-for-space"], namespace: "photos",
+        bindingID: fixture.binding.id, profile: .standard, compact: true)
+    let id = try #require(batch.operationIDs.first)
+    let lease = try #require(try await fixture.store.claim(id, stage: .preparation))
+    let now = Date()
+    try await fixture.store.deferLease(lease, until: now.addingTimeInterval(60))
+    #expect(try await fixture.store.runnable(.preparation, now: now).isEmpty)
+    #expect(try await fixture.store.runnable(.preparation, now: now.addingTimeInterval(61)).map(\.id) == [id])
+    try await fixture.store.close()
+    await #expect(throws: BackupStore.Failure.storageClosed) { try await fixture.store.operation(id) }
+}
+
+@Test func externalModeAloneCannotProduceAReadySpaceNotification() async throws {
+    let fixture = try await BackupStoreFixture.make(mode: .immich)
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    var external = fixture.receipt
+    external.revision += 1
+    external.retention = .external
+    _ = try await fixture.store.apply(external, operationID: fixture.operationID, epoch: 1)
+    let lease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await fixture.store.planImport(lease, expected: [fixture.compact])
+    try await fixture.store.startImport(intent.id, lease: lease)
+    try await fixture.store.importCreated(intent.id, identifier: "external-compact")
+    let proof = BackupAPI.OriginalProof(version: external.version, retention: .external, claimID: nil,
+                                       verifiedAt: Date(), resources: external.originals)
+    _ = try await fixture.store.finishImport(intent.id, actual: [fixture.compact], proof: proof)
+    #expect(try await fixture.store.outbox().map(\.kind) == [.deliveryAcknowledgement])
 }

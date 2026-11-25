@@ -132,19 +132,26 @@ public enum BackupAPI {
         case foregroundOffset = "foreground_offset"
     }
 
+    public enum ExternalVerification: String, Codable, Sendable {
+        case fullResourceScrub = "full_resource_scrub"
+    }
+
     public struct Capabilities: Codable, Equatable, Sendable {
         public var apiVersion: Int
         public var origin: Origin
         public var uploadProtocols: [UploadProtocol]
         public var recipe: Recipe
         public var maximumChanges: Int
+        public var externalVerification: ExternalVerification?
 
-        public init(origin: Origin, uploadProtocols: [UploadProtocol], recipe: Recipe, maximumChanges: Int = 200) {
+        public init(origin: Origin, uploadProtocols: [UploadProtocol], recipe: Recipe, maximumChanges: Int = 200,
+                    externalVerification: ExternalVerification? = nil) {
             self.apiVersion = BackupAPI.version
             self.origin = origin
             self.uploadProtocols = uploadProtocols
             self.recipe = recipe
             self.maximumChanges = maximumChanges
+            self.externalVerification = externalVerification
         }
     }
 

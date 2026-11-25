@@ -8,7 +8,7 @@ extension BackupStore {
         var command: BackupAPI.Command
     }
 
-    func runnable(_ stage: Stage, limit: Int = 200) throws -> [Operation] {
+    func runnable(_ stage: Stage, limit: Int = 200, now: Date = Date()) throws -> [Operation] {
         guard (1...1_000).contains(limit) else { throw Failure.missingOperation }
         let predicate: String
         switch stage {
@@ -22,8 +22,11 @@ extension BackupStore {
                 SELECT body FROM operations WHERE desired = 'active' AND \(predicate)
                 AND json_extract(CAST(body AS TEXT), '$.lease') IS NULL
                 AND coalesce(json_extract(CAST(body AS TEXT), '$.attention'), 0) = 0
+                AND (json_extract(CAST(body AS TEXT), '$.notBefore') IS NULL
+                     OR json_extract(CAST(body AS TEXT), '$.notBefore') <= ?)
                 ORDER BY rowid LIMIT ?
-                """, [.integer(Int64(limit))]).map { try Self.decode(Operation.self, $0.blob("body")) }
+                """, [.real(now.timeIntervalSinceReferenceDate), .integer(Int64(limit))])
+                .map { try Self.decode(Operation.self, $0.blob("body")) }
         }
     }
 
@@ -54,6 +57,7 @@ extension BackupStore {
                   try lineage.text("current_operation") == id.uuidString else { throw Failure.staleOperation }
             operation.desired = .active
             operation.bindingPaused = nil
+            operation.notBefore = nil
             operation.epoch += 1
             operation.lease = nil
             operation.attention = false
