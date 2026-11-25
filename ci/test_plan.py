@@ -51,6 +51,14 @@ class PackagePlanTests(unittest.TestCase):
 
 
 class TargetedUIPlanTests(unittest.TestCase):
+    def test_manual_copy_recovery_keeps_server_contracts_without_unrelated_ui(self):
+        result = plan({"MODE": "manual", "UI_INPUT": "copies"}, [])
+        self.assertEqual(result["ui"], ["copies"])
+        for key in ("server", "package", "app"):
+            self.assertTrue(result[key], key)
+        for key in ("telemetry", "site"):
+            self.assertFalse(result[key], key)
+
     def test_manual_duo_open_does_not_repeat_the_full_matrix(self):
         result = plan({"MODE": "manual", "UI_INPUT": "duo-open"}, [])
         self.assertTrue(result["app"])

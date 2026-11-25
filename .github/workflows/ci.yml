@@ -14,7 +14,7 @@ on:
       ui:
         description: Checks or UI runs
         type: choice
-        options: [none, quick, full, watch, duo-open, package]
+        options: [none, quick, full, watch, duo-open, copies, package]
         default: quick
 
 permissions:
