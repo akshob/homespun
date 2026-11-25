@@ -354,11 +354,12 @@ extension XCUIApplication {
                       file: file, line: line)
         buttons["compact.selected"].tap()
 
-        let busy = gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up'}"))
+        let busy = gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up', 'Processing on server'}"))
         let progress = descendants(matching: .any)["job.progress"]
         let deadline = Date().addingTimeInterval(900)
         repeat { sleep(2) } while (busy.count > 0 || progress.exists) && Date() < deadline
         XCTAssertEqual(busy.count, 0, "items still working after 15 minutes", file: file, line: line)
+        XCTAssertFalse(progress.exists, "local work still running after 15 minutes", file: file, line: line)
         return chosen.count
     }
 
