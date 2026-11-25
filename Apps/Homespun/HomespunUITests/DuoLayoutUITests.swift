@@ -303,7 +303,7 @@ final class DuoLayoutUITests: XCTestCase {
         field.tap()
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + "Unfinished family phone")
         // Exercise the stack/split handoff before relying on the host's separate rotation action.
-        for name in ["landscape", "folded", "landscape", "portrait", "folded"] {
+        for (index, name) in ["landscape", "folded", "landscape", "portrait", "folded"].enumerated() {
             pose(name, file: poses)
             if name == "folded" {
                 XCTAssertTrue(app.wait(width: 0..<500), "the host didn't fold the display")
@@ -317,7 +317,7 @@ final class DuoLayoutUITests: XCTestCase {
             XCTAssertTrue(saveExists, "the Name Save button disappeared in \(name)")
             if saveExists {
                 XCTAssertTrue(save.isEnabled)
-                XCTAssertTrue(save.isHittable, "the Name Save button isn't usable in \(name)")
+                checkNameSaveGeometry(app, pose: "review \(index), \(name)")
             }
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "focus didn't return in \(name)")
         }
@@ -334,7 +334,66 @@ final class DuoLayoutUITests: XCTestCase {
         let reopenedSaveExists = reopenedSave.exists
         XCTAssertTrue(reopenedSaveExists, "Save didn't return with the Name editor")
         if reopenedSaveExists { XCTAssertFalse(reopenedSave.isEnabled, "the abandoned draft is still eligible to save") }
+
+        // Prove actual activation on the open display only after the entire unsaved-draft journey.
+        // Open-Duo lists can report not hittable; use the element's coordinates, not rotated screen coordinates.
+        let confirmed = "Continuity \(UUID().uuidString.prefix(8))"
+        pose("landscape", file: poses)
+        XCTAssertTrue(app.wait(wide: true))
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + confirmed)
+        XCTAssertEqual(field.value as? String, confirmed)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        let activeSave = app.buttons["device.name.save"]
+        XCTAssertTrue(activeSave.exists && activeSave.isEnabled)
+        checkNameSaveGeometry(app, pose: "landscape, before activation")
+        activeSave.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10), "the landscape Save did not close the editor")
+
+        pose("folded", file: poses)
+        XCTAssertTrue(app.wait(width: 0..<500))
+        XCTAssertTrue(app.reveal(row))
+        XCTAssertTrue(row.label.contains(confirmed), "Save did not receive the confirmed name from the server")
+        row.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        // A new draft loads /devices again rather than trusting the locally confirmed setting.
+        XCTAssertEqual(field.value as? String, confirmed, "the server did not retain the landscape rename")
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: confirmed.count) + old)
+        let restoreSave = app.buttons["device.name.save"]
+        XCTAssertTrue(restoreSave.exists && restoreSave.isEnabled)
+        checkNameSaveGeometry(app, pose: "folded, restore original name")
+        restoreSave.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10), "restoring the name did not close the editor")
+        XCTAssertTrue(app.reveal(row))
+        row.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        XCTAssertEqual(field.value as? String, old, "the server did not retain the restored name")
         app.goBack()
+    }
+
+    @MainActor private func checkNameSaveGeometry(_ app: XCUIApplication, pose: String,
+                                                 file: StaticString = #filePath, line: UInt = #line) {
+        let field = app.textFields["device.name"].frame
+        let button = app.buttons["device.name.save"]
+        let save = button.frame
+        let screen = app.windows.firstMatch.frame
+        let keyboard = app.keyboards.firstMatch
+        let keyboardFrame = keyboard.exists ? keyboard.frame : .zero
+        let attachment = XCTAttachment(string: "screen=\(screen) field=\(field) save=\(save)"
+            + " keyboard=\(keyboardFrame) hittable=\(button.isHittable)")
+        attachment.name = "Name geometry, \(pose)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        attach(app, "Name, \(pose)")
+        XCTAssertFalse(save.isEmpty, "\(pose): Save has no touch area", file: file, line: line)
+        XCTAssertTrue(screen.insetBy(dx: -1, dy: -1).contains(save), "\(pose): Save is clipped offscreen",
+                      file: file, line: line)
+        XCTAssertGreaterThanOrEqual(save.minY, field.maxY - 1, "\(pose): Save overlaps the field", file: file, line: line)
+        XCTAssertFalse(save.intersects(keyboardFrame), "\(pose): the keyboard covers Save", file: file, line: line)
     }
 
     @MainActor func testLibraryFillsTheOpenDisplayOnLaunchAndUnfold() throws {
