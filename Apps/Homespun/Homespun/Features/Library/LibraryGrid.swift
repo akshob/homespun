@@ -166,7 +166,8 @@ struct LibraryState: Equatable, Sendable {
     /// needs backing up.)
     /// `backedUp`: items backed up without a compact copy yet, with when it's due (nil: never, a kept favorite).
     init(library: [String], ledger: [String: CompactLedger.Entry], album: Set<String>, job: [String: CompactJob.State],
-         backedUp: [String: Date?] = [:], origin: BackupAPI.Origin? = nil, recovering: Set<String> = []) {
+         backedUp: [String: Date?] = [:], origin: BackupAPI.Origin? = nil, recovering: Set<String> = [],
+         pendingImports: Set<String> = []) {
         let present = Set(library)
         var originalOf: [String: String] = [:]
         var records: [String: CompactLedger.Entry] = [:]
@@ -183,6 +184,8 @@ struct LibraryState: Equatable, Sendable {
         var cells: [Cell] = []
         cells.reserveCapacity(library.count)
         for id in library where !hidden.contains(id) {
+            // Keep the original in place while this process verifies its newly created copy.
+            if pendingImports.contains(id), originalOf[id] == nil { continue }
             if let original = originalOf[id] {
                 let entry = records[id]!
                 let accessible = entry.verifiedCompact && origin != nil && entry.origin == origin
@@ -482,6 +485,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         var backedUp: [String: Date?] = [:]
         var origin: BackupAPI.Origin?
         var recovering: Set<String> = []
+        var pendingImports: Set<String> = []
     }
 
     /// Set by the screen to recompute badges after the library changed.
@@ -676,8 +680,9 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     /// Works out the badges again (after the ledger or the job changed), in the background.
     func update(ledger: [String: CompactLedger.Entry], job: [String: CompactJob.State], backedUp: [String: Date?] = [:],
-                origin: BackupAPI.Origin? = nil, recovering: Set<String> = []) async {
-        inputs = Inputs(ledger: ledger, job: job, backedUp: backedUp, origin: origin, recovering: recovering)
+                origin: BackupAPI.Origin? = nil, recovering: Set<String> = [], pendingImports: Set<String> = []) async {
+        inputs = Inputs(ledger: ledger, job: job, backedUp: backedUp, origin: origin, recovering: recovering,
+                        pendingImports: pendingImports)
         await rebuild()
     }
 
@@ -690,7 +695,8 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         RenderProbe.count("library.buildState")
         let built = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?)? in
             var new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
-                                   backedUp: inputs.backedUp, origin: inputs.origin, recovering: inputs.recovering)
+                                   backedUp: inputs.backedUp, origin: inputs.origin, recovering: inputs.recovering,
+                                   pendingImports: inputs.pendingImports)
             guard new != previous else { return nil }
             new.follow(previous)
             return (new, new.changedIDs(from: previous))

@@ -7,6 +7,7 @@ extension BackupStore {
         var entries: [String: CompactLedger.Entry]
         var backedUp: [String: CompactLedger.BackedUp]
         var kept: Set<String>
+        var pendingImports: Set<String>
     }
 
     struct ProjectionRevision: Equatable, Sendable {
@@ -273,7 +274,23 @@ extension BackupStore {
             for key in entries.keys { backed[key] = nil }
             let kept = try Set(connection.rows("SELECT item FROM decisions WHERE namespace = ? AND kept = 1",
                                                 [.text(namespace)]).map { try $0.text("item") })
-            return LedgerProjection(entries: entries, backedUp: backed, kept: kept)
+            var pendingImports = Set<String>()
+            for row in try connection.rows("""
+                SELECT i.body AS intent, o.body AS operation FROM imports i
+                JOIN operations o ON o.id = i.operation
+                JOIN lineages l ON l.current_operation = o.id
+                JOIN bindings b ON b.id = o.binding
+                WHERE l.namespace = ? AND o.desired = 'active' AND b.retired = 0
+                AND json_extract(CAST(i.body AS TEXT),'$.phase') = 'created'
+                AND json_extract(CAST(o.body AS TEXT),'$.lease.stage') = 'finalization'
+                """, [.text(namespace)]) {
+                let intent = try Self.decode(ImportIntent.self, row.blob("intent"))
+                let operation = try Self.decode(Operation.self, row.blob("operation"))
+                guard !operation.attention, operation.lease?.epoch == operation.epoch,
+                      intent.operationEpoch == operation.epoch, let identifier = intent.createdIdentifier else { continue }
+                pendingImports.insert(identifier)
+            }
+            return LedgerProjection(entries: entries, backedUp: backed, kept: kept, pendingImports: pendingImports)
         }
     }
 

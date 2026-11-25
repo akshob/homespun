@@ -234,14 +234,15 @@ final class LibraryController {
     func refreshGrid() async {
         guard !retired, !suspended else { return }
         do {
-        let kept = try await job.ledger.decisions()
-        let backed = try await job.ledger.backedUpSnapshot()
+        let projection = try await job.ledger.projection()
+        let kept = projection.kept, backed = projection.backedUp
         let recovering = Set(backed.filter { $0.value.origin == nil || $0.value.version == nil || $0.value.origin != job.activeOrigin }.keys)
         automatic.useCanonicalDecisions(kept)
         var states = job.states
         for id in kept where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
-        await library.update(ledger: try await job.ledger.snapshot(), job: states,
-                             backedUp: try await backedUpDue(), origin: job.activeOrigin, recovering: recovering)
+        await library.update(ledger: projection.entries, job: states,
+                             backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
+                             pendingImports: projection.pendingImports)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
@@ -256,8 +257,8 @@ final class LibraryController {
     }
 
     /// Items backed up without a compact copy, with when automatic mode makes it (nil: a kept favorite).
-    private func backedUpDue() async throws -> [String: Date?] {
-        let backedUp = try await job.ledger.backedUpSnapshot().filter { $0.value.origin == job.activeOrigin && $0.value.version != nil }
+    private func backedUpDue(_ all: [String: CompactLedger.BackedUp]) async -> [String: Date?] {
+        let backedUp = all.filter { $0.value.origin == job.activeOrigin && $0.value.version != nil }
         guard !backedUp.isEmpty else { return [:] }
         let ids = Array(backedUp.keys), photos = settings.photos
         let assets = await Task.detached(priority: .userInitiated) { photos.summaries(ids) }.value

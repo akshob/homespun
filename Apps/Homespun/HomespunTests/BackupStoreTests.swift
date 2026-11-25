@@ -286,6 +286,35 @@ private func abandonedPhotoHandoff(_ files: BackupFiles, operationID: UUID,
     #expect(remaining.first?.availability == .removed)
 }
 
+@Test func libraryProjectionPublishesAnImportedCopyOnlyAfterItsMappingIsVerified() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let ledger = CompactLedger(store: fixture.store)
+    let lease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await fixture.store.planImport(lease, expected: [fixture.compact])
+    try await fixture.store.startImport(intent.id, lease: lease)
+    try await fixture.store.importCreated(intent.id, identifier: "new-compact")
+    let pending = try await ledger.projection()
+    #expect(pending.pendingImports == ["new-compact"] && pending.entries.isEmpty)
+    _ = try await fixture.store.finishImport(intent.id, actual: [fixture.compact], proof: fixture.proof)
+    let verified = try await ledger.projection()
+    #expect(verified.pendingImports.isEmpty)
+    #expect(verified.entries.values.map(\.compactIdentifier) == ["new-compact"])
+}
+
+@Test func libraryProjectionDoesNotConcealAnInterruptedImportNeedingRecovery() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let lease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await fixture.store.planImport(lease, expected: [fixture.compact])
+    try await fixture.store.startImport(intent.id, lease: lease)
+    try await fixture.store.importCreated(intent.id, identifier: "interrupted-compact")
+    let restarted = BackupStore(directory: fixture.directory, legacyURL: nil, processID: UUID())
+    let projection = try await restarted.ledgerProjection(namespace: "photos")
+    #expect(projection.pendingImports.isEmpty)
+    #expect(try await restarted.importIntent(fixture.operationID)?.createdIdentifier == "interrupted-compact")
+}
+
 @Test func photosHandoffRecoveryWaitsForTheRestoreJournalToBeVerified() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

@@ -64,6 +64,21 @@ struct GridChangeTests {
         #expect(new.changedIDs(from: previous) == ["a", "copy"])
     }
 
+    @Test func importingCopyDoesNotInsertATemporaryDuplicateOrConcealUnownedCopies() {
+        let pending = LibraryState(library: ["original", "new-copy", "unowned-copy"], ledger: [:],
+            album: ["new-copy", "unowned-copy"], job: ["original": .working("Verifying saved copy")],
+            pendingImports: ["new-copy"])
+        #expect(pending.cells.map(\.id) == ["original", "unowned-copy"])
+        #expect(pending.cell("original")?.badge == .working)
+        #expect(pending.cell("unowned-copy")?.badge == .compactCopy)
+        let entry = CompactLedger.Entry(compactIdentifier: "new-copy", originalBytes: 100, compactBytes: 10,
+                                       savedAt: Date(), serverAssetID: "original-hash")
+        let published = LibraryState(library: ["original", "new-copy", "unowned-copy"], ledger: ["original": entry],
+            album: ["new-copy", "unowned-copy"], job: [:], pendingImports: ["new-copy"])
+        #expect(published.cells.map(\.id) == ["new-copy", "unowned-copy"])
+        #expect(GridChange.replacements(from: gridData(pending.cells), to: gridData(published.cells)) == [0])
+    }
+
     @Test func replacementsRequireSamePhotoAndShape() {
         let old = gridData([gridCell("a"), gridCell("b")])
         let new = gridData([gridCell("copy", badge: .originalOnPhone, original: "a"), gridCell("b")])

@@ -64,7 +64,7 @@ actor CompactLedger {
         try await projection().entries
     }
 
-    private func projection() async throws -> BackupStore.LedgerProjection {
+    func projection() async throws -> BackupStore.LedgerProjection {
         let revision = try await store.projectionRevision()
         if let cached, cached.revision == revision { return cached.projection }
         let result = try await store.ledgerProjection(namespace: namespace)
