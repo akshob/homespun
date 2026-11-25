@@ -120,7 +120,8 @@ final class CompactLaterUITests: XCTestCase {
         let waiting = app.gridItems("Backed up")
         XCTAssertTrue(waiting.firstMatch.waitForExistence(timeout: 20), "nothing waiting for a compact copy")
         let expected = waiting.count
-        let finished = NSPredicate(format: "value IN {'Ready to free up', 'Original at home', 'Kept as is'}")
+        let finished = NSPredicate(format: "value BEGINSWITH %@ OR value BEGINSWITH %@ OR value BEGINSWITH %@",
+                                   "Ready to free up", "Original at home", "Kept as is")
         let completedBefore = app.gridItems().matching(finished).count
         openAutomaticMode(app)
         let slider = app.sliders["automatic.cutoff"]
