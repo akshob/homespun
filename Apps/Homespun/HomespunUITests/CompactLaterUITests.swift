@@ -116,6 +116,12 @@ final class CompactLaterUITests: XCTestCase {
             throw XCTSkip("Run with ci/later.sh.")
         }
         var app = launch()
+        app.openTab("Library")
+        let waiting = app.gridItems("Backed up")
+        XCTAssertTrue(waiting.firstMatch.waitForExistence(timeout: 20), "nothing waiting for a compact copy")
+        let expected = waiting.count
+        let finished = NSPredicate(format: "value IN {'Ready to free up', 'Original at home', 'Kept as is'}")
+        let completedBefore = app.gridItems().matching(finished).count
         openAutomaticMode(app)
         let slider = app.sliders["automatic.cutoff"]
         slider.adjust(toNormalizedSliderPosition: 0)
@@ -137,9 +143,11 @@ final class CompactLaterUITests: XCTestCase {
         app.terminate()
         app = launch()
         let later = app.gridItems("Backed up")
-        waitForAutomatic(app) { later.count == 0 }
+        let completed = app.gridItems().matching(finished)
+        waitForAutomatic(app) { later.count == 0 && completed.count == completedBefore + expected }
         attach(app, "Library, everything compacted")
         XCTAssertEqual(later.count, 0, "items still waiting for their compact copy")
+        XCTAssertEqual(completed.count, completedBefore + expected, "not every deferred item produced a compact result")
         XCTAssertEqual(app.gridItems("Not backed up").count, 0)
     }
 
