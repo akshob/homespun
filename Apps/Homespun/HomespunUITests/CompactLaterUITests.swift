@@ -21,11 +21,13 @@ final class CompactLaterUITests: XCTestCase {
     }
 
     @MainActor private func waitForAutomatic(_ app: XCUIApplication, until done: () -> Bool) {
-        let busy = app.gridItems().matching(NSPredicate(
-            format: "value IN {'Waiting', 'Backing up', 'Processing on server'}"))
+        let busy = app.pendingBackupItems()
         let progress = app.descendants(matching: .any)["job.progress"]
         let deadline = Date().addingTimeInterval(900)
         repeat { sleep(3) } while (busy.count > 0 || progress.exists || !done()) && Date() < deadline
+        XCTAssertEqual(busy.count, 0, "automatic backups are still pending")
+        XCTAssertFalse(progress.exists, "local backup work is still running")
+        XCTAssertTrue(done(), "automatic backups did not reach the expected result")
     }
 
     @MainActor private func openAutomaticMode(_ app: XCUIApplication) {

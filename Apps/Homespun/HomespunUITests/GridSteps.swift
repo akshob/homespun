@@ -327,6 +327,10 @@ extension XCUIApplication {
         return descendants(matching: .any).matching(predicate)
     }
 
+    @MainActor func pendingBackupItems() -> XCUIElementQuery {
+        gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up', 'Processing on server'}"))
+    }
+
     /// Selects the newest `count` items that aren't backed up, compacts them, and waits until
     /// done. Returns how many were selected.
     @MainActor func compactNewest(_ count: Int, matching: NSPredicate? = nil,
@@ -354,7 +358,7 @@ extension XCUIApplication {
                       file: file, line: line)
         buttons["compact.selected"].tap()
 
-        let busy = gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up', 'Processing on server'}"))
+        let busy = pendingBackupItems()
         let progress = descendants(matching: .any)["job.progress"]
         let deadline = Date().addingTimeInterval(900)
         repeat { sleep(2) } while (busy.count > 0 || progress.exists) && Date() < deadline

@@ -178,12 +178,15 @@ final class PerformanceUITests: XCTestCase {
         let before = monitor()
         tapBarButton("compact.selected")
         let progress = app.descendants(matching: .any)["job.progress"].firstMatch
-        XCTAssertTrue(progress.waitForExistence(timeout: 20))
         let deadline = Date().addingTimeInterval(600)
-        repeat { sleep(5) } while progress.exists && Date() < deadline
-        XCTAssertFalse(progress.exists)
+        var after = before
+        repeat {
+            sleep(5)
+            after = monitor()
+        } while (after["job.finished"] ?? 0) - (before["job.finished"] ?? 0) < 20 && Date() < deadline
         sleep(2)
-        let after = monitor()
+        after = monitor()
+        XCTAssertFalse(progress.exists, "local work still running after item completion")
         func delta(_ key: String) -> Double { (after[key] ?? 0) - (before[key] ?? 0) }
         let n = delta("job.finished")
         print("PERF backup: \(after)")
