@@ -217,7 +217,7 @@ struct LibraryView: View, Equatable {
             : filter == .notBackedUp && media == .all
                 ? "done.\(controller.serverName).\(controller.library.state.count(.needsAttention))" : "nothing.\(filter.rawValue)"
         return [notice, empty, controller.job.queueProblem ?? "",
-                controller.job.hasRemoteWork ? "remote" : ""]
+                controller.showsRemoteNotice ? "remote" : ""]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
 
@@ -240,7 +240,7 @@ struct LibraryView: View, Equatable {
             }
             .padding(.horizontal)
         }
-        if controller.job.hasRemoteWork {
+        if controller.showsRemoteNotice {
             InlineNotice(tone: .info, title: "Compact copies are processing on your server",
                          message: "Their originals are already backed up. Server work continues without keeping this screen awake. "
                             + "Open Homespun later to discover and save ready copies.")

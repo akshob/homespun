@@ -457,6 +457,58 @@ private func abandonedPhotoHandoff(_ files: BackupFiles, operationID: UUID,
     }
 }
 
+@MainActor @Test func pendingPresentationUsesCurrentBindingAndCanonicalCompletionNotLeases() {
+    let now = Date()
+    var operation = BackupStore.Operation(id: UUID(), namespace: "photos", itemID: "original", lineage: 1,
+        bindingID: UUID(), origin: .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString),
+        profile: .standard, wantsCompact: true, createdAt: now, updatedAt: now)
+    let origin = operation.origin, bindingID = operation.bindingID
+    func pending(_ candidate: BackupStore.Operation, kept: Bool = false) -> Bool {
+        CompactJob.presentsPendingWork(candidate, state: CompactJob.project(candidate, kept: kept),
+                                      origin: origin, bindingID: bindingID)
+    }
+    #expect(pending(operation))
+    operation.lease = .init(id: UUID(), operationID: operation.id, epoch: 1, processID: UUID(), stage: .preparation)
+    #expect(pending(operation))
+    operation.lease = nil
+    operation.backup = .retained
+    operation.compact = .processing
+    #expect(pending(operation))
+    operation.compact = .ready
+    #expect(pending(operation))
+    let state = CompactJob.project(operation, kept: false)
+    #expect(!CompactJob.presentsPendingWork(operation, state: state, origin: nil, bindingID: bindingID))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state, origin: origin, bindingID: nil))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state, origin: origin, bindingID: UUID()))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state,
+        origin: .init(serverID: origin.serverID, historyEpoch: UUID().uuidString), bindingID: bindingID))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state,
+        origin: .init(serverID: UUID().uuidString, historyEpoch: origin.historyEpoch), bindingID: bindingID))
+    #expect(!pending(operation, kept: true))
+    var terminal = operation
+    terminal.attention = true
+    #expect(!pending(terminal))
+    terminal = operation
+    terminal.wantsCompact = false
+    #expect(!pending(terminal))
+    for desired in [BackupStore.Desired.paused, .cancelled] {
+        terminal = operation
+        terminal.desired = desired
+        #expect(!pending(terminal))
+    }
+    for compact in [BackupAPI.CompactState.held, .failed] {
+        terminal = operation
+        terminal.compact = compact
+        #expect(!pending(terminal))
+    }
+    terminal = operation
+    terminal.delivery = .importedVerified
+    terminal.manifest = .init(kind: .photo, resources: [
+        .init(role: .photo, filename: "original.jpg", size: 100, sha256: String(repeating: "a", count: 64)),
+    ])
+    #expect(!pending(terminal))
+}
+
 @Test func resultDiscoveryTracksCurrentWorkAndStopsAfterTerminalOutboxesAreDrained() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

@@ -129,6 +129,8 @@ and the Get Started card open the Library to pick a few items to try.
 For a requested compact copy, once the server retains the original, "Compact copy in progress"
 covers both making the copy on the server and saving it to this iPhone. Details distinguishes those
 steps; the item is not ready to free up until its saved copy is verified.
+Ready items can be reviewed from Free Up while other backups continue. Confirming removal waits
+for local backup work to stop; backups can be paused in Activity.
 
 Videos play in the item viewer, with Play/Pause and a position slider below the picture.
 The viewer zooms over the whole app from the tapped thumbnail, without changing the tabs or

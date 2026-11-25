@@ -53,7 +53,7 @@ final class LibraryController {
     private(set) var phoneFreeBytes: Int?
     /// Not backed up and created since the last backup, with the days since (T19).
     private(set) var newSinceBackup: (count: Int, days: Int)?
-    /// Originals from the current Back Up; offered once the run finishes.
+    /// Originals from the current Back Up; offered as each item's compact copy is verified.
     private var batch = Set<String>()
     private var started = false
     /// Keep the running accessory until the finished/ready facts have arrived, without a hide/show.
@@ -278,9 +278,12 @@ final class LibraryController {
         inputs.paired = settings.isPaired
         if case .unreachable = settings.serverStatus { inputs.unreachable = serverName }
         if case .checking(let message) = removal { inputs.removing = message }
-        if job.isRunning || finishingBackups > 0 {
+        if job.isRunning || job.hasPendingWork || finishingBackups > 0 {
             let run = job.runProgress
-            inputs.backingUp = (run.done, run.total, run.current?.name ?? (finishingBackups > 0 ? job.items.last?.name : nil))
+            let detail = job.isRunning ? (run.current?.name ?? "Preparing")
+                : job.hasRemoteWork ? "Processing on \(serverName)"
+                : finishingBackups > 0 ? "Finishing compact copies" : "Waiting to continue"
+            inputs.backingUp = (run.done, run.total, detail)
         }
         if let finished { inputs.finished = (finished.count, finished.bytes, Set(finished.originals)) }
         inputs.readyCount = ready.count
@@ -288,6 +291,16 @@ final class LibraryController {
         inputs.phoneFreeBytes = phoneFreeBytes
         inputs.newSinceBackup = automatic.enabled ? nil : newSinceBackup
         return inputs
+    }
+
+    var showsRemoteNotice: Bool { job.hasRemoteWork && !job.hasPendingWork }
+
+    /// Read at tap time, not captured from an earlier row's offer or its source.
+    var freeUpOffer: AccessoryLadder.Offer? {
+        guard !retired, !suspended else { return nil }
+        let current = finished.flatMap { $0.count > 0 ? $0 : nil } ?? ready
+        guard current.count > 0 else { return nil }
+        return .init(count: current.count, bytes: current.bytes, originals: Set(current.originals))
     }
 
     private func refreshNewSinceBackup() async {

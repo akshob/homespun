@@ -132,12 +132,17 @@ final class CompactJob {
     @ObservationIgnored private(set) var compactInProgress = Set<String>()
     @ObservationIgnored private var retainedIDs = Set<UUID>()
     @ObservationIgnored private var remoteIDs = Set<UUID>()
+    @ObservationIgnored private var pendingIDs = Set<UUID>()
     @ObservationIgnored private var pausedIDs = Set<UUID>()
     private(set) var pausedCount = 0
     private(set) var queueProblem: String?
     private(set) var queueLoaded = false
     private(set) var remoteCount = 0
     private(set) var hasRemoteWork = false
+    /// Current-server selections still pending, independent of local execution leases.
+    private(set) var hasPendingWork = false
+    /// Owns the foreground episode; PerfMonitor itself records only when opted in.
+    @ObservationIgnored private(set) var measuresBackupFrames = false
     private(set) var retainedCount = 0
     var activeOrigin: BackupAPI.Origin? {
         guard let context = coordinator.context, settings.matchesBackupBinding(context.binding) else { return nil }
@@ -226,6 +231,7 @@ final class CompactJob {
             let wasCompactInProgress = compactInProgress.contains(operation.itemID)
             if let oldID = currentOperationByItem[operation.itemID], oldID != operation.id {
                 retainedIDs.remove(oldID); remoteIDs.remove(oldID); pausedIDs.remove(oldID)
+                pendingIDs.remove(oldID)
                 compactInProgress.remove(operation.itemID)
                 if let index = positions[oldID] {
                     let old = items[index].state, superseded = State.notYet("An earlier request is preserved; a newer selection owns this item.")
@@ -240,6 +246,11 @@ final class CompactJob {
                 state = .saved(originalBytes: original, compactBytes: intent.expected.reduce(0) { $0 + $1.size })
             }
             guard !retired else { return }
+            pendingIDs.remove(operation.id)
+            if Self.presentsPendingWork(operation, state: state, origin: activeOrigin,
+                                        bindingID: coordinator.context?.binding.id) {
+                pendingIDs.insert(operation.id)
+            }
             let inProgress = Self.presentsCompactInProgress(operation, origin: activeOrigin,
                                                           bindingID: coordinator.context?.binding.id)
             if inProgress { compactInProgress.insert(operation.itemID) }
@@ -294,6 +305,8 @@ final class CompactJob {
         pausedCount = pausedIDs.count
         progress.total = items.count
         runProgress = progress
+        if hasPendingWork != !pendingIDs.isEmpty { hasPendingWork = !pendingIDs.isEmpty }
+        updateBackupFrames()
         if isRunning, !settings.isDemo {
             _ = LongRun.shared.begin(items: progress.total, server: settings.server?.name ?? "your server")
         }
@@ -348,6 +361,12 @@ final class CompactJob {
             && operation.desired == .active && !operation.attention && operation.backup == .retained
             && operation.wantsCompact && operation.delivery != .importedVerified
             && operation.compact != .held && operation.compact != .failed
+    }
+
+    static func presentsPendingWork(_ operation: BackupStore.Operation, state: State, origin: BackupAPI.Origin?,
+                                    bindingID: UUID?) -> Bool {
+        origin != nil && operation.origin == origin && bindingID != nil && operation.bindingID == bindingID
+            && !state.isFinished
     }
 
     private func stageProgress(_ id: UUID, message: String) {
@@ -414,10 +433,23 @@ final class CompactJob {
         try await coordinator.runOpportunity()
     }
 
-    func setVisible(_ visible: Bool) { coordinator.setVisible(visible) }
+    func setVisible(_ visible: Bool) {
+        coordinator.setVisible(visible)
+        updateBackupFrames()
+    }
+
+    private func updateBackupFrames() {
+        let wanted = suppliedCompactor == nil && !retired && !suspended && coordinator.isForegroundActive
+            && activeOrigin != nil && hasPendingWork
+        guard wanted != measuresBackupFrames else { return }
+        measuresBackupFrames = wanted
+        if wanted { PerfMonitor.shared.framesBegan("backup") }
+        else { PerfMonitor.shared.framesEnded("backup") }
+    }
 
     func suspendAndWait() async {
         suspended = true
+        updateBackupFrames()
         contextWork?.cancel()
         coordinator.suspend()
         _ = try? await contextWork?.value
@@ -442,12 +474,12 @@ final class CompactJob {
         guard !retired, coordinator.context != nil || contextWork != nil else { return }
         contextWork?.cancel()
         coordinator.suspend()
-        clearCompactInProgress()
+        resetPresentationFacts()
         onBindingChanged?()
         control { [self] in
             _ = try? await contextWork?.value
             try await coordinator.detach()
-            clearCompactInProgress()
+            resetPresentationFacts()
             remoteIDs = []; retainedIDs = []; pausedIDs = []
             remoteCount = 0; retainedCount = 0; pausedCount = 0
             hasRemoteWork = false
@@ -457,9 +489,12 @@ final class CompactJob {
         }
     }
 
-    private func clearCompactInProgress() {
+    private func resetPresentationFacts() {
         let previous = compactInProgress
         compactInProgress = []
+        pendingIDs = []
+        hasPendingWork = false
+        updateBackupFrames()
         for id in previous { noteChange(id, states[id]) }
     }
 
@@ -747,7 +782,7 @@ final class CompactJob {
     /// Rejects new work immediately. The current item finishes its admitted side effects.
     func retire() {
         retired = true
-        clearCompactInProgress()
+        resetPresentationFacts()
         coordinator.retire()
         contextWork?.cancel()
         historyWork?.cancel()

@@ -33,6 +33,7 @@ final class BackupCoordinator {
     private var driveAgain = false
     private var retired = false
     private var visible = false
+    var isForegroundActive: Bool { visible && !suspended && !retired }
     private var generation = 0
     private var uploadOrder: UUID?
     private var validatedOriginals = Set<UUID>()
