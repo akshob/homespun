@@ -791,7 +791,9 @@ import UIKit
             #expect(rolledBack, "A failed finalization must roll back even the writes before its decision")
 
             try await store.close()
-            let reopened = BackupStore(directory: store.files.root, legacyURL: nil, processID: UUID())
+            let reopened = BackupStore(directory: store.files.root,
+                legacyURL: fixture.session.folder.appendingPathComponent("ledger.json"),
+                namespace: ledger.namespace, processID: UUID())
             do {
                 try await reopened.open()
                 #expect(try await reopened.effect(intent.id) == intent)
