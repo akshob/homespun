@@ -44,8 +44,6 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
     var defaultRoute: Route?
     /// Editors can retain the existing route while ordinary detail pages still fold to the list.
     var retainsOnFold: (Route) -> Bool = { _ in false }
-    /// An editor's confirmation belongs to its navigation host, not to the destination being transferred.
-    var confirmation: (Route) -> AnyView? = { _ in nil }
     /// The list, given the sidebar's selection (none in a stack, where its links push).
     @ViewBuilder var root: (Binding<Route?>?) -> Root
     @ViewBuilder var destination: (Route) -> Destination
@@ -66,7 +64,6 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
                 NavigationStack(path: $path) {
                     root(nil).navigationDestination(for: Route.self) { destination($0) }
                 }
-                .toolbar { confirmationToolbar(for: path.last, host: "compact") }
                 .onAppear { folded() }
             }
         }
@@ -85,13 +82,6 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
             path = SidebarNavigation.selecting(new, in: path, retaining: retainsOnFold)
             listShown = false
         })
-    }
-
-    /// Only the host's currently visible route supplies an action; Back or another route removes it.
-    @ToolbarContentBuilder private func confirmationToolbar(for route: Route?, host: String) -> some ToolbarContent {
-        if let route, let action = confirmation(route) {
-            ToolbarItem(id: "editor.confirmation." + host, placement: .confirmationAction) { action }
-        }
     }
 
     /// Wide: the list beside the detail. Tall: the detail alone unless the list was asked for.
@@ -121,7 +111,6 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
                 }
                 .navigationDestination(for: Route.self) { destination($0) }
             }
-            .toolbar { confirmationToolbar(for: path.last ?? defaultRoute, host: "detail") }
             .id(path.first ?? defaultRoute)
         }
         .onAppear { listShown = false }

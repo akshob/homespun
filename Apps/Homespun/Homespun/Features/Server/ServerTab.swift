@@ -43,8 +43,7 @@ struct ServerTab: View {
         let isPaired = settings.server != nil && settings.isPaired
         // Beside the list on the open iPhone Duo: Server Check (Help and About before pairing).
         SplitNavigation(path: $path, defaultRoute: isPaired ? .check : .help,
-                        retainsOnFold: { $0 == .deviceName },
-                        confirmation: { route in route == .deviceName ? AnyView(nameEditor.saveButton) : nil }) { selection in
+                        retainsOnFold: { $0 == .deviceName }) { selection in
             Group {
                 if let server = settings.server, settings.isPaired {
                     paired(server, selection: selection)

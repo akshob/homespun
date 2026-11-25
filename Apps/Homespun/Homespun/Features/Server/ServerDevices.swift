@@ -324,15 +324,22 @@ struct DeviceNameView: View {
     var body: some View {
         List {
             Section {
-                TextField("Name", text: $draft.name, prompt: Text("Akshob’s iPhone"))
-                    .focused($focused)
-                    .submitLabel(.done)
-                    .onSubmit { if canSave { Task { await save() } } }
-                    .disabled(device == nil || working)
-                    .accessibilityIdentifier("device.name")
-                if let error {
-                    Text(error).font(.subheadline).foregroundStyle(Theme.red).accessibilityIdentifier("device.name.error")
+                VStack(alignment: .leading, spacing: 16) {
+                    TextField("Name", text: $draft.name, prompt: Text("Akshob’s iPhone"))
+                        .focused($focused)
+                        .submitLabel(.done)
+                        .onSubmit { if canSave { Task { await save() } } }
+                        .disabled(device == nil || working)
+                        .accessibilityIdentifier("device.name")
+                    PrimaryButton(title: "Save", systemImage: "checkmark", busy: working, id: "device.name.save") {
+                        Task { await save() }
+                    }
+                    .disabled(!canSave)
+                    if let error {
+                        Text(error).font(.subheadline).foregroundStyle(Theme.red).accessibilityIdentifier("device.name.error")
+                    }
                 }
+                .padding(.vertical, 4)
             } footer: {
                 if let folder = device?.folder {
                     Text("This iPhone’s originals are in the folder “\(folder)” on \(server). Renaming this iPhone renames "
@@ -351,14 +358,6 @@ struct DeviceNameView: View {
             if !Task.isCancelled { focused = draft.wantsFocus }
         }
         .onChange(of: focused) { _, focused in if focused { draft.wantsFocus = true } }
-    }
-
-    var saveButton: some View {
-        Button(role: .confirm) { Task { await save() } } label: {
-            if working { ProgressView() } else { Label("Save", systemImage: "checkmark") }
-        }
-        .disabled(!canSave)
-        .accessibilityIdentifier("device.name.save")
     }
 
     private func load() async {
