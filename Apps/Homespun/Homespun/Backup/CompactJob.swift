@@ -94,8 +94,8 @@ final class CompactJob {
     @ObservationIgnored private var droppedWhilePreparing = Set<String>()
     @ObservationIgnored private var stoppedWhilePreparing = false
     var isPreparing: Bool { preparing > 0 }
-    /// Bumped when an item's phase changes (not for progress messages); the Library applies
-    /// `takePhaseChanges()` then, touching only those items' badges.
+    /// Bumped when an item's phase or retained grid fact changes (not for progress messages);
+    /// the Library applies `takePhaseChanges()` then, touching only those items' badges.
     private(set) var phaseVersion = 0
     @ObservationIgnored private var phaseChanges: [String: State?] = [:]
     /// The item being worked on, so progress messages find it without searching every item.
@@ -128,6 +128,8 @@ final class CompactJob {
     @ObservationIgnored private var pendingHistory = Set<UUID>()
     @ObservationIgnored private var recordedHistory: Set<UUID>?
     @ObservationIgnored private var currentOperationByItem: [String: UUID] = [:]
+    /// Current-server originals retained while their compact copies are made or saved to Photos.
+    @ObservationIgnored private(set) var compactInProgress = Set<String>()
     @ObservationIgnored private var retainedIDs = Set<UUID>()
     @ObservationIgnored private var remoteIDs = Set<UUID>()
     @ObservationIgnored private var pausedIDs = Set<UUID>()
@@ -217,11 +219,14 @@ final class CompactJob {
             Dictionary(Self.prepare(unknown, trigger: .manual, backUpOnly: [], photos: photos).map { ($0.assetIdentifier, $0) },
                        uniquingKeysWith: { first, _ in first })
         }.value
+        guard !retired else { return }
         var progress = runProgress
         var terminal = false
         for operation in current {
+            let wasCompactInProgress = compactInProgress.contains(operation.itemID)
             if let oldID = currentOperationByItem[operation.itemID], oldID != operation.id {
                 retainedIDs.remove(oldID); remoteIDs.remove(oldID); pausedIDs.remove(oldID)
+                compactInProgress.remove(operation.itemID)
                 if let index = positions[oldID] {
                     let old = items[index].state, superseded = State.notYet("An earlier request is preserved; a newer selection owns this item.")
                     updateProgress(&progress, old: old, new: superseded)
@@ -234,6 +239,11 @@ final class CompactJob {
             if case .saved(let original, _) = state, let intent = try await ledger.store.importIntent(operation.id) {
                 state = .saved(originalBytes: original, compactBytes: intent.expected.reduce(0) { $0 + $1.size })
             }
+            guard !retired else { return }
+            let inProgress = Self.presentsCompactInProgress(operation, origin: activeOrigin,
+                                                          bindingID: coordinator.context?.binding.id)
+            if inProgress { compactInProgress.insert(operation.itemID) }
+            else { compactInProgress.remove(operation.itemID) }
             let previous = positions[operation.id].map { items[$0].state }
             let index: Int
             if let old = positions[operation.id] {
@@ -242,9 +252,9 @@ final class CompactJob {
                 updateProgress(&progress, old: before, new: state)
                 items[index].state = state
                 states[operation.itemID] = state
-                if before.phase != state.phase {
+                if before.phase != state.phase || wasCompactInProgress != inProgress {
                     noteChange(operation.itemID, state)
-                    if state.phase == .saved { terminal = true }
+                    if before.phase != state.phase, state.phase == .saved { terminal = true }
                 }
             } else {
                 let description = descriptions[operation.itemID]
@@ -330,6 +340,14 @@ final class CompactJob {
             return .working(operation.problem?.message ?? "Backing up original")
         }
         return .waiting
+    }
+
+    static func presentsCompactInProgress(_ operation: BackupStore.Operation, origin: BackupAPI.Origin?,
+                                         bindingID: UUID?) -> Bool {
+        origin != nil && operation.origin == origin && bindingID != nil && operation.bindingID == bindingID
+            && operation.desired == .active && !operation.attention && operation.backup == .retained
+            && operation.wantsCompact && operation.delivery != .importedVerified
+            && operation.compact != .held && operation.compact != .failed
     }
 
     private func stageProgress(_ id: UUID, message: String) {
@@ -424,10 +442,12 @@ final class CompactJob {
         guard !retired, coordinator.context != nil || contextWork != nil else { return }
         contextWork?.cancel()
         coordinator.suspend()
+        clearCompactInProgress()
         onBindingChanged?()
         control { [self] in
             _ = try? await contextWork?.value
             try await coordinator.detach()
+            clearCompactInProgress()
             remoteIDs = []; retainedIDs = []; pausedIDs = []
             remoteCount = 0; retainedCount = 0; pausedCount = 0
             hasRemoteWork = false
@@ -435,6 +455,12 @@ final class CompactJob {
             if !suspended, settings.isPaired { await refreshQueue() }
             onBindingChanged?()
         }
+    }
+
+    private func clearCompactInProgress() {
+        let previous = compactInProgress
+        compactInProgress = []
+        for id in previous { noteChange(id, states[id]) }
     }
 
     func remover() -> DurableOriginalRemover? {
@@ -488,7 +514,7 @@ final class CompactJob {
         }
     }
 
-    /// The items whose phase changed since the last call (nil: no longer in the job), latest state each.
+    /// Items whose phase or retained grid fact changed (nil: no longer in the job), latest state each.
     func takePhaseChanges() -> [String: State?] {
         defer { phaseChanges = [:] }
         return phaseChanges
@@ -721,6 +747,7 @@ final class CompactJob {
     /// Rejects new work immediately. The current item finishes its admitted side effects.
     func retire() {
         retired = true
+        clearCompactInProgress()
         coordinator.retire()
         contextWork?.cancel()
         historyWork?.cancel()

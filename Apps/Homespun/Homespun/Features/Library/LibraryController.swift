@@ -242,7 +242,7 @@ final class LibraryController {
         for id in kept where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
         await library.update(ledger: projection.entries, job: states,
                              backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
-                             pendingImports: projection.pendingImports)
+                             pendingImports: projection.pendingImports, compactInProgress: job.compactInProgress)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
@@ -362,7 +362,7 @@ final class LibraryController {
     func jobChanged() {
         guard !retired, !suspended else { return }
         let changes = job.takePhaseChanges()
-        library.apply(job: changes)
+        library.apply(job: changes, compactInProgress: job.compactInProgress)
         let finished = changes.values.contains { state in
             switch state {
             case .waiting?, .working?, .processing?: false

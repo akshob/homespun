@@ -323,6 +323,99 @@ import UIKit
         #expect(await clock.waiting == 0)
     }
 
+    @Test func retainedGridFactNotifiesWithoutAPhaseChangeAndClearsAcrossBindingLifetime() async throws {
+        let fixture = try await Fixture.make()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let job = CompactJob(settings: settings, ledger: fixture.ledger)
+        do {
+            let store = job.ledger.store
+            let context = try await settings.backupContext(store: store, namespace: job.ledger.namespace)
+            let policy = try await settings.backupSpacePolicy(store: store)
+            try await job.coordinator.activate(context, policy: policy)
+            let photo = try sample(fixture.session.library, "photo")
+            let batch = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                bindingID: context.binding.id, profile: .standard, compact: true)
+            let id = try #require(batch.operationIDs.first)
+            let lease = try #require(try await store.claim(id, stage: .preparation))
+            let bytes = Data("synthetic original".utf8)
+            let original = ServerAPI.ResourceDescriptor(role: .photo, filename: "original.heic",
+                size: bytes.count, sha256: Fingerprint.sha256(of: bytes))
+            let resource = BackupStore.Resource(fileID: UUID(), operationID: id, kind: .original, descriptor: original)
+            _ = try store.files.prepareStaging(operationID: id)
+            try bytes.write(to: store.files.stagedFile(operationID: id, fileID: resource.fileID))
+            let manifest = BackupAPI.Manifest(kind: .photo, resources: [original])
+            try await store.prepared(lease, manifest: manifest, resources: [resource])
+            var notices = 0
+            job.onPhaseChange = { notices += 1 }
+            await job.coordinator.changed([id])
+            try await eventually { job.states[photo.id]?.phase == .working && notices > 0 }
+            #expect(job.compactInProgress.isEmpty)
+            _ = job.takePhaseChanges()
+            let phaseVersion = job.phaseVersion, beforeNotices = notices
+
+            let recipe = BackupAPI.Recipe(profile: .standard, backend: "test", pipelineVersion: 1)
+            let version = BackupAPI.Version(origin: context.binding.origin, assetID: try manifest.assetID(),
+                manifestID: try manifest.identifier(), descriptorGeneration: 1, recipeID: try recipe.identifier())
+            let compact = Data("c".utf8)
+            let receipt = BackupAPI.Receipt(requestID: UUID(), operationID: id, version: version, revision: 1,
+                backup: .retained, compact: .ready, retention: .permanent, originals: [
+                    .init(role: .photo, sha256: original.sha256, size: original.size, state: .verified,
+                          receivedBytes: original.size, verifiedAt: Date()),
+                ], derivative: .init(generationID: UUID(), version: version, resources: [
+                    .init(role: .photo, filename: "compact.heic", size: compact.count, sha256: Fingerprint.sha256(of: compact)),
+                ]))
+            _ = try await store.apply(receipt, operationID: id, epoch: lease.epoch)
+            await job.coordinator.changed([id])
+            try await eventually { job.compactInProgress == [photo.id] && notices > beforeNotices }
+            #expect(job.states[photo.id]?.phase == .working && job.phaseVersion > phaseVersion)
+            let change = try #require(job.takePhaseChanges()[photo.id])
+            #expect(change?.phase == .working)
+            #expect(!job.isRunning && job.runProgress.done == 0)
+
+            job.invalidateBinding()
+            #expect(job.compactInProgress.isEmpty)
+            #expect(job.takePhaseChanges().keys.contains(photo.id))
+            try await eventually { job.compactInProgress == [photo.id] }
+            let reattached = try #require(job.bindingContext)
+            #expect(reattached.binding.id != context.binding.id)
+            #expect(try await store.operation(id)?.bindingID == reattached.binding.id)
+
+            try await store.setDesired(.cancelled, operationID: id)
+            let replacement = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                bindingID: reattached.binding.id, profile: .standard, compact: true)
+            let replacementID = try #require(replacement.operationIDs.first)
+            #expect(replacementID != id)
+            let replacementLease = try #require(try await store.claim(replacementID, stage: .preparation))
+            let replacementResource = BackupStore.Resource(fileID: UUID(), operationID: replacementID,
+                kind: .original, descriptor: original)
+            try await store.prepared(replacementLease, manifest: manifest, resources: [replacementResource])
+            _ = job.takePhaseChanges()
+            await job.coordinator.changed([id])
+            try await eventually { job.compactInProgress.isEmpty && job.states[photo.id]?.phase == .working }
+            #expect(job.takePhaseChanges().keys.contains(photo.id))
+            var replacementReceipt = receipt
+            replacementReceipt.operationID = replacementID
+            replacementReceipt.requestID = UUID()
+            _ = try await store.apply(replacementReceipt, operationID: replacementID, epoch: replacementLease.epoch)
+            await job.coordinator.changed([replacementID])
+            try await eventually { job.compactInProgress == [photo.id] }
+            job.retire()
+            #expect(job.compactInProgress.isEmpty)
+            #expect(job.takePhaseChanges().keys.contains(photo.id))
+        } catch let failure {
+            await job.stopAndWait()
+            do { try await job.ledger.store.close() } catch { Issue.record(error) }
+            throw failure
+        }
+        await job.stopAndWait()
+        try await job.ledger.store.close()
+    }
+
     @Test func catalogObservationCancelsAndDoesNotRetainTheCatalog() async throws {
         let fixture = try await Fixture.make()
         var catalog: DemoLibrary? = DemoLibrary(folder: fixture.folder.appendingPathComponent("observed"),

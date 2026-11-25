@@ -190,7 +190,11 @@ struct ItemDetailsSheet: View {
             row("iphone", "Original still on this iPhone", "Free Up Space can remove it once the compact copy is in Photos.")
         case .processing:
             row("checkmark.shield", "Original on \(server)", "Its verified backup is independent of compact-copy processing.")
-            row("gearshape.2", "Processing on your server", "The iPhone doesn't need to stay open for server processing. Open it later to discover and save results.")
+            if case .working(let step)? = job {
+                row("iphone", "Saving the compact copy to this iPhone", step)
+            } else {
+                row("gearshape.2", "Processing on your server", "The iPhone doesn't need to stay open for server processing. Open it later to discover and save results.")
+            }
         case .recovery:
             row("questionmark.folder", "Original server needs recovery",
                 cell.serverName.map { "This mapping belongs to \($0), not necessarily the currently paired server. Reconnect it before restoring or removing anything." }

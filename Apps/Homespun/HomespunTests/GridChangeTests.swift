@@ -58,6 +58,45 @@ struct GridChangeTests {
         #expect(state.version == version)
     }
 
+    @Test(arguments: [false, true])
+    func savedJobWaitsForTheVerifiedLedgerSwap(hasBackup: Bool) {
+        let backedUp: [String: Date?] = hasBackup ? ["original": Date(timeIntervalSince1970: 2_000_000_000)] : [:]
+        for job in [CompactJob.State.working("Saving compact copy"), .processing("Making compact copy")] {
+            var state = LibraryState(library: ["original"], ledger: [:], album: [], job: ["original": job], backedUp: backedUp)
+            let before = state
+            let version = state.version
+            let counts = LibraryState.Filter.allCases.map { state.count($0) }
+            #expect(state.apply(job: ["original": .saved(originalBytes: 100, compactBytes: 10)]).isEmpty)
+            #expect(state == before && state.version == version)
+            #expect(LibraryState.Filter.allCases.map { state.count($0) } == counts)
+        }
+    }
+
+    @Test @MainActor func retainedCompactWorkHasOneBadgeWithoutBecomingActionableOrReenteringNotBackedUp() throws {
+        let downloading = CompactJob.State.working("Downloading 40%")
+        var state = LibraryState(library: ["retained", "uploading"], ledger: [:], album: [],
+            job: ["retained": downloading, "uploading": .working("Uploading 62%")], compactInProgress: ["retained"])
+        #expect(state.cell("retained")?.badge == .processing)
+        #expect(state.cell("uploading")?.badge == .working)
+        #expect(state.cells(.notBackedUp).map(\.id) == ["uploading"])
+        #expect(state.cell("retained")?.canCompact == false && state.cell("retained")?.canFree == false)
+        let cell = GridCell(frame: .zero)
+        cell.update(state: try #require(state.cell("retained")), selecting: false, selected: false, serverName: "Home")
+        #expect(cell.accessibilityValue == "Compact copy in progress")
+        let version = state.version
+        #expect(state.apply(job: ["retained": .processing("Making compact copy")]).isEmpty)
+        #expect(state.apply(job: ["retained": .working("Verifying saved copy")]).isEmpty)
+        #expect(state.version == version && state.count(.notBackedUp) == 1)
+
+        var incremental = LibraryState(library: ["retained"], ledger: [:], album: [], job: ["retained": downloading])
+        #expect(incremental.count(.notBackedUp) == 1)
+        #expect(incremental.apply(job: ["retained": downloading], compactInProgress: ["retained"]) == ["retained"])
+        #expect(incremental.cell("retained")?.badge == .processing && incremental.count(.notBackedUp) == 0)
+        #expect(incremental.version == 1)
+        #expect(incremental.apply(job: ["retained": downloading], compactInProgress: []) == ["retained"])
+        #expect(incremental.cell("retained")?.badge == .working && incremental.count(.notBackedUp) == 1)
+    }
+
     @Test func rebuiltDiffIncludesOriginalAndCopy() {
         let previous = LibraryState(cells: [gridCell("a"), gridCell("b")])
         let new = LibraryState(cells: [gridCell("copy", badge: .originalOnPhone, original: "a"), gridCell("b")])

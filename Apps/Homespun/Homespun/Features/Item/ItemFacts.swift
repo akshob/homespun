@@ -43,7 +43,11 @@ enum ItemText {
             return "Backing up"
         case .kept: return "Kept as is · the original stays on this iPhone"
         case .failed: return "Needs attention · couldn't back up"
-        case .processing: return "Original backed up · compact copy processing on \(server)"
+        case .processing:
+            if case .working(let step)? = job {
+                return "Original backed up · saving compact copy" + (step.isEmpty ? "" : " · \(step)")
+            }
+            return "Original backed up · compact copy processing on \(server)"
         case .recovery: return "Backup needs recovery · reconnect its original server"
         case .compactCopy: return "Compact copy · made by Homespun"
         case .copyLater: return "Backed up · " + Badge.compactLater(compactAfter)

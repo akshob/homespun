@@ -60,9 +60,19 @@ import UIKit
         #expect(ItemAction.for(ready) == .freeUp(original: "original"))
         #expect(ItemAction.for(.init(id: "a", badge: .none, original: nil, canFree: false)) == .backUp)
         #expect(ItemAction.for(.init(id: "a", badge: .failed, original: nil, canFree: false)) == .tryAgain)
-        for badge in [Badge.backedUp, .kept, .waiting, .working, .compactCopy] {
+        for badge in [Badge.backedUp, .kept, .waiting, .working, .processing, .compactCopy] {
             #expect(ItemAction.for(.init(id: "a", badge: badge, original: badge == .backedUp ? "o" : nil, canFree: false)) == .none)
         }
+    }
+
+    @Test func compactProgressDistinguishesPhoneDeliveryFromServerProcessing() {
+        let saving = ItemText.sentence(.processing, server: "Home Mac", immich: false, job: .working("Downloading 40%"))
+        #expect(saving == "Original backed up · saving compact copy · Downloading 40%")
+        #expect(ItemText.spoken(saving) == "Original backed up, saving compact copy, Downloading 40%.")
+        #expect(ItemText.sentence(.processing, server: "Home Mac", immich: false, job: .working(""))
+            == "Original backed up · saving compact copy")
+        #expect(ItemText.sentence(.processing, server: "Home Mac", immich: false, job: .processing("Making compact copy"))
+            == "Original backed up · compact copy processing on Home Mac")
     }
 
     @Test func compareNeedsACopyAndAnOriginalItCanReach() {
