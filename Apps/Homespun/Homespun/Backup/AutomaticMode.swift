@@ -74,6 +74,7 @@ final class AutomaticMode {
     private(set) var running = false
     private let url: URL
     private let photos: any PhotoSource
+    private let refreshServerInfo: @MainActor (AppSettings) async -> Void
     /// Runs in the background, and notifies, through iOS (off for the demo, whose runs happen only
     /// while it's on screen).
     private let system: Bool
@@ -89,10 +90,12 @@ final class AutomaticMode {
     var backsUpEverything: Bool { state.since == .distantPast }
 
     init(url: URL = URL.applicationSupportDirectory.appendingPathComponent("Homespun/automatic.json"),
-         photos: any PhotoSource = PhotoKitSource(), system: Bool = true) {
+         photos: any PhotoSource = PhotoKitSource(), system: Bool = true,
+         refreshServerInfo: @escaping @MainActor (AppSettings) async -> Void = { await $0.refreshServerInfo() }) {
         self.url = url
         self.photos = photos
         self.system = system
+        self.refreshServerInfo = refreshServerInfo
         state = (try? JSONDecoder().decode(State.self, from: Data(contentsOf: url))) ?? State()
     }
 
@@ -271,7 +274,7 @@ final class AutomaticMode {
             summary.skipped = "Connect a server first."
             return finish(summary)
         }
-        await settings.refreshServerInfo()
+        await refreshServerInfo(settings)
         guard authorized() else { return summary }
         guard settings.serverStatus == .reachable || job.canAdmitOffline else {
             summary.skipped = "The server wasn't reachable."

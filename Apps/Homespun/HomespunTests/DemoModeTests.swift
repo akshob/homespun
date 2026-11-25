@@ -2,6 +2,7 @@
 import Foundation
 import HomespunCore
 import Photos
+import Synchronization
 import Testing
 import UIKit
 @testable import Homespun
@@ -91,13 +92,21 @@ import UIKit
         private func cancel(_ id: UUID) { pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
     }
 
-    private actor DelayedReadyRemote: BackupRemote {
+    private actor ControlledRemote: BackupRemote {
         nonisolated let baseURL: URL
         private let base: any BackupRemote
-        private var released = false
+        private let beforeVerify: @Sendable (BackupAPI.Version) async -> Void
+        private var released: Bool
         private(set) var held = 0
+        private(set) var verified: [BackupAPI.Version] = []
 
-        init(_ base: any BackupRemote) { self.base = base; baseURL = base.baseURL }
+        init(_ base: any BackupRemote, delaysReady: Bool = false,
+             beforeVerify: @escaping @Sendable (BackupAPI.Version) async -> Void = { _ in }) {
+            self.base = base
+            baseURL = base.baseURL
+            released = !delaysReady
+            self.beforeVerify = beforeVerify
+        }
         func release() { released = true }
         func changes(after cursor: Int64, epoch: String) async throws -> BackupAPI.Changes {
             let page = try await base.changes(after: cursor, epoch: epoch)
@@ -126,7 +135,12 @@ import UIKit
                               resource: ServerAPI.ResourceDescriptor, to file: URL) async throws -> HTTPURLResponse {
             try await base.downloadOriginal(version: version, requestID: requestID, resource: resource, to: file)
         }
-        func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof { try await base.verify(version) }
+        func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof {
+            await beforeVerify(version)
+            let proof = try await base.verify(version)
+            verified.append(version)
+            return proof
+        }
         func acknowledge(_ acknowledgement: BackupAPI.DeliveryAcknowledgement) async throws { try await base.acknowledge(acknowledgement) }
     }
 
@@ -137,6 +151,116 @@ import UIKit
             await Task.yield()
         }
         try #require(try await condition(), "The synthetic delivery did not reach its expected state")
+    }
+
+    private actor OneShotBarrier {
+        private let pauseAt: Int
+        private(set) var arrivals = 0
+        private var released = false
+        private var waiter: CheckedContinuation<Void, Never>?
+
+        init(pauseAt: Int = 1) { self.pauseAt = pauseAt }
+
+        func pause() async {
+            arrivals += 1
+            guard arrivals == pauseAt, !released else { return }
+            await withCheckedContinuation { waiter = $0 }
+        }
+
+        func release() {
+            released = true
+            waiter?.resume()
+            waiter = nil
+        }
+    }
+
+    private func automaticRunHoldingRefresh(
+        premium: Premium,
+        exercise: @MainActor (Fixture, AppSettings, CompactJob, AutomaticMode) async throws -> Void
+    ) async throws -> (summary: AutomaticMode.Summary, operations: [BackupStore.Operation]) {
+        let fixture = try await Fixture.make(), barrier = OneShotBarrier()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let job = CompactJob(settings: settings, ledger: fixture.ledger)
+        let automatic = AutomaticMode(url: fixture.folder.appendingPathComponent("automatic.json"),
+            photos: fixture.session.library, system: false, refreshServerInfo: {
+                await $0.refreshServerInfo()
+                await barrier.pause()
+            })
+        let photo = try sample(fixture.session.library, "photo")
+        try await job.ledger.store.setKeptDecision(
+            fixture.session.library.allIdentifiers().filter { $0 != photo.id },
+            namespace: job.ledger.namespace, kept: true)
+        await automatic.enable(existing: true)
+        let run = Task { await automatic.run(settings: settings, job: job, premium: premium, notify: false) }
+        do {
+            try await eventually { await barrier.arrivals > 0 }
+            #expect(automatic.running && settings.serverStatus == .reachable)
+            try await exercise(fixture, settings, job, automatic)
+            #expect(await barrier.arrivals == 1)
+            await barrier.release()
+            let summary = await run.value
+            #expect(!automatic.running)
+            let operations = try await job.ledger.store.operations()
+            await job.stopAndWait()
+            try await job.ledger.store.close()
+            return (summary, operations)
+        } catch {
+            await barrier.release()
+            _ = await run.value
+            await job.stopAndWait()
+            try? await job.ledger.store.close()
+            throw error
+        }
+    }
+
+    @Test func automaticRunOwnsSelectionBeforeItsFirstSuspension() async throws {
+        let premium = Premium(ownBuild: true, listens: false)
+        let result = try await automaticRunHoldingRefresh(premium: premium) { _, settings, job, automatic in
+            let overlap = await automatic.run(settings: settings, job: job, premium: premium, notify: false)
+            #expect(overlap == AutomaticMode.Summary())
+            #expect(automatic.running, "The overlapping call must not release the first run's ownership")
+            #expect(try await job.ledger.store.operations().isEmpty)
+        }
+        #expect(result.summary.queued == 1 && result.summary.skipped == nil)
+        #expect(result.operations.count == 1, "The owning run must still be able to admit its selection")
+    }
+
+    enum AutomaticInvalidation: CaseIterable, Sendable { case disableReenable, repaired, premiumRevoked }
+
+    @Test(arguments: AutomaticInvalidation.allCases)
+    func automaticRunCannotAdmitObsoleteWorkAfterARefresh(_ change: AutomaticInvalidation) async throws {
+        let owned = Mutex(true)
+        let premium = Premium(ownBuild: false, owned: { owned.withLock { $0 } },
+            testFlightWithoutProduct: { false }, listens: false)
+        await premium.refresh()
+        try #require(premium.isUnlocked)
+        let result = try await automaticRunHoldingRefresh(premium: premium) { fixture, settings, job, automatic in
+            switch change {
+            case .disableReenable:
+                automatic.disable()
+                await automatic.enable(existing: true)
+                #expect(automatic.enabled && premium.isUnlocked)
+            case .repaired:
+                let oldToken = settings.client?.token
+                let client = try await fixture.pairedClient()
+                try settings.finishPairing(serverURL: DemoServer.baseURL,
+                    response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                    pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+                #expect(settings.client?.token != oldToken && settings.serverStatus == .reachable)
+            case .premiumRevoked:
+                owned.withLock { $0 = false }
+                await premium.refresh()
+                #expect(!premium.isUnlocked && automatic.enabled)
+            }
+            #expect(try await job.ledger.store.operations().isEmpty)
+        }
+        #expect(result.summary.queued == 0 && result.summary.skipped == nil)
+        #expect(result.operations.isEmpty, "A stale producer must not create even a durable admission")
     }
 
     @Test func foregroundDiscoveryDeliversAfterItsInitialBackoffAndPublishesTheFreeUpOffer() async throws {
@@ -156,7 +280,7 @@ import UIKit
                 response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
                 pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
             var context = try await settings.backupContext(store: job.ledger.store, namespace: job.ledger.namespace)
-            let remote = DelayedReadyRemote(context.remote)
+            let remote = ControlledRemote(context.remote, delaysReady: true)
             context.remote = remote
             let policy = try await settings.backupSpacePolicy(store: job.ledger.store)
             try await job.coordinator.activate(context, policy: policy)
@@ -522,6 +646,178 @@ import UIKit
         #expect(fixture.session.library.existing([photo.id, entry.compactIdentifier], includeHidden: true).count == 2)
         await model.library.stopAndWait()
         try await model.closeDemoStore()
+    }
+
+    private func withDurablePhotos(
+        count: Int,
+        exercise: @MainActor (Fixture, AppModel, [DemoSample]) async throws -> Void
+    ) async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        do {
+            let client = try await fixture.pairedClient()
+            try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+                response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+            let photos = Array(fixture.session.library.samples.filter { $0.kind == "photo" }.prefix(count))
+            try #require(photos.count == count)
+            let ids = Set(photos.map(\.id))
+            try #require(await model.job.enqueue(photos.map(\.id)) == ids)
+            try await model.job.runOpportunity()
+            try await model.job.runOpportunity()
+            let entries = try await model.job.ledger.snapshot()
+            try #require(ids.allSatisfy { entries[$0]?.verifiedCompact == true })
+            await model.library.stopAndWait()
+            try await exercise(fixture, model, photos)
+        } catch {
+            await model.library.stopAndWait()
+            try? await model.closeDemoStore()
+            throw error
+        }
+        try await model.closeDemoStore()
+    }
+
+    enum CompactChange: CaseIterable, Sendable { case deleted, changed }
+
+    @Test(arguments: CompactChange.allCases)
+    func originalRemovalRechecksAnEarlierCompactAfterAnotherItemsRemoteProof(_ change: CompactChange) async throws {
+        try await withDurablePhotos(count: 2) { fixture, model, photos in
+            let library = fixture.session.library, ledger = model.job.ledger
+            var context = try #require(model.job.bindingContext)
+            let barrier = OneShotBarrier(pauseAt: 2)
+            let remote = ControlledRemote(context.remote, beforeVerify: { _ in await barrier.pause() })
+            context.remote = remote
+            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library, batchLimit: 2)
+            let candidates = try await remover.candidates(only: Set(photos.map(\.id)))
+            try #require(candidates.count == 2)
+            let removal = Task {
+                try await remover.removeEligible(limit: nil, only: Set(photos.map(\.id)), progress: { _ in })
+            }
+            do {
+                try await eventually { await barrier.arrivals == 2 }
+                // The first complete proof succeeded; a different item's proof is still suspended.
+                let proved = await remote.verified
+                try #require(proved.count == 1)
+                let first = try #require(candidates.first { $0.entry.version == proved[0] })
+                let second = try #require(candidates.first { $0.original != first.original })
+                let secondName = try #require(library.describe(second.original)?.name)
+                let compactID = first.entry.compactIdentifier
+                let before = try library.sourceGeneration(compactID)
+                switch change {
+                case .deleted:
+                    try await library.delete([compactID])
+                    #expect(library.item(compactID) == nil)
+                case .changed:
+                    let compact = try #require(library.demoItem(compactID))
+                    var edited = try Data(contentsOf: compact.main)
+                    edited.append(0)
+                    try edited.write(to: compact.main)
+                    #expect(try library.sourceGeneration(compactID) != before)
+                }
+                let questions = fixture.asked.all.count
+                await barrier.release()
+                let report = try await removal.value
+                #expect(report.removed == [secondName])
+                #expect(report.blocked.count == 1 && !report.cancelled)
+                #expect(report.freedBytes == second.entry.originalBytes)
+                #expect(library.existing(photos.map(\.id), includeHidden: true) == [first.original])
+                #expect(library.item(second.entry.compactIdentifier) != nil)
+                #expect(fixture.asked.all.count == questions + 1)
+                let effect = try #require(try await ledger.store.effects(namespace: ledger.namespace, unfinished: false)
+                    .first { $0.kind == .removeOriginal })
+                #expect(effect.phase == .verified && effect.approvals.count == 2)
+                #expect(effect.approvals.first { $0.compact.identifier == compactID }?.compact == before)
+                #expect(effect.submitted == [second.original],
+                        "A previously checked but now invalid pair must never be submitted for original deletion")
+            } catch {
+                await barrier.release()
+                _ = try? await removal.value
+                throw error
+            }
+        }
+    }
+
+    enum KeepPersistenceFault: CaseIterable, Sendable {
+        case recordPhotosSuccess, completeDecision
+
+        var trigger: String {
+            switch self {
+            case .recordPhotosSuccess:
+                """
+                CREATE TRIGGER fail_keep_persistence BEFORE UPDATE OF phase ON photo_effects
+                WHEN NEW.kind = 'keepOriginal' AND NEW.phase = 'created'
+                BEGIN SELECT RAISE(ABORT, 'injected Photos outcome write failure'); END
+                """
+            case .completeDecision:
+                """
+                CREATE TRIGGER fail_keep_persistence BEFORE INSERT ON decisions WHEN NEW.kept = 1
+                BEGIN SELECT RAISE(ABORT, 'injected Keep Original finalization failure'); END
+                """
+            }
+        }
+    }
+
+    @Test(arguments: KeepPersistenceFault.allCases)
+    func keepOriginalSurfacesPersistenceFailureAndReconcilesAfterRestartWithoutDeletingAgain(
+        _ fault: KeepPersistenceFault
+    ) async throws {
+        try await withDurablePhotos(count: 1) { fixture, model, photos in
+            let library = fixture.session.library, ledger = model.job.ledger, store = ledger.store
+            let original = try #require(photos.first).id
+            let mapping = try #require(try await store.mappings(namespace: ledger.namespace)[original])
+            let compactID = mapping.entry.compactIdentifier
+            let generation = try library.sourceGeneration(original)
+            let questions = fixture.asked.all.count
+            // SQLite aborts the real transaction, not a stand-in for the keeper's result.
+            try await store.mutateState { try $0.execute(fault.trigger) }
+            await #expect(throws: BackupDatabase.Failure.self) {
+                try await BackupKeeper(ledger: ledger, photos: library).keep([original])
+            }
+            #expect(fixture.asked.all.count == questions + 1)
+            #expect(library.existing([original, compactID], includeHidden: true) == [original])
+            #expect(try library.sourceGeneration(original) == generation)
+            let intent = try #require(try await store.effects(namespace: ledger.namespace).first { $0.kind == .keepOriginal })
+            #expect(intent.phase == (fault == .recordPhotosSuccess ? .uncertain : .created))
+            #expect(intent.problem != nil && intent.mappings.map(\.id) == [mapping.id])
+            #expect(intent.approvals.map(\.original) == [generation])
+            #expect(intent.submitted == (fault == .recordPhotosSuccess ? [] : [compactID]))
+            #expect(try await store.mappings(namespace: ledger.namespace)[original]?.id == mapping.id)
+            #expect(try await ledger.decisions().isEmpty)
+            #expect(try await store.readState { try $0.rows("SELECT 1 FROM legacy_backed_up").isEmpty },
+                    "A failed finalization must roll back even the writes before its decision")
+
+            try await store.close()
+            let reopened = BackupStore(directory: store.files.root, legacyURL: nil, processID: UUID())
+            do {
+                try await reopened.open()
+                #expect(try await reopened.effect(intent.id) == intent)
+                try await reopened.mutateState { try $0.execute("DROP TRIGGER fail_keep_persistence") }
+                let resumedLedger = CompactLedger(store: reopened, namespace: ledger.namespace)
+                let asked = fixture.asked
+                let resumedPhotos = DemoLibrary(folder: library.folder, media: fixture.media, ask: { asked.ask($0) })
+                #expect(resumedPhotos.existing([original, compactID], includeHidden: true) == [original])
+                let keeper = BackupKeeper(ledger: resumedLedger, photos: resumedPhotos)
+                try await keeper.reconcile()
+                let completed = try #require(try await reopened.effect(intent.id))
+                #expect(completed.phase == .verified && completed.submitted == [compactID])
+                #expect(try await resumedLedger.entry(for: original) == nil)
+                #expect(try await resumedLedger.decisions() == [original])
+                let kept = try #require(try await resumedLedger.backedUpSnapshot()[original])
+                #expect(kept.kept == true && kept.version == mapping.proof?.version && kept.origin == mapping.origin)
+                #expect(kept.originalBytes == mapping.entry.originalBytes && kept.operationID != nil)
+                #expect(try resumedPhotos.sourceGeneration(original) == generation)
+                #expect(try await reopened.effects(namespace: ledger.namespace).isEmpty)
+                #expect(!(try await keeper.keep([original])))
+                try await keeper.reconcile()
+                #expect(try await reopened.effect(intent.id) == completed)
+                #expect(try await reopened.effects(namespace: ledger.namespace, unfinished: false).count == 1)
+                #expect(fixture.asked.all.count == questions + 1, "Recovery must not ask Photos to delete again")
+                try await reopened.close()
+            } catch {
+                try? await reopened.close()
+                throw error
+            }
+        }
     }
 
     @Test func copyFinderRevalidatesThroughTheRealV2WireContractWithoutUploadingOrInventingHistoricalProvenance() async throws {
