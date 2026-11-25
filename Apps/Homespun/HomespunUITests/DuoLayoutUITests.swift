@@ -486,7 +486,7 @@ final class DuoLayoutUITests: XCTestCase {
             return
         }
         let run = app.descendants(matching: .any).matching(identifier: "activity.run").firstMatch
-        XCTAssertTrue(run.exists, "landscape: no list beside the run")
+        XCTAssertTrue(app.scrollSidebar(to: run), "landscape: no list beside the run")
         XCTAssertLessThan(run.frame.maxX, rows.firstMatch.frame.minX + 1, "landscape: the list isn't beside the run")
     }
 

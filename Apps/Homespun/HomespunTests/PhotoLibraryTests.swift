@@ -124,6 +124,9 @@ import UniformTypeIdentifiers
         metadata.kind = .livePhoto
         metadata.generation.width = 320; metadata.generation.height = 240
         metadata.generation.resources = resources.map { .init(role: $0.descriptor.role, name: $0.descriptor.filename, bytes: $0.descriptor.size) }
+        let validation = try await PhotoResourceHandoff.validateLivePhoto(resources)
+        #expect(validation == .valid)
+        #expect(try PhotoResourceHandoff.orphans(in: workspace.staging).isEmpty)
         let photos = PhotoKitSource()
         for restore in [false, true] {
             let identifier: String

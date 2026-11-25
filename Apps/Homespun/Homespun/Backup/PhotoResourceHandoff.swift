@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Darwin
 import Foundation
+import HomespunMedia
 import Synchronization
 import UniformTypeIdentifiers
 
@@ -92,8 +93,26 @@ struct PhotoResourceHandoff: Sendable {
 
     static func use(_ files: [PreparedPhotoResource],
                     _ operation: @Sendable ([PreparedPhotoResource]) async throws -> String) async throws -> String {
+        try await withResources(files, createdIdentifier: { $0 }, operation)
+    }
+
+    static func validateLivePhoto(_ files: [PreparedPhotoResource]) async throws -> LivePhotoValidator.Outcome {
+        try await withResources(files, createdIdentifier: { _ in nil }) { resources in
+            guard let photo = resources.first(where: { $0.descriptor.role == .photo }),
+                  let motion = resources.first(where: { $0.descriptor.role == .pairedVideo }) else {
+                throw Failure.invalidResource
+            }
+            return await LivePhotoValidator.validate(photo: photo.url, video: motion.url)
+        }
+    }
+
+    private static func withResources<Value: Sendable>(
+        _ files: [PreparedPhotoResource],
+        createdIdentifier: @Sendable (Value) -> String?,
+        _ operation: @Sendable ([PreparedPhotoResource]) async throws -> Value
+    ) async throws -> Value {
         let handoff = try prepare(files)
-        let result: Result<String, any Error>
+        let result: Result<Value, any Error>
         do { result = .success(try await operation(handoff.resources)) }
         catch { result = .failure(error) }
         do { try handoff.finish() }
@@ -101,7 +120,7 @@ struct PhotoResourceHandoff: Sendable {
             let identifier: String?
             let problem: String
             switch result {
-            case .success(let created): identifier = created; problem = cleanup.localizedDescription
+            case .success(let created): identifier = createdIdentifier(created); problem = cleanup.localizedDescription
             case .failure(let failure):
                 if let created = failure as? PhotosCreationFailure { identifier = created.identifier }
                 else if let original = failure as? PhotoLibrary.Failure,

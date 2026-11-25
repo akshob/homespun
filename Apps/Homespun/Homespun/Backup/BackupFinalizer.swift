@@ -144,7 +144,7 @@ struct BackupFinalizer: Sendable {
                     made = .init(fileID: fileID, url: output, descriptor: descriptor)
                 }
                 progress("Checking Live Photo")
-                if case .invalid(let reason) = await LivePhotoValidator.validate(photo: photo.url, video: made.url) {
+                if case .invalid(let reason) = try await PhotoResourceHandoff.validateLivePhoto([photo, made]) {
                     throw PhotoLibrary.Failure.livePhotoInvalid(reason)
                 }
                 files.append(made)
@@ -154,7 +154,7 @@ struct BackupFinalizer: Sendable {
                     throw BackupStore.Failure.invalidImport
                 }
                 progress("Checking Live Photo")
-                if case .invalid(let reason) = await LivePhotoValidator.validate(photo: photo.url, video: motion.url) {
+                if case .invalid(let reason) = try await PhotoResourceHandoff.validateLivePhoto([photo, motion]) {
                     throw PhotoLibrary.Failure.livePhotoInvalid(reason)
                 }
             }
