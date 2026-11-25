@@ -89,8 +89,7 @@ final class GridCell: UICollectionViewCell {
 
     func isConfigured(for state: LibraryState.Cell, selecting: Bool, selected: Bool, serverName: String) -> Bool {
         self.state == state && self.selecting == selecting && self.selected == selected && self.serverName == serverName
-            && configuredTraits?.preferredContentSizeCategory == traitCollection.preferredContentSizeCategory
-            && configuredTraits?.userInterfaceStyle == traitCollection.userInterfaceStyle
+            && configuredTraits?.isEqual(traitCollection) == true
     }
 
     /// The badge, selection and VoiceOver's words, from the item's current state.
