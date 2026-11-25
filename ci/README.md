@@ -55,7 +55,11 @@ attached to this public one.
 
 The iPhone demo run also checks app-side redraw counters (`-perfMonitor YES`): eight backups and Select All must not
 reload the grid, blank unchanged pictures, or reevaluate the root per item. The filtered variant
-checks incremental removals. `perf.sh` backs up twenty items against its own disposable HTTPS
+checks incremental removals. `grid.visibleImageClears` uses the collection view's display lifecycle:
+it must stay zero for unchanged visible pictures. The original `grid.imageClears` total is still
+reported and bounded by thumbnail requests; clearing a recycled, not-yet-displayed cell is not
+visible flicker. Configuration, thumbnail-request and root-render budgets are unchanged.
+`perf.sh` backs up twenty items against its own disposable HTTPS
 server (port 18808) and a disposable clone of the synthetic library: zero frames over 50 ms,
 hitch time ≤ 5 ms/s, `GridApply` p95 ≤ 2 ms,
 and at most one `BuildState` per finished item. These counters and timings appear in `perf.monitor`.

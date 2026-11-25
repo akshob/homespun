@@ -29,6 +29,25 @@ struct GridChangeTests {
         #expect(cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Home"))
     }
 
+    @Test @MainActor func cellConfigurationUsesVisibleMeaningRatherThanUnrenderedProvenance() {
+        let cell = GridCell(frame: .zero), state = gridCell("original", badge: .kept)
+        cell.update(state: state, selecting: false, selected: false, serverName: "Home")
+        var metadata = state
+        metadata.serverOrigin = .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
+        metadata.serverName = "Confirmed server"
+        metadata.compactAfter = Date(timeIntervalSince1970: 2_000_000_000)
+        #expect(cell.isConfigured(for: metadata, selecting: false, selected: false, serverName: "Home"))
+        var actionable = gridCell("copy", badge: .originalOnPhone, original: "original")
+        actionable.canFree = false
+        cell.update(state: actionable, selecting: true, selected: false, serverName: "Home")
+        actionable.canFree = true
+        #expect(!cell.isConfigured(for: actionable, selecting: true, selected: false, serverName: "Home"))
+        cell.update(state: gridCell("recent", badge: .copyLater), selecting: false, selected: false, serverName: "Home")
+        var scheduled = gridCell("recent", badge: .copyLater)
+        scheduled.compactAfter = metadata.compactAfter
+        #expect(!cell.isConfigured(for: scheduled, selecting: false, selected: false, serverName: "Home"))
+    }
+
     @Test func jobDiffOnlyIncludesChangedBadges() {
         var state = LibraryState(cells: [gridCell("a"), gridCell("b", badge: .working),
                                         gridCell("copy", badge: .originalOnPhone, original: "c")])

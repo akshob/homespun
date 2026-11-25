@@ -699,7 +699,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
         // A cell made ahead of time may show an older badge or selection.
-        if let cell = cell as? GridCell, let position = position(indexPath) { update(cell, position: position) }
+        if let cell = cell as? GridCell, let position = position(indexPath) {
+            cell.imageWillDisplay()
+            update(cell, position: position)
+        }
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        (cell as? GridCell)?.imageDidEndDisplaying()
     }
 
     // MARK: Prefetching

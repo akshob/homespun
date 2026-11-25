@@ -54,7 +54,8 @@ final class GridRedrawUITests: XCTestCase {
         XCTAssertLessThanOrEqual(delta("render.mainTab"), 2)
         XCTAssertLessThanOrEqual(delta("render.library"), 4)
         XCTAssertEqual(delta("grid.reloads"), 0)
-        XCTAssertEqual(delta("grid.imageClears"), 0)
+        XCTAssertEqual(delta("grid.visibleImageClears"), 0)
+        XCTAssertLessThanOrEqual(delta("grid.imageClears"), delta("grid.thumbRequests"))
         XCTAssertLessThanOrEqual(delta("grid.thumbRequests"), 8)
         XCTAssertLessThanOrEqual(delta("grid.configs"), 40)
     }
@@ -127,7 +128,8 @@ final class GridRedrawUITests: XCTestCase {
         XCTAssertEqual(delta("grid.reloads"), 0)
         if allItems {
             XCTAssertGreaterThanOrEqual(delta("grid.swaps"), 1)
-            XCTAssertEqual(delta("grid.imageClears"), 0)
+            XCTAssertEqual(delta("grid.visibleImageClears"), 0)
+            XCTAssertLessThanOrEqual(delta("grid.imageClears"), delta("grid.thumbRequests"))
             XCTAssertLessThanOrEqual(delta("grid.thumbRequests"), n)
             XCTAssertLessThanOrEqual(delta("grid.configs"), (selectAll ? 2.5 : 4) * n + 8)
             XCTAssertLessThanOrEqual(delta("grid.layouts"), 4)
