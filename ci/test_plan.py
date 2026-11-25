@@ -60,7 +60,7 @@ class TargetedUIPlanTests(unittest.TestCase):
             self.assertFalse(result[key], key)
 
     def test_manual_focused_ui_does_not_repeat_the_full_matrix(self):
-        for choice in ("duo-open", "iphone", "library"):
+        for choice in (run for run in FULL if run != "copies"):
             with self.subTest(choice=choice):
                 result = plan({"MODE": "manual", "UI_INPUT": choice}, [])
                 self.assertTrue(result["app"])

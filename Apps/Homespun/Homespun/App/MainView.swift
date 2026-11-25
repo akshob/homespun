@@ -188,12 +188,14 @@ struct MainTabView: View {
         }
         .task {
             await model.library.start { model.status?.start() }
-            #if DEBUG
+        }
+        #if DEBUG
+        .task {
             if ProcessInfo.processInfo.arguments.contains("-deleteNewestBackedUp") {
                 await model.library.deleteNewestBackedUpForTesting()
             }
-            #endif
         }
+        #endif
     }
 
     /// Free Up Space: a sheet on a phone and iPhone Duo's cover; the whole screen on the open Duo,

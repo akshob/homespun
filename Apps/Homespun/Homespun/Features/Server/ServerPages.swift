@@ -105,7 +105,8 @@ struct AutomaticModeView: View {
             } header: {
                 Text("Status")
             } footer: {
-                Text("Automatic mode never removes originals. You choose when to free up space.")
+                Text("Automatic mode never removes originals. You choose when to free up space. "
+                     + "Deleting an item in Photos does not delete its verified backup from your server.")
             }
             .listRowBackground(Theme.card)
         }

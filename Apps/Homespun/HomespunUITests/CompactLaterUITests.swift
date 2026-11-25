@@ -2,8 +2,8 @@
 import XCTest
 
 /// Automatic mode backs recent items up at once and makes their compact copies only once they're
-/// old enough (Server › Automatic Mode, the slider). A recent item deleted on the iPhone meanwhile
-/// goes to the server's trash. Needs a fresh simulator whose library holds old synthetic media plus
+/// old enough (Server › Automatic Mode, the slider). Deleting a recent item on the iPhone leaves its
+/// permanently retained server original intact. Needs a fresh simulator with old synthetic media plus
 /// `HOMESPUN_RECENT` items added today, and a server (`HOMESPUN_SERVER`, `HOMESPUN_PAIRING_CODE`);
 /// `ci/later.sh` sets this up. The tests run in order.
 final class CompactLaterUITests: XCTestCase {
@@ -21,7 +21,8 @@ final class CompactLaterUITests: XCTestCase {
     }
 
     @MainActor private func waitForAutomatic(_ app: XCUIApplication, until done: () -> Bool) {
-        let busy = app.gridItems().matching(NSPredicate(format: "value BEGINSWITH 'Waiting' OR value BEGINSWITH 'Backing up'"))
+        let busy = app.gridItems().matching(NSPredicate(
+            format: "value IN {'Waiting', 'Backing up', 'Processing on server'}"))
         let progress = app.descendants(matching: .any)["job.progress"]
         let deadline = Date().addingTimeInterval(900)
         repeat { sleep(3) } while (busy.count > 0 || progress.exists || !done()) && Date() < deadline
@@ -71,12 +72,25 @@ final class CompactLaterUITests: XCTestCase {
         attach(app, "Backed up item")
     }
 
-    /// Deleted on the iPhone before its compact copy: the server moves the original to its trash.
-    @MainActor func test2ACleanedUpItemGoesToTheServersTrash() throws {
+    /// A phone deletion cannot withdraw a permanent retention claim or authorize server trash.
+    @MainActor func test2DeletingARecentItemKeepsItsRetainedServerOriginal() throws {
         guard ProcessInfo.processInfo.environment["HOMESPUN_SERVER"] != nil, let recent else {
             throw XCTSkip("Run with ci/later.sh.")
         }
-        let app = launch(["-deleteNewestBackedUp"])
+        @MainActor func storedOriginals(_ app: XCUIApplication) -> String {
+            app.openTab("Server")
+            let originals = app.buttons["settings.originals"]
+            XCTAssertTrue(app.reveal(originals))
+            originals.tap()
+            let summary = app.staticTexts["originals.summary"]
+            XCTAssertTrue(summary.waitForExistence(timeout: 15), "no retained-original storage summary")
+            return summary.label.components(separatedBy: " · ").prefix(2).joined(separator: " · ")
+        }
+        var app = launch()
+        let retained = storedOriginals(app)
+        XCTAssertFalse(retained.hasPrefix("0 "), "the server has no retained originals")
+        app.terminate()
+        app = launch(["-deleteNewestBackedUp"])
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let confirmation = [app.alerts.buttons["Delete"], springboard.alerts.buttons["Delete"]]
         let deadline = Date().addingTimeInterval(60)
@@ -88,14 +102,10 @@ final class CompactLaterUITests: XCTestCase {
         while later.count != recent - 1, Date() < gone { sleep(1) }
         XCTAssertEqual(later.count, recent - 1)
 
-        app.openTab("Server")
-        let originals = app.buttons["settings.originals"]
-        XCTAssertTrue(app.reveal(originals))
-        originals.tap()
+        XCTAssertEqual(storedOriginals(app), retained, "a phone deletion changed retained server bytes")
         let trash = app.descendants(matching: .any)["originals.trash"]
-        XCTAssertTrue(app.scrollTo(trash), "no trash on the server")
-        XCTAssertTrue(trash.label.contains("1"), trash.label)
-        attach(app, "Server trash")
+        XCTAssertFalse(trash.exists, "a permanent original was moved to server trash")
+        attach(app, "Retained server originals")
     }
 
     /// The slider moved to Right Away: the next run compacts what was waiting.

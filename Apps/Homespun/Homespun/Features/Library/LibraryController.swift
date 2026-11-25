@@ -571,21 +571,35 @@ final class LibraryController {
     static func bytes(_ count: Int) -> String { count.formatted(.byteCount(style: .file)) }
 
     #if DEBUG
+    @ObservationIgnored private var testingDeletionStarted = false
+
     /// UI tests: deletes the newest item backed up without a compact copy, as a person cleaning up
-    /// recent photos would (iOS asks first), then refreshes, which tells the server.
+    /// recent photos would (iOS asks first). Permanent server retention is unchanged.
     func deleteNewestBackedUpForTesting() async {
-        let ids: [String]
-        do { ids = Array(try await job.ledger.backedUpSnapshot().keys) }
-        catch { job.showQueueProblem(error); return }
-        var newest: (id: String, date: Date)?
-        PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
-            let date = asset.creationDate ?? .distantPast
-            if newest.map({ date > $0.date }) ?? true { newest = (asset.localIdentifier, date) }
+        guard !testingDeletionStarted, admit() else { return }
+        testingDeletionStarted = true
+        defer { finishedOperation() }
+        await job.refreshQueue()
+        do {
+            guard let origin = job.activeOrigin else { throw BackupStore.Failure.retiredBinding }
+            let entries = try await job.ledger.backedUpSnapshot().filter {
+                $0.value.origin == origin && $0.value.version != nil
+            }
+            var newest: (id: String, date: Date)?
+            PHAsset.fetchAssets(withLocalIdentifiers: Array(entries.keys), options: nil).enumerateObjects { asset, _, _ in
+                let date = asset.creationDate ?? .distantPast
+                if newest.map({ date > $0.date }) ?? true { newest = (asset.localIdentifier, date) }
+            }
+            guard let newest else {
+                throw BackupStageFailure.blocked("No current-server backed-up original is available for the test deletion.")
+            }
+            try Task.checkCancellation()
+            try await Self.delete(newest.id)
+            await refresh()
+            await refreshGrid()
+        } catch {
+            job.showQueueProblem(error)
         }
-        guard let newest else { return }
-        try? await Self.delete(newest.id)
-        await refresh()
-        await refreshGrid()
     }
 
     private nonisolated static func delete(_ id: String) async throws {

@@ -55,12 +55,12 @@ def plan(env, files):
         if choice == "package":
             return {"server": False, "telemetry": False, "site": False, "app": False, "package": True,
                     "ui": [], "why": f"Run workflow on {env.get('REF_NAME', '?')} (macOS package only)"}
-        if choice in ("watch", "duo-open", "iphone", "library"):
-            return {"server": False, "telemetry": False, "site": False, "app": True, "package": False,
-                    "ui": [choice], "why": f"Run workflow on {env.get('REF_NAME', '?')} ({choice} only)"}
         if choice == "copies":
             return {"server": True, "telemetry": False, "site": False, "app": True, "package": True,
                     "ui": ["copies"], "why": f"Run workflow on {env.get('REF_NAME', '?')} (copy recovery and server contracts)"}
+        if choice in FULL:
+            return {"server": False, "telemetry": False, "site": False, "app": True, "package": False,
+                    "ui": [choice], "why": f"Run workflow on {env.get('REF_NAME', '?')} ({choice} only)"}
         ui = {"none": [], "quick": QUICK, "full": FULL}[choice]
         return {"server": True, "telemetry": True, "site": True, "app": True, "package": True, "ui": ui,
                 "why": f"Run workflow on {env.get('REF_NAME', '?')} (UI: {choice})"}

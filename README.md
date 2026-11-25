@@ -165,11 +165,12 @@ launch if the Keychain is unavailable. The demo uses only drawn and bundled medi
   - **Compact copies later**: originals go home right away, but compact copies are made only
     once an item is older than a cutoff you set with a slider (Right Away, 1 Week, 1 Month
     (default), 2 Months, 3 Months), counted from when it was taken or added, whichever is later.
-    Until then the item shows "Backed up" and the server keeps it as `stored`, sending nothing
-    back. Favorites can be kept as they are. Backing up by hand compacts right away.
-  - **Cleaned-up items**: a waiting item you delete on the iPhone (Photos reports the deletion)
-    moves to the server's trash, `<originals>/.trash/<item>/`, and is deleted after 30 days;
-    recovering it on the iPhone puts it back. Anything with a compact copy is never trashed.
+    Until then the item shows "Backed up" and the server retains its complete original, sending no
+    compact copy back. Favorites can be kept as they are. Backing up by hand compacts right away.
+  - **Cleaned-up items**: version 1.1.0 requests permanent retention, including recent Automatic
+    backups. Deleting an item in Photos does not withdraw its server claim or move its original to
+    server trash. Legacy deferred cleanup is not applied to these backups, and no existing permanent
+    request is reclassified as temporary.
 - **Widgets**: what's ready to free up (size and items), the last backup (when, how many), whether
   the server can be reached (by name) and Automatic Mode ("Tonight while charging", "Off"), on the
   Home Screen (small, medium), the Lock Screen (circular, rectangular, inline) and Apple Watch
