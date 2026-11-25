@@ -312,17 +312,28 @@ final class DuoLayoutUITests: XCTestCase {
             }
             XCTAssertTrue(field.waitForExistence(timeout: 15), "the Name editor closed in \(name)")
             XCTAssertEqual(field.value as? String, "Unfinished family phone", "the draft was replaced in \(name)")
-            XCTAssertTrue(app.buttons["device.name.save"].isEnabled)
+            let save = app.buttons["device.name.save"]
+            let saveExists = save.exists
+            XCTAssertTrue(saveExists, "the Name Save button disappeared in \(name)")
+            if saveExists {
+                XCTAssertTrue(save.isEnabled)
+                XCTAssertTrue(save.isHittable, "the Name Save button isn't usable in \(name)")
+            }
             XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "focus didn't return in \(name)")
         }
         // Back abandons the draft; ordinary nonediting pages keep their fold-to-list policy.
         app.goBack()
         XCTAssertTrue(field.waitForNonExistence(timeout: 10), "Back didn't leave the Name editor")
+        XCTAssertFalse(app.buttons["device.name.save"].exists, "Save outlived the Name editor")
         XCTAssertTrue(app.reveal(row))
         row.tap()
         XCTAssertTrue(field.waitForExistence(timeout: 15))
         XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
         XCTAssertEqual(field.value as? String, old, "Back saved or retained the abandoned draft")
+        let reopenedSave = app.buttons["device.name.save"]
+        let reopenedSaveExists = reopenedSave.exists
+        XCTAssertTrue(reopenedSaveExists, "Save didn't return with the Name editor")
+        if reopenedSaveExists { XCTAssertFalse(reopenedSave.isEnabled, "the abandoned draft is still eligible to save") }
         app.goBack()
     }
 

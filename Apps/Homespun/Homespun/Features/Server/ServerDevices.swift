@@ -308,8 +308,8 @@ struct DeviceNameView: View {
     let settings: AppSettings
     @Bindable var draft: DeviceNameDraft
     var renamed: (ServerAPI.DeviceInfo) -> Void = { _ in }
+    var close: () -> Void
     @FocusState private var focused: Bool
-    @Environment(\.dismiss) private var dismiss
 
     private var server: String { settings.server?.name ?? "the server" }
     private var device: ServerAPI.DeviceInfo? { draft.device }
@@ -346,20 +346,19 @@ struct DeviceNameView: View {
         .homespunList()
         .navigationTitle("Name")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button(role: .confirm) { Task { await save() } } label: {
-                    if working { ProgressView() } else { Label("Save", systemImage: "checkmark") }
-                }
-                .disabled(!canSave)
-                .accessibilityIdentifier("device.name.save")
-            }
-        }
         .task {
             await load()
             if !Task.isCancelled { focused = draft.wantsFocus }
         }
         .onChange(of: focused) { _, focused in if focused { draft.wantsFocus = true } }
+    }
+
+    var saveButton: some View {
+        Button(role: .confirm) { Task { await save() } } label: {
+            if working { ProgressView() } else { Label("Save", systemImage: "checkmark") }
+        }
+        .disabled(!canSave)
+        .accessibilityIdentifier("device.name.save")
     }
 
     private func load() async {
@@ -383,7 +382,7 @@ struct DeviceNameView: View {
             settings.confirmDeviceName(updated.name)
             renamed(updated)
             Announce.say("Renamed to \(updated.name).")
-            dismiss()
+            close()
         } catch let failure as ServerClient.Failure where failure.status == 404 || failure.status == 405 {
             draft.error = "Update Homespun Server on \(server) to rename this iPhone."
         } catch {

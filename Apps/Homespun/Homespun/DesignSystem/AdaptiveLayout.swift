@@ -44,6 +44,8 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
     var defaultRoute: Route?
     /// Editors can retain the existing route while ordinary detail pages still fold to the list.
     var retainsOnFold: (Route) -> Bool = { _ in false }
+    /// An editor's confirmation belongs to its navigation host, not to the destination being transferred.
+    var confirmation: (Route) -> AnyView? = { _ in nil }
     /// The list, given the sidebar's selection (none in a stack, where its links push).
     @ViewBuilder var root: (Binding<Route?>?) -> Root
     @ViewBuilder var destination: (Route) -> Destination
@@ -62,7 +64,7 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
                 split.onAppear { unfolded = true }
             } else {
                 NavigationStack(path: $path) {
-                    root(nil).navigationDestination(for: Route.self) { destination($0) }
+                    root(nil).navigationDestination(for: Route.self) { page($0, host: "compact") }
                 }
                 .onAppear { folded() }
             }
@@ -82,6 +84,18 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
             path = SidebarNavigation.selecting(new, in: path, retaining: retainsOnFold)
             listShown = false
         })
+    }
+
+    @ViewBuilder private func page(_ route: Route, host: String) -> some View {
+        // Outgoing and incoming editor content overlap during a fold; their toolbar registrations are host-scoped.
+        if let action = confirmation(route) {
+            destination(route)
+                .toolbar {
+                    ToolbarItem(id: "editor.confirmation." + host, placement: .confirmationAction) { action }
+                }
+        } else {
+            destination(route)
+        }
     }
 
     /// Wide: the list beside the detail. Tall: the detail alone unless the list was asked for.
@@ -107,9 +121,9 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
             NavigationStack(path: Binding(get: { Array(path.dropFirst()) },
                                           set: { rest in path = Array(path.prefix(1)) + rest })) {
                 Group {
-                    if let route = path.first ?? defaultRoute { destination(route) } else { empty }
+                    if let route = path.first ?? defaultRoute { page(route, host: "detail") } else { empty }
                 }
-                .navigationDestination(for: Route.self) { destination($0) }
+                .navigationDestination(for: Route.self) { page($0, host: "detail") }
             }
             .id(path.first ?? defaultRoute)
         }

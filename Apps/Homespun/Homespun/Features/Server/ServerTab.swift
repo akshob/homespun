@@ -43,7 +43,8 @@ struct ServerTab: View {
         let isPaired = settings.server != nil && settings.isPaired
         // Beside the list on the open iPhone Duo: Server Check (Help and About before pairing).
         SplitNavigation(path: $path, defaultRoute: isPaired ? .check : .help,
-                        retainsOnFold: { $0 == .deviceName }) { selection in
+                        retainsOnFold: { $0 == .deviceName },
+                        confirmation: { route in route == .deviceName ? AnyView(nameEditor.saveButton) : nil }) { selection in
             Group {
                 if let server = settings.server, settings.isPaired {
                     paired(server, selection: selection)
@@ -334,10 +335,7 @@ struct ServerTab: View {
             }
         case .compactCopies: CompactCopiesView(server: settings.server)
         case .devices: DevicesView(settings: settings, rename: { path.append(.deviceName) }) { path.append(.addDevice) }
-        case .deviceName: DeviceNameView(settings: settings, draft: nameDraft) { updated in
-            thisDevice = updated
-            devices = devices?.map { $0.isThisDevice ? updated : $0 }
-        }
+        case .deviceName: nameEditor
         case .addDevice: AddDeviceView(settings: settings)
         case .notifications: NotificationsView(model: model)
         case .wake: WakeSettingsView(enrollment: WakeSystem.enrollment, demo: settings.isDemo)
@@ -346,6 +344,17 @@ struct ServerTab: View {
         case .help: HelpAboutView(model: model)
         case .analytics: AnalyticsSettingsView(demo: settings.isDemo)
         }
+    }
+
+    private var nameEditor: DeviceNameView {
+        let draft = nameDraft
+        return DeviceNameView(settings: model.settings, draft: draft, renamed: { updated in
+            thisDevice = updated
+            devices = devices?.map { $0.isThisDevice ? updated : $0 }
+        }, close: {
+            guard nameDraft === draft, path.last == .deviceName else { return }
+            path.removeLast()
+        })
     }
 
     // MARK: Values
