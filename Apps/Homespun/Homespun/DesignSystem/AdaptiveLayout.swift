@@ -64,8 +64,9 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
                 split.onAppear { unfolded = true }
             } else {
                 NavigationStack(path: $path) {
-                    root(nil).navigationDestination(for: Route.self) { page($0, host: "compact") }
+                    root(nil).navigationDestination(for: Route.self) { destination($0) }
                 }
+                .toolbar { confirmationToolbar(for: path.last, host: "compact") }
                 .onAppear { folded() }
             }
         }
@@ -86,15 +87,10 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
         })
     }
 
-    @ViewBuilder private func page(_ route: Route, host: String) -> some View {
-        // Outgoing and incoming editor content overlap during a fold; their toolbar registrations are host-scoped.
-        if let action = confirmation(route) {
-            destination(route)
-                .toolbar {
-                    ToolbarItem(id: "editor.confirmation." + host, placement: .confirmationAction) { action }
-                }
-        } else {
-            destination(route)
+    /// Only the host's currently visible route supplies an action; Back or another route removes it.
+    @ToolbarContentBuilder private func confirmationToolbar(for route: Route?, host: String) -> some ToolbarContent {
+        if let route, let action = confirmation(route) {
+            ToolbarItem(id: "editor.confirmation." + host, placement: .confirmationAction) { action }
         }
     }
 
@@ -121,10 +117,11 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
             NavigationStack(path: Binding(get: { Array(path.dropFirst()) },
                                           set: { rest in path = Array(path.prefix(1)) + rest })) {
                 Group {
-                    if let route = path.first ?? defaultRoute { page(route, host: "detail") } else { empty }
+                    if let route = path.first ?? defaultRoute { destination(route) } else { empty }
                 }
-                .navigationDestination(for: Route.self) { page($0, host: "detail") }
+                .navigationDestination(for: Route.self) { destination($0) }
             }
+            .toolbar { confirmationToolbar(for: path.last ?? defaultRoute, host: "detail") }
             .id(path.first ?? defaultRoute)
         }
         .onAppear { listShown = false }
