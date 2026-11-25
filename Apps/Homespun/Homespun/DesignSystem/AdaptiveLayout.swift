@@ -22,6 +22,16 @@ enum GridColumns {
     }
 }
 
+enum SidebarNavigation {
+    static func selecting<Route>(_ route: Route?, in path: [Route],
+                                 retaining: (Route) -> Bool) -> [Route] {
+        if let route { return [route] }
+        // The disappearing sidebar can deselect its row while the compact stack takes over.
+        // That is not Back or an explicit choice to abandon an editor.
+        return path.contains(where: retaining) ? path : []
+    }
+}
+
 /// A tab's navigation (Activity, Server). On a compact width (an iPhone, iPhone Duo's cover) one
 /// stack. On a regular width (iPhone Duo open) the shape of Settings: the list as a sidebar and what
 /// it opens beside it, never an empty page (`defaultRoute`), deeper screens pushed in that column;
@@ -69,7 +79,7 @@ struct SplitNavigation<Route: Hashable, Root: View, Destination: View, Empty: Vi
     /// The sidebar's selection is the detail column's first screen; choosing another starts it afresh.
     private var selection: Binding<Route?> {
         Binding(get: { path.first ?? defaultRoute }, set: { new in
-            path = new.map { [$0] } ?? []
+            path = SidebarNavigation.selecting(new, in: path, retaining: retainsOnFold)
             listShown = false
         })
     }

@@ -298,17 +298,31 @@ final class DuoLayoutUITests: XCTestCase {
         row.tap()
         let field = app.textFields["device.name"]
         XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
         let old = field.value as? String ?? ""
         field.tap()
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + "Unfinished family phone")
-        for name in ["landscape", "portrait", "folded"] {
+        // Exercise the stack/split handoff before relying on the host's separate rotation action.
+        for name in ["landscape", "folded", "landscape", "portrait", "folded"] {
             pose(name, file: poses)
+            if name == "folded" {
+                XCTAssertTrue(app.wait(width: 0..<500), "the host didn't fold the display")
+            } else {
+                XCTAssertTrue(app.wait(wide: name == "landscape"), "the host didn't turn \(name)")
+            }
             XCTAssertTrue(field.waitForExistence(timeout: 15), "the Name editor closed in \(name)")
             XCTAssertEqual(field.value as? String, "Unfinished family phone", "the draft was replaced in \(name)")
             XCTAssertTrue(app.buttons["device.name.save"].isEnabled)
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "focus didn't return in \(name)")
         }
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "focus didn't return to the editor")
         // Back abandons the draft; ordinary nonediting pages keep their fold-to-list policy.
+        app.goBack()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10), "Back didn't leave the Name editor")
+        XCTAssertTrue(app.reveal(row))
+        row.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        XCTAssertEqual(field.value as? String, old, "Back saved or retained the abandoned draft")
         app.goBack()
     }
 

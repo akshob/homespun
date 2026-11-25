@@ -441,6 +441,16 @@ import UIKit
         #expect(draft.name == "An unfinished name" && draft.device == device && draft.wantsFocus)
     }
 
+    @Test func sidebarTeardownRetainsTheNameRouteWithoutChangingOrdinaryFoldNavigation() {
+        enum Route: Equatable { case name, devices, check }
+        let retaining: (Route) -> Bool = { $0 == .name }
+        let editor = SidebarNavigation.selecting(nil, in: [Route.devices, .name], retaining: retaining)
+        #expect(editor == [.devices, .name])
+        #expect(SidebarNavigation.selecting(nil, in: [Route.check], retaining: retaining).isEmpty)
+        #expect(SidebarNavigation.selecting(Route.check, in: editor, retaining: retaining) == [.check])
+        #expect(SidebarNavigation.selecting(nil, in: [Route](), retaining: retaining).isEmpty)
+    }
+
     private final class MemoryItem: Homespun.LibraryItem {
         let localIdentifier: String
         let picture: UIImage
