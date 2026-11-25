@@ -177,8 +177,10 @@ struct LibraryView: View, Equatable {
 
     /// The grid's UIKit cells are also the viewer's zoom sources.
     private var grid: some View {
-        GridView(library: controller.library, selection: selection, counts: counts, store: store, input: gridInput,
-                 actions: gridActions)
+        LibraryAggregate {
+            GridView(library: controller.library, selection: selection, counts: counts, store: store, input: gridInput,
+                     actions: gridActions)
+        }
             .ignoresSafeArea()
             .onAppear { Self.recordLaunch() }
     }

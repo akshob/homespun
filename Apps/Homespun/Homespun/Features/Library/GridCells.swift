@@ -26,6 +26,9 @@ final class GridCell: UICollectionViewCell {
     private var info: MediaInfo?
     private var state: LibraryState.Cell?
     private var serverName = ""
+    private var selecting = false
+    private var selected = false
+    private var configuredTraits: UITraitCollection?
 
     /// Whether the cell has a picture yet (the performance tests count cells shown without one).
     var hasImage: Bool { imageView.image != nil }
@@ -84,11 +87,18 @@ final class GridCell: UICollectionViewCell {
         updateMarks()
     }
 
+    func isConfigured(for state: LibraryState.Cell, selecting: Bool, selected: Bool, serverName: String) -> Bool {
+        self.state == state && self.selecting == selecting && self.selected == selected && self.serverName == serverName
+            && configuredTraits?.preferredContentSizeCategory == traitCollection.preferredContentSizeCategory
+            && configuredTraits?.userInterfaceStyle == traitCollection.userInterfaceStyle
+    }
+
     /// The badge, selection and VoiceOver's words, from the item's current state.
     func update(state: LibraryState.Cell, selecting: Bool, selected: Bool, serverName: String) {
         let badgeChanged = self.state?.badge != state.badge && self.state?.id == state.id
         self.state = state
         self.serverName = serverName
+        configuredTraits = traitCollection
         let size: CGFloat = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? 28 : 20
         let image = state.badge == .working ? GridStyle.halo(size: size) : GridStyle.badge(state.badge, size: size)
         if badgeChanged, badgeView.image != nil || image != nil {
@@ -103,6 +113,8 @@ final class GridCell: UICollectionViewCell {
 
     func updateSelection(selecting: Bool, selected: Bool) {
         RenderProbe.count("grid.selections")
+        self.selecting = selecting
+        self.selected = selected
         dim.isHidden = !selected
         let selectable = state.map { $0.canCompact || $0.canFree || $0.canRestore } ?? false
         let mark = selecting ? (selected ? GridStyle.checkmark(traitCollection) : selectable ? GridStyle.circle : nil) : nil
@@ -172,6 +184,7 @@ final class GridCell: UICollectionViewCell {
         // The picture stays until the next item is shown (it's cleared there if the item differs).
         cancelRequest()
         spinner.stopAnimating()
+        configuredTraits = nil
     }
 
     private func cancelRequest() {

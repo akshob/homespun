@@ -616,16 +616,19 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         guard let cell, let indexPath, let position = position(indexPath) else { return }
         RenderProbe.count("grid.configs")
         let id = data.cells[position].id
-        cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
+        let state = library.state.cell(id) ?? data.cells[position]
+        let keepImage = cell.item.map { state.original == $0 } ?? false
+        cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels, keepImage: keepImage)
         update(cell, position: position)
     }
 
     private func update(_ cell: GridCell, position: Int) {
-        RenderProbe.count("grid.configs")
         let initial = data.cells[position]
         let state = library.state.cell(initial.id) ?? initial
-        cell.update(state: state, selecting: selection.active, selected: selection.active && selection.ids.contains(initial.id),
-                    serverName: input.serverName)
+        let selecting = selection.active, selected = selecting && selection.ids.contains(initial.id)
+        guard !cell.isConfigured(for: state, selecting: selecting, selected: selected, serverName: input.serverName) else { return }
+        RenderProbe.count("grid.configs")
+        cell.update(state: state, selecting: selecting, selected: selected, serverName: input.serverName)
     }
 
     func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String,

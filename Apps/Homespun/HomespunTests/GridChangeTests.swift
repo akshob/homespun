@@ -13,6 +13,22 @@ private func gridData(_ cells: [LibraryState.Cell], months: [String: Int] = [:])
 }
 
 struct GridChangeTests {
+    @Test @MainActor func cellConfigurationTracksDirectSelectionAndReuseWithoutRepeatingUnchangedWork() {
+        let cell = GridCell(frame: .zero), state = gridCell("original", badge: .working)
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))
+        cell.update(state: state, selecting: true, selected: false, serverName: "Home")
+        #expect(cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))
+        cell.updateSelection(selecting: true, selected: true)
+        #expect(cell.accessibilityTraits.contains(.selected))
+        #expect(cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Home"))
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Other"))
+        cell.prepareForReuse()
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Home"))
+        cell.update(state: state, selecting: true, selected: true, serverName: "Home")
+        #expect(cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Home"))
+    }
+
     @Test func jobDiffOnlyIncludesChangedBadges() {
         var state = LibraryState(cells: [gridCell("a"), gridCell("b", badge: .working),
                                         gridCell("copy", badge: .originalOnPhone, original: "c")])
