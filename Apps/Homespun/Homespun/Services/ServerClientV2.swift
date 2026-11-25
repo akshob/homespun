@@ -47,9 +47,19 @@ protocol BackupRemote: Sendable {
     func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof
     func acknowledge(_ acknowledgement: BackupAPI.DeliveryAcknowledgement) async throws
     func enrollWake(_ sender: WakeRelayAPI.Sender) async throws
+    func resolveCopy(_ lookup: BackupAPI.CopyLookup) async throws -> BackupAPI.CopyCandidate
+    func adoptCopy(_ adoption: BackupAPI.CopyAdoption) async throws -> BackupAPI.Receipt
 }
 
 extension BackupRemote {
+    func resolveCopy(_ lookup: BackupAPI.CopyLookup) async throws -> BackupAPI.CopyCandidate {
+        throw BackupStageFailure.blocked("Update Homespun Server, then run Find Compact Copies again. Existing copies have been kept.")
+    }
+
+    func adoptCopy(_ adoption: BackupAPI.CopyAdoption) async throws -> BackupAPI.Receipt {
+        throw BackupStageFailure.blocked("This server cannot revalidate existing compact copies. No original has been removed.")
+    }
+
     func enrollWake(_ sender: WakeRelayAPI.Sender) async throws {
         throw BackupStageFailure.blocked("This connection does not support optional wake enrollment.")
     }
@@ -79,6 +89,14 @@ struct ServerClientV2: BackupRemote {
 
     func submit(_ request: BackupAPI.Request) async throws -> BackupAPI.Receipt {
         try await json("backup-requests", method: "POST", body: request)
+    }
+
+    func resolveCopy(_ lookup: BackupAPI.CopyLookup) async throws -> BackupAPI.CopyCandidate {
+        try await json("copies/resolve", method: "POST", body: lookup)
+    }
+
+    func adoptCopy(_ adoption: BackupAPI.CopyAdoption) async throws -> BackupAPI.Receipt {
+        try await json("copies/adopt", method: "POST", body: adoption)
     }
 
     func lookup(operationID: UUID) async throws -> [BackupAPI.Receipt] {

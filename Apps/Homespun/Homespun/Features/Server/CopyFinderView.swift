@@ -7,6 +7,7 @@ struct CopyFinderView: View {
     let finder: CopyFinder
     let settings: AppSettings
     let ledger: CompactLedger
+    let job: CompactJob
     @State private var confirmingStop = false
     @Environment(\.dismiss) private var dismiss
 
@@ -69,9 +70,9 @@ struct CopyFinderView: View {
                  + "it never backs up a compact copy as if it were an original.")
                 .foregroundStyle(Theme.secondaryLabel)
             bullet("checkmark.circle.fill", Theme.teal,
-                   "Found copies become Original at home. Nothing is uploaded, changed or removed.")
+                   "Verified copies become Original at home. No media leaves this iPhone and nothing in Photos is removed.")
             bullet("lock.fill", Theme.accent,
-                   "Only fingerprints (SHA-256) go to \(server), your own server. Not the photos, not their names.")
+                   "Only fingerprints (SHA-256), file roles and sizes go to \(server), your own server. Not the photos or their names.")
             bullet("clock", Theme.accent, "Found copies show up as it goes. Keep Homespun open while it checks.")
             bullet("icloud", Theme.accent, "Items only in iCloud are skipped. Nothing is downloaded.")
             if let error = finder.error {
@@ -106,7 +107,7 @@ struct CopyFinderView: View {
             }
             .accessibilityElement(children: .combine)
             .accessibilityIdentifier("copies.progress")
-            bullet("lock.fill", Theme.accent, "Only fingerprints go to \(server).")
+            bullet("lock.fill", Theme.accent, "Only fingerprints, file roles and sizes go to \(server).")
             bullet("iphone", Theme.accent, "Keep Homespun open; a large library takes a while.")
         }
         .padding(.top, 8)
@@ -179,7 +180,7 @@ struct CopyFinderView: View {
         if summary.needsAttention > 0 {
             rows.append(("attention", "exclamationmark.triangle.fill", Theme.red,
                          "\(summary.needsAttention.formatted()) need attention",
-                         "Only part of each matched, so they're left as they are"))
+                         "Keep these items. Reconnect the original archive, update the server if needed, then Run Again."))
         }
         rows.append(("notFound", "circle.dashed", Theme.secondaryLabel, "\(summary.notFound.formatted()) not found",
                      "Not backed up yet · only on this iPhone"))
@@ -233,8 +234,15 @@ struct CopyFinderView: View {
     }
 
     private func start(again: Bool) {
-        guard let client = settings.client else { return }
+        guard settings.client != nil else { return }
         Announce.say("Finding compact copies.")
-        finder.start(lookup: { try await client.lookupCopies($0) }, ledger: ledger, again: again)
+        Task {
+            await job.refreshQueue()
+            guard let client = settings.client, let context = job.bindingContext,
+                  settings.matchesBackupBinding(context.binding) else { finder.unavailable(); return }
+            finder.start(lookup: { try await client.lookupCopies($0) }, ledger: ledger, context: context,
+                current: { settings.matchesBackupBinding(context.binding) && job.bindingContext?.binding.id == context.binding.id },
+                again: again)
+        }
     }
 }

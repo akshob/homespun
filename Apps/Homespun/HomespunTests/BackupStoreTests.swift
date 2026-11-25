@@ -60,6 +60,105 @@ private struct BackupStoreFixture {
 
 private enum PhotoHandoffTestFailure: Error, Equatable { case interrupted }
 
+@Test func existingCopyAdoptionPersistsCanonicalProofWithoutInventingAnImportAndReusesItsIntentAfterRestart() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let manifest = BackupAPI.Manifest(kind: .photo, resources: [fixture.original])
+    let compact = BackupAPI.Manifest(kind: .photo, resources: [fixture.compact])
+    let candidate = BackupAPI.CopyCandidate(origin: fixture.binding.origin, manifest: manifest)
+    // Unknown historical provenance is preserved, rather than overwritten with the current URL.
+    let ledger = CompactLedger(store: fixture.store)
+    let key = CompactLedger.elsewhere("found-copy")
+    let historical = "old-installation-original"
+    try await ledger.record(original: historical, compact: "found-copy", originalBytes: fixture.original.size,
+                            compactBytes: fixture.compact.size, serverAssetID: fixture.receipt.version.assetID)
+    let operation = try await fixture.store.planCopyAdoption(compactID: "found-copy", originalID: nil,
+        candidate: candidate, compact: compact, bindingID: fixture.binding.id, namespace: "photos", profile: .standard)
+    #expect(try await fixture.store.deviceRunnable(.upload, binding: fixture.binding, namespace: "photos").isEmpty)
+    #expect(try await ledger.entry(for: historical)?.verifiedCompact == false)
+    try await fixture.store.close()
+    let reopened = BackupStore(directory: fixture.directory, legacyURL: nil)
+    let resumed = try await reopened.planCopyAdoption(compactID: "found-copy", originalID: nil,
+        candidate: candidate, compact: compact, bindingID: fixture.binding.id, namespace: "photos", profile: .standard)
+    #expect(resumed.id == operation.id)
+    var receipt = fixture.receipt
+    receipt.operationID = operation.id
+    receipt.compact = .requested
+    receipt.derivative = nil
+    var proof = fixture.proof
+    proof.verifiedAt = Date()
+    var changed = fixture.compact
+    changed.size += 1
+    await #expect(throws: BackupStore.Failure.invalidImport) {
+        try await reopened.finishCopyAdoption(operation.id, epoch: operation.epoch,
+            receipt: receipt, proof: proof, actual: [changed])
+    }
+    var changedOriginal = proof
+    changedOriginal.resources[0].sha256 = String(repeating: "f", count: 64)
+    await #expect(throws: BackupStore.Failure.invalidImport) {
+        try await reopened.finishCopyAdoption(operation.id, epoch: operation.epoch,
+            receipt: receipt, proof: changedOriginal, actual: [fixture.compact])
+    }
+    try await reopened.finishCopyAdoption(operation.id, epoch: operation.epoch,
+        receipt: receipt, proof: proof, actual: [fixture.compact])
+    let restoredLedger = CompactLedger(store: reopened)
+    let entry = try #require(try await restoredLedger.entry(for: key))
+    #expect(entry.verifiedCompact && entry.origin == fixture.binding.origin && entry.requestID == receipt.requestID)
+    #expect(entry.operationID == operation.id && entry.bindingID == fixture.binding.id && entry.revalidatedCopy == true)
+    #expect(entry.compactResources == [fixture.compact])
+    let anotherPrincipal = await CopyFinder.known([key: entry], origin: fixture.binding.origin, bindingID: UUID())
+    #expect(anotherPrincipal.isEmpty)
+    #expect(try await restoredLedger.entry(for: historical) == nil)
+    #expect(try await reopened.importIntent(operation.id) == nil)
+    #expect(try await reopened.outbox().isEmpty)
+    let mapping = try #require(try await reopened.mappings(namespace: "photos")[key])
+    try await reopened.finishCopyAdoption(operation.id, epoch: operation.epoch,
+        receipt: receipt, proof: proof, actual: [fixture.compact])
+    #expect(try await reopened.mappings(namespace: "photos")[key]?.id == mapping.id)
+    #expect(try await reopened.operations().count == 2)
+    let history = try await reopened.readState { connection in
+        try connection.rows("SELECT body FROM mappings WHERE json_extract(CAST(body AS TEXT),'$.entry.compactIdentifier') = ?",
+                            [.text("found-copy")])
+            .map { try BackupStore.decode(BackupStore.SavedMapping.self, $0.blob("body")) }
+    }
+    #expect(history.count == 2 && history.contains { $0.origin == nil && $0.proof == nil })
+    try await reopened.close()
+}
+
+@Test func existingCopyAdoptionCannotFinishAcrossRetirementOrABindingRoundTrip() async throws {
+    let fixture = try await BackupStoreFixture.make(consumerID: "same-device")
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let operation = try await fixture.store.planCopyAdoption(compactID: "found-copy", originalID: nil,
+        candidate: .init(origin: fixture.binding.origin, manifest: .init(kind: .photo, resources: [fixture.original])),
+        compact: .init(kind: .photo, resources: [fixture.compact]), bindingID: fixture.binding.id,
+        namespace: "photos", profile: .standard)
+    var receipt = fixture.receipt
+    receipt.operationID = operation.id
+    var proof = fixture.proof
+    proof.verifiedAt = Date()
+    try await fixture.store.retireBinding(fixture.binding.id)
+    var away = fixture.binding
+    away.id = UUID()
+    away.origin = .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
+    away.trustEpoch = UUID()
+    try await fixture.store.bind(away)
+    await #expect(throws: BackupStore.Failure.invalidImport) {
+        try await fixture.store.finishCopyAdoption(operation.id, epoch: operation.epoch,
+            receipt: receipt, proof: proof, actual: [fixture.compact])
+    }
+    try await fixture.store.retireBinding(away.id)
+    var new = fixture.binding
+    new.id = UUID()
+    new.trustEpoch = UUID()
+    try await fixture.store.bind(new)
+    try await fixture.store.reattach(from: fixture.binding.id, to: new.id)
+    await #expect(throws: BackupStore.Failure.invalidImport) {
+        try await fixture.store.finishCopyAdoption(operation.id, epoch: operation.epoch,
+            receipt: receipt, proof: proof, actual: [fixture.compact])
+    }
+    #expect(try await fixture.store.mappings(namespace: "photos").isEmpty)
+}
+
 private func photoHandoffWorkspace(_ store: BackupStore) -> BackupWorkspace {
     .init(store: store, policy: .init(maximumTransientBytes: 1_000_000, minimumAvailableBytes: 0,
                                     finalizationReserveBytes: 100_000, maximumTransfers: 2))

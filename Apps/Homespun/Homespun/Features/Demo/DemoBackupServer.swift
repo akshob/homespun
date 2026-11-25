@@ -52,6 +52,7 @@ actor DemoBackupServer {
         var snapshots: [UUID: FrozenSnapshot] = [:]
         var sequence: Int64 = 0
         var generation: Int64 = 0
+        var copyAdoptions: [String: String]?
     }
 
     private let folder: URL
@@ -98,6 +99,26 @@ actor DemoBackupServer {
         return (seen.count, bytes)
     }
 
+    func lookupCopies(_ hashes: [String]) -> [ServerAPI.CopyLookupResponse.Match] {
+        let wanted = Set(hashes.map { $0.lowercased() })
+        var matches: [String: ServerAPI.CopyLookupResponse.Match] = [:]
+        for record in state.records.values {
+            for file in record.derivative?.resources ?? [] where wanted.contains(file.sha256) {
+                matches[file.sha256] = .init(sha256: file.sha256, assetID: record.version.assetID, role: file.role,
+                    isOriginal: false, originalsVerified: record.complete,
+                    originalBytes: record.request.manifest.resources.reduce(0) { $0 + $1.size })
+            }
+        }
+        for record in state.records.values where record.complete {
+            for file in record.request.manifest.resources where wanted.contains(file.sha256) {
+                matches[file.sha256] = .init(sha256: file.sha256, assetID: record.version.assetID, role: file.role,
+                    isOriginal: true, originalsVerified: true,
+                    originalBytes: record.request.manifest.resources.reduce(0) { $0 + $1.size })
+            }
+        }
+        return Array(matches.values)
+    }
+
     func handle(method: String, url: URL, owner: String, headers: [String: String], body: Data) async -> DemoServer.Response {
         guard !retired, !unreadable else { return DemoServer.error(503, "This demo backup server is unavailable.") }
         admitted += 1
@@ -134,9 +155,32 @@ actor DemoBackupServer {
             try save()
             return try json(BackupAPI.Capabilities(origin: state.origin, uploadProtocols: [.foregroundOffset], recipe: recipe))
         }
+        if method == "POST", path == ["copies", "resolve"] {
+            return try json(resolveCopy(decode(BackupAPI.CopyLookup.self)))
+        }
+        if method == "POST", path == ["copies", "adopt"] {
+            let adoption = try decode(BackupAPI.CopyAdoption.self), request = adoption.request
+            let candidate = try resolveCopy(.init(origin: request.origin, assetID: request.manifest.assetID(), compact: adoption.compact))
+            guard !request.compact, request.retention == .permanent,
+                  try candidate.manifest.identifier() == request.manifest.identifier() else { throw conflict() }
+            let compactID = try adoption.compact.identifier()
+            let key = owner + "/" + request.operationID.uuidString
+            if let old = state.copyAdoptions?[key], old != compactID { throw conflict() }
+            if state.records.values.contains(where: { $0.owner == owner && $0.request.operationID == request.operationID }),
+               state.copyAdoptions?[key] == nil { throw conflict() }
+            let result = try register(request, owner: owner)
+            guard result.backup == .retained else { throw conflict() }
+            _ = try proof(record(result.requestID, owner: owner))
+            if state.copyAdoptions == nil { state.copyAdoptions = [:] }
+            state.copyAdoptions?[key] = compactID
+            try save()
+            return try json(result)
+        }
         if path == ["backup-requests"] {
             if method == "POST" {
-                return try json(register(decode(BackupAPI.Request.self), owner: owner), status: 201)
+                let request = try decode(BackupAPI.Request.self)
+                guard state.copyAdoptions?[owner + "/" + request.operationID.uuidString] == nil else { throw conflict() }
+                return try json(register(request, owner: owner), status: 201)
             }
             if method == "GET", let operation = value("operation_id").flatMap(UUID.init(uuidString:)) {
                 guard let record = state.records.values.first(where: { $0.owner == owner && $0.request.operationID == operation }) else {
@@ -257,10 +301,19 @@ actor DemoBackupServer {
             }
             return receipt(old)
         }
-        guard state.generation < Int64.max else { throw conflict() }
-        state.generation += 1
+        let manifestID = try request.manifest.identifier()
+        let descriptorGeneration: Int64
+        let generations = Set(state.records.values.filter { $0.version.manifestID == manifestID }.map(\.version.descriptorGeneration))
+        guard generations.count <= 1 else { throw conflict() }
+        if let generation = generations.first {
+            descriptorGeneration = generation
+        } else {
+            guard state.generation < Int64.max else { throw conflict() }
+            state.generation += 1
+            descriptorGeneration = state.generation
+        }
         let version = BackupAPI.Version(origin: state.origin, assetID: try request.manifest.assetID(),
-            manifestID: try request.manifest.identifier(), descriptorGeneration: state.generation,
+            manifestID: manifestID, descriptorGeneration: descriptorGeneration,
             recipeID: try BackupAPI.Recipe(profile: request.profile, backend: recipe.backend,
                                           pipelineVersion: recipe.pipelineVersion).identifier())
         let original = request.manifest.resources.map {
@@ -281,6 +334,22 @@ actor DemoBackupServer {
         schedule(&record)
         try publish(record)
         return receipt(record)
+    }
+
+    private func resolveCopy(_ lookup: BackupAPI.CopyLookup) throws -> BackupAPI.CopyCandidate {
+        _ = try lookup.compact.validated()
+        guard lookup.origin == state.origin else { throw conflict() }
+        var manifests: [String: BackupAPI.Manifest] = [:]
+        for record in state.records.values where record.version.assetID == lookup.assetID {
+            guard let derivative = record.derivative, derivative.deviceCompresses.isEmpty,
+                  record.request.manifest.kind == lookup.compact.kind,
+                  BackupValidation.matches(lookup.compact.resources, derivative.resources.map {
+                      .init(role: $0.role, filename: $0.filename, size: $0.size, sha256: $0.sha256)
+                  }) else { continue }
+            manifests[record.version.manifestID] = record.request.manifest
+        }
+        guard manifests.count == 1, let manifest = manifests.values.first else { throw conflict() }
+        return .init(origin: state.origin, manifest: manifest)
     }
 
     private func append(_ data: Data, to supplied: Upload, id: UUID) throws {

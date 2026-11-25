@@ -57,6 +57,9 @@
       storage. Those logical records can be included in the device backup you configure with Apple. Reconstructible
       transfer files and resume data are excluded from that backup; pairing and wake credentials stay in
       device-only Keychain. Restoring a device backup does not restore a native network task or its credentials.</p>
+    <p>Find Compact Copies in version 1.1.0 sends file fingerprints (SHA-256), resource roles and sizes to your
+      paired server to revalidate existing copies. It does not send their media or local file names.
+      An old match alone never authorizes removing an original.</p>
 
     <h2>Optional background wakeups in version 1.1.0</h2>
     <p>Background Wakeups is off unless you explicitly enable it, and is unavailable in builds without a configured

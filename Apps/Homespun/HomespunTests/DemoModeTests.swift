@@ -524,6 +524,93 @@ import UIKit
         try await model.closeDemoStore()
     }
 
+    @Test func copyFinderRevalidatesThroughTheRealV2WireContractWithoutUploadingOrInventingHistoricalProvenance() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await model.job.enqueue([photo.id]) == [photo.id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let originalEntry = try #require(try await model.job.ledger.entry(for: photo.id))
+        let source = try #require(fixture.session.library.demoItem(photo.id))
+        let metadata = try fixture.session.library.backupMetadata(photo.id)
+        let descriptors = try await fixture.session.library.resourceFingerprints(photo.id)
+        let originalFiles = try source.files.map { role, url in
+            PreparedPhotoResource(fileID: UUID(), url: url,
+                descriptor: try #require(descriptors.first { $0.role == role }))
+        }
+        try await fixture.session.library.delete([photo.id])
+        let context = try #require(model.job.bindingContext)
+        let recovery = BackupStore(directory: fixture.folder.appendingPathComponent("copy-recovery"), legacyURL: nil)
+        try await recovery.bind(context.binding)
+        try await recovery.rememberBinding(context.binding.id, information: context.information)
+        let ledger = CompactLedger(store: recovery)
+        let finderURL = fixture.folder.appendingPathComponent("copy-recovery-finder.json")
+        let finder = CopyFinder(url: finderURL, photos: fixture.session.library)
+        let before = try await client.storage()
+        await finder.run(lookup: { try await client.lookupCopies($0) }, ledger: ledger, context: context)
+        #expect(finder.error == nil && finder.summary?.found == 1 && finder.summary?.readyToFree == 0)
+        let key = CompactLedger.elsewhere(originalEntry.compactIdentifier)
+        let entry = try #require(try await ledger.entry(for: key))
+        #expect(entry.verifiedCompact && entry.revalidatedCopy == true && entry.origin == context.binding.origin)
+        #expect(entry.version?.manifestID == originalEntry.version?.manifestID)
+        let state = LibraryState(library: fixture.session.library.allIdentifiers(), ledger: try await ledger.snapshot(),
+            album: fixture.session.library.albumMembers(), job: [:], origin: context.binding.origin)
+        #expect(state.cells(.all).first { $0.id == entry.compactIdentifier }?.badge == .backedUp)
+        let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: fixture.session.library)
+        #expect(try await remover.candidates(only: nil).isEmpty)
+        var checking = context
+        checking.session.id = UUID()
+        checking.session.identifier = "foreground.copy-recovery"
+        try await recovery.registerSession(checking.session)
+        let coordinator = BackupCoordinator(store: recovery, photos: fixture.session.library, namespace: ledger.namespace)
+        try await coordinator.activate(checking, policy: .init(maximumTransientBytes: 100_000_000,
+            minimumAvailableBytes: 0, finalizationReserveBytes: 1_000_000, maximumTransfers: 1))
+        let count = try await recovery.operations().count
+        await #expect(throws: BackupStageFailure.self) {
+            _ = try await coordinator.admit([entry.compactIdentifier], compact: true, trigger: .manual)
+        }
+        #expect(try await recovery.operations().count == count)
+        try await coordinator.stopAndWait()
+
+        // A later original must match every resource; it is linked using the same real proof
+        // contract, not by turning a legacy asset ID into a trusted deletion record.
+        let restored = try await fixture.session.library.restoreResources(originalFiles, metadata: metadata)
+        await finder.run(lookup: { try await client.lookupCopies($0) }, ledger: ledger, context: context)
+        #expect(finder.error == nil && finder.summary?.readyToFree == 1)
+        let paired = try #require(try await ledger.entry(for: restored))
+        #expect(paired.verifiedCompact && paired.compactIdentifier == entry.compactIdentifier)
+        #expect(try await ledger.entry(for: key) == nil)
+        #expect(try await remover.candidates(only: [restored]).count == 1)
+        #expect(try await client.storage().storedBytes == before.storedBytes)
+        let operations = try await recovery.operations()
+        let receipts = try await context.remote.snapshot(continuation: nil).receipts
+        let reloaded = CopyFinder(url: finderURL, photos: fixture.session.library)
+        await reloaded.run(lookup: { try await client.lookupCopies($0) }, ledger: ledger, context: context)
+        #expect(reloaded.total == 0)
+        #expect(try await recovery.operations().count == operations.count)
+        #expect(try await context.remote.snapshot(continuation: nil).receipts.count == receipts.count)
+
+        // A full compact changed under the same ID cannot cause a Photos deletion, even though
+        // a previously verified canonical badge still exists.
+        let copy = try #require(fixture.session.library.demoItem(paired.compactIdentifier))
+        var changed = try Data(contentsOf: copy.main)
+        changed[0] ^= 1
+        try changed.write(to: copy.main)
+        let questions = fixture.asked.all.count
+        let report = try await remover.removeEligible(limit: nil, only: [restored], progress: { _ in })
+        #expect(report.removed.isEmpty && !report.blocked.isEmpty)
+        #expect(fixture.asked.all.count == questions)
+        #expect(fixture.session.library.existing([restored], includeHidden: true) == [restored])
+        try await recovery.close()
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
     @Test func durablePreparationIsBoundedAndUncertainImportsRequireAUniqueCompleteMatch() async throws {
         let fixture = try await Fixture.make()
         let library = fixture.session.library

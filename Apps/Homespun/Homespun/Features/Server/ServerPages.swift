@@ -561,7 +561,7 @@ struct ExistingLibraryView: View {
         .navigationTitle("Existing Library")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $finding) {
-            CopyFinderView(finder: finder, settings: settings, ledger: model.job.ledger)
+            CopyFinderView(finder: finder, settings: settings, ledger: model.job.ledger, job: model.job)
         }
     }
 

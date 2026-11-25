@@ -410,13 +410,16 @@ final class DemoLibrary: ItemCatalog, Sendable {
         var hashed: [String: CopyFinder.Hashed] = [:]
         for id in ids {
             guard let item = demoItem(id) else { continue }
-            var entry = CopyFinder.Hashed(hashes: [:], bytes: 0)
-            for (role, url) in item.files where CopyMatching.roles.contains(role) {
-                guard let digests = try? Fingerprint.digests(of: url) else { continue }
+            guard let kind = item.itemKind, let generation = try? sourceGeneration(id) else { continue }
+            var entry = CopyFinder.Hashed(hashes: [:], bytes: 0, kind: kind.api, generation: generation)
+            for (role, url) in item.files {
+                guard let digests = try? Fingerprint.digests(of: url) else { break }
                 entry.hashes[role] = digests.sha256
                 entry.bytes += digests.size
+                entry.resources.append(.init(role: role, filename: url.lastPathComponent, size: digests.size, sha256: digests.sha256))
             }
-            if !entry.hashes.isEmpty { hashed[id] = entry }
+            if !entry.hashes.isEmpty, entry.resources.count == item.files.count,
+               (try? sourceGeneration(id)) == generation { hashed[id] = entry }
         }
         return hashed
     }

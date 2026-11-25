@@ -716,7 +716,7 @@ Stop the serving process before a mutating import, including in-place linking. I
 exclusive catalog ownership and refuse to race a live service or an unfinished originals move.
 `--dry-run` remains read-only and can run alongside the service.
 
-It runs beside a running server, and running it again is safe (finished items are skipped).
+Running the import again is safe (finished items are skipped).
 By default the originals stay where they are: Homespun reads them, never moves, changes, or
 deletes them, and hashes them again where they are whenever the app checks an item. With
 `--copy`, each is copied into the originals folder under `--folder NAME` (default "Camera
@@ -737,10 +737,22 @@ An original may carry `"sha256"` and `"sha1"` (as recorded when it was fetched, 
 service reports it) to make sure it hasn't changed.
 
 Then, in the app, open Server › Existing Library › Find Compact Copies. It hashes the photos and
-videos Homespun doesn't know yet and asks the server about them (`POST /api/v1/copies/lookup`;
-only hashes leave the phone). Copies it finds count as backed up and join the Homespun album;
-an original still on the phone whose copy is found becomes ready to free up. It also restores
-what Homespun knew after reinstalling the app or moving to a new iPhone.
+videos Homespun doesn't know yet. Hash lookup (`POST /api/v1/copies/lookup`) supplies hints only.
+In 1.1, `POST /api/v2/copies/resolve` resolves the complete compact resource set to one exact
+original manifest; `/copies/adopt` admits an idempotent, device-owned permanent request using
+the normal immutable-original adoption path. The server freshly copies and checks legacy
+originals when needed; in-place imports remain untouched. Existing immutable objects are reused.
+Only hashes, file roles and sizes leave the phone, not media or its local file names.
+After a fresh versioned server byte proof and another full local compact check, Copy Finder
+writes the canonical verified mapping and adds the copy to the Homespun album, without importing
+or uploading it again. An original here becomes ready only if **all** its resources match too;
+Free Up Space still performs its separate fresh proof and iOS confirmation.
+
+This establishes an equivalent backup on the **current authenticated server**, not where an
+old copy was first made. Unknown historical provenance remains unknown. Partial or ambiguous
+resource sets, changed originals, older servers and Immich-only sources stay untrusted and show
+recovery guidance; keep the items, reconnect the original archive and run again after updating
+the server if necessary. Neither a legacy match nor a remembered URL authorizes deletion.
 
 ## Analytics and problem reports
 

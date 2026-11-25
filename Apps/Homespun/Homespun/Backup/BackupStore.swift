@@ -228,6 +228,9 @@ actor BackupStore {
                 let operation: Operation
                 if let existing {
                     var queued = try Self.decode(Operation.self, existing.blob("body"))
+                    guard try Self.metadata("copy-adoption:" + queued.id.uuidString, as: CopyIntent.self, connection) == nil else {
+                        throw Failure.invalidImport
+                    }
                     guard queued.profile == profile else { throw Failure.incompatibleQueuedSettings }
                     if compact, !queued.wantsCompact {
                         queued.wantsCompact = true

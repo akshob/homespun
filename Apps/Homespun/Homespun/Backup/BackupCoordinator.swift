@@ -139,6 +139,9 @@ final class BackupCoordinator {
         let projection = try await store.ledgerProjection(namespace: namespace)
         let present = photos.existing(projection.entries.values.map(\.compactIdentifier), includeHidden: true)
         for id in ids {
+            if present.contains(id) {
+                throw BackupStageFailure.blocked("This is an existing compact copy. Use Find Compact Copies to revalidate its original; it must not be uploaded as a new original.")
+            }
             if let entry = projection.entries[id], present.contains(entry.compactIdentifier) {
                 throw BackupStageFailure.blocked(entry.origin == nil
                     ? "This item already has a compact mapping with unknown historical origin. Recover that mapping before making another copy."

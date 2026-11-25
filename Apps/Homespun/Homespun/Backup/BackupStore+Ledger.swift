@@ -229,7 +229,8 @@ extension BackupStore {
                 SELECT m.body,o.id AS operation_id,o.binding AS binding_id,
                 json_extract(CAST(o.body AS TEXT),'$.receipt.requestId') AS request_id
                 FROM mappings m JOIN lineages l ON l.current_mapping = m.id
-                LEFT JOIN imports i ON i.id = m.intent LEFT JOIN operations o ON o.id = i.operation
+                LEFT JOIN imports i ON i.id = m.intent
+                LEFT JOIN operations o ON o.id = coalesce(i.operation, json_extract(CAST(m.body AS TEXT),'$.entry.operationID'))
                 WHERE l.namespace = ?
                 """, [.text(namespace)]) {
                 let mapping = try Self.decode(SavedMapping.self, row.blob("body"))

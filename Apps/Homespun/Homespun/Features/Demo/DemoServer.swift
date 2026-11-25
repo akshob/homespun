@@ -186,6 +186,19 @@ actor DemoServer {
             information.freeBytes = information.freeBytes.map { max(0, $0 - statistics.bytes) }
             return (try? Self.json(information)) ?? Self.error(500, "The demo storage status couldn't be read.")
         }
+        if method == "POST", parts == ["api", "v1", "copies", "lookup"] {
+            guard let token, state.devices.contains(where: { $0.token == token }) else {
+                return Self.error(401, "Pair this device with the demo first.")
+            }
+            do {
+                let request = try ServerAPI.decoder.decode(ServerAPI.CopyLookupRequest.self, from: body)
+                guard request.sha256.count <= ServerAPI.CopyLookupRequest.maximumCount else {
+                    return Self.error(400, "Too many fingerprints.")
+                }
+                let matches = lookup(request.sha256) + (await backup.lookupCopies(request.sha256))
+                return try Self.json(ServerAPI.CopyLookupResponse(matches: matches))
+            } catch { return Self.error(400, "Homespun Demo couldn't read those fingerprints.") }
+        }
         guard parts.count >= 3, parts[0] == "api", parts[1] == "v1" else { return Self.error(404, "Not found.") }
         let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         do {

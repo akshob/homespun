@@ -335,15 +335,21 @@ struct PhotoKitSource: PhotoSource {
 
     private static func hash(_ identifier: String) async throws -> CopyFinder.Hashed? {
         guard let asset = PhotoLibrary.asset(identifier) else { return nil }
-        let resources = PHAssetResource.assetResources(for: asset)
-            .filter { CopyMatching.roles.contains(PhotoLibrary.role(of: $0.type)) }
-        guard !resources.isEmpty else { return nil }
-        var hashed = CopyFinder.Hashed(hashes: [:], bytes: 0)
+        let source = PhotoKitSource()
+        let before = try source.sourceGeneration(identifier)
+        let resources = try ServerCompactor.resources(of: asset, mode: .files)
+        guard !resources.isEmpty, let kind = PhotoLibrary.kind(of: asset) else { return nil }
+        var hashed = CopyFinder.Hashed(hashes: [:], bytes: 0, kind: kind.api, generation: before)
         for resource in resources {
             let (sha256, size) = try await digest(resource)
-            hashed.hashes[PhotoLibrary.role(of: resource.type)] = sha256
-            hashed.bytes += size
+            let role = PhotoLibrary.role(of: resource.type)
+            let (total, overflow) = hashed.bytes.addingReportingOverflow(size)
+            guard size > 0, !overflow else { return nil }
+            hashed.hashes[role] = sha256
+            hashed.bytes = total
+            hashed.resources.append(.init(role: role, filename: resource.originalFilename, size: size, sha256: sha256))
         }
+        guard try source.sourceGeneration(identifier) == before else { return nil }
         return hashed
     }
 

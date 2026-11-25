@@ -20,6 +20,8 @@ actor CompactLedger {
         var compactResources: [ServerAPI.ResourceDescriptor]?
         var retention: BackupAPI.RetentionState?
         var externalVerification: BackupAPI.ExternalVerification?
+        /// A current equivalent backup was checked; this does not identify the copy's maker.
+        var revalidatedCopy: Bool?
 
         var verifiedCompact: Bool {
             origin != nil && version != nil && requestID != nil

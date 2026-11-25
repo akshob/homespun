@@ -167,10 +167,15 @@ struct ItemDetailsSheet: View {
         case .originalOnPhone, .backedUp:
             row("checkmark.shield", immich ? "Original in Immich (checked)" : "Original on \(server)", backedUpLine)
             row("photo.on.rectangle", "Compact copy in Photos", "Homespun album · same date, place, favorite")
+            if details?.entry?.revalidatedCopy == true {
+                row("checkmark.shield", "Existing copy revalidated",
+                    "An equivalent original was checked on this server. Where this copy was first made is unknown.")
+            }
             if cell.badge == .originalOnPhone {
                 row("iphone", "Original still on this iPhone", "Free Up Space removes it here", tint: Theme.amber)
             } else {
-                row("iphone.slash", "Not on this iPhone", "Freed up. The compact copy stays in Photos.")
+                row("iphone.slash", "Not on this iPhone", details?.entry?.revalidatedCopy == true
+                    ? "Only the compact copy is on this iPhone." : "Freed up. The compact copy stays in Photos.")
             }
         case .compactCopy:
             row("square.on.square", "A Homespun compact copy", "This iPhone has no record of where its original is.")
