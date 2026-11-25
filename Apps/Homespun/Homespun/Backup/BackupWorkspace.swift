@@ -119,6 +119,8 @@ struct BackupWorkspace: Sendable {
     func reconcileInbox() async throws -> BackupInboxRecovery {
         try store.files.prepare()
         var result = BackupInboxRecovery()
+        let handoffs = try await reconcilePhotoHandoffs()
+        result.problems += handoffs.problems
         let transfers = try await store.transfers()
         let sessions = try await store.sessions()
         let captures = try inbox.captures()
@@ -196,11 +198,33 @@ struct BackupWorkspace: Sendable {
     }
 
     func collectReleasedFiles() async throws {
-        for resource in try await store.claimCleanup() {
+        let handoffs = try await reconcilePhotoHandoffs()
+        guard handoffs.problems.isEmpty else { throw PhotoResourceHandoff.Failure.unprovenAlias }
+        for resource in try await store.claimCleanup(excludingOperations: handoffs.protected) {
             let file = store.files.stagedFile(operationID: resource.operationID, fileID: resource.fileID)
             do { try FileManager.default.removeItem(at: file) }
             catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
             try await store.cleanedResource(resource.fileID)
         }
+    }
+
+    private func reconcilePhotoHandoffs() async throws -> (problems: [String], protected: Set<UUID>) {
+        var problems: [String] = []
+        var protected = Set<UUID>()
+        for orphan in try PhotoResourceHandoff.orphans(in: store.files.staging, includingActive: true) {
+            if PhotoResourceHandoff.isActive(orphan.id) { protected.insert(orphan.operationID); continue }
+            guard try await store.operation(orphan.operationID) != nil else {
+                problems.append("An unknown Photos handoff was preserved. No original was removed or re-imported.")
+                continue
+            }
+            // A crashed Photos transaction may still be reading the URL. Its journal must be reconciled first.
+            if try await store.hasUnresolvedPhotosHandoff(orphan.operationID) {
+                protected.insert(orphan.operationID)
+                continue
+            }
+            do { try PhotoResourceHandoff.clean(orphan, in: store.files.staging) }
+            catch { problems.append("An unproven Photos handoff was preserved for recovery.") }
+        }
+        return (problems, protected)
     }
 }

@@ -41,10 +41,12 @@ struct BackupFiles: Sendable {
         return directory
     }
 
+    static func prepareTransientDirectory(_ url: URL) throws { try directory(url, excludedFromBackup: true) }
+
     func spaceObservation() throws -> BackupSpaceObservation {
         let capacity = try root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             .volumeAvailableCapacityForImportantUsage
-        var total: Int64 = 0
+        var sizes: [PhotoResourceHandoff.Identity: Int64] = [:]
         let enumerationError = OSAllocatedUnfairLock<(any Error)?>(initialState: nil)
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
         for folder in [staging, inbox, resume] {
@@ -56,13 +58,17 @@ struct BackupFiles: Sendable {
                 let values = try url.resourceValues(forKeys: keys)
                 guard values.isSymbolicLink != true else { throw Failure.invalidFile }
                 if values.isRegularFile == true {
-                    guard let size = values.fileSize, size >= 0 else { throw Failure.invalidFile }
-                    let (next, overflow) = total.addingReportingOverflow(Int64(size))
-                    guard !overflow else { throw BackupSpaceFailure.workingSpaceRequired }
-                    total = next
+                    let file = try PhotoResourceHandoff.file(url)
+                    sizes[file.identity] = max(sizes[file.identity] ?? 0, file.bytes)
                 }
             }
             if let error = enumerationError.withLock({ $0 }) { throw error }
+        }
+        var total: Int64 = 0
+        for size in sizes.values {
+            let (next, overflow) = total.addingReportingOverflow(size)
+            guard !overflow else { throw BackupSpaceFailure.workingSpaceRequired }
+            total = next
         }
         return .init(availableBytes: capacity, transientBytes: total)
     }

@@ -371,6 +371,9 @@ struct DurableOriginalRestorer: RestoringOriginals {
             } catch PhotoLibrary.Failure.restoreMetadata(let identifier, let message) {
                 try await ledger.store.effectCreated(id, identifier: identifier, problem: message)
                 throw PhotosCreationFailure(identifier: identifier, message: message)
+            } catch let failure as PhotosCreationFailure {
+                try await ledger.store.effectCreated(id, identifier: failure.identifier, problem: failure.localizedDescription)
+                throw failure
             } catch {
                 try await ledger.store.effectUncertain(id, message: error.localizedDescription)
                 throw error

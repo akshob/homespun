@@ -96,6 +96,23 @@ extension BackupStore {
 
     func effect(_ id: UUID) throws -> PhotoEffect? { try readState { try Self.effect(id, $0) } }
 
+    func hasUnresolvedPhotosHandoff(_ operationID: UUID) throws -> Bool {
+        try readState { connection in
+            if let row = try connection.rows("SELECT body FROM imports WHERE operation = ?",
+                                             [.text(operationID.uuidString)]).first {
+                let intent = try Self.decode(ImportIntent.self, row.blob("body"))
+                if intent.phase != .verified { return true }
+            }
+            for row in try connection.rows("""
+                SELECT body FROM photo_effects WHERE phase IN ('planned','mutating','uncertain','created')
+                """) {
+                let effect = try Self.decode(PhotoEffect.self, row.blob("body"))
+                if effect.kind == .restore, effect.epochs[operationID] != nil { return true }
+            }
+            return false
+        }
+    }
+
     func effectResources(_ id: UUID, resources: [Resource]) throws {
         try mutateState { connection in
             guard var effect = try Self.effect(id, connection), effect.kind == .restore, effect.phase == .planned,

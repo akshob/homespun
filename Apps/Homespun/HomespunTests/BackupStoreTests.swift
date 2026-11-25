@@ -58,6 +58,191 @@ private struct BackupStoreFixture {
     }
 }
 
+private enum PhotoHandoffTestFailure: Error, Equatable { case interrupted }
+
+private func photoHandoffWorkspace(_ store: BackupStore) -> BackupWorkspace {
+    .init(store: store, policy: .init(maximumTransientBytes: 1_000_000, minimumAvailableBytes: 0,
+                                    finalizationReserveBytes: 100_000, maximumTransfers: 2))
+}
+
+private func abandonedPhotoHandoff(_ files: BackupFiles, operationID: UUID,
+                                   resource: PreparedPhotoResource) throws -> (directory: URL, alias: URL) {
+    let root = files.staging.appendingPathComponent(PhotoResourceHandoff.folderName, isDirectory: true)
+    try BackupFiles.prepareTransientDirectory(root)
+    let directory = root.appendingPathComponent(operationID.uuidString + "." + UUID().uuidString, isDirectory: true)
+    try BackupFiles.prepareTransientDirectory(directory)
+    let alias = directory.appendingPathComponent(resource.fileID.uuidString).appendingPathExtension("heic")
+    try FileManager.default.linkItem(at: resource.url, to: alias)
+    return (directory, alias)
+}
+
+@Test func photosHandoffPinsTypedLinksThroughTheTransactionWithoutDoubleCountingPayload() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let stored = try await fixture.store.resources(fixture.operationID)
+    let original = try #require(stored.first)
+    let files = fixture.store.files
+    let resource = PreparedPhotoResource(fileID: original.fileID,
+        url: files.stagedFile(operationID: fixture.operationID, fileID: original.fileID), descriptor: original.descriptor)
+    let before = try files.spaceObservation()
+    let workspace = photoHandoffWorkspace(fixture.store)
+    let created = try await PhotoResourceHandoff.use([resource]) { resources in
+        let handed = try #require(resources.first)
+        #expect(handed.fileID == resource.fileID && handed.descriptor == resource.descriptor && handed.url != resource.url)
+        #expect(handed.url.pathExtension == "heic")
+        #expect(try PhotoResourceHandoff.file(handed.url).identity == PhotoResourceHandoff.file(resource.url).identity)
+        let during = try files.spaceObservation()
+        #expect(during.transientBytes == before.transientBytes)
+        #expect(try handed.url.deletingLastPathComponent().resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true)
+        let recovery = try await workspace.reconcileInbox()
+        #expect(recovery.problems.isEmpty)
+        await Task.yield()
+        #expect(FileManager.default.fileExists(atPath: handed.url.path))
+        return "created-synthetic-item"
+    }
+    #expect(created == "created-synthetic-item")
+    #expect(try PhotoResourceHandoff.orphans(in: files.staging).isEmpty)
+    await #expect(throws: PhotoHandoffTestFailure.interrupted) {
+        try await PhotoResourceHandoff.use([resource]) { _ in throw PhotoHandoffTestFailure.interrupted }
+    }
+    #expect(try PhotoResourceHandoff.orphans(in: files.staging).isEmpty)
+    let retained = try Fingerprint.digests(of: resource.url)
+    #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+}
+
+@Test func photosHandoffLinkFailureKeepsTheCanonicalInputAndDoesNotInvokePhotos() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let stored = try await fixture.store.resources(fixture.operationID)
+    let original = try #require(stored.first)
+    let files = fixture.store.files
+    let resource = PreparedPhotoResource(fileID: original.fileID,
+        url: files.stagedFile(operationID: fixture.operationID, fileID: original.fileID), descriptor: original.descriptor)
+    let missingID = UUID()
+    let missing = PreparedPhotoResource(fileID: missingID,
+        url: files.stagedFile(operationID: fixture.operationID, fileID: missingID), descriptor: original.descriptor)
+    await #expect(throws: (any Error).self) {
+        try await PhotoResourceHandoff.use([resource, missing]) { _ in
+            Issue.record("Photos must not be invoked after a resource linkage failure.")
+            return "unexpected-item"
+        }
+    }
+    #expect(try PhotoResourceHandoff.orphans(in: files.staging).isEmpty)
+    let retained = try Fingerprint.digests(of: resource.url)
+    #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+}
+
+@Test func photosHandoffCleanupFailureRetainsTheKnownCreationIdentifierAndOriginal() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let stored = try await fixture.store.resources(fixture.operationID)
+    let original = try #require(stored.first)
+    let files = fixture.store.files
+    let resource = PreparedPhotoResource(fileID: original.fileID,
+        url: files.stagedFile(operationID: fixture.operationID, fileID: original.fileID), descriptor: original.descriptor)
+    do {
+        _ = try await PhotoResourceHandoff.use([resource]) { resources in
+            let handed = try #require(resources.first)
+            try FileManager.default.removeItem(at: handed.url)
+            try Data("unexpected replacement".utf8).write(to: handed.url)
+            return "known-Photos-creation"
+        }
+        Issue.record("An unproven alias must not be removed or reported as a clean completion.")
+    } catch let failure as PhotosCreationFailure {
+        #expect(failure.identifier == "known-Photos-creation")
+    }
+    let retained = try Fingerprint.digests(of: resource.url)
+    #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+    let recovery = try await photoHandoffWorkspace(fixture.store).reconcileInbox()
+    #expect(!recovery.problems.isEmpty)
+    #expect(try PhotoResourceHandoff.orphans(in: files.staging).count == 1)
+}
+
+@Test func photosHandoffRecoveryPreservesUncertainImportThenCleansBeforeReleasingCanonicalFiles() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let stored = try await fixture.store.resources(fixture.operationID)
+    let original = try #require(stored.first)
+    let files = fixture.store.files
+    let resource = PreparedPhotoResource(fileID: original.fileID,
+        url: files.stagedFile(operationID: fixture.operationID, fileID: original.fileID), descriptor: original.descriptor)
+    let lease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await fixture.store.planImport(lease, expected: [fixture.compact])
+    try await fixture.store.startImport(intent.id, lease: lease)
+    let abandoned = try abandonedPhotoHandoff(files, operationID: fixture.operationID, resource: resource)
+    try await fixture.store.importUncertain(intent.id)
+    let reopened = BackupStore(directory: fixture.directory, legacyURL: nil)
+    let workspace = photoHandoffWorkspace(reopened)
+    let recovery = try await workspace.reconcileInbox()
+    #expect(recovery.problems.isEmpty)
+    #expect(FileManager.default.fileExists(atPath: abandoned.alias.path))
+    #expect(FileManager.default.fileExists(atPath: resource.url.path))
+    #expect(try await reopened.importIntent(fixture.operationID)?.phase == .uncertain)
+    try await reopened.importCreated(intent.id, identifier: "reconciled-synthetic-import")
+    _ = try await reopened.finishImport(intent.id, actual: [fixture.compact], proof: fixture.proof)
+    try await workspace.collectReleasedFiles()
+    #expect(!FileManager.default.fileExists(atPath: abandoned.directory.path))
+    #expect(!FileManager.default.fileExists(atPath: resource.url.path))
+    let remaining = try await reopened.resources(fixture.operationID)
+    #expect(remaining.first?.availability == .removed)
+}
+
+@Test func photosHandoffRecoveryWaitsForTheRestoreJournalToBeVerified() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let stored = try await fixture.store.resources(fixture.operationID)
+    let original = try #require(stored.first)
+    let files = fixture.store.files
+    let resource = PreparedPhotoResource(fileID: original.fileID,
+        url: files.stagedFile(operationID: fixture.operationID, fileID: original.fileID), descriptor: original.descriptor)
+    let lease = try #require(try await fixture.store.claim(fixture.operationID, stage: .finalization))
+    let intent = try await fixture.store.planImport(lease, expected: [fixture.compact])
+    try await fixture.store.startImport(intent.id, lease: lease)
+    try await fixture.store.importCreated(intent.id, identifier: "synthetic-compact")
+    let mapping = try await fixture.store.finishImport(intent.id, actual: [fixture.compact], proof: fixture.proof)
+    let operation = try #require(try await fixture.store.operation(fixture.operationID))
+    let effect = BackupStore.PhotoEffect(id: UUID(), namespace: "photos", item: "synthetic-compact", kind: .restore,
+        bindingID: fixture.binding.id, version: fixture.receipt.version, epochs: [fixture.operationID: operation.epoch],
+        mappings: [mapping], expected: [fixture.original])
+    _ = try await fixture.store.planEffect(effect)
+    try await fixture.store.startEffect(effect.id)
+    let abandoned = try abandonedPhotoHandoff(files, operationID: fixture.operationID, resource: resource)
+    try await fixture.store.effectUncertain(effect.id, message: "simulated process interruption")
+    let workspace = photoHandoffWorkspace(fixture.store)
+    let recovery = try await workspace.reconcileInbox()
+    #expect(recovery.problems.isEmpty && FileManager.default.fileExists(atPath: abandoned.alias.path))
+    try await workspace.collectReleasedFiles()
+    #expect(FileManager.default.fileExists(atPath: resource.url.path))
+    try await fixture.store.effectCreated(effect.id, identifier: "synthetic-restored")
+    let createdRecovery = try await workspace.reconcileInbox()
+    #expect(createdRecovery.problems.isEmpty && FileManager.default.fileExists(atPath: abandoned.alias.path))
+    _ = try await fixture.store.completeRestore(effect.id, actual: [fixture.original], proof: fixture.proof)
+    try await workspace.collectReleasedFiles()
+    #expect(!FileManager.default.fileExists(atPath: abandoned.directory.path))
+}
+
+@Test func photosHandoffRecoveryPreservesUnknownOwnersAndUnprovenLastLinks() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let stored = try await fixture.store.resources(fixture.operationID)
+    let original = try #require(stored.first)
+    let files = fixture.store.files
+    let resource = PreparedPhotoResource(fileID: original.fileID,
+        url: files.stagedFile(operationID: fixture.operationID, fileID: original.fileID), descriptor: original.descriptor)
+    let unknown = try abandonedPhotoHandoff(files, operationID: UUID(), resource: resource)
+    let known = try abandonedPhotoHandoff(files, operationID: fixture.operationID, resource: resource)
+    try FileManager.default.removeItem(at: resource.url)
+    let workspace = photoHandoffWorkspace(fixture.store)
+    let recovery = try await workspace.reconcileInbox()
+    #expect(recovery.problems.count == 2)
+    #expect(FileManager.default.fileExists(atPath: unknown.alias.path))
+    #expect(FileManager.default.fileExists(atPath: known.alias.path))
+    let retained = try Fingerprint.digests(of: known.alias)
+    #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+    await #expect(throws: PhotoResourceHandoff.Failure.unprovenAlias) { try await workspace.collectReleasedFiles() }
+    #expect(FileManager.default.fileExists(atPath: known.alias.path))
+}
+
 @Test func resultDiscoveryTracksCurrentWorkAndStopsAfterTerminalOutboxesAreDrained() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

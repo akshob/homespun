@@ -257,31 +257,32 @@ extension PhotoKitSource {
     }
 
     func importCompact(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String {
-        let location = try metadata.location()
-        var plan = PhotoLibrary.ImportPlan(creationDate: metadata.creationDate, location: location,
-                                          isFavorite: metadata.favorite, isHidden: metadata.hidden)
-        plan.resources = try files.map { file in
-            guard let type = PhotoLibrary.type(for: file.descriptor.role) else {
-                throw PhotoLibrary.Failure.unsupported("This compact copy contains an unsupported Photos role.")
+        try await PhotoResourceHandoff.use(files) { resources in
+            let location = try metadata.location()
+            var plan = PhotoLibrary.ImportPlan(creationDate: metadata.creationDate, location: location,
+                                              isFavorite: metadata.favorite, isHidden: metadata.hidden)
+            plan.resources = try resources.map { file in
+                guard let type = PhotoLibrary.type(for: file.descriptor.role) else {
+                    throw PhotoLibrary.Failure.unsupported("This compact copy contains an unsupported Photos role.")
+                }
+                return (type, file.url)
             }
-            return (type, file.url)
+            plan.originalFilenames = Dictionary(uniqueKeysWithValues: resources.map { ($0.url, $0.descriptor.filename) })
+            let id = try await PhotoLibrary.save(plan)
+            do { try await Self.applyMetadata(id, metadata: metadata) }
+            catch { throw PhotosCreationFailure(identifier: id, message: error.localizedDescription) }
+            return id
         }
-        plan.originalFilenames = Dictionary(uniqueKeysWithValues: files.map { ($0.url, $0.descriptor.filename) })
-        let id = try await PhotoLibrary.save(plan)
-        do {
-            try await Self.applyMetadata(id, metadata: metadata)
-        } catch {
-            throw PhotosCreationFailure(identifier: id, message: error.localizedDescription)
-        }
-        return id
     }
 
     func restoreResources(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String {
-        try await PhotoLibrary.restore(files.map { ($0.descriptor.role, $0.url) }, favorite: metadata.favorite,
-                                       hidden: metadata.hidden, albums: metadata.albums,
-                                       metadata: .library(creationDate: metadata.creationDate, location: try metadata.location()),
-                                       filenames: Dictionary(uniqueKeysWithValues: files.map { ($0.url, $0.descriptor.filename) }),
-                                       shouldMoveFile: false)
+        try await PhotoResourceHandoff.use(files) { resources in
+            try await PhotoLibrary.restore(resources.map { ($0.descriptor.role, $0.url) }, favorite: metadata.favorite,
+                                           hidden: metadata.hidden, albums: metadata.albums,
+                                           metadata: .library(creationDate: metadata.creationDate, location: try metadata.location()),
+                                           filenames: Dictionary(uniqueKeysWithValues: resources.map { ($0.url, $0.descriptor.filename) }),
+                                           shouldMoveFile: false)
+        }
     }
 
     func removeApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult {
