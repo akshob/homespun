@@ -451,6 +451,12 @@ struct FreeUpSpacePanel: View {
                     .primaryAction()
                     .disabled(controller.job.isRunning)
                     .accessibilityIdentifier("remove.confirm")
+                    .accessibilityHint(controller.job.hasPendingWork
+                        ? "Review now. Confirm after local backup work stops, or pause backups in Activity." : "")
+                    if controller.job.hasPendingWork {
+                        Text("Review ready copies now. Confirmation waits for local backup work to stop; you can pause backups in Activity.")
+                            .font(.caption).foregroundStyle(Theme.secondaryLabel)
+                    }
                     if trial {
                         Button("Something Looks Wrong") { withAnimation { somethingWrong = true } }
                             .accessibilityIdentifier("remove.wrong")

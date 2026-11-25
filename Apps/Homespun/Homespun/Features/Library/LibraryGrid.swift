@@ -30,7 +30,7 @@ enum Badge: Equatable, Sendable {
         case .kept: "Kept as is"
         case .failed: "Needs attention"
         case .copyLater: "Backed up"
-        case .processing: "Processing on server"
+        case .processing: "Compact copy in progress"
         case .recovery: "Backup needs recovery"
         }
     }
@@ -45,7 +45,7 @@ enum Badge: Equatable, Sendable {
         case .working: "Being backed up."
         case .kept: "Kept as is: the original stays on this iPhone. See Details for why."
         case .failed: "Something needs your attention. See Activity."
-        case .processing: "The original is backed up. Its compact copy is still processing on the server."
+        case .processing: "The original is backed up. Its compact copy is being made on your server or saved to this iPhone."
         case .recovery: "Reconnect the known original server or recover the earlier mapping. This item is not ready to remove."
         case .copyLater: "The original is safe at home. Its compact copy comes once it's older, so photos you delete "
             + "before then never come back."
@@ -135,6 +135,7 @@ struct LibraryState: Equatable, Sendable {
     private var counts: [Filter: Int] = [:]
     /// Items backed up without a compact copy yet, with when it's due (kept for job updates).
     private var backedUp: [String: Date?] = [:]
+    private var compactInProgress = Set<String>()
     /// Changes whenever the cells do, so views can tell states apart without comparing every cell.
     private(set) var version = 0
 
@@ -167,7 +168,7 @@ struct LibraryState: Equatable, Sendable {
     /// `backedUp`: items backed up without a compact copy yet, with when it's due (nil: never, a kept favorite).
     init(library: [String], ledger: [String: CompactLedger.Entry], album: Set<String>, job: [String: CompactJob.State],
          backedUp: [String: Date?] = [:], origin: BackupAPI.Origin? = nil, recovering: Set<String> = [],
-         pendingImports: Set<String> = []) {
+         pendingImports: Set<String> = [], compactInProgress: Set<String> = []) {
         let present = Set(library)
         var originalOf: [String: String] = [:]
         var records: [String: CompactLedger.Entry] = [:]
@@ -196,21 +197,22 @@ struct LibraryState: Equatable, Sendable {
                 cells.append(Cell(id: id, badge: .compactCopy, original: nil, canFree: false))
             } else {
                 let badge = recovering.contains(id) && job[id]?.isOpen != true ? Badge.recovery
-                    : Self.badge(job: job[id], backedUp: backedUp[id] != nil)
+                    : Self.badge(job: job[id], backedUp: backedUp[id] != nil, inProgress: compactInProgress.contains(id))
                 cells.append(Cell(id: id, badge: badge, original: nil,
                                   canFree: false, compactAfter: backedUp[id] ?? nil))
             }
         }
         self.cells = cells
         self.backedUp = backedUp
+        self.compactInProgress = compactInProgress
         reindex()
     }
 
     /// The badge of an item with no compact copy, from the job and whether it's backed up.
-    static func badge(job: CompactJob.State?, backedUp: Bool) -> Badge {
+    static func badge(job: CompactJob.State?, backedUp: Bool, inProgress: Bool = false) -> Badge {
         switch job {
         case .waiting?: .waiting
-        case .working?: .working
+        case .working?: inProgress ? .processing : .working
         case .failed?: .failed
         case .unchanged?: .kept
         case .notYet?: .none
@@ -223,13 +225,16 @@ struct LibraryState: Equatable, Sendable {
     /// Applies job changes to the cells they concern (nil: the item left the job), keeping the
     /// counts. Items whose badge comes from a compact copy aren't the job's to change.
     @discardableResult
-    mutating func apply(job changes: [String: CompactJob.State?]) -> [String] {
+    mutating func apply(job changes: [String: CompactJob.State?], compactInProgress: Set<String>? = nil) -> [String] {
+        if let compactInProgress { self.compactInProgress = compactInProgress }
         var changed: [String] = []
         for (id, state) in changes {
+            // The ledger rebuild that follows replaces a saved item with its compact copy.
+            if case .saved? = state { continue }
             guard let index = positions[id] else { continue }
             let cell = cells[index]
             guard cell.original == nil, cell.badge != .compactCopy else { continue }
-            let badge = Self.badge(job: state, backedUp: backedUp[id] != nil)
+            let badge = Self.badge(job: state, backedUp: backedUp[id] != nil, inProgress: self.compactInProgress.contains(id))
             guard badge != cell.badge else { continue }
             for filter in Filter.allCases where filter != .all && cell.matches(filter) { counts[filter, default: 0] -= 1 }
             cells[index].badge = badge
@@ -486,6 +491,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         var origin: BackupAPI.Origin?
         var recovering: Set<String> = []
         var pendingImports: Set<String> = []
+        var compactInProgress: Set<String> = []
     }
 
     /// Set by the screen to recompute badges after the library changed.
@@ -680,9 +686,10 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     /// Works out the badges again (after the ledger or the job changed), in the background.
     func update(ledger: [String: CompactLedger.Entry], job: [String: CompactJob.State], backedUp: [String: Date?] = [:],
-                origin: BackupAPI.Origin? = nil, recovering: Set<String> = [], pendingImports: Set<String> = []) async {
+                origin: BackupAPI.Origin? = nil, recovering: Set<String> = [], pendingImports: Set<String> = [],
+                compactInProgress: Set<String> = []) async {
         inputs = Inputs(ledger: ledger, job: job, backedUp: backedUp, origin: origin, recovering: recovering,
-                        pendingImports: pendingImports)
+                        pendingImports: pendingImports, compactInProgress: compactInProgress)
         await rebuild()
     }
 
@@ -696,7 +703,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         let built = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?)? in
             var new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
                                    backedUp: inputs.backedUp, origin: inputs.origin, recovering: inputs.recovering,
-                                   pendingImports: inputs.pendingImports)
+                                   pendingImports: inputs.pendingImports, compactInProgress: inputs.compactInProgress)
             guard new != previous else { return nil }
             new.follow(previous)
             return (new, new.changedIDs(from: previous))
@@ -714,11 +721,12 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
 
     /// The job changed these items (nil: they left it): their badges change at once; the ledger
     /// (a finished item's compact copy) follows in a rebuild.
-    func apply(job changes: [String: CompactJob.State?]) {
+    func apply(job changes: [String: CompactJob.State?], compactInProgress: Set<String> = []) {
         guard !changes.isEmpty else { return }
         generation &+= 1
         for (id, value) in changes { inputs.job[id] = value }
-        let changed = state.apply(job: changes)
+        inputs.compactInProgress = compactInProgress
+        let changed = state.apply(job: changes, compactInProgress: compactInProgress)
         changedIDs?.formUnion(changed)
     }
 

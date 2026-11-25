@@ -46,7 +46,7 @@ private struct AccessoryContent: View {
                     VStack(spacing: 0) {
                         Spacer(minLength: 0)
                         StatusAccessory(status: status, serverName: model.library.serverName,
-                                        width: width, open: open)
+                                        width: width, open: open, currentFreeUpOffer: { model.library.freeUpOffer })
                             // A sidebar changes the available width without resizing the window.
                             .id([proxy.size.width, proxy.size.height, width])
                             .glassEffect(.regular, in: .rect(cornerRadius: 24))

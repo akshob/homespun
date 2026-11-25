@@ -200,6 +200,13 @@ struct CompareTip: Tip {
 
 /// The accessory's one slot (DESIGN §16.4): the highest-priority state wins; the rest wait.
 enum AccessoryLadder {
+    struct Offer: Equatable {
+        var count: Int
+        var bytes: Int
+        /// Nil describes all ready items; actions resolve an explicit current set at tap time.
+        var originals: Set<String>?
+    }
+
     struct Inputs {
         var paired = false
         var unreachable: String?
@@ -217,7 +224,7 @@ enum AccessoryLadder {
     enum State: Equatable {
         case unreachable(String)
         case removing(String)
-        case backingUp(done: Int, total: Int, current: String?)
+        case backingUp(done: Int, total: Int, current: String?, offer: Offer?)
         case almostFull(bytes: Int)
         case finished(count: Int, bytes: Int, originals: Set<String>)
         case ready(count: Int, bytes: Int)
@@ -229,7 +236,17 @@ enum AccessoryLadder {
         if inputs.paired, let name = inputs.unreachable { return .unreachable(name) }
         // 2 · Running work.
         if let message = inputs.removing { return .removing(message) }
-        if let run = inputs.backingUp { return .backingUp(done: run.done, total: run.total, current: run.current) }
+        if let run = inputs.backingUp {
+            let offer: Offer?
+            if let finished = inputs.finished, finished.count > 0 {
+                offer = Offer(count: finished.count, bytes: finished.bytes, originals: finished.originals)
+            } else if inputs.readyCount > 0 {
+                offer = Offer(count: inputs.readyCount, bytes: inputs.readyBytes, originals: nil)
+            } else {
+                offer = nil
+            }
+            return .backingUp(done: run.done, total: run.total, current: run.current, offer: offer)
+        }
         // 3 · Space pressure: almost full and something real to free (T15).
         if let free = inputs.phoneFreeBytes, free < 2_000_000_000, inputs.readyBytes >= 500_000_000 {
             return .almostFull(bytes: inputs.readyBytes)

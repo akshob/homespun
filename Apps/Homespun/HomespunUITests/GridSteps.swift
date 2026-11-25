@@ -328,7 +328,7 @@ extension XCUIApplication {
     }
 
     @MainActor func pendingBackupItems() -> XCUIElementQuery {
-        gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up', 'Processing on server'}"))
+        gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up', 'Compact copy in progress'}"))
     }
 
     /// Selects the newest `count` items that aren't backed up, compacts them, and waits until

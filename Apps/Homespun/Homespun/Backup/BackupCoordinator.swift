@@ -33,6 +33,7 @@ final class BackupCoordinator {
     private var driveAgain = false
     private var retired = false
     private var visible = false
+    var isForegroundActive: Bool { visible && !suspended && !retired }
     private var generation = 0
     private var uploadOrder: UUID?
     private var validatedOriginals = Set<UUID>()
@@ -42,6 +43,8 @@ final class BackupCoordinator {
     private var suspended = false
     var currentWorkspace: BackupWorkspace? { workspace }
     var changed: @MainActor (Set<UUID>) async -> Void = { _ in }
+    /// Committed intent for presentation, before `changed` can suspend; not an execution lease.
+    var admitted: @MainActor (_ ids: [UUID], _ bindingID: UUID) -> Void = { _, _ in }
     var progress: @MainActor (UUID, String) -> Void = { _, _ in }
     var localWork: @MainActor (Int) -> Void = { _ in }
     var failed: @MainActor (Error) -> Void = { _ in }
@@ -169,6 +172,9 @@ final class BackupCoordinator {
         let batch = try await store.admit(ids, namespace: namespace, bindingID: binding.id,
                                          profile: context.information.capabilities.recipe.profile, compact: compact)
         try await store.rememberAdmission(batch, trigger: trigger)
+        if !retired, mine == generation, self.context?.binding.id == binding.id {
+            admitted(batch.operationIDs, binding.id)
+        }
         await changed(Set(batch.operationIDs))
         if !retired, mine == generation {
             if trigger != .automatic { schedulingPaused = false }

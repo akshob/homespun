@@ -20,12 +20,18 @@ import Testing
     #expect(AccessoryLadder.pick(inputs) == .almostFull(bytes: 4_200_000_000))
     // Running work outranks space; a blocking problem outranks everything.
     inputs.backingUp = (3, 12, "IMG_2041.HEIC")
-    #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC"))
+    let finishedOffer = AccessoryLadder.Offer(count: 12, bytes: 1_400_000_000, originals: ["a"])
+    #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC", offer: finishedOffer))
+    inputs.finished = nil
+    #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC",
+        offer: .init(count: 37, bytes: 4_200_000_000, originals: nil)))
+    inputs.readyCount = 0
+    #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC", offer: nil))
     inputs.unreachable = "Home Mac"
     #expect(AccessoryLadder.pick(inputs) == .unreachable("Home Mac"))
     // Not paired: an unreachable name means nothing.
     inputs.paired = false
-    #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC"))
+    #expect(AccessoryLadder.pick(inputs) == .backingUp(done: 3, total: 12, current: "IMG_2041.HEIC", offer: nil))
 
     // New since the last backup: only with at least 50 items and 3 days, and nothing more urgent.
     var calm = AccessoryLadder.Inputs()

@@ -402,6 +402,113 @@ private func abandonedPhotoHandoff(_ files: BackupFiles, operationID: UUID,
     #expect(CompactJob.project(operation, kept: false).isFinished)
 }
 
+@MainActor @Test func compactInProgressRequiresTheCurrentRetainedActiveBindingButNotALocalLease() {
+    let now = Date()
+    var operation = BackupStore.Operation(id: UUID(), namespace: "photos", itemID: "original", lineage: 1,
+        bindingID: UUID(), origin: .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString),
+        backup: .retained, profile: .standard, wantsCompact: true, createdAt: now, updatedAt: now)
+    let origin = operation.origin, bindingID = operation.bindingID
+    func presents(_ candidate: BackupStore.Operation) -> Bool {
+        CompactJob.presentsCompactInProgress(candidate, origin: origin, bindingID: bindingID)
+    }
+    #expect(presents(operation))
+    operation.lease = .init(id: UUID(), operationID: operation.id, epoch: 1, processID: UUID(), stage: .finalization)
+    #expect(presents(operation))
+    operation.lease = nil
+    operation.epoch += 1
+    #expect(presents(operation))
+    for compact in [BackupAPI.CompactState.requested, .queued, .processing, .ready] {
+        operation.compact = compact
+        for delivery in [BackupAPI.DeliveryState.pending, .downloading, .validating, .importPlanned] {
+            operation.delivery = delivery
+            #expect(presents(operation))
+        }
+    }
+    #expect(!CompactJob.presentsCompactInProgress(operation, origin: nil, bindingID: bindingID))
+    #expect(!CompactJob.presentsCompactInProgress(operation, origin: origin, bindingID: nil))
+    #expect(!CompactJob.presentsCompactInProgress(operation, origin: origin, bindingID: UUID()))
+    #expect(!CompactJob.presentsCompactInProgress(operation,
+        origin: .init(serverID: UUID().uuidString, historyEpoch: origin.historyEpoch), bindingID: bindingID))
+    #expect(!CompactJob.presentsCompactInProgress(operation,
+        origin: .init(serverID: origin.serverID, historyEpoch: UUID().uuidString), bindingID: bindingID))
+    var excluded = operation
+    excluded.attention = true
+    #expect(!presents(excluded))
+    excluded = operation
+    excluded.wantsCompact = false
+    #expect(!presents(excluded))
+    excluded = operation
+    excluded.delivery = .importedVerified
+    #expect(!presents(excluded))
+    for desired in [BackupStore.Desired.paused, .cancelled] {
+        excluded = operation
+        excluded.desired = desired
+        #expect(!presents(excluded))
+    }
+    for compact in [BackupAPI.CompactState.held, .failed] {
+        excluded = operation
+        excluded.compact = compact
+        #expect(!presents(excluded))
+    }
+    for backup in [BackupAPI.BackupState.selected, .preparing, .uploading, .verifying, .blocked, .failed] {
+        excluded = operation
+        excluded.backup = backup
+        #expect(!presents(excluded))
+    }
+}
+
+@MainActor @Test func pendingPresentationUsesCurrentBindingAndCanonicalCompletionNotLeases() {
+    let now = Date()
+    var operation = BackupStore.Operation(id: UUID(), namespace: "photos", itemID: "original", lineage: 1,
+        bindingID: UUID(), origin: .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString),
+        profile: .standard, wantsCompact: true, createdAt: now, updatedAt: now)
+    let origin = operation.origin, bindingID = operation.bindingID
+    func pending(_ candidate: BackupStore.Operation, kept: Bool = false) -> Bool {
+        CompactJob.presentsPendingWork(candidate, state: CompactJob.project(candidate, kept: kept),
+                                      origin: origin, bindingID: bindingID)
+    }
+    #expect(pending(operation))
+    operation.lease = .init(id: UUID(), operationID: operation.id, epoch: 1, processID: UUID(), stage: .preparation)
+    #expect(pending(operation))
+    operation.lease = nil
+    operation.backup = .retained
+    operation.compact = .processing
+    #expect(pending(operation))
+    operation.compact = .ready
+    #expect(pending(operation))
+    let state = CompactJob.project(operation, kept: false)
+    #expect(!CompactJob.presentsPendingWork(operation, state: state, origin: nil, bindingID: bindingID))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state, origin: origin, bindingID: nil))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state, origin: origin, bindingID: UUID()))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state,
+        origin: .init(serverID: origin.serverID, historyEpoch: UUID().uuidString), bindingID: bindingID))
+    #expect(!CompactJob.presentsPendingWork(operation, state: state,
+        origin: .init(serverID: UUID().uuidString, historyEpoch: origin.historyEpoch), bindingID: bindingID))
+    #expect(!pending(operation, kept: true))
+    var terminal = operation
+    terminal.attention = true
+    #expect(!pending(terminal))
+    terminal = operation
+    terminal.wantsCompact = false
+    #expect(!pending(terminal))
+    for desired in [BackupStore.Desired.paused, .cancelled] {
+        terminal = operation
+        terminal.desired = desired
+        #expect(!pending(terminal))
+    }
+    for compact in [BackupAPI.CompactState.held, .failed] {
+        terminal = operation
+        terminal.compact = compact
+        #expect(!pending(terminal))
+    }
+    terminal = operation
+    terminal.delivery = .importedVerified
+    terminal.manifest = .init(kind: .photo, resources: [
+        .init(role: .photo, filename: "original.jpg", size: 100, sha256: String(repeating: "a", count: 64)),
+    ])
+    #expect(!pending(terminal))
+}
+
 @Test func resultDiscoveryTracksCurrentWorkAndStopsAfterTerminalOutboxesAreDrained() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

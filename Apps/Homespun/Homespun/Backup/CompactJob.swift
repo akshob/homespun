@@ -94,8 +94,8 @@ final class CompactJob {
     @ObservationIgnored private var droppedWhilePreparing = Set<String>()
     @ObservationIgnored private var stoppedWhilePreparing = false
     var isPreparing: Bool { preparing > 0 }
-    /// Bumped when an item's phase changes (not for progress messages); the Library applies
-    /// `takePhaseChanges()` then, touching only those items' badges.
+    /// Bumped when an item's phase or retained grid fact changes (not for progress messages);
+    /// the Library applies `takePhaseChanges()` then, touching only those items' badges.
     private(set) var phaseVersion = 0
     @ObservationIgnored private var phaseChanges: [String: State?] = [:]
     /// The item being worked on, so progress messages find it without searching every item.
@@ -128,14 +128,23 @@ final class CompactJob {
     @ObservationIgnored private var pendingHistory = Set<UUID>()
     @ObservationIgnored private var recordedHistory: Set<UUID>?
     @ObservationIgnored private var currentOperationByItem: [String: UUID] = [:]
+    /// Current-server originals retained while their compact copies are made or saved to Photos.
+    @ObservationIgnored private(set) var compactInProgress = Set<String>()
     @ObservationIgnored private var retainedIDs = Set<UUID>()
     @ObservationIgnored private var remoteIDs = Set<UUID>()
+    @ObservationIgnored private var pendingIDs = Set<UUID>()
+    /// Committed admissions not yet reconciled; a reused ID gets a new coverage token.
+    @ObservationIgnored private(set) var admissionSeeds: [UUID: UUID] = [:]
     @ObservationIgnored private var pausedIDs = Set<UUID>()
     private(set) var pausedCount = 0
     private(set) var queueProblem: String?
     private(set) var queueLoaded = false
     private(set) var remoteCount = 0
     private(set) var hasRemoteWork = false
+    /// Current-server selections still pending, independent of local execution leases.
+    private(set) var hasPendingWork = false
+    /// Owns the foreground episode; PerfMonitor itself records only when opted in.
+    @ObservationIgnored private(set) var measuresBackupFrames = false
     private(set) var retainedCount = 0
     var activeOrigin: BackupAPI.Origin? {
         guard let context = coordinator.context, settings.matchesBackupBinding(context.binding) else { return nil }
@@ -152,6 +161,13 @@ final class CompactJob {
         coordinator = BackupCoordinator(store: ledger.store, photos: settings.photos, namespace: ledger.namespace,
                                         discoverySleep: discoverySleep)
         coordinator.changed = { [weak self] ids in self?.project(ids) }
+        coordinator.admitted = { [weak self] ids, bindingID in
+            guard let self, !self.retired, !self.suspended, let origin = self.activeOrigin,
+                  let binding = self.coordinator.context?.binding, binding.id == bindingID,
+                  binding.origin == origin else { return }
+            for id in ids { self.admissionSeeds[id] = UUID() }
+            self.refreshPending()
+        }
         coordinator.progress = { [weak self] id, message in self?.stageProgress(id, message: message) }
         coordinator.localWork = { [weak self] count in
             guard let self, !self.retired else { return }
@@ -179,10 +195,18 @@ final class CompactJob {
         if ids.isEmpty { reloadProjection = true } else { pendingProjection.formUnion(ids) }
         guard projectionWork == nil, !retired else { return }
         projectionWork = Task {
-            defer { projectionWork = nil }
+            defer {
+                projectionWork = nil
+                if retired || Task.isCancelled {
+                    admissionSeeds = [:]
+                    refreshPending()
+                }
+            }
             do {
                 repeat {
+                    guard !retired, !Task.isCancelled else { return }
                     if reloadProjection || !queueLoaded {
+                        let covered = admissionSeeds
                         reloadProjection = false
                         pendingProjection = []
                         var cursor: Int64 = 0
@@ -190,22 +214,46 @@ final class CompactJob {
                             let page = try await ledger.store.operationPage(namespace: ledger.namespace, after: cursor)
                             cursor = page.cursor
                             try await applyProjection(page.operations)
+                            guard !retired else { return }
                             if !page.hasMore { break }
                             await Task.yield()
                         } while !Task.isCancelled
+                        guard !Task.isCancelled else { return }
                         queueLoaded = true
+                        reconcileAdmissionSeeds(covered)
                     } else {
                         let requested = pendingProjection
+                        let covered = Dictionary(uniqueKeysWithValues: requested.compactMap { id in
+                            admissionSeeds[id].map { (id, $0) }
+                        })
                         pendingProjection = []
                         var operations: [BackupStore.Operation] = []
                         for id in requested {
                             if let operation = try await ledger.store.operation(id) { operations.append(operation) }
+                            else { pendingIDs.remove(id) }
                         }
                         try await applyProjection(operations)
+                        guard !retired, !Task.isCancelled else { return }
+                        reconcileAdmissionSeeds(covered)
                     }
                 } while reloadProjection || !pendingProjection.isEmpty
-            } catch { showQueueProblem(error) }
+            } catch {
+                admissionSeeds = [:]
+                refreshPending()
+                showQueueProblem(error)
+            }
         }
+    }
+
+    private func reconcileAdmissionSeeds(_ covered: [UUID: UUID]) {
+        for (id, token) in covered where admissionSeeds[id] == token { admissionSeeds[id] = nil }
+        refreshPending()
+    }
+
+    private func refreshPending() {
+        let pending = !pendingIDs.isEmpty || !admissionSeeds.isEmpty
+        if hasPendingWork != pending { hasPendingWork = pending }
+        updateBackupFrames()
     }
 
     private func applyProjection(_ operations: [BackupStore.Operation]) async throws {
@@ -217,11 +265,15 @@ final class CompactJob {
             Dictionary(Self.prepare(unknown, trigger: .manual, backUpOnly: [], photos: photos).map { ($0.assetIdentifier, $0) },
                        uniquingKeysWith: { first, _ in first })
         }.value
+        guard !retired else { return }
         var progress = runProgress
         var terminal = false
         for operation in current {
+            let wasCompactInProgress = compactInProgress.contains(operation.itemID)
             if let oldID = currentOperationByItem[operation.itemID], oldID != operation.id {
                 retainedIDs.remove(oldID); remoteIDs.remove(oldID); pausedIDs.remove(oldID)
+                pendingIDs.remove(oldID)
+                compactInProgress.remove(operation.itemID)
                 if let index = positions[oldID] {
                     let old = items[index].state, superseded = State.notYet("An earlier request is preserved; a newer selection owns this item.")
                     updateProgress(&progress, old: old, new: superseded)
@@ -234,6 +286,16 @@ final class CompactJob {
             if case .saved(let original, _) = state, let intent = try await ledger.store.importIntent(operation.id) {
                 state = .saved(originalBytes: original, compactBytes: intent.expected.reduce(0) { $0 + $1.size })
             }
+            guard !retired else { return }
+            pendingIDs.remove(operation.id)
+            if Self.presentsPendingWork(operation, state: state, origin: activeOrigin,
+                                        bindingID: coordinator.context?.binding.id) {
+                pendingIDs.insert(operation.id)
+            }
+            let inProgress = Self.presentsCompactInProgress(operation, origin: activeOrigin,
+                                                          bindingID: coordinator.context?.binding.id)
+            if inProgress { compactInProgress.insert(operation.itemID) }
+            else { compactInProgress.remove(operation.itemID) }
             let previous = positions[operation.id].map { items[$0].state }
             let index: Int
             if let old = positions[operation.id] {
@@ -242,9 +304,9 @@ final class CompactJob {
                 updateProgress(&progress, old: before, new: state)
                 items[index].state = state
                 states[operation.itemID] = state
-                if before.phase != state.phase {
+                if before.phase != state.phase || wasCompactInProgress != inProgress {
                     noteChange(operation.itemID, state)
-                    if state.phase == .saved { terminal = true }
+                    if before.phase != state.phase, state.phase == .saved { terminal = true }
                 }
             } else {
                 let description = descriptions[operation.itemID]
@@ -284,6 +346,7 @@ final class CompactJob {
         pausedCount = pausedIDs.count
         progress.total = items.count
         runProgress = progress
+        refreshPending()
         if isRunning, !settings.isDemo {
             _ = LongRun.shared.begin(items: progress.total, server: settings.server?.name ?? "your server")
         }
@@ -330,6 +393,20 @@ final class CompactJob {
             return .working(operation.problem?.message ?? "Backing up original")
         }
         return .waiting
+    }
+
+    static func presentsCompactInProgress(_ operation: BackupStore.Operation, origin: BackupAPI.Origin?,
+                                         bindingID: UUID?) -> Bool {
+        origin != nil && operation.origin == origin && bindingID != nil && operation.bindingID == bindingID
+            && operation.desired == .active && !operation.attention && operation.backup == .retained
+            && operation.wantsCompact && operation.delivery != .importedVerified
+            && operation.compact != .held && operation.compact != .failed
+    }
+
+    static func presentsPendingWork(_ operation: BackupStore.Operation, state: State, origin: BackupAPI.Origin?,
+                                    bindingID: UUID?) -> Bool {
+        origin != nil && operation.origin == origin && bindingID != nil && operation.bindingID == bindingID
+            && !state.isFinished
     }
 
     private func stageProgress(_ id: UUID, message: String) {
@@ -396,10 +473,23 @@ final class CompactJob {
         try await coordinator.runOpportunity()
     }
 
-    func setVisible(_ visible: Bool) { coordinator.setVisible(visible) }
+    func setVisible(_ visible: Bool) {
+        coordinator.setVisible(visible)
+        updateBackupFrames()
+    }
+
+    private func updateBackupFrames() {
+        let wanted = suppliedCompactor == nil && !retired && !suspended && coordinator.isForegroundActive
+            && activeOrigin != nil && hasPendingWork
+        guard wanted != measuresBackupFrames else { return }
+        measuresBackupFrames = wanted
+        if wanted { PerfMonitor.shared.framesBegan("backup") }
+        else { PerfMonitor.shared.framesEnded("backup") }
+    }
 
     func suspendAndWait() async {
         suspended = true
+        updateBackupFrames()
         contextWork?.cancel()
         coordinator.suspend()
         _ = try? await contextWork?.value
@@ -424,10 +514,12 @@ final class CompactJob {
         guard !retired, coordinator.context != nil || contextWork != nil else { return }
         contextWork?.cancel()
         coordinator.suspend()
+        resetPresentationFacts()
         onBindingChanged?()
         control { [self] in
             _ = try? await contextWork?.value
             try await coordinator.detach()
+            resetPresentationFacts()
             remoteIDs = []; retainedIDs = []; pausedIDs = []
             remoteCount = 0; retainedCount = 0; pausedCount = 0
             hasRemoteWork = false
@@ -435,6 +527,15 @@ final class CompactJob {
             if !suspended, settings.isPaired { await refreshQueue() }
             onBindingChanged?()
         }
+    }
+
+    private func resetPresentationFacts() {
+        let previous = compactInProgress
+        compactInProgress = []
+        pendingIDs = []
+        admissionSeeds = [:]
+        refreshPending()
+        for id in previous { noteChange(id, states[id]) }
     }
 
     func remover() -> DurableOriginalRemover? {
@@ -488,7 +589,7 @@ final class CompactJob {
         }
     }
 
-    /// The items whose phase changed since the last call (nil: no longer in the job), latest state each.
+    /// Items whose phase or retained grid fact changed (nil: no longer in the job), latest state each.
     func takePhaseChanges() -> [String: State?] {
         defer { phaseChanges = [:] }
         return phaseChanges
@@ -721,6 +822,7 @@ final class CompactJob {
     /// Rejects new work immediately. The current item finishes its admitted side effects.
     func retire() {
         retired = true
+        resetPresentationFacts()
         coordinator.retire()
         contextWork?.cancel()
         historyWork?.cancel()
