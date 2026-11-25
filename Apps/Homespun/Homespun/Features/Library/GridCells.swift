@@ -26,8 +26,8 @@ final class GridCell: UICollectionViewCell {
     private var info: MediaInfo?
     private var state: LibraryState.Cell?
     private var serverName = ""
-    private var selecting = false
-    private var selected = false
+    private var configuredSelecting = false
+    private var configuredSelected = false
     private var configuredTraits: UITraitCollection?
 
     /// Whether the cell has a picture yet (the performance tests count cells shown without one).
@@ -88,7 +88,7 @@ final class GridCell: UICollectionViewCell {
     }
 
     func isConfigured(for state: LibraryState.Cell, selecting: Bool, selected: Bool, serverName: String) -> Bool {
-        self.state == state && self.selecting == selecting && self.selected == selected && self.serverName == serverName
+        self.state == state && configuredSelecting == selecting && configuredSelected == selected && self.serverName == serverName
             && configuredTraits?.isEqual(traitCollection) == true
     }
 
@@ -112,8 +112,8 @@ final class GridCell: UICollectionViewCell {
 
     func updateSelection(selecting: Bool, selected: Bool) {
         RenderProbe.count("grid.selections")
-        self.selecting = selecting
-        self.selected = selected
+        configuredSelecting = selecting
+        configuredSelected = selected
         dim.isHidden = !selected
         let selectable = state.map { $0.canCompact || $0.canFree || $0.canRestore } ?? false
         let mark = selecting ? (selected ? GridStyle.checkmark(traitCollection) : selectable ? GridStyle.circle : nil) : nil
