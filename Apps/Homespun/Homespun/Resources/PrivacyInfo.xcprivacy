@@ -2,11 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Homespun's privacy manifest. Analytics, crash and performance data are collected only if the
      person chooses Share Analytics; an email address and the problem description only when they
-     send a problem report. A separately configured optional wake relay receives a push token only
-     after explicit wake consent. Nothing is used for tracking or advertising. -->
+     send a problem report. Version 1.1.0 has no wake relay and collects no push token.
+     Nothing is used for tracking or advertising. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Version 1.0.0 disables purchases. Version 1.1.0 enables the one-time Premium purchase.
-     Optional wake enrollment uses a device push token only for app functionality, never tracking. -->
+     Version 1.1.0 has no wake relay and collects no push token. -->
 <plist version="1.0">
 <dict>
 	<key>NSPrivacyTracking</key>

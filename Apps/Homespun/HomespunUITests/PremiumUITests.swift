@@ -32,7 +32,7 @@ final class PremiumUITests: XCTestCase {
 
         app.openTab("Server")
         app.swipeUpInContent()
-        for id in ["settings.premium", "settings.automatic", "settings.connectors"] {
+        for id in ["settings.premium", "settings.automatic", "settings.connectors", "settings.wake"] {
             XCTAssertFalse(app.buttons[id].exists, id)
         }
         XCTAssertTrue(app.reveal(app.buttons["settings.notifications"]), "Manual completion alerts stay free")

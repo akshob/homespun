@@ -1,8 +1,10 @@
 # Homespun
 
-### Optional wake relay (implementation preview)
+### Optional wake relay (dormant; not part of 1.1.0)
 
-`homespun-notify` is separate, opt-in infrastructure for content-free APNs background hints.
+Homespun 1.1.0 ships without it: the app shows no Background Wakeups setting, never registers for
+remote notifications and sends no push token. `homespun-notify` remains unreleased infrastructure
+for content-free APNs background hints.
 It is not started by `homespun-server`, has not been deployed as part of this change, and does
 not make iOS background execution or delivery guaranteed. The result cursor remains authoritative.
 Deployment and any hosting spend require a separate owner decision.
@@ -537,7 +539,8 @@ the normal connector counts include v1 and v2. Destination changes fence old com
 Cloud copies and their status never substitute for local retention or fresh external byte proof.
 
 An optional owner-configured `HOMESPUN_WAKE_RELAY_URL` (HTTPS, default absent) enables a content-free
-wake sender. This does not deploy or advertise a functioning relay. After the phone opts in and
+wake sender. Not used by Homespun 1.1.0: leave `HOMESPUN_WAKE_RELAY_URL` unset.
+This does not deploy or advertise a functioning relay. After the phone opts in and
 activates its relay route, `POST /api/v2/wake/enrollment` accepts only `WakeRelayAPI.Sender`
 (`route_id`, `generation_id`, canonical 32-byte `token`) for that authenticated device.
 Without an owner endpoint it returns `wake_unavailable` and stores nothing. It returns an ETag

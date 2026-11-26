@@ -17,6 +17,7 @@ struct ServerTab: View {
             case .automatic: ReleaseFeatures.automaticMode
             case .connectors: ReleaseFeatures.cloudCopies
             case .premium: ReleaseFeatures.premium
+            case .wake: WakeSystem.relayConfigured
             default: true
             }
         }
@@ -290,12 +291,14 @@ struct ServerTab: View {
             }
             .accessibilityIdentifier("settings.notifications")
             .sidebarRow(Route.notifications)
-            NavigationLink(value: Route.wake) {
-                ServerRow(title: "Background Wakeups", symbol: "antenna.radiowaves.left.and.right",
-                          value: model.settings.isDemo ? "Off in the demo" : nil)
+            if Route.wake.isAvailable {
+                NavigationLink(value: Route.wake) {
+                    ServerRow(title: "Background Wakeups", symbol: "antenna.radiowaves.left.and.right",
+                              value: model.settings.isDemo ? "Off in the demo" : nil)
+                }
+                .accessibilityIdentifier("settings.wake")
+                .sidebarRow(Route.wake)
             }
-            .accessibilityIdentifier("settings.wake")
-            .sidebarRow(Route.wake)
             NavigationLink(value: Route.analytics) {
                 ServerRow(title: "Share Analytics", symbol: "chart.bar",
                           value: model.settings.isDemo ? "Off in the demo" : Telemetry.shared.isSharing ? "On" : "Off")
@@ -337,7 +340,8 @@ struct ServerTab: View {
         case .deviceName: nameEditor
         case .addDevice: AddDeviceView(settings: settings)
         case .notifications: NotificationsView(model: model)
-        case .wake: WakeSettingsView(enrollment: WakeSystem.enrollment, demo: settings.isDemo)
+        case .wake:
+            if Route.wake.isAvailable { WakeSettingsView(enrollment: WakeSystem.enrollment, demo: settings.isDemo) }
         case .premium:
             if ReleaseFeatures.premium { PremiumView(premium: model.premium, model: model) }
         case .help: HelpAboutView(model: model)

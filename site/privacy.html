@@ -16,13 +16,13 @@
   </header>
   <main>
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated November 24, 2026</p>
+    <p class="updated">Last updated November 26, 2026</p>
 
     <p><strong>In short:</strong> Your photos and videos stay on your iPhone or go to a server that you run. The
       developer of Homespun never receives them. The app has no accounts, ads, or tracking, and it never sells your
       data. If you choose to share analytics, the developer receives anonymous usage counts and crash reports;
-      if you send a problem report, the developer receives what you write. A separately configured optional wake
-      service in version 1.1.0 uses a device push token only after you opt in, as described below.</p>
+      if you send a problem report, the developer receives what you write. Homespun does not use push notifications
+      from the developer and collects no device push token.</p>
     <p>Version 1.0.0 remains the public App Store release while version 1.1.0 is prepared.
       Features identified as 1.1.0 below are not enabled in the 1.0.0 app.</p>
 
@@ -57,29 +57,11 @@
       and Microsoft credentials still remain on your server.</p>
     <p>Version 1.1.0 keeps pending backup choices, verified-copy records and recovery intent in protected local
       storage. Those logical records can be included in the device backup you configure with Apple. Reconstructible
-      transfer files and resume data are excluded from that backup; pairing and wake credentials stay in
+      transfer files and resume data are excluded from that backup; pairing credentials stay in
       device-only Keychain. Restoring a device backup does not restore a native network task or its credentials.</p>
     <p>Find Compact Copies in version 1.1.0 sends file fingerprints (SHA-256), resource roles and sizes to your
       paired server to revalidate existing copies. It does not send their media or local file names.
       An old match alone never authorizes removing an original.</p>
-
-    <h2>Optional background wakeups in version 1.1.0</h2>
-    <p>Background Wakeups is off unless you explicitly enable it, and is unavailable in builds without a configured
-      wake service. It is separate from sharing analytics, Premium ownership and permission to show local alerts.
-      Your iPhone sends its Apple Push Notification service (APNs) token to the configured Homespun wake relay.
-      Your own server receives only an opaque route and a scoped send credential, never that device token or
-      the developer's APNs signing key.</p>
-    <p>A wake hint contains only an opaque generation and a random nonce. It contains no media, hashes, file names,
-      server names or LAN addresses, item counts or progress. The relay sends Apple a generic background hint;
-      the app then authenticates your server and checks its authoritative results. Apple may delay, coalesce or
-      drop a hint. It does not carry a photo, authorize an import or deletion, or guarantee background execution.</p>
-    <p>Pending tokenless enrollments expire after one day. Active device-token enrollments expire after 90 days
-      without a device refresh, or are removed after opt-out or an invalid-token response. Disabling wakeups fences
-      new enrollment and retains private deletion handles until the relay acknowledges cleanup. A delayed
-      activation cannot recreate an erased enrollment. Apple may already have accepted an in-flight generic hint;
-      receiving it does not re-enable consent. The relay application does not keep request or token logs.
-      Network infrastructure still processes connection IP addresses to deliver and protect HTTPS requests;
-      these addresses are not included in hint payloads or used for analytics.</p>
 
     <h2>Analytics you choose to share</h2>
     <p>Homespun asks once, during setup, whether you want to share anonymous analytics with its developer, and you
@@ -118,7 +100,7 @@
       with no real server. Leaving deletes the demo's settings and records; the drawn samples stay until the next launch.
       Your own server's settings and records stay unchanged.</p>
     <p>Local demo-time intervals are kept only to exclude delayed or mixed iOS diagnostics from sharing. These
-      intervals stay on the iPhone. The demo never enrolls for remote notifications.</p>
+      intervals stay on the iPhone.</p>
 
     <h2>Where it goes and how long it's kept</h2>
     <p>Analytics, crash reports, and problem reports go to a service the developer runs on Cloudflare

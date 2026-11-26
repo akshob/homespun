@@ -4,11 +4,21 @@ import HomespunCore
 import UIKit
 
 @MainActor enum WakeSystem {
+    nonisolated static func relayURL(configured: String?, pushEnvironment: String?) -> URL? {
+        guard let pushEnvironment, ["development", "production"].contains(pushEnvironment),
+              let configured, !configured.isEmpty else { return nil }
+        return URL(string: configured)
+    }
+
+    /// Whether this build has a wake relay. 1.1.0 ships without one: no setting, no enrollment, no push token.
+    nonisolated static let relayConfigured: Bool = relayURL(
+        configured: Bundle.main.object(forInfoDictionaryKey: "HomespunWakeRelayURL") as? String,
+        pushEnvironment: Bundle.main.object(forInfoDictionaryKey: "HomespunWakePushEnvironment") as? String) != nil
+
     static let enrollment: WakeEnrollment = {
         let configured = Bundle.main.object(forInfoDictionaryKey: "HomespunWakeRelayURL") as? String
         let pushEnvironment = Bundle.main.object(forInfoDictionaryKey: "HomespunWakePushEnvironment") as? String
-        let url = pushEnvironment.map { ["development", "production"].contains($0) } == true
-            ? configured.flatMap { $0.isEmpty ? nil : URL(string: $0) } : nil
+        let url = relayURL(configured: configured, pushEnvironment: pushEnvironment)
         let environment: WakeRelayAPI.Environment = pushEnvironment == "development" ? .sandbox : .production
         return WakeEnrollment(relayURL: url, environment: environment, storage: KeychainWakeEnrollmentStore())
     }()

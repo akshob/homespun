@@ -4,6 +4,13 @@ import HomespunCore
 import Testing
 @testable import Homespun
 
+@MainActor @Test func backgroundWakeupsAreHiddenWithoutAConfiguredRelay() {
+    #expect(WakeSystem.relayURL(configured: "", pushEnvironment: "") == nil)
+    #expect(WakeSystem.relayURL(configured: "https://wake.example.invalid", pushEnvironment: "") == nil)
+    #expect(WakeSystem.relayURL(configured: "https://wake.example.invalid", pushEnvironment: "production") != nil)
+    #expect(!WakeSystem.relayConfigured && !ServerTab.Route.wake.isAvailable)
+}
+
 @MainActor private final class WakeMemoryStore: WakeEnrollmentStoring {
     var value = WakeEnrollmentState()
     var failSave = false
