@@ -980,7 +980,7 @@ struct BoundedMotionEncoder: Sendable {
                     currentPCM = nil
                     if sample == nil || offset == CMSampleBufferGetNumSamples(sample!) {
                         sample = nil
-                        if !end, !read() { state.pointee = .endOfStream; return nil }
+                        if !end, !(try read()) { state.pointee = .endOfStream; return nil }
                     }
                     guard !end, let sample, let block = CMSampleBufferGetDataBuffer(sample), requested > 0 else {
                         state.pointee = .endOfStream
