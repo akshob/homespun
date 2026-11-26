@@ -571,6 +571,223 @@ private func files(in directory: URL) throws -> [String] {
         for chunk in serialized.chunks { try handle.write(contentsOf: chunk) }
     }
 
+    private static func compositionAtomPath(_ type: String, videoID: UInt32, in data: Data) throws -> [Range<Int>] {
+        func children(_ range: Range<Int>) throws -> [(String, Range<Int>)] {
+            var result: [(String, Range<Int>)] = [], offset = range.lowerBound
+            while offset < range.upperBound {
+                let short = try QuickTimeMuxer.read32(data, offset)
+                var size = Int(short)
+                if short == 1 {
+                    try #require(offset + 16 <= range.upperBound)
+                    size = try #require(Int(exactly: data[(offset + 8)..<(offset + 16)].reduce(UInt64(0)) {
+                        ($0 << 8) | UInt64($1)
+                    }))
+                } else if short == 0 { size = range.upperBound - offset }
+                try #require(size >= 8 && size <= range.upperBound - offset)
+                result.append((String(decoding: data[(offset + 4)..<(offset + 8)], as: UTF8.self), offset..<(offset + size)))
+                offset += size
+            }
+            return result
+        }
+        let moov = try #require(try children(0..<data.count).first(where: { $0.0 == "moov" })?.1)
+        var path = [moov]
+        var video: Range<Int>?
+        for (_, candidate) in try children((moov.lowerBound + 8)..<moov.upperBound).filter({ $0.0 == "trak" }) {
+            let header = try #require(try children((candidate.lowerBound + 8)..<candidate.upperBound).first(where: { $0.0 == "tkhd" })?.1)
+            if try QuickTimeMuxer.read32(data, header.lowerBound + 20) == videoID { video = candidate }
+        }
+        var container = try #require(video)
+        path.append(container)
+        for name in ["mdia", "minf", "stbl", type] {
+            container = try #require(try children((container.lowerBound + 8)..<container.upperBound).first(where: { $0.0 == name })?.1)
+            path.append(container)
+        }
+        return path
+    }
+
+    @Test func ownedCompositionSummaryValidatesBFrameFixtureAndRawRoundTrip() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("roundtrip.mov")
+        try await Synthetic.video(at: input, Self.ownedSpec(frames: 15, audio: 0))
+        let source = try QuickTimeMuxer.source(input, limits: .init())
+        let video = try #require(source.tracks.first(where: { $0.model.kind == "vide" }))
+        let summary = try #require(video.compositionSummary)
+        #expect(video.compositionOffsets.contains(where: { $0 != 0 }), "Fixture must exercise composition reordering")
+        #expect(Set(video.compositionOffsets).count > 1, "A constant codec delay is not a B-frame reorder witness")
+        #expect(try summary == QuickTimeMuxer.compositionSummary(durations: video.durations,
+                                                               displayOffsets: video.compositionOffsets))
+        let sourceBytes = try Data(contentsOf: input)
+        let path = try Self.compositionAtomPath("cslg", videoID: video.model.id, in: sourceBytes)
+        let atom = try #require(path.last)
+        let fields = try (0..<5).map { Int32(bitPattern: try QuickTimeMuxer.read32(sourceBytes, atom.lowerBound + 12 + $0 * 4)) }
+        #expect(summary.fields == fields)
+        try Self.writeMovie(Self.materialized(input), to: output)
+        let roundTrip = try QuickTimeMuxer.source(output, limits: .init())
+        for old in source.tracks {
+            let new = try #require(roundTrip.tracks.first(where: { $0.model.id == old.model.id }))
+            #expect(new.durations == old.durations && new.compositionOffsets == old.compositionOffsets)
+            #expect(new.compositionOffsetAtom == old.compositionOffsetAtom)
+            #expect(new.compositionSummaryAtom == old.compositionSummaryAtom)
+        }
+        #expect(try await AVSupport.decodeVideo(input, cancellable: true) == 15)
+        #expect(try await AVSupport.decodeVideo(output, cancellable: true) == 15)
+        let a = try #require(try await AVURLAsset(url: input).loadTracks(withMediaType: .video).first)
+        let b = try #require(try await AVURLAsset(url: output).loadTracks(withMediaType: .video).first)
+        #expect(try await a.load(.timeRange) == b.load(.timeRange))
+    }
+
+    @Test func ownedCompositionSummaryRejectsEveryCorruptedField() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("in.mov"), mutated = directory.appendingPathComponent("mutated.mov")
+        try await Synthetic.video(at: input, Self.ownedSpec(frames: 15, audio: 0))
+        let source = try QuickTimeMuxer.source(input, limits: .init())
+        let video = try #require(source.tracks.first(where: { $0.model.kind == "vide" }))
+        let original = try Data(contentsOf: input)
+        let path = try Self.compositionAtomPath("cslg", videoID: video.model.id, in: original)
+        let atom = try #require(path.last)
+        for field in 0..<5 {
+            for delta in [Int32(-1), Int32(1)] {
+                var bytes = original
+                let offset = atom.lowerBound + 12 + field * 4
+                let old = Int32(bitPattern: try QuickTimeMuxer.read32(bytes, offset))
+                let (changed, overflow) = old.addingReportingOverflow(delta)
+                try #require(!overflow)
+                try QuickTimeMuxer.replace32(&bytes, offset, UInt32(bitPattern: changed))
+                try bytes.write(to: mutated)
+                do {
+                    _ = try QuickTimeMuxer.source(mutated, limits: .init())
+                    Issue.record("A supplied composition summary field cannot override the sample-derived timeline")
+                } catch let error as QuickTimeMuxer.Failure {
+                    guard case .corruptInput(let message) = error, message.hasPrefix("composition summary parsed="),
+                          message.contains(" computed=") else { throw error }
+                }
+            }
+        }
+    }
+
+    enum OwnedCompositionMutation: CaseIterable, Sendable {
+        case version, flags, wrongSize, extendedSize, duplicate, missingOffsets, offsetVersion
+    }
+
+    @Test(arguments: OwnedCompositionMutation.allCases)
+    func ownedCompositionSummaryRejectsUnsupportedStructures(_ mutation: OwnedCompositionMutation) async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("in.mov"), mutated = directory.appendingPathComponent("mutated.mov")
+        try await Synthetic.video(at: input, Self.ownedSpec(frames: 15, audio: 0))
+        let video = try #require(try QuickTimeMuxer.source(input, limits: .init()).tracks.first(where: { $0.model.kind == "vide" }))
+        var data = try Data(contentsOf: input)
+        let path = try Self.compositionAtomPath("cslg", videoID: video.model.id, in: data)
+        let summary = try #require(path.last)
+        switch mutation {
+        case .version: data[summary.lowerBound + 8] = 1
+        case .flags: data[summary.lowerBound + 11] = 1
+        case .wrongSize: try QuickTimeMuxer.replace32(&data, summary.lowerBound, 28)
+        case .extendedSize: try QuickTimeMuxer.replace32(&data, summary.lowerBound, 1)
+        case .duplicate:
+            let copy = data.subdata(in: summary)
+            data.insert(contentsOf: copy, at: summary.upperBound)
+            for ancestor in path.dropLast() {
+                try QuickTimeMuxer.replace32(&data, ancestor.lowerBound, UInt32(ancestor.count + copy.count))
+            }
+        case .missingOffsets:
+            let offsetPath = try Self.compositionAtomPath("ctts", videoID: video.model.id, in: data)
+            let ctts = try #require(offsetPath.last)
+            data.removeSubrange(ctts)
+            for ancestor in offsetPath.dropLast() {
+                try QuickTimeMuxer.replace32(&data, ancestor.lowerBound, UInt32(ancestor.count - ctts.count))
+            }
+        case .offsetVersion:
+            let ctts = try #require(try Self.compositionAtomPath("ctts", videoID: video.model.id, in: data).last)
+            data[ctts.lowerBound + 8] = 1
+        }
+        try data.write(to: mutated)
+        do {
+            _ = try QuickTimeMuxer.source(mutated, limits: .init())
+            Issue.record("Unsupported composition structure must fail closed")
+        } catch let error as QuickTimeMuxer.Failure {
+            switch error {
+            case .unsupported, .corruptInput: break
+            default: throw error
+            }
+            if mutation == .missingOffsets {
+                #expect(error == .unsupported("composition summary without offsets"))
+            }
+            if mutation == .version || mutation == .flags {
+                #expect(error == .unsupported("composition summary size/version/flags"))
+            }
+            if mutation == .offsetVersion {
+                #expect(error == .unsupported("composition timing version/flags"))
+            }
+        }
+    }
+
+    @Test(arguments: [[Int32(-2), 0, 3], [Int32(0), 1]])
+    func ownedCompositionSignedModelRoundTrip(offsets: [Int32]) async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("signed.mov")
+        try await Synthetic.video(at: input, Self.ownedSpec(frames: 15, audio: 0))
+        var movie = try Self.materialized(input)
+        let video = try #require(movie.tracks.firstIndex(where: { $0.kind == "vide" }))
+        movie.tracks[video].samples = offsets.enumerated().map {
+            var sample = movie.tracks[video].samples[$0.offset]
+            sample.duration = 10
+            sample.compositionOffset = $0.element
+            return sample
+        }
+        try Self.writeMovie(movie, to: output)
+        let parsed = try #require(try QuickTimeMuxer.source(output, limits: .init()).tracks.first(where: { $0.model.kind == "vide" }))
+        #expect(parsed.compositionOffsets == offsets)
+        let summary = try #require(parsed.compositionSummary)
+        let ctts = try #require(parsed.compositionOffsetAtom)
+        if offsets.count == 3 {
+            #expect(summary.fields == [-2, -2, 3, -2, 33])
+            #expect(try [QuickTimeMuxer.read32(ctts, 20), QuickTimeMuxer.read32(ctts, 28),
+                         QuickTimeMuxer.read32(ctts, 36)] == [0, 2, 5])
+        } else {
+            #expect(summary.fields == [0, 0, 1, 0, 21])
+            #expect(try [QuickTimeMuxer.read32(ctts, 20), QuickTimeMuxer.read32(ctts, 28)] == [0, 1])
+        }
+        #expect(throws: QuickTimeMuxer.Failure.limitExceeded("signed composition timing")) {
+            try QuickTimeMuxer.compositionSummary(durations: [UInt32.max], displayOffsets: [1])
+        }
+    }
+
+    @Test func ownedFormatIdentityDiagnosticForSyntheticFixtures() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for frames in [1, 15] {
+            let input = directory.appendingPathComponent("fixture-\(frames).mov")
+            var spec = Self.ownedSpec(frames: frames, audio: frames == 1 ? 0 : 1)
+            if frames == 1 {
+                spec.width = 512
+                spec.height = 512
+                spec.cleanAperture = nil
+                spec.bitrate = 100_000
+            }
+            try await Synthetic.video(at: input, spec)
+            let asset = AVURLAsset(url: input)
+            for track in try await asset.load(.tracks) {
+                let expected = try #require(try await track.load(.formatDescriptions).first)
+                let reader = try AVAssetReader(asset: asset)
+                let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+                output.alwaysCopiesSampleData = false
+                try #require(reader.canAdd(output))
+                reader.add(output)
+                defer { reader.cancelReading() }
+                try #require(reader.startReading())
+                let sample = try #require(output.copyNextSampleBuffer())
+                let actual = try #require(CMSampleBufferGetFormatDescription(sample))
+                if !CFEqual(actual, expected) {
+                    Issue.record("synthetic frames=\(frames) track_id=\(track.trackID) \(BoundedMotionEncoder.formatDifference(actual, expected))")
+                }
+            }
+        }
+    }
+
     private static func monoAudioWindow(_ input: URL, frames: Int = 1024) async throws -> [Float] {
         let asset = AVURLAsset(url: input)
         let track = try #require(try await asset.loadTracks(withMediaType: .audio).first)
@@ -918,6 +1135,11 @@ private func files(in directory: URL) throws -> [String] {
             #expect(state.serialized == [result.size])
             #expect(result.size > 0 && result.size < inputSize)
             #expect(state.opened.first?.0 == .encoded)
+            let encodedVideo = try #require(try QuickTimeMuxer.source(output, limits: .init()).tracks.first(where: {
+                $0.model.kind == "vide"
+            }))
+            #expect(encodedVideo.compositionOffsets.allSatisfy({ $0 == 0 }))
+            #expect(encodedVideo.compositionOffsetAtom == nil && encodedVideo.compositionSummaryAtom == nil)
         } else {
             #expect(result.mode == .originalKeptNotSmaller)
             #expect(state.opened.first?.0 == .originalCopy && result.size == inputSize)

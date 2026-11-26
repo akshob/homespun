@@ -47,6 +47,7 @@ enum QuickTimeMuxer {
     struct Sample {
         var bytes: Data
         var duration: UInt32
+        /// Actual signed display offset, not the shifted unsigned value stored in ctts.
         var compositionOffset: Int32 = 0
         var sync = true
     }
@@ -83,6 +84,46 @@ enum QuickTimeMuxer {
         /// Payload Data uses copy-on-write references, never a concatenated output copy.
         var chunks: [Data]
         var totalBytes: Int
+    }
+
+    struct CompositionSummary: Equatable {
+        var shift: Int32
+        var least: Int32
+        var greatest: Int32
+        var start: Int32
+        var end: Int32
+
+        var fields: [Int32] { [shift, least, greatest, start, end] }
+    }
+
+    private static func timingAdd(_ a: Int64, _ b: Int64) throws -> Int64 {
+        let (value, overflow) = a.addingReportingOverflow(b)
+        guard !overflow else { throw Failure.limitExceeded("composition timing addition") }
+        return value
+    }
+
+    private static func timing32(_ value: Int64) throws -> Int32 {
+        guard let result = Int32(exactly: value) else { throw Failure.limitExceeded("signed composition timing") }
+        return result
+    }
+
+    /// QTFF v0: stored offset = display offset - shift; absent cslg implies zero shift.
+    /// Bounds use decode order; the last displayed frame retains its decode duration.
+    static func compositionSummary(durations: [UInt32], displayOffsets: [Int32]) throws -> CompositionSummary {
+        guard !durations.isEmpty, durations.count == displayOffsets.count,
+              durations.allSatisfy({ $0 > 0 }),
+              let least = displayOffsets.min(), let greatest = displayOffsets.max() else {
+            throw Failure.corruptInput("composition sample timing")
+        }
+        var decode: Int64 = 0, start = Int64.max, end = Int64.min
+        for index in durations.indices {
+            let displayed = try timingAdd(decode, Int64(displayOffsets[index]))
+            start = min(start, displayed)
+            end = max(end, try timingAdd(displayed, Int64(durations[index])))
+            decode = try timingAdd(decode, Int64(durations[index]))
+        }
+        return CompositionSummary(shift: min(least, 0), least: least, greatest: greatest,
+                                  start: try timing32(start), end: try timing32(end))
     }
 
     static func add(_ lhs: Int, _ rhs: Int) throws -> Int {
@@ -187,9 +228,17 @@ enum QuickTimeMuxer {
         var tables = try fullAtom("stsd", integer(1) + track.description)
         tables.append(try table("stts", runs(track.samples.map(\.duration))))
         if track.samples.contains(where: { $0.compositionOffset != 0 }) {
-            tables.append(try fullAtom("ctts", runs(track.samples.map {
-                UInt32(bitPattern: $0.compositionOffset)
-            }).reduce(into: Data()) { $0.append(integer($1)) }))
+            let summary = try compositionSummary(durations: track.samples.map(\.duration),
+                                                 displayOffsets: track.samples.map(\.compositionOffset))
+            let stored = try track.samples.map { sample -> UInt32 in
+                let shifted = try timingAdd(Int64(sample.compositionOffset), -Int64(summary.shift))
+                guard let value = UInt32(exactly: shifted) else { throw Failure.limitExceeded("stored composition offset") }
+                return value
+            }
+            tables.append(try table("ctts", runs(stored)))
+            tables.append(try fullAtom("cslg", summary.fields.reduce(into: Data()) {
+                $0.append(integer(UInt32(bitPattern: $1)))
+            }))
         }
         if track.samples.contains(where: { !$0.sync }) {
             let indices = track.samples.enumerated().filter { $0.element.sync }.map { UInt32($0.offset + 1) }
@@ -231,7 +280,7 @@ enum QuickTimeMuxer {
         for track in movie.tracks {
             guard track.samples.count <= limits.samplesPerTrack else { throw Failure.limitExceeded("sample count") }
             for sample in track.samples {
-                guard sample.duration > 0, sample.compositionOffset >= 0,
+                guard sample.duration > 0,
                       !sample.bytes.isEmpty, sample.bytes.count <= limits.sampleBytes else {
                     throw Failure.unsupported("sample size or timing")
                 }
@@ -271,7 +320,11 @@ enum QuickTimeMuxer {
         var model: Track
         var sampleSizes: [UInt32]
         var durations: [UInt32]
+        /// Actual signed display offsets after applying the validated cslg shift.
         var compositionOffsets: [Int32]
+        var compositionOffsetAtom: Data?
+        var compositionSummaryAtom: Data?
+        var compositionSummary: CompositionSummary?
         var sampleOffsets: [Int]
     }
 
@@ -545,7 +598,7 @@ enum QuickTimeMuxer {
                 throw Failure.unsupported("non-self data reference")
             }
             let stbl = try children(only("stbl", minf).body)
-            try whitelist(stbl, ["stsd", "stts", "ctts", "stss", "stsc", "stsz", "stco", "co64", "sdtp"])
+            try whitelist(stbl, ["stsd", "stts", "ctts", "cslg", "stss", "stsc", "stsz", "stco", "co64", "sdtp"])
             guard Set(stbl.map(\.type)).count == stbl.count,
                   Set(parts.map(\.type)).count == parts.count else {
                 throw Failure.corruptInput("duplicate track/table atoms")
@@ -609,11 +662,27 @@ enum QuickTimeMuxer {
             }
             if let dependencies = stbl.first(where: { $0.type == "sdtp" }),
                dependencies.range.count != 12 + count { throw Failure.corruptInput("dependency table") }
-            let composition = try expand("ctts", optional: true).map { Int32(bitPattern: $0) }
-            if let ctts = stbl.first(where: { $0.type == "ctts" }) {
-                let version = try read32(data, ctts.body.lowerBound) >> 24
-                guard version == 0, composition.allSatisfy({ $0 >= 0 }) else {
-                    throw Failure.unsupported("composition timing")
+            let ctts = stbl.first(where: { $0.type == "ctts" })
+            let cslg = stbl.first(where: { $0.type == "cslg" })
+            var summary: CompositionSummary?
+            if let cslg {
+                guard ctts != nil else { throw Failure.unsupported("composition summary without offsets") }
+                guard cslg.range.count == 32, try read32(data, cslg.body.lowerBound) == 0 else {
+                    throw Failure.unsupported("composition summary size/version/flags")
+                }
+                let fields = try (0..<5).map { Int32(bitPattern: try read32(data, cslg.range.lowerBound + 12 + $0 * 4)) }
+                summary = CompositionSummary(shift: fields[0], least: fields[1], greatest: fields[2],
+                                             start: fields[3], end: fields[4])
+            }
+            if let ctts, try read32(data, ctts.body.lowerBound) != 0 {
+                throw Failure.unsupported("composition timing version/flags")
+            }
+            let shift = Int64(summary?.shift ?? 0)
+            let composition = try expand("ctts", optional: true).map { try timing32(timingAdd(Int64($0), shift)) }
+            if let summary {
+                let computed = try compositionSummary(durations: durations, displayOffsets: composition)
+                guard summary == computed else {
+                    throw Failure.corruptInput("composition summary parsed=\(summary.fields) computed=\(computed.fields)")
                 }
             }
             let chunks = stbl.filter { $0.type == "stco" || $0.type == "co64" }
@@ -663,7 +732,9 @@ enum QuickTimeMuxer {
                 references: parts.first(where: { $0.type == "tref" }).map(raw),
                 aperture: aperture,
                 edits: edits, description: raw(entry)), sampleSizes: sizes,
-                durations: durations, compositionOffsets: composition, sampleOffsets: sampleOffsets))
+                durations: durations, compositionOffsets: composition,
+                compositionOffsetAtom: ctts.map(raw), compositionSummaryAtom: cslg.map(raw),
+                compositionSummary: summary, sampleOffsets: sampleOffsets))
         }
         guard tracks.filter({ $0.model.kind == "vide" }).count == 1,
               tracks.filter({ $0.model.kind == "soun" }).count <= 1,

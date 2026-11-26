@@ -48,6 +48,123 @@ struct BoundedMotionEncoder: Sendable {
     var audioBitrate = 96_000
     var limits = Limits()
 
+    /// Diagnostic only: no comparison result here relaxes the fixed-format guard.
+    /// Values stay private; output contains equality/count facts and schema key names.
+    static func formatDifference(_ a: CMFormatDescription, _ b: CMFormatDescription) -> String {
+        let typeA = CMFormatDescriptionGetMediaType(a), typeB = CMFormatDescriptionGetMediaType(b)
+        var facts = ["media_type_equal=\(typeA == typeB)",
+                     "subtype_equal=\(CMFormatDescriptionGetMediaSubType(a) == CMFormatDescriptionGetMediaSubType(b))"]
+        if typeA == kCMMediaType_Video, typeB == kCMMediaType_Video {
+            let x = CMVideoFormatDescriptionGetDimensions(a), y = CMVideoFormatDescriptionGetDimensions(b)
+            facts.append("dimensions_a=\(x.width)x\(x.height) dimensions_b=\(y.width)x\(y.height) equal=\(x.width == y.width && x.height == y.height)")
+        }
+        func bytesEqual(_ x: UnsafeRawPointer?, _ nx: Int, _ y: UnsafeRawPointer?, _ ny: Int) -> String {
+            guard nx >= 0, ny >= 0, nx <= 65_536, ny <= 65_536 else { return "diagnostic_limit" }
+            guard nx == ny else { return "false" }
+            if nx == 0 { return "true" }
+            guard let x, let y else { return "false" }
+            return String(memcmp(x, y, nx) == 0)
+        }
+        if typeA == kCMMediaType_Audio, typeB == kCMMediaType_Audio {
+            if let x = CMAudioFormatDescriptionGetStreamBasicDescription(a)?.pointee,
+               let y = CMAudioFormatDescriptionGetStreamBasicDescription(b)?.pointee {
+                facts.append("ASBD_equal_fields=[sampleRate:\(x.mSampleRate == y.mSampleRate),formatID:\(x.mFormatID == y.mFormatID),flags:\(x.mFormatFlags == y.mFormatFlags),bytesPerPacket:\(x.mBytesPerPacket == y.mBytesPerPacket),framesPerPacket:\(x.mFramesPerPacket == y.mFramesPerPacket),bytesPerFrame:\(x.mBytesPerFrame == y.mBytesPerFrame),channels:\(x.mChannelsPerFrame == y.mChannelsPerFrame),bits:\(x.mBitsPerChannel == y.mBitsPerChannel),reserved:\(x.mReserved == y.mReserved)]")
+            } else { facts.append("ASBD_missing=true") }
+            var cookieA = 0, cookieB = 0, layoutA = 0, layoutB = 0
+            let x = CMAudioFormatDescriptionGetMagicCookie(a, sizeOut: &cookieA)
+            let y = CMAudioFormatDescriptionGetMagicCookie(b, sizeOut: &cookieB)
+            facts.append("cookie_bytes_a=\(cookieA) b=\(cookieB) equal=\(bytesEqual(x, cookieA, y, cookieB))")
+            let lx = CMAudioFormatDescriptionGetChannelLayout(a, sizeOut: &layoutA)
+            let ly = CMAudioFormatDescriptionGetChannelLayout(b, sizeOut: &layoutB)
+            facts.append("layout_bytes_a=\(layoutA) b=\(layoutB) equal=\(bytesEqual(lx.map { UnsafeRawPointer($0) }, layoutA, ly.map { UnsafeRawPointer($0) }, layoutB))")
+        }
+        func name(_ value: Any) -> String? {
+            guard let string = value as? NSString, string.length <= 128 else { return nil }
+            return string as String
+        }
+        func names(_ keys: [String]) -> [String] {
+            keys.map { key in
+                key.unicodeScalars.map {
+                    CharacterSet.controlCharacters.contains($0) ? "\\u{\(String($0.value, radix: 16))}" : String($0)
+                }.joined()
+            }
+        }
+        if typeA == kCMMediaType_Metadata, typeB == kCMMediaType_Metadata {
+            func identifiers(_ format: CMFormatDescription) -> [String]? {
+                guard let values = CMMetadataFormatDescriptionGetIdentifiers(format) else { return [] }
+                guard CFArrayGetCount(values) <= 64 else { return nil }
+                let array = values as NSArray
+                var result: [String] = []
+                for value in array {
+                    guard let key = name(value) else { return nil }
+                    result.append(key)
+                }
+                return result
+            }
+            if let x = identifiers(a), let y = identifiers(b) {
+                facts.append("identifier_count_a=\(x.count) b=\(y.count) equal=\(x == y) names_a=\(names(x)) names_b=\(names(y))")
+            } else { facts.append("identifiers=diagnostic_limit") }
+        }
+        func extensions(_ format: CMFormatDescription) -> NSDictionary? {
+            guard let value = CMFormatDescriptionGetExtensions(format) else { return nil }
+            return value as NSDictionary
+        }
+        func keys(_ dictionary: NSDictionary?) -> [String]? {
+            guard let dictionary else { return [] }
+            guard dictionary.count <= 64 else { return nil }
+            var result: [String] = []
+            for value in dictionary.allKeys {
+                guard let key = name(value) else { return nil }
+                result.append(key)
+            }
+            return result.sorted()
+        }
+        // Bound recursive property-list inspection before CFEqual, including codec blobs.
+        var nodes = 0, bytes = 0
+        func bounded(_ value: Any, _ depth: Int = 0) -> Bool {
+            nodes += 1
+            guard nodes <= 4096, depth <= 4 else { return false }
+            if let data = value as? NSData {
+                guard data.length <= 65_536 else { return false }
+                bytes += data.length
+            } else if let string = value as? NSString {
+                guard string.length <= 65_536 else { return false }
+                bytes += string.length * 4
+            } else if let dictionary = value as? NSDictionary {
+                guard dictionary.count <= 64 else { return false }
+                for (key, item) in dictionary {
+                    guard bounded(key, depth + 1), bounded(item, depth + 1) else { return false }
+                }
+            } else if let array = value as? NSArray {
+                guard array.count <= 64 else { return false }
+                for item in array where !bounded(item, depth + 1) { return false }
+            } else if !(value is NSNumber) { return false }
+            return bytes <= 262_144
+        }
+        func keyDifferences(_ label: String, _ x: NSDictionary?, _ y: NSDictionary?) -> String {
+            guard let kx = keys(x), let ky = keys(y) else { return "\(label)=diagnostic_limit" }
+            let sx = Set(kx), sy = Set(ky)
+            var unequal: [String] = [], capped: [String] = []
+            for key in sx.intersection(sy).sorted() {
+                guard let vx = x?[key], let vy = y?[key] else { capped.append(key); continue }
+                if !bounded(vx) || !bounded(vy) { capped.append(key) }
+                else if !CFEqual(vx as CFTypeRef, vy as CFTypeRef) { unequal.append(key) }
+            }
+            return "\(label)_count_a=\(kx.count) b=\(ky.count) only_a=\(names(sx.subtracting(sy).sorted())) only_b=\(names(sy.subtracting(sx).sorted())) unequal=\(names(unequal)) comparison_capped=\(names(capped))"
+        }
+        let x = extensions(a), y = extensions(b)
+        facts.append(keyDifferences("extension_keys", x, y))
+        let atomKey = kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms as String
+        let ax = x?[atomKey], ay = y?[atomKey]
+        if (ax != nil && !(ax is NSDictionary)) || (ay != nil && !(ay is NSDictionary)) {
+            facts.append("atom_keys=unexpected_dictionary_type")
+        } else {
+            facts.append(keyDifferences("atom_keys", ax as? NSDictionary, ay as? NSDictionary))
+        }
+        let result = facts.joined(separator: "; ")
+        return result.count <= 16_384 ? result : String(result.prefix(16_384)) + "; diagnostic_output_capped"
+    }
+
     func compress(input: URL, output: URL, observer: Observer = .init()) async throws -> VideoCompressionResult {
         try Task.checkCancellation()
         try limits.validate()
@@ -462,8 +579,11 @@ struct BoundedMotionEncoder: Sendable {
                 var count = 0
                 while let sample = output.copyNextSampleBuffer() {
                     try checkCancellation()
-                    guard let format = CMSampleBufferGetFormatDescription(sample), CFEqual(format, expectedFormat) else {
-                        throw Failure.unsupported("source format changed")
+                    guard let format = CMSampleBufferGetFormatDescription(sample) else {
+                        throw Failure.unsupported("source format missing")
+                    }
+                    guard CFEqual(format, expectedFormat) else {
+                        throw Failure.unsupported("source format changed: \(BoundedMotionEncoder.formatDifference(format, expectedFormat))")
                     }
                     let n = CMSampleBufferGetNumSamples(sample)
                     guard n > 0, n <= model.sampleSizes.count - count else {
@@ -888,9 +1008,12 @@ struct BoundedMotionEncoder: Sendable {
             var count = 0
             while let sample = output.copyNextSampleBuffer() {
                 try checkCancellation()
-                guard let current = CMSampleBufferGetFormatDescription(sample), CFEqual(current, format),
+                guard let current = CMSampleBufferGetFormatDescription(sample),
                       CMSampleBufferGetNumSamples(sample) == 1, count < model.sampleSizes.count else {
                     throw Failure.unsupported("metadata description/sample grouping")
+                }
+                guard CFEqual(current, format) else {
+                    throw Failure.unsupported("metadata source format changed: \(BoundedMotionEncoder.formatDifference(current, format))")
                 }
                 let bytes = try sampleBytes(sample)
                 guard bytes.count == model.sampleSizes[count], CMSampleBufferDataIsReady(sample),
