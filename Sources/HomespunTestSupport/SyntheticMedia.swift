@@ -103,6 +103,8 @@ public enum Synthetic {
         guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
     }
 
+    public enum AudioWaveform: Sendable { case sine440, onsetChirp }
+
     public struct VideoSpec: Sendable {
         public var width: Int
         public var height: Int
@@ -118,11 +120,20 @@ public enum Synthetic {
         /// Writes Live Photo motion: content identifier, still-image-time track, and its link.
         public var liveIdentifier: String?
         public var cleanAperture: (width: Int, height: Int)?
+        public var cleanApertureOffset: (horizontal: Int, vertical: Int)?
+        public var creationDate: String?
+        public var locationISO6709: String?
+        public var taggedSDR: Bool
+        public var pixelAspect: (horizontal: Int, vertical: Int)?
+        public var audioWaveform: AudioWaveform
 
         public init(width: Int = 1920, height: Int = 1080, fps: Int32 = 30, frames: Int = 60,
                     bitrate: Int = 20_000_000, audioChannels: UInt32 = 2, audioSampleRate: Int = 44_100,
                     audioBitrate: Int = 128_000, transfer: String? = nil, transform: CGAffineTransform = .identity,
-                    liveIdentifier: String? = nil, cleanAperture: (width: Int, height: Int)? = nil) {
+                    liveIdentifier: String? = nil, cleanAperture: (width: Int, height: Int)? = nil,
+                    creationDate: String? = nil, locationISO6709: String? = nil, taggedSDR: Bool = false,
+                    pixelAspect: (horizontal: Int, vertical: Int)? = nil, audioWaveform: AudioWaveform = .sine440,
+                    cleanApertureOffset: (horizontal: Int, vertical: Int)? = nil) {
             self.width = width
             self.height = height
             self.fps = fps
@@ -135,6 +146,12 @@ public enum Synthetic {
             self.transform = transform
             self.liveIdentifier = liveIdentifier
             self.cleanAperture = cleanAperture
+            self.creationDate = creationDate
+            self.locationISO6709 = locationISO6709
+            self.taggedSDR = taggedSDR
+            self.pixelAspect = pixelAspect
+            self.audioWaveform = audioWaveform
+            self.cleanApertureOffset = cleanApertureOffset
         }
     }
 
@@ -150,12 +167,24 @@ public enum Synthetic {
             settings[AVVideoColorPropertiesKey] = [AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_2020,
                                                    AVVideoTransferFunctionKey: transfer,
                                                    AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_2020]
+        } else if spec.taggedSDR {
+            settings[AVVideoColorPropertiesKey] = [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ]
+        }
+        if let aspect = spec.pixelAspect {
+            settings[AVVideoPixelAspectRatioKey] = [
+                AVVideoPixelAspectRatioHorizontalSpacingKey: aspect.horizontal,
+                AVVideoPixelAspectRatioVerticalSpacingKey: aspect.vertical,
+            ]
         }
         if let clap = spec.cleanAperture {
             settings[AVVideoCleanApertureKey] = [AVVideoCleanApertureWidthKey: clap.width,
                                                  AVVideoCleanApertureHeightKey: clap.height,
-                                                 AVVideoCleanApertureHorizontalOffsetKey: 0,
-                                                 AVVideoCleanApertureVerticalOffsetKey: 0]
+                                                 AVVideoCleanApertureHorizontalOffsetKey: spec.cleanApertureOffset?.horizontal ?? 0,
+                                                 AVVideoCleanApertureVerticalOffsetKey: spec.cleanApertureOffset?.vertical ?? 0]
         }
         settings[AVVideoCompressionPropertiesKey] = compression
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
@@ -188,6 +217,19 @@ public enum Synthetic {
                                            formatDescriptionOut: &audioFormat)
         }
 
+        var movieMetadata: [AVMetadataItem] = []
+        for (key, value) in [
+            ("com.apple.quicktime.creationdate", spec.creationDate),
+            ("com.apple.quicktime.location.ISO6709", spec.locationISO6709),
+        ] {
+            guard let value else { continue }
+            let item = AVMutableMetadataItem()
+            item.key = key as NSString
+            item.keySpace = .quickTimeMetadata
+            item.value = value as NSString
+            item.dataType = kCMMetadataBaseDataType_UTF8 as String
+            movieMetadata.append(item)
+        }
         var metadataAdaptor: AVAssetWriterInputMetadataAdaptor?
         if let identifier = spec.liveIdentifier {
             let item = AVMutableMetadataItem()
@@ -195,7 +237,7 @@ public enum Synthetic {
             item.keySpace = .quickTimeMetadata
             item.value = identifier as NSString
             item.dataType = kCMMetadataBaseDataType_UTF8 as String
-            writer.metadata = [item]
+            movieMetadata.append(item)
             var format: CMFormatDescription?
             CMMetadataFormatDescriptionCreateWithMetadataSpecifications(
                 allocator: kCFAllocatorDefault, metadataType: kCMMetadataFormatType_Boxed,
@@ -210,6 +252,7 @@ public enum Synthetic {
             input.addTrackAssociation(withTrackOf: videoInput, type: AVAssetTrack.AssociationType.metadataReferent.rawValue)
             metadataAdaptor = AVAssetWriterInputMetadataAdaptor(assetWriterInput: input)
         }
+        writer.metadata = movieMetadata
 
         guard writer.startWriting() else { throw writer.error ?? CocoaError(.fileWriteUnknown) }
         writer.startSession(atSourceTime: .zero)
@@ -314,7 +357,19 @@ public enum Synthetic {
                 let count = min(1024, total - start)
                 var samples = [Int16](repeating: 0, count: count * channels)
                 for index in 0..<count {
-                    let value = Int16(8000 * sin(2 * Double.pi * 440 * Double(start + index) / Double(sampleRate)))
+                    let value: Int16
+                    switch spec.audioWaveform {
+                    case .sine440:
+                        value = Int16(8000 * sin(2 * Double.pi * 440 * Double(start + index) / Double(sampleRate)))
+                    case .onsetChirp:
+                        let t = Double(start + index) / Double(sampleRate) - 0.08
+                        let length = 0.72
+                        if t >= 0, t < length {
+                            let envelope = min(1, min(t / 0.008, (length - t) / 0.012))
+                            let sweep = min(2400, Double(sampleRate) * 0.35) - 190
+                            value = Int16(8000 * envelope * sin(2 * Double.pi * (190 * t + sweep * t * t / (2 * length))))
+                        } else { value = 0 }
+                    }
                     for channel in 0..<channels { samples[index * channels + channel] = value }
                 }
                 var block: CMBlockBuffer?
