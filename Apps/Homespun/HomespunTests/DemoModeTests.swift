@@ -1137,15 +1137,30 @@ import UIKit
         }
     }
 
-    private func delegatedMotionPolicy(store: BackupStore, id: UUID, receipt: BackupAPI.Receipt,
-                                       motionCopies: Int) async throws -> BackupSpacePolicy {
+    private func delegatedMotionPolicy(coordinator: BackupCoordinator, store: BackupStore, id: UUID,
+                                       receipt: BackupAPI.Receipt, motionCopies: Int) async throws
+        -> (policy: BackupSpacePolicy, transient: Int64, requiredBytes: Int64, details: String) {
+        let workspace = try #require(coordinator.currentWorkspace)
+        // The last upload's spool can be released only after its transfer completes, after apply()'s cleanup.
+        // Measure the stable retained workspace, not bytes the next result reconciliation will reclaim.
+        try await workspace.collectReleasedFiles()
+        let resources = try await store.resources(id), transfers = try await store.transfers(operationID: id)
+        let reservations = try await store.reservations(operationID: id)
+        try #require(resources.allSatisfy { $0.kind != .motion }, "Expected fresh motion; resources=\(resources)")
+        try #require(transfers.allSatisfy { $0.kind == .upload && $0.state == .completed },
+                     "Expected only finished uploads before budgeting; transfers=\(transfers)")
+        try #require(reservations.isEmpty, "Unexpected reservations before budgeting: \(reservations)")
         let transient = try store.files.spaceObservation().transientBytes
         let photo = try #require(receipt.derivative?.resources.first { $0.role == .photo })
-        let motion = try #require(try await store.resources(id).first {
+        let motion = try #require(resources.first {
             $0.kind == .original && $0.descriptor.role == .pairedVideo && $0.availability == .present
         })
-        return .init(maximumTransientBytes: transient + Int64(2 * photo.size + motionCopies * motion.descriptor.size),
-                     minimumAvailableBytes: 0, finalizationReserveBytes: 0, maximumTransfers: 3)
+        let required = Int64(2 * photo.size + 4 * motion.descriptor.size)
+        let policy = BackupSpacePolicy(
+            maximumTransientBytes: transient + Int64(2 * photo.size + motionCopies * motion.descriptor.size),
+            minimumAvailableBytes: 0, finalizationReserveBytes: 0, maximumTransfers: 3)
+        return (policy, transient, required,
+                "transient=\(transient), photoBytes=\(photo.size), motionBytes=\(motion.descriptor.size), requiredBytes=\(required), policy=\(policy)")
     }
 
     private func expectNoMotionPartials(_ store: BackupStore) throws {
@@ -1163,8 +1178,14 @@ import UIKit
             let questions = fixture.asked.all.count
             let held = try #require(try await store.operation(id)?.receipt)
             let ready = try await remote.status(held.requestID)
-            let policy = try await delegatedMotionPolicy(store: store, id: id, receipt: ready, motionCopies: 4)
-            try await coordinator.activate(context, policy: policy)
+            let budget = try await delegatedMotionPolicy(coordinator: coordinator, store: store, id: id, receipt: ready, motionCopies: 4)
+            try await coordinator.activate(context, policy: budget.policy)
+            let before = try store.files.spaceObservation()
+            let space = "\(budget.details); beforeFinalization=\(before); activePolicy=\(String(describing: coordinator.currentWorkspace?.policy))"
+            try #require(coordinator.currentWorkspace?.policy == budget.policy, "\(space)")
+            try #require(before.transientBytes == budget.transient, "The measured workspace changed: \(space)")
+            try #require(before.transientBytes + budget.requiredBytes == budget.policy.maximumTransientBytes,
+                         "The positive case must allow exactly the 4x reservation: \(space)")
             var messages: [String] = []
             coordinator.progress = { _, message in messages.append(message) }
             await remote.release()
@@ -1175,7 +1196,7 @@ import UIKit
             let operation = try #require(try await store.operation(id))
             let diagnostics = try await backupDiagnostics(store, id: id)
             #expect(operation.delivery == .importedVerified && !operation.attention && operation.problem == nil && operation.lease == nil,
-                    "\(diagnostics); progress=\(messages)")
+                    "\(diagnostics); progress=\(messages); \(space)")
             let receipt = try #require(operation.receipt), derivative = try #require(receipt.derivative)
             #expect(derivative.deviceCompresses == [.pairedVideo] && derivative.resources.map(\.role) == [.photo])
             let compressing = try #require(messages.firstIndex(of: "Compressing motion"), "\(diagnostics); progress=\(messages)")
@@ -1195,10 +1216,14 @@ import UIKit
             #expect(intent.expected.first { $0.role == .photo } == .init(
                 role: .photo, filename: photo.filename, size: photo.size, sha256: photo.sha256))
             let mapping = try #require(try await store.mappings(namespace: ledger.namespace)[live.id])
-            #expect(mapping.compactResources == intent.expected && mapping.proof?.retention == .permanent)
+            let mapped = try #require(mapping.compactResources)
+            // Saved fingerprints carry Photos' observed names and SHA-1, not the import plan's display fields.
+            #expect(BackupValidation.matches(mapped, intent.expected), "mapped=\(mapped); expected=\(intent.expected)")
+            #expect(mapping.proof?.retention == .permanent, "Expected permanent retention; proof=\(String(describing: mapping.proof))")
             let copy = try #require(library.demoItem(mapping.entry.compactIdentifier))
             #expect(copy.kind == .livePhoto && copy.motion != nil)
             let fingerprints = try await library.resourceFingerprints(copy.localIdentifier)
+            #expect(mapped == fingerprints, "mapped=\(mapped); saved fingerprints=\(fingerprints)")
             #expect(fingerprints.first { $0.role == .pairedVideo }?.sha256 == made.sha256)
             #expect(library.existing([live.id], includeHidden: true) == [live.id])
             #expect(try library.sourceGeneration(live.id) == generation)
@@ -1220,28 +1245,44 @@ import UIKit
             let original = try await library.resourceFingerprints(live.id)
             let held = try #require(try await store.operation(id)?.receipt)
             let ready = try await remote.status(held.requestID)
-            let policy = try await delegatedMotionPolicy(store: store, id: id, receipt: ready, motionCopies: 3)
-            try await coordinator.activate(context, policy: policy)
+            let budget = try await delegatedMotionPolicy(coordinator: coordinator, store: store, id: id, receipt: ready, motionCopies: 3)
+            try await coordinator.activate(context, policy: budget.policy)
+            let before = try store.files.spaceObservation()
+            let space = "\(budget.details); beforeFinalization=\(before); activePolicy=\(String(describing: coordinator.currentWorkspace?.policy))"
+            try #require(coordinator.currentWorkspace?.policy == budget.policy, "\(space)")
+            try #require(before.transientBytes == budget.transient, "The measured workspace changed: \(space)")
+            try #require(before.transientBytes + budget.requiredBytes > budget.policy.maximumTransientBytes,
+                         "The negative case must not have room for the 4x reservation: \(space)")
             await remote.release()
             try await coordinator.runOpportunity()
             try await coordinator.runOpportunity()
             let operation = try #require(try await store.operation(id))
-            let diagnostics = try await backupDiagnostics(store, id: id)
+            let diagnostics = "\(try await backupDiagnostics(store, id: id)); \(space)"
             #expect(operation.notBefore != nil && !operation.attention && operation.problem == nil, "\(diagnostics)")
-            #expect(operation.delivery != .importedVerified)
-            #expect(try await store.importIntent(id) == nil)
+            #expect(operation.delivery != .importedVerified, "\(diagnostics)")
+            let intent = try await store.importIntent(id)
+            #expect(intent == nil, "Expected no import intent; actual=\(String(describing: intent)); \(diagnostics)")
             let resources = try await store.resources(id)
-            #expect(resources.allSatisfy { $0.kind != .motion })
-            #expect(try await store.transfers(operationID: id).allSatisfy { $0.kind != .download })
-            #expect(try await store.reservations(operationID: id).isEmpty)
+            #expect(resources.allSatisfy { $0.kind != .motion }, "Expected no made motion; resources=\(resources); \(diagnostics)")
+            let transfers = try await store.transfers(operationID: id)
+            #expect(transfers.allSatisfy { $0.kind != .download }, "Expected no downloads; transfers=\(transfers); \(diagnostics)")
+            let reservations = try await store.reservations(operationID: id)
+            #expect(reservations.isEmpty, "Expected no reservations; actual=\(reservations); \(diagnostics)")
             let motion = try #require(resources.first { $0.kind == .original && $0.descriptor.role == .pairedVideo })
             let digest = try Fingerprint.digests(of: store.files.stagedFile(operationID: id, fileID: motion.fileID))
-            #expect(digest.sha256 == motion.descriptor.sha256 && digest.size == motion.descriptor.size)
-            #expect(library.allIdentifiers() == identifiers && library.albumMembers() == album)
-            #expect(try library.sourceGeneration(live.id) == generation)
-            #expect(try await library.resourceFingerprints(live.id) == original && fixture.asked.all.count == questions)
+            #expect(digest.sha256 == motion.descriptor.sha256 && digest.size == motion.descriptor.size,
+                    "actual=\(digest); expected=\(motion.descriptor); \(diagnostics)")
+            let currentIdentifiers = library.allIdentifiers(), currentAlbum = library.albumMembers()
+            #expect(currentIdentifiers == identifiers && currentAlbum == album,
+                    "identifiers: actual=\(currentIdentifiers), expected=\(identifiers); album: actual=\(currentAlbum), expected=\(album); \(diagnostics)")
+            let currentGeneration = try library.sourceGeneration(live.id)
+            #expect(currentGeneration == generation, "actual=\(currentGeneration); expected=\(generation); \(diagnostics)")
+            let fingerprints = try await library.resourceFingerprints(live.id), asked = fixture.asked.all.count
+            #expect(fingerprints == original && asked == questions,
+                    "fingerprints: actual=\(fingerprints), expected=\(original); questions: actual=\(asked), expected=\(questions); \(diagnostics)")
             let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library)
-            #expect(try await remover.candidates(only: [live.id]).isEmpty)
+            let candidates = try await remover.candidates(only: [live.id])
+            #expect(candidates.isEmpty, "Expected no removal candidates; actual count=\(candidates.count); \(diagnostics)")
         }
     }
 
