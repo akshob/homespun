@@ -126,6 +126,7 @@ public enum Synthetic {
         public var taggedSDR: Bool
         public var pixelAspect: (horizontal: Int, vertical: Int)?
         public var audioWaveform: AudioWaveform
+        public var allowFrameReordering: Bool?
 
         public init(width: Int = 1920, height: Int = 1080, fps: Int32 = 30, frames: Int = 60,
                     bitrate: Int = 20_000_000, audioChannels: UInt32 = 2, audioSampleRate: Int = 44_100,
@@ -133,7 +134,8 @@ public enum Synthetic {
                     liveIdentifier: String? = nil, cleanAperture: (width: Int, height: Int)? = nil,
                     creationDate: String? = nil, locationISO6709: String? = nil, taggedSDR: Bool = false,
                     pixelAspect: (horizontal: Int, vertical: Int)? = nil, audioWaveform: AudioWaveform = .sine440,
-                    cleanApertureOffset: (horizontal: Int, vertical: Int)? = nil) {
+                    cleanApertureOffset: (horizontal: Int, vertical: Int)? = nil,
+                    allowFrameReordering: Bool? = nil) {
             self.width = width
             self.height = height
             self.fps = fps
@@ -152,6 +154,7 @@ public enum Synthetic {
             self.pixelAspect = pixelAspect
             self.audioWaveform = audioWaveform
             self.cleanApertureOffset = cleanApertureOffset
+            self.allowFrameReordering = allowFrameReordering
         }
     }
 
@@ -159,6 +162,7 @@ public enum Synthetic {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: url.pathExtension == "mp4" ? .mp4 : .mov)
         var compression: [String: Any] = [AVVideoAverageBitRateKey: spec.bitrate]
+        if let allow = spec.allowFrameReordering { compression[AVVideoAllowFrameReorderingKey] = allow }
         var settings: [String: Any] = [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: spec.width,
                                        AVVideoHeightKey: spec.height]
         if let transfer = spec.transfer {

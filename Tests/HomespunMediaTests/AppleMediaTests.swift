@@ -729,7 +729,9 @@ private func files(in directory: URL) throws -> [String] {
         let directory = try Synthetic.directory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("signed.mov")
-        try await Synthetic.video(at: input, Self.ownedSpec(frames: 15, audio: 0))
+        var spec = Self.ownedSpec(frames: 15, audio: 0)
+        spec.allowFrameReordering = false
+        try await Synthetic.video(at: input, spec)
         var movie = try Self.materialized(input)
         let video = try #require(movie.tracks.firstIndex(where: { $0.kind == "vide" }))
         movie.tracks[video].samples = offsets.enumerated().map {
@@ -785,6 +787,396 @@ private func files(in directory: URL) throws -> [String] {
                     Issue.record("synthetic frames=\(frames) track_id=\(track.trackID) \(BoundedMotionEncoder.formatDifference(actual, expected))")
                 }
             }
+        }
+    }
+
+    // TEMPORARY forensic capture. Deliberately records ONE issue after X1-X3;
+    // remove or convert to assertions in the subsequent adjudicated fix. Never land it.
+    @Test func ownedFixtureForensicsReport() async {
+        var sections: [String] = []
+        for fixture in 1...3 {
+            let report = OwnedFixtureForensics()
+            var directory: URL?
+            do {
+                let folder = try Synthetic.directory()
+                directory = folder
+                let input = folder.appendingPathComponent("fixture.mov")
+                var spec = Self.ownedSpec(frames: fixture == 1 ? 1 : fixture == 2 ? 15 : 90,
+                                          audio: fixture == 1 ? 0 : fixture == 2 ? 1 : 2)
+                if fixture == 1 {
+                    spec.width = 512
+                    spec.height = 512
+                    spec.cleanAperture = nil
+                    spec.bitrate = 100_000
+                } else if fixture == 3 { spec.audioSampleRate = 48_000 }
+                try await Synthetic.video(at: input, spec)
+                report.raw(input)
+                await report.read(input)
+                report.production(input)
+            } catch {
+                report.append("fixture_error_code=\((error as NSError).code)", to: .production)
+            }
+            if let directory {
+                do { try FileManager.default.removeItem(at: directory) }
+                catch { report.append("fixture_cleanup_error_code=\((error as NSError).code)", to: .production) }
+            }
+            sections.append("X\(fixture)\n\(report.text)")
+        }
+        let text = sections.joined(separator: "\n")
+        let bounded = String(decoding: text.utf8.prefix(65_532), as: UTF8.self)
+        Issue.record("\(bounded)")
+    }
+
+    private final class OwnedFixtureForensics {
+        enum Section: CaseIterable, Hashable { case raw, reader, production }
+        private enum Fault: Int, Error { case bounds = 1, limit, missing, overflow, timing }
+        private struct Atom {
+            var type: String
+            var range: Range<Int>
+            var header: Int
+            var children: [Atom]
+        }
+        private struct Track {
+            var id: UInt32
+            var scale: Int32
+            var declaredSamples: Int
+            var deltas: [UInt32]
+            var offsets: [UInt32]?
+            var summary: [Int64]?
+            var candidates: [[Int64]?] = []
+        }
+        private var data = Data()
+        private var atoms = 0
+        private var tracks: [UInt32: Track] = [:]
+        private var lines: [Section: String] = [:]
+        private var capped = Set<Section>()
+        var text: String { Section.allCases.map { lines[$0] ?? "" }.joined(separator: "\n") }
+
+        func append(_ line: String, to section: Section) {
+            let limit = section == .raw ? 6_000 : section == .reader ? 14_000 : 1_000
+            let old = lines[section] ?? ""
+            guard !capped.contains(section) else { return }
+            let safe = String(line.prefix(limit))
+            if old.utf8.count + safe.utf8.count + 1 <= limit {
+                lines[section] = old + safe + "\n"
+            } else {
+                lines[section] = old + "SECTION_CAPPED\n"
+                capped.insert(section)
+            }
+        }
+
+        private func hex(_ value: UInt32) -> String { "0x" + String(value, radix: 16) }
+        private func fourcc(_ bytes: Data) -> String {
+            bytes.allSatisfy({ (0x20...0x7e).contains($0) })
+                ? String(decoding: bytes, as: UTF8.self)
+                : "0x" + bytes.map { String(format: "%02x", $0) }.joined()
+        }
+        private func word(_ offset: Int) throws -> UInt32 {
+            guard offset >= 0, offset <= data.count - 4 else { throw Fault.bounds }
+            return data[offset..<(offset + 4)].reduce(0) { ($0 << 8) | UInt32($1) }
+        }
+        private func word(_ atom: Atom, _ relative: Int) throws -> UInt32 {
+            guard relative >= 0, relative <= atom.range.count - 4 else { throw Fault.bounds }
+            return try word(atom.range.lowerBound + relative)
+        }
+        private func child(_ type: String, of atom: Atom) throws -> Atom {
+            guard let found = atom.children.first(where: { $0.type == type }) else { throw Fault.missing }
+            return found
+        }
+        private func walk(_ range: Range<Int>, depth: Int = 0) throws -> [Atom] {
+            guard depth <= 8 else { throw Fault.limit }
+            var offset = range.lowerBound, result: [Atom] = []
+            while offset < range.upperBound {
+                atoms += 1
+                guard atoms <= 4096, range.upperBound - offset >= 8 else { throw Fault.limit }
+                let short = try word(offset)
+                let type = fourcc(data.subdata(in: (offset + 4)..<(offset + 8)))
+                var count = Int(short), header = 8
+                if short == 1 {
+                    guard range.upperBound - offset >= 16 else { throw Fault.bounds }
+                    let length = data[(offset + 8)..<(offset + 16)].reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+                    guard let exact = Int(exactly: length) else { throw Fault.overflow }
+                    count = exact
+                    header = 16
+                    append("extended_atom=\(type) size=\(length)", to: .raw)
+                } else if short == 0 { count = range.upperBound - offset }
+                guard count >= header, count <= range.upperBound - offset else { throw Fault.bounds }
+                var children: [Atom] = []
+                if header == 8, ["moov", "trak", "mdia", "minf", "stbl", "edts"].contains(type) {
+                    do { children = try walk((offset + header)..<(offset + count), depth: depth + 1) }
+                    catch { append("walk_atom=\(type) error_code=\((error as NSError).code)", to: .raw) }
+                }
+                result.append(Atom(type: type, range: offset..<(offset + count), header: header, children: children))
+                offset += count
+            }
+            return result
+        }
+        private func runs(_ atom: Atom) throws -> [(UInt32, UInt32)] {
+            let n = Int(try word(atom, 12))
+            guard n <= 7200, atom.range.count == 16 + n * 8 else { throw Fault.limit }
+            return try (0..<n).map { (try word(atom, 16 + $0 * 8), try word(atom, 20 + $0 * 8)) }
+        }
+        private func expand(_ runs: [(UInt32, UInt32)]) throws -> [UInt32] {
+            var result: [UInt32] = []
+            for (count, value) in runs {
+                guard count <= 7200 - result.count else { throw Fault.limit }
+                result.append(contentsOf: repeatElement(value, count: Int(count)))
+            }
+            return result
+        }
+        private func checkedAdd(_ a: Int64, _ b: Int64) throws -> Int64 {
+            let (value, overflow) = a.addingReportingOverflow(b)
+            guard !overflow else { throw Fault.overflow }
+            return value
+        }
+
+        func raw(_ input: URL) {
+            do {
+                let size = (try FileManager.default.attributesOfItem(atPath: input.path)[.size] as? NSNumber)?.intValue ?? 0
+                guard size > 0, size <= 64 * 1024 * 1024 else { throw Fault.limit }
+                data = try Data(contentsOf: input)
+                let roots = try walk(0..<data.count)
+                guard let moov = roots.first(where: { $0.type == "moov" }) else { throw Fault.missing }
+                do {
+                    let header = try child("mvhd", of: moov)
+                    append("mvhd version_flags=\(hex(try word(header, 8))) scale=\(try word(header, 20)) duration=\(try word(header, 24))", to: .raw)
+                } catch { append("mvhd_error_code=\((error as NSError).code)", to: .raw) }
+                for (index, atom) in moov.children.filter({ $0.type == "trak" }).enumerated() {
+                    do { try rawTrack(atom, index: index) }
+                    catch { append("trak_index=\(index) raw_error_code=\((error as NSError).code)", to: .raw) }
+                }
+            } catch { append("raw_error_code=\((error as NSError).code)", to: .raw) }
+        }
+
+        private func rawTrack(_ atom: Atom, index: Int) throws {
+            let tkhd = try child("tkhd", of: atom)
+            let id = try word(tkhd, 20)
+            append("trak_index=\(index) id=\(id) tkhd_version_flags=\(hex(try word(tkhd, 8))) duration=\(try word(tkhd, 28))", to: .raw)
+            let mdia = try child("mdia", of: atom), mdhd = try child("mdhd", of: mdia)
+            let scale = try word(mdhd, 20)
+            let hdlr = try child("hdlr", of: mdia)
+            guard hdlr.range.count >= 20, let timescale = Int32(exactly: scale), timescale > 0 else { throw Fault.bounds }
+            let kind = fourcc(data.subdata(in: (hdlr.range.lowerBound + 16)..<(hdlr.range.lowerBound + 20)))
+            let minf = try child("minf", of: mdia), stbl = try child("stbl", of: minf)
+            let headers = minf.children.filter { ["gmhd", "nmhd", "vmhd", "smhd"].contains($0.type) }.map(\.type)
+            append("track=\(id) handler=\(kind) mdhd_version_flags=\(hex(try word(mdhd, 8))) scale=\(scale) duration=\(try word(mdhd, 24)) minf_headers=\(headers)", to: .raw)
+            if let edts = atom.children.first(where: { $0.type == "edts" }) {
+                do {
+                    let elst = try child("elst", of: edts)
+                    let vf = try word(elst, 8), n = Int(try word(elst, 12))
+                    append("track=\(id) elst version_flags=\(hex(vf)) count=\(n)", to: .raw)
+                    guard vf >> 24 == 0, n <= 16, elst.range.count == 16 + n * 12 else { throw Fault.limit }
+                    for i in 0..<n {
+                        let time = try word(elst, 20 + i * 12)
+                        append("elst[\(i)] duration=\(try word(elst, 16 + i * 12)) media_raw=\(hex(time)) media_i32=\(Int32(bitPattern: time)) rate=\(hex(try word(elst, 24 + i * 12)))", to: .raw)
+                    }
+                } catch { append("track=\(id) elst_error_code=\((error as NSError).code)", to: .raw) }
+            } else { append("track=\(id) elst=absent", to: .raw) }
+            let stsd = try child("stsd", of: stbl)
+            guard stsd.range.count >= 24 else { throw Fault.bounds }
+            append("track=\(id) stsd_count=\(try word(stsd, 12)) first_entry=\(fourcc(data.subdata(in: (stsd.range.lowerBound + 20)..<(stsd.range.lowerBound + 24))))", to: .raw)
+            let deltaRuns = try runs(child("stts", of: stbl)), deltas = try expand(deltaRuns)
+            let declared = Int(try word(child("stsz", of: stbl), 16))
+            let totalDuration = try deltas.reduce(Int64(0)) { try checkedAdd($0, Int64($1)) }
+            append("track=\(id) stts_entries=\(deltaRuns.count) samples=\(deltas.count) duration=\(totalDuration) min_delta=\(deltas.min() ?? 0) max_delta=\(deltas.max() ?? 0) stsz_count=\(declared)", to: .raw)
+            if let stss = stbl.children.first(where: { $0.type == "stss" }) {
+                append("track=\(id) stss_count=\(try word(stss, 12))", to: .raw)
+            } else { append("track=\(id) stss=absent", to: .raw) }
+            var model = Track(id: id, scale: timescale, declaredSamples: declared, deltas: deltas)
+            if let cslg = stbl.children.first(where: { $0.type == "cslg" }) {
+                append("track=\(id) cslg_size=\(cslg.range.count) version_flags=\(hex(try word(cslg, 8)))", to: .raw)
+                var fields: [Int64] = []
+                for i in 0..<5 {
+                    let raw = try word(cslg, 12 + i * 4)
+                    fields.append(Int64(Int32(bitPattern: raw)))
+                    append("cslg[\(i)]=(\(hex(raw)),u32:\(raw),i32:\(Int32(bitPattern: raw)))", to: .raw)
+                }
+                model.summary = fields
+            } else { append("track=\(id) cslg=absent", to: .raw) }
+            if let ctts = stbl.children.first(where: { $0.type == "ctts" }) {
+                let offsetRuns = try runs(ctts), offsets = try expand(offsetRuns)
+                model.offsets = offsets
+                let signed = offsets.map { Int32(bitPattern: $0) }
+                append("track=\(id) ctts_version_flags=\(hex(try word(ctts, 8))) entries=\(offsetRuns.count) covered=\(offsets.count) u32_min=\(offsets.min() ?? 0) u32_max=\(offsets.max() ?? 0) i32_min=\(signed.min() ?? 0) i32_max=\(signed.max() ?? 0)", to: .raw)
+                for (i, run) in offsetRuns.prefix(16).enumerated() {
+                    append("ctts[\(i)]=(\(run.0),\(hex(run.1)),u32:\(run.1),i32:\(Int32(bitPattern: run.1)))", to: .raw)
+                }
+                for candidate in 0..<4 {
+                    do { model.candidates.append(try candidateOffsets(model, candidate: candidate)) }
+                    catch {
+                        model.candidates.append(nil)
+                        append("track=\(id) C\(candidate + 1) candidate_error_code=\((error as NSError).code)", to: .raw)
+                    }
+                }
+            } else { append("track=\(id) ctts=absent", to: .raw) }
+            tracks[id] = model
+        }
+
+        private func candidateOffsets(_ track: Track, candidate: Int) throws -> [Int64] {
+            guard let offsets = track.offsets, offsets.count == track.deltas.count, !offsets.isEmpty else { throw Fault.timing }
+            let shift = track.summary?.first ?? 0
+            var result: [Int64] = [], least = Int64.max, greatest = Int64.min
+            var start = Int64.max, end = Int64.min, decode: Int64 = 0
+            for i in offsets.indices {
+                do {
+                    let stored = candidate == 0 || candidate == 3 ? Int64(offsets[i]) : Int64(Int32(bitPattern: offsets[i]))
+                    let display = try checkedAdd(stored, candidate < 2 ? shift : 0)
+                    result.append(display)
+                    least = min(least, display); greatest = max(greatest, display)
+                    let presentation = try checkedAdd(decode, display)
+                    start = min(start, presentation)
+                    end = max(end, try checkedAdd(presentation, Int64(track.deltas[i])))
+                    decode = try checkedAdd(decode, Int64(track.deltas[i]))
+                } catch {
+                    append("track=\(track.id) C\(candidate + 1) overflow_at_sample=\(i)", to: .raw)
+                    throw error
+                }
+            }
+            let summary = [min(least, 0), least, greatest, start, end]
+            let matches = track.summary.map { zip($0, summary).map { $0.0 == $0.1 } }
+            let matchText = matches.map { "[" + $0.map { String($0) }.joined(separator: ",") + "]" } ?? "absent"
+            append("track=\(track.id) C\(candidate + 1) shift_least_greatest_start_end=\(summary) summary_matches=\(matchText)", to: .raw)
+            return result
+        }
+
+        private func time(_ time: CMTime) -> String {
+            "\(time.value)/\(time.timescale)/flags:\(time.flags.rawValue)/epoch:\(time.epoch)"
+        }
+        private func attachmentFacts(_ sample: CMSampleBuffer) -> String {
+            let keys: [(String, CFString)] = [
+                ("EmptyMedia", kCMSampleBufferAttachmentKey_EmptyMedia),
+                ("PermanentEmptyMedia", kCMSampleBufferAttachmentKey_PermanentEmptyMedia),
+                ("TrimDurationAtStart", kCMSampleBufferAttachmentKey_TrimDurationAtStart),
+                ("TrimDurationAtEnd", kCMSampleBufferAttachmentKey_TrimDurationAtEnd),
+                ("EndsPreviousSampleDuration", kCMSampleBufferAttachmentKey_EndsPreviousSampleDuration),
+                ("ResetDecoderBeforeDecoding", kCMSampleBufferAttachmentKey_ResetDecoderBeforeDecoding),
+                ("DrainAfterDecoding", kCMSampleBufferAttachmentKey_DrainAfterDecoding),
+                ("DisplayEmptyMediaImmediately", kCMSampleBufferAttachmentKey_DisplayEmptyMediaImmediately),
+                ("FillDiscontinuitiesWithSilence", kCMSampleBufferAttachmentKey_FillDiscontinuitiesWithSilence),
+                ("PostNotificationWhenConsumed", kCMSampleBufferAttachmentKey_PostNotificationWhenConsumed),
+            ]
+            return keys.compactMap { name, key -> String? in
+                guard let value = CMGetAttachment(sample, key: key, attachmentModeOut: nil) else { return nil }
+                guard name == "EmptyMedia" || name == "PermanentEmptyMedia" else { return name }
+                guard CFGetTypeID(value) == CFBooleanGetTypeID(), let boolean = value as? NSNumber else { return name + "=nonBool" }
+                return name + "=" + String(boolean.boolValue)
+            }.joined(separator: ",")
+        }
+
+        func read(_ input: URL) async {
+            let asset = AVURLAsset(url: input)
+            do {
+                for track in try await asset.load(.tracks) {
+                    do { try await readTrack(track, asset: asset) }
+                    catch { append("track=\(track.trackID) reader_error_code=\((error as NSError).code)", to: .reader) }
+                }
+            } catch { append("asset_reader_error_code=\((error as NSError).code)", to: .reader) }
+        }
+
+        private func readTrack(_ track: AVAssetTrack, asset: AVAsset) async throws {
+            let id = UInt32(bitPattern: track.trackID), model = tracks[UInt32(bitPattern: track.trackID)]
+            var expected: CMFormatDescription?
+            do { expected = try await track.load(.formatDescriptions).first }
+            catch { append("track=\(id) track_format_error_code=\((error as NSError).code)", to: .reader) }
+            let scale: CMTimeScale
+            if let model { scale = model.scale }
+            else {
+                do { scale = try await track.load(.naturalTimeScale) }
+                catch { append("track=\(id) timescale_error_code=\((error as NSError).code)", to: .reader); scale = 0 }
+            }
+            let reader = try AVAssetReader(asset: asset)
+            let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+            output.alwaysCopiesSampleData = false
+            guard reader.canAdd(output) else { throw Fault.missing }
+            reader.add(output)
+            defer { reader.cancelReading() }
+            guard reader.startReading() else {
+                append("track=\(id) start=false status=\(reader.status.rawValue) error_code=\((reader.error as NSError?)?.code ?? 0)", to: .reader)
+                return
+            }
+            var buffers = 0, markers = 0, realBuffers = 0, samples = 0, laterMissing = 0
+            var first: CMFormatDescription?, laterEqual = true
+            var offsets: [Int64?] = [], previousDTS: CMTime?, decodeOrder = true, unknownDTS = 0
+            while let sample = output.copyNextSampleBuffer() {
+                let index = buffers
+                buffers += 1
+                let n = CMSampleBufferGetNumSamples(sample), format = CMSampleBufferGetFormatDescription(sample)
+                let block = CMSampleBufferGetDataBuffer(sample)
+                if n == 0 { markers += 1 }
+                if index < 8 || n == 0 || format == nil {
+                    append("track=\(id) buffer=\(index) samples=\(n) format=\(format != nil) data=\(block != nil) length=\(block.map { CMBlockBufferGetDataLength($0) } ?? 0) ready=\(CMSampleBufferDataIsReady(sample)) valid=\(CMSampleBufferIsValid(sample)) pts=\(time(CMSampleBufferGetPresentationTimeStamp(sample))) dts=\(time(CMSampleBufferGetDecodeTimeStamp(sample))) duration=\(time(CMSampleBufferGetDuration(sample))) output_pts=\(time(CMSampleBufferGetOutputPresentationTimeStamp(sample))) attachments=[\(attachmentFacts(sample))]", to: .reader)
+                }
+                if n > 0 {
+                    realBuffers += 1
+                    let (total, overflow) = samples.addingReportingOverflow(n)
+                    if !overflow { samples = total }
+                    else { append("track=\(id) sample_count_overflow buffer=\(index)", to: .reader) }
+                    if let format {
+                        if let first { laterEqual = laterEqual && CFEqual(first, format) }
+                        else {
+                            first = format
+                            if let expected {
+                                let equal = CFEqual(format, expected)
+                                append("track=\(id) first_real_buffer=\(index) format_equal_track=\(equal)", to: .reader)
+                                if !equal { append(BoundedMotionEncoder.formatDifference(format, expected), to: .reader) }
+                            } else { append("track=\(id) expected_track_format=absent", to: .reader) }
+                        }
+                    } else { laterMissing += 1; laterEqual = false }
+                    if track.mediaType == .video {
+                        if n <= 7200, offsets.count <= 7200 - n {
+                            for i in 0..<n {
+                                var timing = CMSampleTimingInfo()
+                                let status = CMSampleBufferGetSampleTimingInfo(sample, at: i, timingInfoOut: &timing)
+                                guard status == noErr, timing.presentationTimeStamp.isNumeric,
+                                      timing.decodeTimeStamp.isNumeric, scale > 0 else {
+                                    offsets.append(nil); unknownDTS += 1; continue
+                                }
+                                if let previousDTS, timing.decodeTimeStamp < previousDTS { decodeOrder = false }
+                                previousDTS = timing.decodeTimeStamp
+                                let difference = CMTimeSubtract(timing.presentationTimeStamp, timing.decodeTimeStamp)
+                                let converted = CMTimeConvertScale(difference, timescale: scale, method: .default)
+                                if converted.isNumeric, CMTimeCompare(converted, difference) == 0 { offsets.append(converted.value) }
+                                else { offsets.append(nil) }
+                            }
+                        } else { append("track=\(id) timing_storage_capped buffer=\(index)", to: .reader) }
+                    }
+                }
+            }
+            append("track=\(id) totals buffers=\(buffers) markers=\(markers) real_buffers=\(realBuffers) real_samples=\(samples) stsz=\(model?.declaredSamples ?? -1) sample_count_equal=\(samples == model?.declaredSamples) status=\(reader.status.rawValue) error_code=\((reader.error as NSError?)?.code ?? 0) later_formats_equal_first=\(laterEqual) missing_real_formats=\(laterMissing)", to: .reader)
+            if track.mediaType == .video {
+                append("track=\(id) decode_order=\(decodeOrder) unknown_dts=\(unknownDTS) offsets=\(offsets.count)", to: .reader)
+                if let model, model.offsets != nil {
+                    for candidate in 0..<4 {
+                        let values = candidate < model.candidates.count ? model.candidates[candidate] : nil
+                        var matches = 0, mismatch: String?
+                        for index in offsets.indices {
+                            let expected = values.flatMap { index < $0.count ? $0[index] : nil }
+                            if let actual = offsets[index], let expected, actual == expected { matches += 1 }
+                            else if mismatch == nil {
+                                let actualText = offsets[index].map { String($0) } ?? "invalid"
+                                let expectedText = expected.map { String($0) } ?? "invalid"
+                                mismatch = "index:\(index),avf:\(actualText),candidate:\(expectedText)"
+                            }
+                        }
+                        let firstMismatch = mismatch ?? "none"
+                        append("track=\(id) C\(candidate + 1) matches=\(matches)/\(offsets.count) candidate_count=\(values?.count ?? 0) first_mismatch=\(firstMismatch)", to: .reader)
+                    }
+                }
+            }
+        }
+
+        func production(_ input: URL) {
+            do {
+                _ = try QuickTimeMuxer.source(input, limits: .init())
+                append("production_parse=ok", to: .production)
+            } catch let error as QuickTimeMuxer.Failure {
+                switch error {
+                case .unsupported(let message): append("production_parse=unsupported " + String(message.prefix(768)), to: .production)
+                case .corruptInput(let message): append("production_parse=corruptInput " + String(message.prefix(768)), to: .production)
+                case .limitExceeded(let message): append("production_parse=limitExceeded " + String(message.prefix(768)), to: .production)
+                default: append("production_parse_error_code=\((error as NSError).code)", to: .production)
+                }
+            } catch { append("production_parse_error_code=\((error as NSError).code)", to: .production) }
         }
     }
 

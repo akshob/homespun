@@ -576,11 +576,20 @@ struct BoundedMotionEncoder: Sendable {
                 guard let track = tracks.first(where: { UInt32(bitPattern: $0.trackID) == model.model.id }),
                       let expectedFormat = formats[model.model.id] else { throw Failure.unsupported("source track mapping") }
                 let (reader, output) = try startReader(track, settings: nil)
-                var count = 0
+                var count = 0, bufferIndex = 0
                 while let sample = output.copyNextSampleBuffer() {
                     try checkCancellation()
+                    defer { bufferIndex += 1 }
                     guard let format = CMSampleBufferGetFormatDescription(sample) else {
-                        throw Failure.unsupported("source format missing")
+                        func attachment(_ key: CFString) -> String {
+                            guard let value = CMGetAttachment(sample, key: key, attachmentModeOut: nil) else { return "absent" }
+                            guard CFGetTypeID(value) == CFBooleanGetTypeID(), let number = value as? NSNumber else { return "nonBool" }
+                            return String(number.boolValue)
+                        }
+                        let time = CMSampleBufferGetPresentationTimeStamp(sample)
+                        let data = CMSampleBufferGetDataBuffer(sample).map { String(CMBlockBufferGetDataLength($0)) } ?? "none"
+                        throw Failure.unsupported(
+                            "source format missing track=\(model.model.id) kind=\(model.model.kind) buffer=\(bufferIndex) samples=\(CMSampleBufferGetNumSamples(sample)) data=\(data) empty=\(attachment(kCMSampleBufferAttachmentKey_EmptyMedia)) permanent=\(attachment(kCMSampleBufferAttachmentKey_PermanentEmptyMedia)) pts=\(time.value)/\(time.timescale)")
                     }
                     guard CFEqual(format, expectedFormat) else {
                         throw Failure.unsupported("source format changed: \(BoundedMotionEncoder.formatDifference(format, expectedFormat))")

@@ -678,7 +678,14 @@ enum QuickTimeMuxer {
                 throw Failure.unsupported("composition timing version/flags")
             }
             let shift = Int64(summary?.shift ?? 0)
-            let composition = try expand("ctts", optional: true).map { try timing32(timingAdd(Int64($0), shift)) }
+            let composition = try expand("ctts", optional: true).enumerated().map { index, stored in
+                let value = try timingAdd(Int64(stored), shift)
+                guard let display = Int32(exactly: value) else {
+                    throw Failure.limitExceeded(
+                        "signed composition timing track=\(id) handler=\(kind) timescale=\(scale) sample=\(index) stored=0x\(String(stored, radix: 16)) shift=\(shift) value=\(value)")
+                }
+                return display
+            }
             if let summary {
                 let computed = try compositionSummary(durations: durations, displayOffsets: composition)
                 guard summary == computed else {
