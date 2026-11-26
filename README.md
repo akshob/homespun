@@ -521,6 +521,10 @@ any original can be offered for removal. Motion that does not get smaller is kep
 A hard bound on total working space is planned for a later release. Native/background transfers
 remain unavailable.
 
+The retained motion is read through an identity-checked typed hard link, and its encoding partial
+keeps a `.mov` suffix so AVFoundation can reopen it for verification even when the authoritative
+workspace file is an extensionless UUID. Retry cleanup covers both encoding and byte-copy partials.
+
 Immich remains read-only. Its independently scheduled acquisition downloads and checks every
 expected original resource by positive size and SHA-256, using SHA-1/search only to locate it.
 Edited/RAW/auxiliary-resource manifests are rejected explicitly. No upload protocol is advertised

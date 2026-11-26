@@ -146,7 +146,11 @@ struct BackupFinalizer: Sendable {
                     let fileID = UUID(), output = store.files.stagedFile(operationID: operation.id, fileID: fileID)
                     try await store.saveMetadata(pendingKey, value: fileID)
                     do {
-                        _ = try await LivePhotoMotionCompressor(profile: operation.profile).compress(input: input, output: output)
+                        let source = PreparedPhotoResource(fileID: motion.fileID, url: input, descriptor: motion.descriptor)
+                        _ = try await PhotoResourceHandoff.read([source]) { resources in
+                            try await LivePhotoMotionCompressor(profile: operation.profile)
+                                .compress(input: resources[0].url, output: output)
+                        }
                         try BackupFiles.protect(output)
                         let digest = try await Task.detached { try Fingerprint.digests(of: output) }.value
                         guard digest.size > 0, digest.size <= permit.maximumBytes else { throw BackupSpaceFailure.workingSpaceRequired }

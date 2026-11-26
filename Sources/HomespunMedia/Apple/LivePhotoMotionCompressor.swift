@@ -33,9 +33,16 @@ public struct LivePhotoMotionCompressor: Sendable {
     }
 
     /// Every file `compress(input:output:)` can leave behind if its process is killed: the output and its
-    /// hidden partial. Callers that own `output` remove these before retrying with a new name.
+    /// hidden copy/encoding partials. Callers that own `output` remove these before retrying with a new name.
     public static func workingFiles(for output: URL) -> [URL] {
-        [output, MediaFiles.partialURL(for: output)]
+        let copy = MediaFiles.partialURL(for: output), encoding = encodingPartialURL(for: output)
+        return copy == encoding ? [output, copy] : [output, copy, encoding]
+    }
+
+    private static func encodingPartialURL(for output: URL) -> URL {
+        let partial = MediaFiles.partialURL(for: output)
+        // UUID workspace names have no type hint for the verification reader.
+        return output.pathExtension.isEmpty ? partial.appendingPathExtension("mov") : partial
     }
 
     public func compress(input: URL, output: URL) async throws -> VideoCompressionResult {
@@ -81,7 +88,7 @@ public struct LivePhotoMotionCompressor: Sendable {
                                           heldReasons: Array(Set(held)).sorted())
         }
 
-        let partial = MediaFiles.partialURL(for: output)
+        let partial = Self.encodingPartialURL(for: output)
         try? FileManager.default.removeItem(at: partial)
         defer { try? FileManager.default.removeItem(at: partial) }
         let reader = try AVAssetReader(asset: asset)

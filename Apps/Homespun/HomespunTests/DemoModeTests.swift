@@ -2,6 +2,7 @@
 import Foundation
 import HomespunCore
 import HomespunMedia
+import HomespunTestSupport
 import Observation
 import Photos
 import Synchronization
@@ -19,6 +20,7 @@ import UIKit
         let settingsName = "demo-test-\(UUID().uuidString)"
         let session: DemoSession
         let media: URL
+        let ownsMedia: Bool
         let ledger: CompactLedger
         let asked = Asked()
 
@@ -39,8 +41,35 @@ import UIKit
             Fixture(media: try await DemoTestMedia.ready.value, processingDelay: processingDelay)
         }
 
-        init(media: URL, processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil) {
+        static func makeDelegatedMotion() async throws -> Fixture {
+            let media = try DemoTestMedia.makeRoot()
+            do {
+                let pairing = UUID().uuidString
+                let still = media.appendingPathComponent("synthetic.jpg")
+                let motion = media.appendingPathComponent("synthetic.mov")
+                let compact = media.appendingPathComponent("compact.jpg")
+                try Synthetic.photo(at: still, .init(width: 1600, height: 1200, quality: 1, contentIdentifier: pairing))
+                try await Synthetic.video(at: motion, .init(width: 640, height: 480, frames: 45,
+                    bitrate: 12_000_000, audioChannels: 1, liveIdentifier: pairing))
+                try Synthetic.photo(at: compact, .init(width: 800, height: 600, quality: 0.5, contentIdentifier: pairing))
+                try #require(try await LivePhotoMotionCompressor.contentIdentifier(of: motion) == pairing)
+                try #require(await LivePhotoValidator.validate(photo: still, video: motion) == .valid,
+                             "The delegated fixture must be a real, accepted synthetic Live Photo before staging")
+                let sample = DemoSample(name: "synthetic-live", kind: "live_photo", date: "2024-05-01T12:34:56-07:00",
+                    width: 1600, height: 1200, seconds: 1.5,
+                    files: ["photo": still.lastPathComponent, "paired_video": motion.lastPathComponent],
+                    compact: ["photo": compact.lastPathComponent, "paired_video": motion.lastPathComponent])
+                try JSONEncoder().encode([sample]).write(to: media.appendingPathComponent("samples.json"))
+                return Fixture(media: media, ownsMedia: true)
+            } catch {
+                try? FileManager.default.removeItem(at: media)
+                throw error
+            }
+        }
+
+        init(media: URL, processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil, ownsMedia: Bool = false) {
             self.media = media
+            self.ownsMedia = ownsMedia
             let asked = asked
             session = DemoSession(folder: folder, defaults: UserDefaults(suiteName: settingsName)!, pace: 0,
                                   media: media, processingDelay: processingDelay) { asked.ask($0) }
@@ -54,6 +83,7 @@ import UIKit
             URLProtocol.unregisterClass(DemoURLProtocol.self)
             DemoServer.running.withLock { $0 = nil }
             try? FileManager.default.removeItem(at: folder)
+            if ownsMedia { try? FileManager.default.removeItem(at: media) }
             UserDefaults.standard.removePersistentDomain(forName: settingsName)
         }
 
@@ -1070,7 +1100,7 @@ import UIKit
     private func withDelegatedMotion(
         _ exercise: @MainActor (Fixture, AppSettings, BackupBindingContext, ControlledRemote, BackupCoordinator, UUID, DemoSample) async throws -> Void
     ) async throws {
-        let fixture = try await Fixture.make()
+        let fixture = try await Fixture.makeDelegatedMotion()
         let library = fixture.session.library, ledger = fixture.ledger
         let settings = AppSettings(defaults: fixture.session.defaults, photos: library,
             tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
@@ -1094,7 +1124,8 @@ import UIKit
                 try await coordinator.runOpportunity()
                 if try await ledger.store.operation(id)?.backup == .retained, await remote.held > 0 { break }
             }
-            #expect(try await ledger.store.operation(id)?.backup == .retained)
+            let diagnostics = try await backupDiagnostics(ledger.store, id: id)
+            #expect(try await ledger.store.operation(id)?.backup == .retained, "\(diagnostics)")
             try #require(await remote.held > 0)
             try await exercise(fixture, settings, context, remote, coordinator, id, live)
             try await coordinator.stopAndWait()
@@ -1120,6 +1151,8 @@ import UIKit
     private func expectNoMotionPartials(_ store: BackupStore) throws {
         let files = try #require(FileManager.default.enumerator(at: store.files.staging, includingPropertiesForKeys: nil))
         for case let file as URL in files { #expect(!file.lastPathComponent.hasPrefix(".partial-")) }
+        #expect(try PhotoResourceHandoff.orphans(in: store.files.staging, includingActive: true).isEmpty,
+                "Motion reads must also finish or recover their identity-checked typed aliases")
     }
 
     @Test func freshDelegatedLinuxMotionIsCompressedOnTheIPhoneAndSavedAsAVerifiedPair() async throws {
@@ -1140,11 +1173,13 @@ import UIKit
                 if try await store.operation(id)?.delivery == .importedVerified { break }
             }
             let operation = try #require(try await store.operation(id))
-            #expect(operation.delivery == .importedVerified && !operation.attention && operation.problem == nil && operation.lease == nil)
+            let diagnostics = try await backupDiagnostics(store, id: id)
+            #expect(operation.delivery == .importedVerified && !operation.attention && operation.problem == nil && operation.lease == nil,
+                    "\(diagnostics); progress=\(messages)")
             let receipt = try #require(operation.receipt), derivative = try #require(receipt.derivative)
             #expect(derivative.deviceCompresses == [.pairedVideo] && derivative.resources.map(\.role) == [.photo])
-            let compressing = try #require(messages.firstIndex(of: "Compressing motion"))
-            let checking = try #require(messages.firstIndex(of: "Checking Live Photo"))
+            let compressing = try #require(messages.firstIndex(of: "Compressing motion"), "\(diagnostics); progress=\(messages)")
+            let checking = try #require(messages.firstIndex(of: "Checking Live Photo"), "\(diagnostics); progress=\(messages)")
             #expect(compressing < checking)
             let resources = try await store.resources(id)
             let motions = resources.filter { $0.kind == .motion && $0.descriptor.role == .pairedVideo }
@@ -1191,7 +1226,8 @@ import UIKit
             try await coordinator.runOpportunity()
             try await coordinator.runOpportunity()
             let operation = try #require(try await store.operation(id))
-            #expect(operation.notBefore != nil && !operation.attention && operation.problem == nil)
+            let diagnostics = try await backupDiagnostics(store, id: id)
+            #expect(operation.notBefore != nil && !operation.attention && operation.problem == nil, "\(diagnostics)")
             #expect(operation.delivery != .importedVerified)
             #expect(try await store.importIntent(id) == nil)
             let resources = try await store.resources(id)
@@ -1242,6 +1278,10 @@ import UIKit
             } catch is CancellationError {
                 cancelled = true
                 try await store.deferLease(lease)
+            } catch {
+                await cancellation.withLock { $0 }?.value
+                print("Delegated finalization failed: \(error); \(try await backupDiagnostics(store, id: id))")
+                throw error
             }
             await cancellation.withLock { $0 }?.value
             try expectNoMotionPartials(store)
@@ -1276,7 +1316,8 @@ import UIKit
                 try await coordinator.runOpportunity()
                 if try await store.operation(id)?.delivery == .importedVerified { break }
             }
-            #expect(try await store.operation(id)?.delivery == .importedVerified)
+            let diagnostics = try await backupDiagnostics(store, id: id)
+            #expect(try await store.operation(id)?.delivery == .importedVerified, "\(diagnostics)")
             #expect(library.albumMembers().count == 1)
             let intent = try #require(try await store.importIntent(id))
             #expect(intent.phase == .verified)

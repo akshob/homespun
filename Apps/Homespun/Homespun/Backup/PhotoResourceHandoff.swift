@@ -96,6 +96,14 @@ struct PhotoResourceHandoff: Sendable {
         try await withResources(files, createdIdentifier: { $0 }, operation)
     }
 
+    /// AVFoundation also needs typed URLs. These read-only aliases retain the verified UUID file's identity.
+    static func read<Value: Sendable>(
+        _ files: [PreparedPhotoResource],
+        _ operation: @Sendable ([PreparedPhotoResource]) async throws -> Value
+    ) async throws -> Value {
+        try await withResources(files, createdIdentifier: { _ in nil }, operation)
+    }
+
     static func validateLivePhoto(_ files: [PreparedPhotoResource]) async throws -> LivePhotoValidator.Outcome {
         try await withResources(files, createdIdentifier: { _ in nil }) { resources in
             guard let photo = resources.first(where: { $0.descriptor.role == .photo }),
