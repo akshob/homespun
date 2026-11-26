@@ -410,7 +410,10 @@ final class BackupCoordinator {
         let transfer: BackupStore.Transfer
         if let old = transfers.last(where: { $0.kind == .upload && $0.expected.role == expected.role
             && $0.version == receipt.version && $0.epoch == operation.epoch && $0.sessionID == context.session.id && !$0.state.terminal }) {
-            transfer = old
+            // Re-admit immutable intent, not the execution state left by the preceding quantum.
+            var intent = old
+            intent.state = .intent
+            transfer = intent
         } else {
             var reusable: UUID?
             for old in transfers.reversed() where old.kind == .upload && old.version == receipt.version

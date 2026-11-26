@@ -35,12 +35,21 @@ final class BackupResumeUITests: XCTestCase {
         }
     }
 
-    private func waitFor(_ message: String, timeout: TimeInterval, _ condition: () throws -> Bool) throws {
+    @MainActor private func waitFor(_ message: String, timeout: TimeInterval, _ condition: () throws -> Bool) throws {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
             if try condition() { return }
             usleep(250_000)
         } while Date() < deadline
+        var state = XCUIApplication().debugDescription
+        if let log = ProcessInfo.processInfo.environment["HOMESPUN_SERVER_LOG"],
+           let text = try? String(contentsOfFile: log, encoding: .utf8) {
+            state += "\nRecent server requests:\n" + text.split(separator: "\n").suffix(40).joined(separator: "\n")
+        }
+        let attachment = XCTAttachment(string: state)
+        attachment.name = message + " — app and server state"
+        attachment.lifetime = .keepAlways
+        add(attachment)
         XCTFail(message)
         throw Failure.timedOut(message)
     }

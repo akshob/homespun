@@ -960,6 +960,21 @@ import UIKit
         try #require(library.samples.first { $0.kind == kind })
     }
 
+    private func backupDiagnostics(_ store: BackupStore, id: UUID) async throws -> String {
+        guard let operation = try await store.operation(id) else { return "Missing backup operation \(id)" }
+        let transfers = try await store.transfers(operationID: id).map {
+            "\($0.kind) \($0.id): state=\($0.state), session=\($0.sessionID), upload=\(String(describing: $0.uploadID))"
+        }
+        let reservations = try await store.reservations(operationID: id)
+        return """
+        Operation \(id): desired=\(operation.desired), backup=\(operation.backup), compact=\(operation.compact), \
+        delivery=\(operation.delivery), attention=\(operation.attention), problem=\(String(describing: operation.problem)), \
+        lease=\(String(describing: operation.lease)), notBefore=\(String(describing: operation.notBefore))
+        Transfers: \(transfers)
+        Reservations: \(reservations)
+        """
+    }
+
     @Test func versionedLookupUsesTheServersNotFoundAndSingleReceiptWireContract() async throws {
         let fixture = try await Fixture.make()
         let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
@@ -1310,6 +1325,7 @@ import UIKit
             uploadID = try #require(await remoteA.admittedUploadIDs.first)
             serverOffset = try await base.uploadPosition(uploadID).offset
             try #require(serverOffset > 0 && serverOffset < size)
+            try #require(size - serverOffset > 4 * 65_536, "Resume must cross an upload quantum, not just finish its first four chunks")
             try await storeA.close()
         } catch {
             coordinatorA.suspend()
@@ -1335,19 +1351,21 @@ import UIKit
                 if try await storeB.operation(id)?.delivery == .importedVerified { break }
             }
             let operation = try #require(try await storeB.currentOperations([video.id], namespace: ledgerB.namespace).first)
-            #expect(operation.id == id && operation.delivery == .importedVerified)
+            let diagnostics = try await backupDiagnostics(storeB, id: id)
+            #expect(operation.id == id && operation.delivery == .importedVerified, "\(diagnostics)")
             let admittedA = await remoteA.admittedUploadIDs, admittedB = await remoteB.admittedUploadIDs
             let admitted = admittedA + admittedB
             #expect(!admitted.isEmpty && Set(admitted) == [uploadID])
             let appends = await remoteB.appends
             #expect(appends.first?.offset == serverOffset && appends.allSatisfy { $0.offset > 0 && $0.uploadID == uploadID })
-            #expect(appends.reduce(Int64(0)) { $0 + Int64($1.count) } == size - serverOffset)
+            #expect(appends.reduce(Int64(0)) { $0 + Int64($1.count) } == size - serverOffset,
+                    "serverOffset=\(serverOffset), size=\(size), appends=\(appends); \(diagnostics)")
             let transfers = try await storeB.transfers(operationID: id).filter { $0.kind == .upload }
             let old = transfers.filter { $0.sessionID == contextA.session.id }
             #expect(!old.isEmpty && old.allSatisfy { $0.state == .failed })
-            #expect(transfers.contains { $0.sessionID == contextB.session.id && $0.state == .completed })
-            #expect(try await storeB.reservations().isEmpty)
-            #expect(library.albumMembers().count == 1)
+            #expect(transfers.contains { $0.sessionID == contextB.session.id && $0.state == .completed }, "\(diagnostics)")
+            #expect(try await storeB.reservations().isEmpty, "\(diagnostics)")
+            #expect(library.albumMembers().count == 1, "\(diagnostics)")
             try await coordinatorB.stopAndWait()
             try await storeB.close()
         } catch {

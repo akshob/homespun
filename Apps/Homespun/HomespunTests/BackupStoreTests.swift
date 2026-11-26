@@ -60,6 +60,27 @@ private struct BackupStoreFixture {
 
 private enum PhotoHandoffTestFailure: Error, Equatable { case interrupted }
 
+@Test func failedUploadIntentAdmissionReleasesItsReservation() async throws {
+    let fixture = try await BackupStoreFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.directory) }
+    let original = try #require(try await fixture.store.resources(fixture.operationID).first)
+    let transfer = BackupStore.Transfer(id: UUID(), operationID: fixture.operationID, epoch: 1,
+        sessionID: UUID(), kind: .upload, version: fixture.receipt.version,
+        expected: original.descriptor, resourceID: original.fileID, uploadID: UUID())
+    let workspace = BackupWorkspace(store: fixture.store, policy: .init(
+        maximumTransientBytes: 8 << 20, minimumAvailableBytes: 0, finalizationReserveBytes: 0, maximumTransfers: 3))
+    // Capacity is available, but this transfer has no registered foreground session.
+    await #expect(throws: BackupStore.Failure.staleOperation) {
+        _ = try await workspace.reserveTransfer(transfer, futureBytes: 0)
+    }
+    #expect(try await fixture.store.reservations().isEmpty)
+    #expect(try await fixture.store.transfers().isEmpty)
+    let digest = try Fingerprint.digests(of: fixture.store.files.stagedFile(
+        operationID: fixture.operationID, fileID: original.fileID))
+    #expect(digest.sha256 == original.descriptor.sha256 && digest.size == original.descriptor.size)
+    try await fixture.store.close()
+}
+
 @Test func existingCopyAdoptionPersistsCanonicalProofWithoutInventingAnImportAndReusesItsIntentAfterRestart() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }

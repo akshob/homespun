@@ -499,6 +499,10 @@ consumers also protect matching legacy temporary copies from automatic expiry.
 a retained receipt. Failed/unfinished publication keeps a recovery journal. Storage pressure is
 explicit backpressure, never permission to delete originals.
 
+The phone yields its upload slot after four chunks. Further quanta re-admit the same immutable
+transfer intent and query the durable offset again; an execution state from the previous quantum
+is not a new admission. Failed local intent admission releases its working-space reservation.
+
 Use `/api/v2/changes?after=<cursor>&epoch=<historyEpoch>` or `/api/v2/snapshot` to reconcile results.
 Snapshot continuation tokens are opaque, expiring, and bound to the authenticated device.
 Immutable `/api/v2/derivatives/<generation>/resources/<role>` downloads provide exact lengths,

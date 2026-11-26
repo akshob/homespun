@@ -58,7 +58,12 @@ struct BackupWorkspace: Sendable {
             systemCopyBytes: transfer.kind == .upload ? Int64(ServerClientV2.maximumBufferedChunk * 2) : 0,
             taskSlots: 1, transferID: transfer.id)
         try await store.reserveSpace(reservation, policy: policy)
-        try await store.stageTransfer(transfer)
+        do {
+            try await store.stageTransfer(transfer)
+        } catch {
+            try await store.releaseReservation(reservation.id)
+            throw error
+        }
         return reservation.id
     }
 
