@@ -32,6 +32,12 @@ public struct LivePhotoMotionCompressor: Sendable {
         try await AVSupport.contentIdentifier(of: AVURLAsset(url: url))
     }
 
+    /// Every file `compress(input:output:)` can leave behind if its process is killed: the output and its
+    /// hidden partial. Callers that own `output` remove these before retrying with a new name.
+    public static func workingFiles(for output: URL) -> [URL] {
+        [output, MediaFiles.partialURL(for: output)]
+    }
+
     public func compress(input: URL, output: URL) async throws -> VideoCompressionResult {
         try await compress(input: input, output: output, observer: .init())
     }

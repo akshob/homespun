@@ -32,7 +32,6 @@ enum BackupValidation {
 }
 
 struct BackupFinalizer: Sendable {
-    static let boundedMotionEncodingAvailable = false
     let store: BackupStore
     let photos: any PhotoSource
     let workspace: BackupWorkspace
@@ -77,13 +76,11 @@ struct BackupFinalizer: Sendable {
         }
         let cachedMotion = cached.first { $0.kind == .motion && $0.descriptor.role == .pairedVideo && $0.availability == .present
             && FileManager.default.fileExists(atPath: store.files.stagedFile(operationID: operation.id, fileID: $0.fileID).path) }
-        guard !derivative.deviceCompresses.contains(.pairedVideo) || cachedMotion != nil || Self.boundedMotionEncodingAvailable else {
-            throw BackupStageFailure.blocked("The original is retained. Saving this Live Photo needs bounded on-iPhone motion encoding, which is not yet available. No original can be removed.")
-        }
         let motion = originals.first { $0.kind == .original && $0.availability == .present && $0.descriptor.role == .fullSizePairedVideo }
             ?? originals.first { $0.kind == .original && $0.availability == .present && $0.descriptor.role == .pairedVideo }
         // Existing staged files are already counted by the Store. Reserve missing downloads plus
-        // Photos' new copy, and local encoding's unpublished output/copy overlap.
+        // Photos' new copy. Linux delegates motion: reserve the retained motion's encoding overlap
+        // (output, partial and Photos' copy), conservatively 4x its size.
         var needed = try sum(derivative.resources.filter { existing($0) == nil }.map(\.size)
                              + derivative.resources.map(\.size) + [cachedMotion?.descriptor.size ?? 0])
         if derivative.deviceCompresses.contains(.pairedVideo), cachedMotion == nil {
@@ -129,23 +126,49 @@ struct BackupFinalizer: Sendable {
                     let file = store.files.stagedFile(operationID: operation.id, fileID: oldMotion.fileID)
                     try await validate(file, expected: oldMotion.descriptor)
                     made = .init(fileID: oldMotion.fileID, url: file, descriptor: oldMotion.descriptor)
+                    progress("Checking Live Photo")
+                    if case .invalid(let reason) = try await PhotoResourceHandoff.validateLivePhoto([photo, made]) {
+                        throw PhotoLibrary.Failure.livePhotoInvalid(reason)
+                    }
                 } else {
                     progress("Compressing motion")
-                    let fileID = UUID(), output = store.files.stagedFile(operationID: operation.id, fileID: fileID)
                     let input = store.files.stagedFile(operationID: operation.id, fileID: motion.fileID)
                     try await validate(input, expected: motion.descriptor)
-                    _ = try await LivePhotoMotionCompressor(profile: operation.profile).compress(input: input, output: output)
-                    try BackupFiles.protect(output)
-                    let digest = try await Task.detached { try Fingerprint.digests(of: output) }.value
-                    guard digest.size > 0, digest.size <= permit.maximumBytes else { throw BackupSpaceFailure.workingSpaceRequired }
-                    let descriptor = ServerAPI.ResourceDescriptor(role: .pairedVideo, filename: "motion.mov",
-                                                                  size: digest.size, sha256: digest.sha256, sha1: digest.sha1)
-                    try await store.recordResource(.init(fileID: fileID, operationID: operation.id, kind: .motion, descriptor: descriptor))
-                    made = .init(fileID: fileID, url: output, descriptor: descriptor)
-                }
-                progress("Checking Live Photo")
-                if case .invalid(let reason) = try await PhotoResourceHandoff.validateLivePhoto([photo, made]) {
-                    throw PhotoLibrary.Failure.livePhotoInvalid(reason)
+                    let pendingKey = "delegated-motion-output:" + operation.id.uuidString
+                    if let abandoned = try await store.metadata(pendingKey, as: UUID.self),
+                       try await !store.resources(operation.id).contains(where: { $0.fileID == abandoned }) {
+                        let output = store.files.stagedFile(operationID: operation.id, fileID: abandoned)
+                        for url in LivePhotoMotionCompressor.workingFiles(for: output) {
+                            do { try FileManager.default.removeItem(at: url) }
+                            catch let error as CocoaError where error.code == .fileNoSuchFile || error.code == .fileReadNoSuchFile {}
+                        }
+                    }
+                    let fileID = UUID(), output = store.files.stagedFile(operationID: operation.id, fileID: fileID)
+                    try await store.saveMetadata(pendingKey, value: fileID)
+                    do {
+                        _ = try await LivePhotoMotionCompressor(profile: operation.profile).compress(input: input, output: output)
+                        try BackupFiles.protect(output)
+                        let digest = try await Task.detached { try Fingerprint.digests(of: output) }.value
+                        guard digest.size > 0, digest.size <= permit.maximumBytes else { throw BackupSpaceFailure.workingSpaceRequired }
+                        let descriptor = ServerAPI.ResourceDescriptor(role: .pairedVideo, filename: "motion.mov",
+                                                                      size: digest.size, sha256: digest.sha256, sha1: digest.sha1)
+                        let candidate = PreparedPhotoResource(fileID: fileID, url: output, descriptor: descriptor)
+                        progress("Checking Live Photo")
+                        if case .invalid(let reason) = try await PhotoResourceHandoff.validateLivePhoto([photo, candidate]) {
+                            throw PhotoLibrary.Failure.livePhotoInvalid(reason)
+                        }
+                        try await store.recordResource(.init(fileID: fileID, operationID: operation.id, kind: .motion, descriptor: descriptor))
+                        made = candidate
+                    } catch {
+                        // Only our own never-recorded output; a recorded resource is never deleted here.
+                        if let recorded = try? await store.resources(operation.id),
+                           !recorded.contains(where: { $0.fileID == fileID }) {
+                            for url in LivePhotoMotionCompressor.workingFiles(for: output) {
+                                try? FileManager.default.removeItem(at: url)
+                            }
+                        }
+                        throw error
+                    }
                 }
                 files.append(made)
             } else if manifest.kind == .livePhoto {

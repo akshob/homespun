@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import HomespunMedia
 import Observation
 import Photos
 import Synchronization
@@ -1031,7 +1032,9 @@ import UIKit
         try await model.closeDemoStore()
     }
 
-    @Test func freshDelegatedLinuxMotionStaysBlockedWithoutImportingOrChangingItsRetainedOriginal() async throws {
+    private func withDelegatedMotion(
+        _ exercise: @MainActor (Fixture, AppSettings, BackupBindingContext, ControlledRemote, BackupCoordinator, UUID, DemoSample) async throws -> Void
+    ) async throws {
         let fixture = try await Fixture.make()
         let library = fixture.session.library, ledger = fixture.ledger
         let settings = AppSettings(defaults: fixture.session.defaults, photos: library,
@@ -1043,54 +1046,208 @@ import UIKit
         var context = try await settings.backupContext(store: ledger.store, namespace: ledger.namespace)
         // The real synthetic server keeps the complete original. Only its delivery is
         // presented as Linux's photo-only derivative plus delegated pairedVideo.
-        context.remote = ControlledRemote(context.remote, delegatesMotion: true)
+        let remote = ControlledRemote(context.remote, delaysReady: true, delegatesMotion: true)
+        context.remote = remote
         let coordinator = BackupCoordinator(store: ledger.store, photos: library, namespace: ledger.namespace)
         do {
             let live = try sample(library, "live_photo")
-            let identifiers = library.allIdentifiers(), generation = try library.sourceGeneration(live.id)
-            let original = try await library.resourceFingerprints(live.id)
-            let album = library.albumMembers(), questions = fixture.asked.all.count
             let policy = try await settings.backupSpacePolicy(store: ledger.store)
             try await coordinator.activate(context, policy: policy)
             let batch = try await coordinator.admit([live.id], compact: true, trigger: .manual)
             let id = try #require(batch.operationIDs.first)
-            try await coordinator.runOpportunity()
-            try await coordinator.runOpportunity()
-            let operation = try #require(try await ledger.store.operation(id))
-            let receipt = try #require(operation.receipt), manifest = try #require(operation.manifest)
-            #expect(manifest.kind == .livePhoto && operation.backup == .retained && operation.compact == .ready)
-            #expect(receipt.derivative?.deviceCompresses == [.pairedVideo])
-            #expect(receipt.derivative?.resources.map(\.role) == [.photo])
-            #expect(operation.problem?.code == "stage_failed" && operation.attention && operation.lease == nil)
-            #expect(operation.problem?.stage == .finalization)
-            #expect(operation.problem?.message.contains("bounded on-iPhone motion encoding") == true)
-            #expect(operation.delivery != .importedVerified)
-            let resources = try await ledger.store.resources(id)
-            #expect(resources.allSatisfy { $0.kind != .motion })
-            let motion = try #require(resources.first {
-                $0.kind == .original && $0.descriptor.role == .pairedVideo && $0.availability == .present
-            })
-            let retained = try Fingerprint.digests(of: ledger.store.files.stagedFile(operationID: id, fileID: motion.fileID))
-            #expect(retained.sha256 == motion.descriptor.sha256 && retained.size == motion.descriptor.size)
-            #expect(try await ledger.store.transfers(operationID: id).allSatisfy { $0.kind != .download })
-            #expect(try await ledger.store.importIntent(id) == nil)
-            #expect(try await ledger.store.mappings(namespace: ledger.namespace).isEmpty)
-            #expect(try await ledger.store.outbox().allSatisfy { $0.kind != .deliveryAcknowledgement })
-            #expect(try await ledger.store.effects(namespace: ledger.namespace, unfinished: false).isEmpty)
-            #expect(library.allIdentifiers() == identifiers && library.albumMembers() == album)
-            #expect(try library.sourceGeneration(live.id) == generation)
-            #expect(try await library.resourceFingerprints(live.id) == original)
-            #expect(fixture.asked.all.count == questions)
-            let proof = try await context.remote.verify(receipt.version)
-            #expect(BackupValidation.retained(proof, manifest: manifest, context: context, policy: .permanent))
-            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library)
-            #expect(try await remover.candidates(only: [live.id]).isEmpty)
+            for _ in 0..<5 {
+                try await coordinator.runOpportunity()
+                if try await ledger.store.operation(id)?.backup == .retained, await remote.held > 0 { break }
+            }
+            #expect(try await ledger.store.operation(id)?.backup == .retained)
+            try #require(await remote.held > 0)
+            try await exercise(fixture, settings, context, remote, coordinator, id, live)
             try await coordinator.stopAndWait()
             try await ledger.store.close()
         } catch {
             try? await coordinator.stopAndWait()
             try? await ledger.store.close()
             throw error
+        }
+    }
+
+    private func delegatedMotionPolicy(store: BackupStore, id: UUID, receipt: BackupAPI.Receipt,
+                                       motionCopies: Int) async throws -> BackupSpacePolicy {
+        let transient = try store.files.spaceObservation().transientBytes
+        let photo = try #require(receipt.derivative?.resources.first { $0.role == .photo })
+        let motion = try #require(try await store.resources(id).first {
+            $0.kind == .original && $0.descriptor.role == .pairedVideo && $0.availability == .present
+        })
+        return .init(maximumTransientBytes: transient + Int64(2 * photo.size + motionCopies * motion.descriptor.size),
+                     minimumAvailableBytes: 0, finalizationReserveBytes: 0, maximumTransfers: 3)
+    }
+
+    private func expectNoMotionPartials(_ store: BackupStore) throws {
+        let files = try #require(FileManager.default.enumerator(at: store.files.staging, includingPropertiesForKeys: nil))
+        for case let file as URL in files { #expect(!file.lastPathComponent.hasPrefix(".partial-")) }
+    }
+
+    @Test func freshDelegatedLinuxMotionIsCompressedOnTheIPhoneAndSavedAsAVerifiedPair() async throws {
+        try await withDelegatedMotion { fixture, _, context, remote, coordinator, id, live in
+            let library = fixture.session.library, ledger = fixture.ledger, store = ledger.store
+            let generation = try library.sourceGeneration(live.id)
+            let original = try await library.resourceFingerprints(live.id)
+            let questions = fixture.asked.all.count
+            let held = try #require(try await store.operation(id)?.receipt)
+            let ready = try await remote.status(held.requestID)
+            let policy = try await delegatedMotionPolicy(store: store, id: id, receipt: ready, motionCopies: 4)
+            try await coordinator.activate(context, policy: policy)
+            var messages: [String] = []
+            coordinator.progress = { _, message in messages.append(message) }
+            await remote.release()
+            for _ in 0..<5 {
+                try await coordinator.runOpportunity()
+                if try await store.operation(id)?.delivery == .importedVerified { break }
+            }
+            let operation = try #require(try await store.operation(id))
+            #expect(operation.delivery == .importedVerified && !operation.attention && operation.problem == nil && operation.lease == nil)
+            let receipt = try #require(operation.receipt), derivative = try #require(receipt.derivative)
+            #expect(derivative.deviceCompresses == [.pairedVideo] && derivative.resources.map(\.role) == [.photo])
+            let compressing = try #require(messages.firstIndex(of: "Compressing motion"))
+            let checking = try #require(messages.firstIndex(of: "Checking Live Photo"))
+            #expect(compressing < checking)
+            let resources = try await store.resources(id)
+            let motions = resources.filter { $0.kind == .motion && $0.descriptor.role == .pairedVideo }
+            try #require(motions.count == 1)
+            let made = try #require(motions.first).descriptor
+            let source = try #require(original.first { $0.role == .pairedVideo })
+            // Simulator bitrate is not deterministic: either byte-identical fallback or a smaller encode is valid.
+            #expect(made.sha256 == source.sha256 && made.size == source.size || made.size < source.size)
+            let intent = try #require(try await store.importIntent(id))
+            #expect(intent.phase == .verified && Set(intent.expected.map(\.role)) == [.photo, .pairedVideo])
+            #expect(intent.expected.first { $0.role == .pairedVideo } == made)
+            let photo = try #require(derivative.resources.first)
+            #expect(intent.expected.first { $0.role == .photo } == .init(
+                role: .photo, filename: photo.filename, size: photo.size, sha256: photo.sha256))
+            let mapping = try #require(try await store.mappings(namespace: ledger.namespace)[live.id])
+            #expect(mapping.compactResources == intent.expected && mapping.proof?.retention == .permanent)
+            let copy = try #require(library.demoItem(mapping.entry.compactIdentifier))
+            #expect(copy.kind == .livePhoto && copy.motion != nil)
+            let fingerprints = try await library.resourceFingerprints(copy.localIdentifier)
+            #expect(fingerprints.first { $0.role == .pairedVideo }?.sha256 == made.sha256)
+            #expect(library.existing([live.id], includeHidden: true) == [live.id])
+            #expect(try library.sourceGeneration(live.id) == generation)
+            #expect(try await library.resourceFingerprints(live.id) == original && fixture.asked.all.count == questions)
+            try expectNoMotionPartials(store)
+            let manifest = try #require(operation.manifest), proof = try #require(mapping.proof)
+            #expect(BackupValidation.retained(proof, manifest: manifest, context: context, policy: .permanent))
+            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library)
+            #expect(try await remover.candidates(only: [live.id]).count == 1)
+            #expect(await !remote.verified.isEmpty)
+        }
+    }
+
+    @Test func delegatedMotionReservesFourTimesTheMotionBeforeDownloadingOrEncoding() async throws {
+        try await withDelegatedMotion { fixture, _, context, remote, coordinator, id, live in
+            let library = fixture.session.library, ledger = fixture.ledger, store = ledger.store
+            let identifiers = library.allIdentifiers(), album = library.albumMembers()
+            let generation = try library.sourceGeneration(live.id), questions = fixture.asked.all.count
+            let original = try await library.resourceFingerprints(live.id)
+            let held = try #require(try await store.operation(id)?.receipt)
+            let ready = try await remote.status(held.requestID)
+            let policy = try await delegatedMotionPolicy(store: store, id: id, receipt: ready, motionCopies: 3)
+            try await coordinator.activate(context, policy: policy)
+            await remote.release()
+            try await coordinator.runOpportunity()
+            try await coordinator.runOpportunity()
+            let operation = try #require(try await store.operation(id))
+            #expect(operation.notBefore != nil && !operation.attention && operation.problem == nil)
+            #expect(operation.delivery != .importedVerified)
+            #expect(try await store.importIntent(id) == nil)
+            let resources = try await store.resources(id)
+            #expect(resources.allSatisfy { $0.kind != .motion })
+            #expect(try await store.transfers(operationID: id).allSatisfy { $0.kind != .download })
+            #expect(try await store.reservations(operationID: id).isEmpty)
+            let motion = try #require(resources.first { $0.kind == .original && $0.descriptor.role == .pairedVideo })
+            let digest = try Fingerprint.digests(of: store.files.stagedFile(operationID: id, fileID: motion.fileID))
+            #expect(digest.sha256 == motion.descriptor.sha256 && digest.size == motion.descriptor.size)
+            #expect(library.allIdentifiers() == identifiers && library.albumMembers() == album)
+            #expect(try library.sourceGeneration(live.id) == generation)
+            #expect(try await library.resourceFingerprints(live.id) == original && fixture.asked.all.count == questions)
+            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library)
+            #expect(try await remover.candidates(only: [live.id]).isEmpty)
+        }
+    }
+
+    @Test func cancelledDelegatedMotionLeavesNoPartialOrImportAndResumesToOnePair() async throws {
+        try await withDelegatedMotion { fixture, settings, context, remote, coordinator, id, _ in
+            let library = fixture.session.library, ledger = fixture.ledger, store = ledger.store
+            let album = library.albumMembers()
+            await remote.release()
+            // Invisible reconciliation applies the receipt without starting finalization.
+            try await coordinator.reconcile()
+            let lease = try #require(try await store.claim(id, stage: .finalization))
+            let operation = try #require(try await store.operation(id))
+            let policy = try await settings.backupSpacePolicy(store: store)
+            let finalizer = BackupFinalizer(store: store, photos: library, workspace: .init(store: store, policy: policy))
+            let handle = Mutex<Task<BackupStore.SavedMapping, Error>?>(nil)
+            let cancellation = Mutex<Task<Void, Never>?>(nil)
+            let task = Task {
+                try await finalizer.run(operation, lease: lease, context: context) { message in
+                    if message == "Compressing motion" {
+                        cancellation.withLock { task in
+                            task = Task {
+                                try? await Task.sleep(for: .milliseconds(150))
+                                handle.withLock { $0 }?.cancel()
+                            }
+                        }
+                    }
+                }
+            }
+            handle.withLock { $0 = task }
+            var cancelled = false
+            do {
+                _ = try await task.value
+                try await store.release(lease)
+            } catch is CancellationError {
+                cancelled = true
+                try await store.deferLease(lease)
+            }
+            await cancellation.withLock { $0 }?.value
+            try expectNoMotionPartials(store)
+            let resources = try await store.resources(id)
+            let recorded = Set(resources.map { $0.fileID.uuidString })
+            let directory = store.files.staging.appendingPathComponent(id.uuidString)
+            for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) {
+                if try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                    #expect(recorded.contains(file.lastPathComponent), "No unrecorded encode output may survive cancellation")
+                }
+            }
+            if cancelled {
+                let intent = try await store.importIntent(id)
+                #expect(intent == nil || intent?.phase == .planned)
+                let mappings = try await store.mappings(namespace: ledger.namespace)
+                #expect(library.albumMembers() == album && mappings.isEmpty)
+            }
+            let cached = resources.first { $0.kind == .motion }
+            if let cached {
+                let digest = try Fingerprint.digests(of: store.files.stagedFile(operationID: id, fileID: cached.fileID))
+                #expect(digest.sha256 == cached.descriptor.sha256 && digest.size == cached.descriptor.size)
+            }
+            var ghosts: [URL] = []
+            if cached == nil {
+                let ghost = UUID()
+                try await store.saveMetadata("delegated-motion-output:" + id.uuidString, value: ghost)
+                ghosts = LivePhotoMotionCompressor.workingFiles(for: store.files.stagedFile(operationID: id, fileID: ghost))
+                for file in ghosts { try Data(repeating: 0xA5, count: 4_096).write(to: file) }
+            }
+            // If cancellation landed after recording, keep that verified motion to exercise cached reuse instead.
+            for _ in 0..<5 {
+                try await coordinator.runOpportunity()
+                if try await store.operation(id)?.delivery == .importedVerified { break }
+            }
+            #expect(try await store.operation(id)?.delivery == .importedVerified)
+            #expect(library.albumMembers().count == 1)
+            let intent = try #require(try await store.importIntent(id))
+            #expect(intent.phase == .verified)
+            if let cached { #expect(intent.expected.first { $0.role == .pairedVideo } == cached.descriptor) }
+            #expect(ghosts.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+            try expectNoMotionPartials(store)
         }
     }
 

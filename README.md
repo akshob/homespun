@@ -505,10 +505,13 @@ are client-generated UUIDs posted to `/api/v2/deliveries/<id>/ack`; acknowledgem
 delivery. Fresh `/api/v2/assets/<asset>/versions/<manifest>/verify` accepts `BackupAPI.Version` and
 requires that device's permanent local claim. No endpoint falls back to mutable v1 proof.
 
-Fresh Linux-delegated Live Photo motion remains blocked in the staged 1.1 pipeline until
-hard-bounded on-iPhone encoding is available. An already verified staged motion resource can
-be reused; otherwise the original stays retained and no Photos import starts. Motion integrity
-and cancellation checks do not enable that encoding gate or native background transfers.
+With a Linux server the receipt delegates Live Photo motion (`device_compresses: ["paired_video"]`).
+The iPhone re-encodes the retained original motion with AVFoundation (`LivePhotoMotionCompressor`),
+reserving the motion's size four times over for the encode, checks the pair with `PHLivePhoto`,
+and imports it only after the server's retained-original proof; the saved pair is verified before
+any original can be offered for removal. Motion that does not get smaller is kept byte-identical.
+A hard bound on total working space is planned for a later release. Native/background transfers
+remain unavailable.
 
 Immich remains read-only. Its independently scheduled acquisition downloads and checks every
 expected original resource by positive size and SHA-256, using SHA-1/search only to locate it.
@@ -761,6 +764,9 @@ After a fresh versioned server byte proof and another full local compact check, 
 writes the canonical verified mapping and adds the copy to the Homespun album, without importing
 or uploading it again. An original here becomes ready only if **all** its resources match too;
 Free Up Space still performs its separate fresh proof and iOS confirmation.
+
+A Live Photo whose motion the iPhone compressed (Linux server) cannot yet be re-linked by
+Find Compact Copies; its original stays retained and nothing is removed.
 
 This establishes an equivalent backup on the **current authenticated server**, not where an
 old copy was first made. Unknown historical provenance remains unknown. Partial or ambiguous
