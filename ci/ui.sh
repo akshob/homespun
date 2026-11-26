@@ -117,6 +117,17 @@ if [[ -z ${SERVERLESS:-} ]]; then
                             if HOMESPUN_DATA=$currentData $SERVER_BIN pair --minutes 180 > $DATA/pairing-again.next; then
                                 mv $DATA/pairing-again.next $DATA/pairing-again
                             fi;;
+                        compact-settled)
+                            result=timeout
+                            for attempt in {1..900}; do
+                                pending=$(sqlite3 -cmd ".timeout 2000" $currentData/homespun.db \
+                                    "SELECT count(*) FROM backup_requests WHERE wants_compact = 1 AND paused = 0 AND cancelled = 0 AND compact_state IN ('requested','queued','processing')" 2>/dev/null)
+                                ready=$(sqlite3 -cmd ".timeout 2000" $currentData/homespun.db \
+                                    "SELECT count(*) FROM backup_requests WHERE compact_state = 'ready'" 2>/dev/null)
+                                if [[ $pending == 0 && ${ready:-0} -gt 0 ]]; then result=ready; break; fi
+                                sleep 0.2
+                            done
+                            print -r -- $result > $DATA/compact-settled;;
                         wrong-key-port)
                             stop_server
                             wait_port_free $MOVEPORT || exit 1
@@ -146,6 +157,9 @@ if [[ -z ${SERVERLESS:-} ]]; then
     export TEST_RUNNER_HOMESPUN_MOVED_SERVER=127.0.0.1:$MOVEPORT
     export TEST_RUNNER_HOMESPUN_ROGUE_LOG=$RESULTS/$NAME-rogue-server.log
     export TEST_RUNNER_HOMESPUN_PAIRING_OUTPUT_FILE=$DATA/pairing-again
+    export TEST_RUNNER_HOMESPUN_SERVER_LOG=$DATA.log
+    export TEST_RUNNER_HOMESPUN_COMPACT_SETTLED_FILE=$DATA/compact-settled
+    export TEST_RUNNER_HOMESPUN_SEED_VIDEO_BYTES=$(stat -f%z $SEED/IMG_2003.MOV)
 fi
 if [[ -n ${STUB_PORT:-} ]]; then
     stamp telemetry.start.start
@@ -188,7 +202,7 @@ if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
     stamp simulator.reboot.end
     run_tests; STATUS=$?
 fi
-if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests)* ]]; then
+if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests|BackupResumeUITests)* ]]; then
     require_test_environment $RESULTS/$NAME.log || STATUS=1
 fi
 if [[ -n ${STUB_PORT:-} ]]; then

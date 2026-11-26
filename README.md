@@ -470,7 +470,9 @@ their old roots are recorded in the catalog. A move interrupted by a restart kee
 
 The authenticated `/api/v2` API separates original retention, processing, and delivery.
 Capabilities advertise only `foreground_offset`: this is **not native/background resumable
-upload support**. Manual/permanent claims survive cancellation and missing import acknowledgements;
+upload support**. Transfers may stop when the app is closed; opening the app resumes selected
+backups from the server's durable upload offset and fetches compact copies finished while it was
+closed, without selecting the items again. Manual/permanent claims survive cancellation and missing import acknowledgements;
 `compact: false` can still request permanent original retention. Existing ambiguous trash is retained
 after migration, not given a new expiry. Versioned deferred claims are explicit and currently retained
 without automatic expiry; they do not authorize a permanent deletion proof.

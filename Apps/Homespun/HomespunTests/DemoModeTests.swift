@@ -99,16 +99,23 @@ import UIKit
         private let base: any BackupRemote
         private let beforeVerify: @Sendable (BackupAPI.Version) async -> Void
         private let delegatesMotion: Bool
+        private let chunkLimit: Int64?
+        private let appendBarrier: OneShotBarrier?
         private var released: Bool
         private(set) var held = 0
         private(set) var verified: [BackupAPI.Version] = []
+        private(set) var admittedUploadIDs: [UUID] = []
+        private(set) var appends: [(uploadID: UUID, offset: Int64, count: Int)] = []
 
         init(_ base: any BackupRemote, delaysReady: Bool = false, delegatesMotion: Bool = false,
+             chunkLimit: Int64? = nil, appendBarrier: OneShotBarrier? = nil,
              beforeVerify: @escaping @Sendable (BackupAPI.Version) async -> Void = { _ in }) {
             self.base = base
             baseURL = base.baseURL
             released = !delaysReady
             self.delegatesMotion = delegatesMotion
+            self.chunkLimit = chunkLimit
+            self.appendBarrier = appendBarrier
             self.beforeVerify = beforeVerify
         }
 
@@ -141,9 +148,22 @@ import UIKit
         func command(requestID: UUID, _ command: BackupAPI.Command) async throws -> BackupAPI.Receipt {
             delivery(try await base.command(requestID: requestID, command))
         }
-        func admitUpload(_ request: BackupAPI.UploadRequest) async throws -> BackupAPI.UploadAdmission { try await base.admitUpload(request) }
-        func uploadPosition(_ uploadID: UUID) async throws -> BackupUploadPosition { try await base.uploadPosition(uploadID) }
-        func append(_ bytes: Data, uploadID: UUID, offset: Int64) async throws -> Int64 { try await base.append(bytes, uploadID: uploadID, offset: offset) }
+        func admitUpload(_ request: BackupAPI.UploadRequest) async throws -> BackupAPI.UploadAdmission {
+            admittedUploadIDs.append(request.uploadID)
+            return try await base.admitUpload(request)
+        }
+        func uploadPosition(_ uploadID: UUID) async throws -> BackupUploadPosition {
+            var position = try await base.uploadPosition(uploadID)
+            if let chunkLimit { position.maximumChunkBytes = min(position.maximumChunkBytes, chunkLimit) }
+            return position
+        }
+        func append(_ bytes: Data, uploadID: UUID, offset: Int64) async throws -> Int64 {
+            await appendBarrier?.pause()
+            try Task.checkCancellation()
+            let next = try await base.append(bytes, uploadID: uploadID, offset: offset)
+            appends.append((uploadID, offset, bytes.count))
+            return next
+        }
         func completeUpload(_ uploadID: UUID) async throws -> BackupAPI.Receipt { delivery(try await base.completeUpload(uploadID)) }
         func snapshot(continuation: String?) async throws -> BackupAPI.Snapshot {
             var page = try await base.snapshot(continuation: continuation)
@@ -1248,6 +1268,92 @@ import UIKit
             if let cached { #expect(intent.expected.first { $0.role == .pairedVideo } == cached.descriptor) }
             #expect(ghosts.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
             try expectNoMotionPartials(store)
+        }
+    }
+
+    @Test func uploadAfterAProcessRestartResumesFromTheServersOffsetWithTheSameUploadID() async throws {
+        let fixture = try await Fixture.make(), library = fixture.session.library
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let directory = fixture.folder.appendingPathComponent("Backup")
+        let storeA = BackupStore(directory: directory, legacyURL: nil, processID: UUID())
+        let ledgerA = CompactLedger(store: storeA)
+        let coordinatorA = BackupCoordinator(store: storeA, photos: library, namespace: ledgerA.namespace)
+        let barrier = OneShotBarrier(pauseAt: 3)
+        var contextA = try await settings.backupContext(store: storeA, namespace: ledgerA.namespace)
+        let base = contextA.remote
+        let remoteA = ControlledRemote(base, chunkLimit: 65_536, appendBarrier: barrier)
+        contextA.remote = remoteA
+        let video = try sample(library, "video")
+        let id: UUID
+        let uploadID: UUID
+        let serverOffset: Int64
+        let size: Int64
+        let policyA = try await settings.backupSpacePolicy(store: storeA)
+        try await coordinatorA.activate(contextA, policy: policyA)
+        let batch = try await coordinatorA.admit([video.id], compact: true, trigger: .manual)
+        id = try #require(batch.operationIDs.first)
+        let run = Task { try await coordinatorA.runOpportunity() }
+        do {
+            try await eventually { await barrier.arrivals == 3 }
+            coordinatorA.suspend()
+            await barrier.release()
+            // Suspension cancels execution, not persisted desired intent.
+            do { try await run.value } catch is CancellationError {}
+            try await coordinatorA.stopAndWait()
+            let operation = try #require(try await storeA.operation(id))
+            size = Int64(try #require(operation.manifest?.resources.first { $0.role == .video }).size)
+            uploadID = try #require(await remoteA.admittedUploadIDs.first)
+            serverOffset = try await base.uploadPosition(uploadID).offset
+            try #require(serverOffset > 0 && serverOffset < size)
+            try await storeA.close()
+        } catch {
+            coordinatorA.suspend()
+            await barrier.release()
+            _ = try? await run.value
+            try? await coordinatorA.stopAndWait()
+            try? await storeA.close()
+            throw error
+        }
+        let storeB = BackupStore(directory: directory, legacyURL: nil, processID: UUID())
+        let ledgerB = CompactLedger(store: storeB)
+        let coordinatorB = BackupCoordinator(store: storeB, photos: library, namespace: ledgerB.namespace)
+        do {
+            var contextB = try await settings.backupContext(store: storeB, namespace: ledgerB.namespace)
+            #expect(contextB.session.id != contextA.session.id)
+            let remoteB = ControlledRemote(contextB.remote, chunkLimit: 65_536)
+            contextB.remote = remoteB
+            let policyB = try await settings.backupSpacePolicy(store: storeB)
+            try await coordinatorB.activate(contextB, policy: policyB)
+            // No second admission or selection: reopening alone restores the original operation.
+            for _ in 0..<5 {
+                try await coordinatorB.runOpportunity()
+                if try await storeB.operation(id)?.delivery == .importedVerified { break }
+            }
+            let operation = try #require(try await storeB.currentOperations([video.id], namespace: ledgerB.namespace).first)
+            #expect(operation.id == id && operation.delivery == .importedVerified)
+            let admittedA = await remoteA.admittedUploadIDs, admittedB = await remoteB.admittedUploadIDs
+            let admitted = admittedA + admittedB
+            #expect(!admitted.isEmpty && Set(admitted) == [uploadID])
+            let appends = await remoteB.appends
+            #expect(appends.first?.offset == serverOffset && appends.allSatisfy { $0.offset > 0 && $0.uploadID == uploadID })
+            #expect(appends.reduce(Int64(0)) { $0 + Int64($1.count) } == size - serverOffset)
+            let transfers = try await storeB.transfers(operationID: id).filter { $0.kind == .upload }
+            let old = transfers.filter { $0.sessionID == contextA.session.id }
+            #expect(!old.isEmpty && old.allSatisfy { $0.state == .failed })
+            #expect(transfers.contains { $0.sessionID == contextB.session.id && $0.state == .completed })
+            #expect(try await storeB.reservations().isEmpty)
+            #expect(library.albumMembers().count == 1)
+            try await coordinatorB.stopAndWait()
+            try await storeB.close()
+        } catch {
+            try? await coordinatorB.stopAndWait()
+            try? await storeB.close()
+            throw error
         }
     }
 

@@ -6,6 +6,18 @@ import HomespunCore
 /// neither a server encoder nor a discovery backoff holds isRunning, the screen, or LongRun.
 @MainActor
 final class BackupCoordinator {
+    #if DEBUG
+    /// UI tests only: smaller, slower upload chunks ("bytes,milliseconds"), so a test can quit mid-upload.
+    private static let testUploadPacing: (bytes: Int64, delay: Duration)? = {
+        guard let text = ProcessInfo.processInfo.environment["HOMESPUN_TEST_UPLOAD_PACING"] else { return nil }
+        let parts = text.split(separator: ",", omittingEmptySubsequences: false)
+        guard parts.count == 2, let bytes = Int64(parts[0]), let milliseconds = Int64(parts[1]),
+              (4_096...Int64(ServerClientV2.maximumBufferedChunk)).contains(bytes),
+              (0...5_000).contains(milliseconds) else { return nil }
+        return (bytes, .milliseconds(milliseconds))
+    }()
+    #endif
+
     private struct PreparedCandidate: Codable, Sendable {
         var metadata: BackupPhotoMetadata
         var resources: [BackupStore.Resource]
@@ -428,7 +440,13 @@ final class BackupCoordinator {
                 try Task.checkCancellation()
                 guard try await store.operation(operation.id)?.lease == lease else { throw BackupStore.Failure.staleOperation }
                 try handle.seek(toOffset: UInt64(position.offset))
-                let count = min(Int64(ServerClientV2.maximumBufferedChunk), position.maximumChunkBytes, position.size - position.offset)
+                var count = min(Int64(ServerClientV2.maximumBufferedChunk), position.maximumChunkBytes, position.size - position.offset)
+                #if DEBUG
+                if let pacing = Self.testUploadPacing {
+                    count = min(count, pacing.bytes)
+                    try await Task.sleep(for: pacing.delay)
+                }
+                #endif
                 guard count > 0, let data = try handle.read(upToCount: Int(count)), data.count == Int(count) else {
                     throw BackupStore.Failure.invalidReceipt
                 }
