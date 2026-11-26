@@ -57,6 +57,17 @@ func serverTrustFixture() throws -> SecTrust {
     }
 }
 
+@Test func v2QueueRequestsUseTheSamePlaintextRefusalBeforeSendingAnything() async throws {
+    let client = ServerClientV2(ServerClient(baseURL: URL(string: "http://192.0.2.1:8787")!,
+                                             token: "synthetic token", trust: .system))
+    do {
+        _ = try await client.capabilities()
+        Issue.record("The v2 queue admitted a plaintext request")
+    } catch let failure as ServerClient.Failure {
+        #expect(failure.code == "insecure")
+    }
+}
+
 @MainActor @Test func identityMismatchesAreNotCancellationsAndNeverReportTheKey() {
     let fingerprint = ServerKeyFingerprint(spki: Data("a server key".utf8))
     let error = ServerClient.IdentityMismatch(observed: fingerprint)

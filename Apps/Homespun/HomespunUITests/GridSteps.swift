@@ -327,6 +327,10 @@ extension XCUIApplication {
         return descendants(matching: .any).matching(predicate)
     }
 
+    @MainActor func pendingBackupItems() -> XCUIElementQuery {
+        gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up', 'Compact copy in progress'}"))
+    }
+
     /// Selects the newest `count` items that aren't backed up, compacts them, and waits until
     /// done. Returns how many were selected.
     @MainActor func compactNewest(_ count: Int, matching: NSPredicate? = nil,
@@ -342,6 +346,19 @@ extension XCUIApplication {
 
     @MainActor private func compactOnScreen(_ count: Int, newest: Bool, matching: NSPredicate? = nil,
                                            file: StaticString, line: UInt) -> Int {
+        let selected = startCompacting(count, newest: newest, matching: matching, file: file, line: line)
+        let busy = pendingBackupItems()
+        let progress = descendants(matching: .any)["job.progress"]
+        let deadline = Date().addingTimeInterval(900)
+        repeat { sleep(2) } while (busy.count > 0 || progress.exists) && Date() < deadline
+        XCTAssertEqual(busy.count, 0, "items still working after 15 minutes", file: file, line: line)
+        XCTAssertFalse(progress.exists, "local work still running after 15 minutes", file: file, line: line)
+        return selected
+    }
+
+    /// Selects and starts a backup, without waiting for transfers or server processing.
+    @MainActor func startCompacting(_ count: Int, newest: Bool = true, matching: NSPredicate? = nil,
+                                   file: StaticString = #filePath, line: UInt = #line) -> Int {
         let candidates = matching.map { gridItems("Not backed up").matching($0) } ?? gridItems("Not backed up")
         XCTAssertTrue(candidates.firstMatch.waitForExistence(timeout: 20), "the grid shows nothing to compact",
                       file: file, line: line)
@@ -353,12 +370,6 @@ extension XCUIApplication {
         XCTAssertTrue(hasScreen("\(chosen.count) Selected", timeout: 5), "selection count",
                       file: file, line: line)
         buttons["compact.selected"].tap()
-
-        let busy = gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up'}"))
-        let progress = descendants(matching: .any)["job.progress"]
-        let deadline = Date().addingTimeInterval(900)
-        repeat { sleep(2) } while (busy.count > 0 || progress.exists) && Date() < deadline
-        XCTAssertEqual(busy.count, 0, "items still working after 15 minutes", file: file, line: line)
         return chosen.count
     }
 

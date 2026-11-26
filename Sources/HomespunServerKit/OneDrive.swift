@@ -103,13 +103,23 @@ struct OneDriveConnector: Connector {
     }
 
     func copy(_ item: ConnectorItem, context: ConnectorContext) async throws -> String? {
-        let folder = Self.folder(try await context.value("folder"), date: item.captureDate)
+        var folder = Self.folder(try await context.value("folder"), date: item.captureDate)
+        if let version = item.immutableManifestID {
+            guard Validation.isSHA256(version) else { throw ConnectorError.failed("Invalid immutable manifest identity.") }
+            folder += "/Versions/" + version
+        }
         let primary = item.file(item.kind == .video ? .video : .photo)
         let stem = ((primary?.filename ?? item.assetID) as NSString).deletingPathExtension
         var placed: [String] = []
         for file in item.files {
-            let name = Self.name(for: file, stem: stem)
-            placed.append(try await upload(file, to: folder + "/" + name, captureDate: item.captureDate, context: context))
+            if item.immutableManifestID != nil {
+                guard Validation.isSHA256(file.sha256), file.size > 0 else { throw ConnectorError.failed("Invalid immutable resource.") }
+                let name = file.role.rawValue + "-" + file.sha256 + "-" + String(Storage.sanitized(file.filename).prefix(120))
+                placed.append(try await uploadImmutable(file, to: folder + "/" + name, captureDate: item.captureDate, context: context))
+            } else {
+                let name = Self.name(for: file, stem: stem)
+                placed.append(try await upload(file, to: folder + "/" + name, captureDate: item.captureDate, context: context))
+            }
         }
         return placed.first.map { ($0 as NSString).deletingLastPathComponent }
     }
@@ -120,11 +130,26 @@ struct OneDriveConnector: Connector {
     /// If the name is taken by the same bytes, that copy counts; otherwise OneDrive renames.
     private func upload(_ file: ConnectorItem.File, to path: String, captureDate: Date?, context: ConnectorContext)
         async throws -> String {
-        let hash = try await detached { try QuickXorHash.of(file: file.url) }
-        if let existing = try await item(at: path, context), Self.matches(existing, size: file.size, hash: hash) {
-            return path
+        try await upload(file, to: path, captureDate: captureDate, context: context, immutable: false)
+    }
+
+    private func uploadImmutable(_ file: ConnectorItem.File, to path: String, captureDate: Date?, context: ConnectorContext) async throws -> String {
+        do { return try await upload(file, to: path, captureDate: captureDate, context: context, immutable: true) }
+        catch let failure as HTTPFailure where [409, 412].contains(failure.status) {
+            let hash = try await detached { try QuickXorHash.of(file: file.url) }
+            if let existing = try await item(at: path, context), Self.matches(existing, size: file.size, hash: hash) { return path }
+            throw ConnectorError.failed("An immutable cloud object collides; existing bytes were not overwritten.")
         }
-        var item: [String: Any] = ["@microsoft.graph.conflictBehavior": "rename"]
+    }
+
+    private func upload(_ file: ConnectorItem.File, to path: String, captureDate: Date?, context: ConnectorContext,
+                        immutable: Bool) async throws -> String {
+        let hash = try await detached { try QuickXorHash.of(file: file.url) }
+        if let existing = try await item(at: path, context) {
+            if Self.matches(existing, size: file.size, hash: hash) { return path }
+            if immutable { throw ConnectorError.failed("An immutable cloud object changed; existing bytes were not overwritten.") }
+        }
+        var item: [String: Any] = ["@microsoft.graph.conflictBehavior": immutable ? "fail" : "rename"]
         if let captureDate {
             let date = Timestamp.string(captureDate)
             item["fileSystemInfo"] = ["createdDateTime": date, "lastModifiedDateTime": date]

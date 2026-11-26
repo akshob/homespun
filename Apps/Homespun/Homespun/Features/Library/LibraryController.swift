@@ -53,12 +53,13 @@ final class LibraryController {
     private(set) var phoneFreeBytes: Int?
     /// Not backed up and created since the last backup, with the days since (T19).
     private(set) var newSinceBackup: (count: Int, days: Int)?
-    /// Originals from the current Back Up; offered once the run finishes.
+    /// Originals from the current Back Up; offered as each item's compact copy is verified.
     private var batch = Set<String>()
     private var started = false
     /// Keep the running accessory until the finished/ready facts have arrived, without a hide/show.
     private var finishingBackups = 0
     private var retired = false
+    private var suspended = false
     private var operations = 0
     private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
     private var localRetirements: [UUID: @MainActor () async -> Void] = [:]
@@ -73,7 +74,7 @@ final class LibraryController {
     }
 
     private func admit() -> Bool {
-        guard !retired else { return false }
+        guard !retired, !suspended else { return false }
         operations += 1
         return true
     }
@@ -91,6 +92,7 @@ final class LibraryController {
         retired = true
         job.onPhaseChange = nil
         job.onRunFinished = nil
+        job.onBindingChanged = nil
         library.onChange = nil
         library.stopObserving()
         pendingRebuild?.cancel()
@@ -113,6 +115,26 @@ final class LibraryController {
         await job.history?.flush()
     }
 
+    func suspendAndWait() async {
+        suspended = true
+        pendingRebuild?.cancel()
+        restoreTask?.cancel()
+        await job.suspendAndWait()
+        await restoreTask?.value
+        await copyFinder.suspendAndWait()
+        await pendingRebuild?.value
+        if operations > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
+        await job.history?.flush()
+    }
+
+    func resumeExecution() {
+        guard !retired else { return }
+        suspended = false
+        copyFinder.resume()
+        job.resumeExecution()
+        scheduleRefreshGrid()
+    }
+
     init(settings: AppSettings, job: CompactJob, premium: Premium, automatic: AutomaticMode, copyFinder: CopyFinder) {
         self.settings = settings
         self.job = job
@@ -124,6 +146,13 @@ final class LibraryController {
         journey = JourneyLog(defaults: settings.defaults, tips: !settings.isDemo)
         access = settings.photos.authorization()
         job.onPhaseChange = { [weak self] in self?.jobChanged() }
+        job.onBindingChanged = { [weak self] in
+            guard let self, !self.retired else { return }
+            self.ready = Ready()
+            self.readyChecked = false
+            self.finished = nil
+            self.scheduleRefreshGrid()
+        }
         job.onRunFinished = { [weak self] in
             self?.finishingBackups += 1
             Task { [weak self] in
@@ -149,9 +178,10 @@ final class LibraryController {
 
     /// Why Back Up can't start now, if it can't.
     var backUpBlockedReason: String? {
+        guard settings.backupAdmissionsEnabled else { return "New backup selections are paused; saved work remains recoverable." }
         guard settings.isPaired else { return "Set up your home computer first." }
         if case .blocked(let reason) = settings.connectionTrust { return reason }
-        if case .unreachable = settings.serverStatus { return "Can't reach \(serverName)." }
+        if case .unreachable = settings.serverStatus, !job.canAdmitOffline { return "Can't reach \(serverName)." }
         return nil
     }
 
@@ -188,8 +218,7 @@ final class LibraryController {
             await refreshGrid()
         }
         if settings.isPaired { await settings.refreshServerInfo() }
-        // Recent items backed up and then deleted here go to the server's trash, never compacted.
-        if settings.serverStatus == .reachable { await automatic.reportRemoved(settings: settings, ledger: job.ledger) }
+        await job.refreshQueue()
         await refreshReady()
         await refreshGrid()
     }
@@ -203,10 +232,18 @@ final class LibraryController {
     }
 
     func refreshGrid() async {
-        guard !retired else { return }
+        guard !retired, !suspended else { return }
+        do {
+        let projection = try await job.ledger.projection()
+        let kept = projection.kept, backed = projection.backedUp
+        let recovering = Set(backed.filter { $0.value.origin == nil || $0.value.version == nil || $0.value.origin != job.activeOrigin }.keys)
+        automatic.useCanonicalDecisions(kept)
         var states = job.states
-        for id in automatic.keptAsIs where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
-        await library.update(ledger: await job.ledger.snapshot(), job: states, backedUp: await backedUpDue())
+        let compactInProgress = job.compactInProgress
+        for id in kept where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
+        await library.update(ledger: projection.entries, job: states,
+                             backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
+                             pendingImports: projection.pendingImports, compactInProgress: compactInProgress)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
@@ -217,11 +254,12 @@ final class LibraryController {
             TipState.trialDone = settings.trialConfirmed
         }
         await refreshNewSinceBackup()
+        } catch { job.showQueueProblem(error) }
     }
 
     /// Items backed up without a compact copy, with when automatic mode makes it (nil: a kept favorite).
-    private func backedUpDue() async -> [String: Date?] {
-        let backedUp = await job.ledger.backedUpSnapshot()
+    private func backedUpDue(_ all: [String: CompactLedger.BackedUp]) async -> [String: Date?] {
+        let backedUp = all.filter { $0.value.origin == job.activeOrigin && $0.value.version != nil }
         guard !backedUp.isEmpty else { return [:] }
         let ids = Array(backedUp.keys), photos = settings.photos
         let assets = await Task.detached(priority: .userInitiated) { photos.summaries(ids) }.value
@@ -240,9 +278,12 @@ final class LibraryController {
         inputs.paired = settings.isPaired
         if case .unreachable = settings.serverStatus { inputs.unreachable = serverName }
         if case .checking(let message) = removal { inputs.removing = message }
-        if job.isRunning || finishingBackups > 0 {
+        if job.isRunning || job.hasPendingWork || finishingBackups > 0 {
             let run = job.runProgress
-            inputs.backingUp = (run.done, run.total, run.current?.name ?? (finishingBackups > 0 ? job.items.last?.name : nil))
+            let detail = job.isRunning ? (run.current?.name ?? "Preparing")
+                : job.hasRemoteWork ? "Processing on \(serverName)"
+                : finishingBackups > 0 ? "Finishing compact copies" : "Waiting to continue"
+            inputs.backingUp = (run.done, run.total, detail)
         }
         if let finished { inputs.finished = (finished.count, finished.bytes, Set(finished.originals)) }
         inputs.readyCount = ready.count
@@ -250,6 +291,16 @@ final class LibraryController {
         inputs.phoneFreeBytes = phoneFreeBytes
         inputs.newSinceBackup = automatic.enabled ? nil : newSinceBackup
         return inputs
+    }
+
+    var showsRemoteNotice: Bool { job.hasRemoteWork && !job.hasPendingWork }
+
+    /// Read at tap time, not captured from an earlier row's offer or its source.
+    var freeUpOffer: AccessoryLadder.Offer? {
+        guard !retired, !suspended else { return nil }
+        let current = finished.flatMap { $0.count > 0 ? $0 : nil } ?? ready
+        guard current.count > 0 else { return nil }
+        return .init(count: current.count, bytes: current.bytes, originals: Set(current.originals))
     }
 
     private func refreshNewSinceBackup() async {
@@ -275,17 +326,25 @@ final class LibraryController {
     }
 
     func refreshReady() async {
-        defer { readyChecked = true }
-        guard let remover = settings.remover(ledger: job.ledger) else {
+        guard !retired, !suspended else { return }
+        if job.bindingContext == nil, settings.isPaired { await job.refreshQueue() }
+        guard let remover = job.remover() else {
             ready = Ready()
+            readyChecked = !settings.isPaired
             return
         }
-        let candidates = await remover.candidates()
+        do {
+        let candidates = try await remover.candidates()
+        readyChecked = true
         readySizes = Dictionary(candidates.map { ($0.original, $0.entry.originalBytes) }, uniquingKeysWith: { a, _ in a })
         ready = Ready(originals: candidates.map(\.original), bytes: candidates.reduce(0) { $0 + $1.entry.originalBytes })
         if let finished {
             let still = finished.originals.filter { readySizes[$0] != nil }
             self.finished = still.isEmpty ? nil : Ready(originals: still, bytes: still.reduce(0) { $0 + (readySizes[$1] ?? 0) })
+        }
+        } catch {
+            readyChecked = false
+            job.showQueueProblem(error)
         }
     }
 
@@ -295,33 +354,32 @@ final class LibraryController {
     /// copy comes back to Photos.
     func backUp(_ identifiers: [String]) {
         guard !retired, !identifiers.isEmpty else { return }
-        automatic.retryKept(identifiers)
         finished = nil
         if case .done = removal { removal = .idle }
-        batch.formUnion(identifiers)
-        journey.backupStarted(manual: true)
-        Announce.say("Backing up \(identifiers.count) \(identifiers.count == 1 ? "item" : "items").")
+        Announce.say("Saving your backup selection.")
         // Picked now: the first task while setup is still going (it finishes setup right after).
         let trigger: RunHistory.Trigger = settings.onboardingComplete ? .manual : .firstTask
         Task {
             guard admit() else { return }
             defer { finishedOperation() }
-            await job.enqueue(identifiers, trigger: trigger)
-            // Once the items are queued, so the system's progress follows them from the start. (The demo's
-            // runs are short and stay on screen.)
-            if !settings.isDemo { LongRun.shared.begin(items: identifiers.count, server: serverName) }
+            let accepted = await job.enqueue(identifiers, trigger: trigger)
+            batch.formUnion(accepted)
+            if !accepted.isEmpty {
+                journey.backupStarted(manual: true)
+                Announce.say("Queued \(accepted.count) \(accepted.count == 1 ? "item" : "items"). The selection is saved.")
+            }
         }
     }
 
     /// The job changed: the items it touched change badge at once; an item that finished (its
     /// compact copy is in the ledger now) brings a full rebuild once things settle.
     func jobChanged() {
-        guard !retired else { return }
+        guard !retired, !suspended else { return }
         let changes = job.takePhaseChanges()
-        library.apply(job: changes)
+        library.apply(job: changes, compactInProgress: job.compactInProgress)
         let finished = changes.values.contains { state in
             switch state {
-            case .waiting?, .working?: false
+            case .waiting?, .working?, .processing?: false
             default: true
             }
         }
@@ -330,7 +388,7 @@ final class LibraryController {
     }
 
     private func scheduleRefreshGrid() {
-        guard !retired else { return }
+        guard !retired, !suspended else { return }
         pendingRebuild?.cancel()
         pendingRebuild = Task {
             try? await Task.sleep(for: .milliseconds(400))
@@ -347,12 +405,13 @@ final class LibraryController {
         journey.backupFinished()
         await refreshReady()
         let backedUp = batch
-        batch = []
         guard !backedUp.isEmpty, settings.isPaired else { return }
         let originals = ready.originals.filter { backedUp.contains($0) }
         guard !originals.isEmpty else { return }
-        let bytes = originals.reduce(0) { $0 + (readySizes[$1] ?? 0) }
-        finished = Ready(originals: originals, bytes: bytes)
+        batch.subtract(originals)
+        let accumulated = Array(Set((finished?.originals ?? []) + originals))
+        let bytes = accumulated.reduce(0) { $0 + (readySizes[$1] ?? 0) }
+        finished = Ready(originals: accumulated, bytes: bytes)
         Announce.say("\(originals.count) backed up. \(Self.bytes(bytes)) can be freed.")
     }
 
@@ -364,13 +423,17 @@ final class LibraryController {
         defer { finishedOperation() }
         keepProblem = nil
         guard case .failed? = job.states[id] else { return false }
-        guard automatic.keepAsIs(id) else {
-            keepProblem = "Couldn't save this choice. The item still needs attention. Try again."
+        do {
+            try await job.keepAsIs(id)
+            automatic.useCanonicalDecisions(try await job.ledger.decisions())
+            _ = job.resolveFailure(id)
+            await refreshGrid()
+            return true
+        } catch {
+            keepProblem = "Couldn't save this choice. The item still needs attention: \(error.localizedDescription)"
+            job.showQueueProblem(error)
             return false
         }
-        guard job.resolveFailure(id) else { return false }
-        await refreshGrid()
-        return true
     }
 
     private(set) var keepProblem: String?
@@ -381,7 +444,7 @@ final class LibraryController {
     func runAutomatic() async {
         guard admit() else { return }
         defer { finishedOperation() }
-        guard automatic.enabled, premium.isUnlocked, !job.isRunning, !isRemoving, settings.onboardingComplete else { return }
+        guard automatic.enabled, premium.isUnlocked, !isRemoving, settings.onboardingComplete else { return }
         await automatic.run(settings: settings, job: job, premium: premium, notify: false)
         await refreshReady()
         await refreshGrid()
@@ -393,7 +456,11 @@ final class LibraryController {
     func freeUp(only scope: Set<String>? = nil) async {
         guard admit() else { return }
         defer { finishedOperation() }
-        guard !isRemoving, let remover = settings.remover(ledger: job.ledger) else { return }
+        guard !isRemoving else { return }
+        guard let remover = job.remover() else {
+            removal = .done(.init(blocked: ["Reconnect the known original server before freeing up space."]))
+            return
+        }
         journey.used(.freeUp)
         removal = .checking("Checking with \(serverName)")
         Announce.say("Checking with \(serverName).")
@@ -445,9 +512,12 @@ final class LibraryController {
     /// Which of these compact copies can have their originals restored: known to this iPhone, with the
     /// original on Homespun Server (not in Immich) and not on this iPhone.
     func restorable(_ compacts: [String]) async -> [OriginalRestorer.Item] {
+        do {
         guard settings.server?.mode != .immich else { return [] }
         let wanted = Set(compacts)
-        let entries = await job.ledger.snapshot().filter { wanted.contains($0.value.compactIdentifier) && $0.value.serverAssetID != nil }
+        let entries = try await job.ledger.snapshot().filter {
+            wanted.contains($0.value.compactIdentifier) && $0.value.verifiedCompact && $0.value.origin == job.activeOrigin
+        }
         let originals = entries.keys.filter { !$0.hasPrefix(CompactLedger.elsewhere("")) }
         let photos = settings.photos
         let present = await Task.detached { photos.existing(Array(originals), includeHidden: true) }.value
@@ -455,11 +525,16 @@ final class LibraryController {
             .map { OriginalRestorer.Item(key: $0.key, compact: $0.value.compactIdentifier, serverAssetID: $0.value.serverAssetID!,
                                          originalBytes: $0.value.originalBytes) }
             .sorted { $0.compact < $1.compact }
+        } catch {
+            job.showQueueProblem(error)
+            restoring = .done(.init(problems: [error.localizedDescription]))
+            return []
+        }
     }
 
     /// Restores these originals (see `OriginalRestorer`); `restoring` follows it.
     func restore(_ items: [OriginalRestorer.Item]) {
-        guard !retired, !isRestoring, !items.isEmpty, let restorer = settings.restorer(ledger: job.ledger) else { return }
+        guard !retired, !suspended, !isRestoring, !items.isEmpty, let restorer = job.restorer() else { return }
         restoring = .running(.init(done: 0, total: items.count, message: "Getting ready"))
         Announce.say(items.count == 1 ? "Restoring the original." : "Restoring \(items.count) originals.")
         restoreTask = Task {
@@ -488,30 +563,20 @@ final class LibraryController {
     func keepOriginals(_ originals: [String]) async -> Bool {
         guard admit() else { return false }
         defer { finishedOperation() }
-        let ledger = job.ledger
-        var items: [(original: String, serverAssetID: String, originalBytes: Int)] = []
-        var compacts: [String] = []
-        for original in originals {
-            guard let entry = await ledger.entry(for: original), let assetID = entry.serverAssetID else { continue }
-            items.append((original, assetID, entry.originalBytes))
-            compacts.append(entry.compactIdentifier)
-        }
-        guard !items.isEmpty else { return false }
         do {
-            try await settings.photos.delete(compacts)
+            let kept = try await BackupKeeper(ledger: job.ledger, photos: settings.photos).keep(originals)
+            guard kept else { return false }
+            automatic.useCanonicalDecisions(try await job.ledger.decisions())
+            Announce.say(originals.count == 1 ? "Kept the original. Its compact copy is in Recently Deleted."
+                         : "Kept the originals. Their compact copies are in Recently Deleted.")
+            await refreshReady()
+            await refreshGrid()
+            return true
         } catch {
+            keepProblem = "Photos may already have changed. The saved keep intent needs reconciliation: \(error.localizedDescription)"
+            job.showQueueProblem(error)
             return false
         }
-        do {
-            try await ledger.keepOriginals(items)
-        } catch {
-            Telemetry.shared.record(error: error, where: "keep")
-        }
-        Announce.say(items.count == 1 ? "Kept the original. Its compact copy is in Recently Deleted."
-                     : "Kept \(items.count) originals. Their compact copies are in Recently Deleted.")
-        await refreshReady()
-        await refreshGrid()
-        return true
     }
 
     func dismissRemoval() {
@@ -521,19 +586,35 @@ final class LibraryController {
     static func bytes(_ count: Int) -> String { count.formatted(.byteCount(style: .file)) }
 
     #if DEBUG
+    @ObservationIgnored private var testingDeletionStarted = false
+
     /// UI tests: deletes the newest item backed up without a compact copy, as a person cleaning up
-    /// recent photos would (iOS asks first), then refreshes, which tells the server.
+    /// recent photos would (iOS asks first). Permanent server retention is unchanged.
     func deleteNewestBackedUpForTesting() async {
-        let ids = Array(await job.ledger.backedUpSnapshot().keys)
-        var newest: (id: String, date: Date)?
-        PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil).enumerateObjects { asset, _, _ in
-            let date = asset.creationDate ?? .distantPast
-            if newest.map({ date > $0.date }) ?? true { newest = (asset.localIdentifier, date) }
+        guard !testingDeletionStarted, admit() else { return }
+        testingDeletionStarted = true
+        defer { finishedOperation() }
+        await job.refreshQueue()
+        do {
+            guard let origin = job.activeOrigin else { throw BackupStore.Failure.retiredBinding }
+            let entries = try await job.ledger.backedUpSnapshot().filter {
+                $0.value.origin == origin && $0.value.version != nil
+            }
+            var newest: (id: String, date: Date)?
+            PHAsset.fetchAssets(withLocalIdentifiers: Array(entries.keys), options: nil).enumerateObjects { asset, _, _ in
+                let date = asset.creationDate ?? .distantPast
+                if newest.map({ date > $0.date }) ?? true { newest = (asset.localIdentifier, date) }
+            }
+            guard let newest else {
+                throw BackupStageFailure.blocked("No current-server backed-up original is available for the test deletion.")
+            }
+            try Task.checkCancellation()
+            try await Self.delete(newest.id)
+            await refresh()
+            await refreshGrid()
+        } catch {
+            job.showQueueProblem(error)
         }
-        guard let newest else { return }
-        try? await Self.delete(newest.id)
-        await refresh()
-        await refreshGrid()
     }
 
     private nonisolated static func delete(_ id: String) async throws {

@@ -43,6 +43,16 @@ enum ItemText {
             return "Backing up"
         case .kept: return "Kept as is · the original stays on this iPhone"
         case .failed: return "Needs attention · couldn't back up"
+        case .processing:
+            switch job {
+            case .working(let step)?:
+                return "Original backed up · saving compact copy" + (step.isEmpty ? "" : " · \(step)")
+            case .processing?:
+                return "Original backed up · compact copy processing on \(server)"
+            default:
+                return "Original backed up · compact copy in progress"
+            }
+        case .recovery: return "Backup needs recovery · reconnect its original server"
         case .compactCopy: return "Compact copy · made by Homespun"
         case .copyLater: return "Backed up · " + Badge.compactLater(compactAfter)
         }
@@ -69,6 +79,7 @@ enum ItemAction: Equatable {
         case .none: return .backUp
         case .failed: return .tryAgain
         case .copyLater: return .compactNow
+        case .recovery: return cell.original == nil ? .backUp : .none
         default: return .none
         }
     }

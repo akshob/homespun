@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import HomespunCore
 import Observation
 import Synchronization
 import UIKit
@@ -77,7 +78,8 @@ final class DemoMode {
 
     private func prepare(origin: Origin) {
         self.origin = origin
-        if origin == .launch { Telemetry.shared.paused = true }
+        preparation = .drawing(nil)
+        Telemetry.shared.paused = true
         let id = UUID(), previous = work
         #if DEBUG
         if holdNextPreparation {
@@ -89,6 +91,8 @@ final class DemoMode {
         work = Task(priority: .userInitiated) {
             guard !Task.isCancelled, preparationID == id else { return }
             do {
+                await AppModel.shared.suspendForDemo()
+                try Task.checkCancellation()
                 let ready = await DemoMediaStore.shared.readyFolder()
                 try Task.checkCancellation()
                 guard preparationID == id else { return }
@@ -177,10 +181,9 @@ final class DemoMode {
         settling = true
         Task {
             await previous?.value
-            if wasLaunch {
-                Self.wipe()
-                Telemetry.shared.paused = false
-            }
+            if wasLaunch { Self.wipe() }
+            Telemetry.shared.paused = false
+            await AppModel.shared.resumeAfterDemo()
             settling = false
         }
         Announce.say(wasLaunch ? "Left the demo." : "The demo didn't start.")
@@ -249,8 +252,15 @@ final class DemoMode {
             await model.settings.stopAndWait()
             await status?.publishNow()
             DemoPictures.forget()
+            do { try await model.closeDemoStore() }
+            catch {
+                // Preserve both the fenced actor and folder when its last fact needs recovery.
+                preparation = .failed(.failed("The demo's working state needs recovery before it can be cleared."))
+                return
+            }
             Self.wipe()
             Telemetry.shared.paused = false
+            await AppModel.shared.resumeAfterDemo()
             settling = false
             Announce.say("Left the demo.")
         }
@@ -272,12 +282,14 @@ final class DemoSession: Sendable {
     let tokens: DemoTokens
 
     init(folder: URL, defaults: UserDefaults, pace: Double = 1, media: URL,
+         processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil,
          ask: @escaping @Sendable (DemoLibrary.Question) async -> Bool = { await DemoPrompt.ask($0) }) {
         self.folder = folder
         self.defaults = defaults
         library = DemoLibrary(folder: folder.appendingPathComponent("library", isDirectory: true), media: media, ask: ask)
         let library = library
-        server = DemoServer(folder: folder.appendingPathComponent("server", isDirectory: true), pace: pace) {
+        server = DemoServer(folder: folder.appendingPathComponent("server", isDirectory: true), pace: pace,
+                            processingDelay: processingDelay) {
             library.bundledCompact(sha256: $0)
         }
         tokens = DemoTokens(defaults: defaults, library: library)

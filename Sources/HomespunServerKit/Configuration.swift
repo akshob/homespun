@@ -32,6 +32,12 @@ public struct ServerConfiguration: Sendable {
     public var onedriveClientID: String?
     /// Largest body accepted by one upload request.
     public var maximumChunkBytes = 64 << 20
+    public var photoWorkers = 1
+    public var videoWorkers = 1
+    public var minimumFreeBytes: Int64 = 1 << 30
+    public var maximumStagingBytes: Int64 = 64 << 30
+    /// Owner-controlled optional relay endpoint. No endpoint is accepted from a paired device.
+    public var wakeRelayURL: URL?
 
     public init(dataDirectory: URL, host: String = "127.0.0.1", port: Int = 8787, name: String = "Homespun",
                 profile: CompressionProfile = .standard, immich: ImmichConfiguration? = nil) {
@@ -68,6 +74,27 @@ public struct ServerConfiguration: Sendable {
             configuration.port = number
         }
         configuration.name = environment["HOMESPUN_NAME"] ?? ProcessInfo.processInfo.hostName
+        if let text = environment["HOMESPUN_WAKE_RELAY_URL"], !text.isEmpty {
+            guard let url = URL(string: text), url.scheme == "https", url.host != nil, url.user == nil,
+                  url.password == nil, url.query == nil, url.fragment == nil,
+                  (1...65_535).contains(url.port ?? 443) else { throw Failure.invalid("bad HOMESPUN_WAKE_RELAY_URL") }
+            configuration.wakeRelayURL = url
+        }
+        for (key, maximum) in [("HOMESPUN_PHOTO_WORKERS", 2), ("HOMESPUN_VIDEO_WORKERS", 2)] {
+            if let text = environment[key] {
+                guard let count = Int(text), (1...maximum).contains(count) else { throw Failure.invalid("bad \(key)") }
+                if key == "HOMESPUN_PHOTO_WORKERS" { configuration.photoWorkers = count }
+                else { configuration.videoWorkers = count }
+            }
+        }
+        if let text = environment["HOMESPUN_MAX_STAGING_BYTES"] {
+            guard let size = Int64(text), size > 0 else { throw Failure.invalid("bad HOMESPUN_MAX_STAGING_BYTES") }
+            configuration.maximumStagingBytes = size
+        }
+        if let text = environment["HOMESPUN_MIN_FREE_BYTES"] {
+            guard let size = Int64(text), size >= (256 << 20) else { throw Failure.invalid("bad HOMESPUN_MIN_FREE_BYTES") }
+            configuration.minimumFreeBytes = size
+        }
         if let originals = environment["HOMESPUN_ORIGINALS"], !originals.isEmpty {
             guard originals.hasPrefix("/") else { throw Failure.invalid("HOMESPUN_ORIGINALS must be an absolute path") }
             configuration.originalsDirectory = URL(fileURLWithPath: originals, isDirectory: true)

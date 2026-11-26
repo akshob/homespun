@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import CoreFoundation
 import Foundation
 import HomespunCore
 import Observation
@@ -114,6 +115,141 @@ final class AppSettings {
             defaults.set(url, forKey: "serverURL")
             tokens.removeToken(for: old.absoluteString)
             tokens.removePins(for: old.absoluteString)
+        }
+    }
+
+    @ObservationIgnored var backupBindingChanged: (@MainActor () -> Void)?
+    var backupAdmissionsEnabled: Bool {
+        guard let value = defaults.object(forKey: "backupAdmissionsDisabled") else { return true }
+        guard let disabled = value as? Bool else { return false }
+        return !disabled
+    }
+
+    func backupContext(store: BackupStore, namespace: String) async throws -> BackupBindingContext {
+        guard !isRetired, let client, let mode = server?.mode, let token = client.token else {
+            throw ServerClient.Failure(status: 0, message: "Pair with your home server first.")
+        }
+        let url = client.baseURL, trust = client.trust, name = server?.name ?? "your server"
+        func current() -> Bool {
+            !isRetired && serverURL == url && tokens.token(for: url.absoluteString) == token && connectionTrust == trust
+                && server?.mode == mode
+        }
+        let remote = ServerClientV2(client)
+        let capabilities = try await remote.capabilities()
+        guard current(), !Task.isCancelled else { throw CancellationError() }
+        let devices = try await client.devices().filter(\.isThisDevice)
+        guard current(), devices.count == 1, let consumer = devices.first?.id, !consumer.isEmpty else {
+            throw BackupStore.Failure.invalidReceipt
+        }
+        let information = BackupStore.BindingInformation(capabilities: capabilities, name: name, namespace: namespace)
+        let existing = try await store.bindings()
+        guard current(), !Task.isCancelled else { throw CancellationError() }
+        var selected: BackupStore.Binding?
+        for binding in existing where !binding.retired && binding.origin == capabilities.origin
+            && binding.baseURL == url && binding.mode == mode && binding.consumerID == consumer {
+            if matchesBackupBinding(binding),
+               try await store.bindingInformation(binding.id) == information {
+                selected = binding
+                break
+            }
+        }
+        guard current(), !Task.isCancelled else { throw CancellationError() }
+        let binding: BackupStore.Binding
+        if let selected {
+            binding = selected
+        } else {
+            let id = UUID(), reference = "backup-binding:" + id.uuidString
+            guard let pins else { throw ServerPairing.IdentityFailure() }
+            try tokens.setToken(token, for: reference)
+            try tokens.setPins(pins, for: reference)
+            binding = .init(id: id, origin: capabilities.origin, trustEpoch: UUID(), baseURL: url,
+                            keychainReference: reference, mode: mode, consumerID: consumer,
+                            externalVerification: capabilities.externalVerification)
+            try await store.bind(binding)
+            try await store.rememberBinding(binding.id, information: information)
+        }
+        guard current(), !Task.isCancelled else {
+            try await store.retireBinding(binding.id)
+            throw CancellationError()
+        }
+        guard let installation = UUID(uuidString: try pairingIdentity().id) else { throw BackupStore.Failure.invalidReceipt }
+        let session = BackupStore.TransferSession(id: UUID(), bindingID: binding.id,
+            identifier: "foreground." + UUID().uuidString, installationID: installation, background: false)
+        try await store.registerSession(session)
+        return .init(binding: binding, information: information, session: session, remote: remote)
+    }
+
+    func matchesBackupBinding(_ binding: BackupStore.Binding) -> Bool {
+        guard !isRetired, !binding.retired, serverURL == binding.baseURL, server?.mode == binding.mode,
+              let current = serverURL.flatMap({ tokens.token(for: $0.absoluteString) }),
+              current == tokens.token(for: binding.keychainReference),
+              let saved = tokens.pins(for: binding.keychainReference) else { return false }
+        let capturedTrust: ServerTrust = isDemo && binding.baseURL.host == DemoServer.host ? .demo : saved.trust
+        return capturedTrust == connectionTrust
+    }
+
+    func cachedBackupContext(store: BackupStore, namespace: String) async throws -> BackupBindingContext? {
+        let bindings = try await store.bindings()
+        for binding in bindings.reversed() where matchesBackupBinding(binding) && binding.consumerID?.isEmpty == false {
+            guard let information = try await store.bindingInformation(binding.id), information.namespace == namespace,
+                  let token = tokens.token(for: binding.keychainReference),
+                  let pins = tokens.pins(for: binding.keychainReference), matchesBackupBinding(binding),
+                  let installation = UUID(uuidString: try pairingIdentity().id) else { continue }
+            let client = ServerClient(baseURL: binding.baseURL, token: token, trust: isDemo ? .demo : pins.trust, session: self.session)
+            let session = BackupStore.TransferSession(id: UUID(), bindingID: binding.id,
+                identifier: "foreground." + UUID().uuidString, installationID: installation, background: false)
+            try await store.registerSession(session)
+            guard matchesBackupBinding(binding), !Task.isCancelled else { throw CancellationError() }
+            return .init(binding: binding, information: information, session: session, remote: ServerClientV2(client))
+        }
+        return nil
+    }
+
+    /// These measured-capacity defaults are unvalidated production policy, not physical bounds.
+    /// The reservation primitive re-measures capacity; absent overrides alone use these defaults.
+    func backupSpacePolicy(store: BackupStore) async throws -> BackupSpacePolicy {
+        try await store.open()
+        let files = store.files
+        let observation = try await Task.detached { try files.spaceObservation() }.value
+        guard let available = observation.availableBytes, available > 0 else { throw BackupSpaceFailure.capacityUnavailable }
+        return try Self.backupSpacePolicy(available: available, configuredValue: { defaults.object(forKey: $0) })
+    }
+
+    static func backupSpacePolicy(available: Int64, configuredValue: (String) -> Any?) throws -> BackupSpacePolicy {
+        guard available > 0 else { throw BackupSpaceFailure.capacityUnavailable }
+        func configured(_ key: String, fallback: Int64) throws -> Int64 {
+            guard let raw = configuredValue(key) else { return fallback }
+            return try backupSpaceInteger(raw)
+        }
+        let maximum = try configured("backupWorkspaceBytes", fallback: max(1, available / 4))
+        let minimum = try configured("backupMinimumAvailableBytes", fallback: available / 8)
+        let finalization = try configured("backupFinalizationReserveBytes", fallback: maximum / 4)
+        let transfers = try configured("backupMaximumTransfers", fallback: 3)
+        guard maximum > 0, minimum >= 0, finalization >= 0, (1...128).contains(transfers),
+              let maximumTransfers = Int(exactly: transfers) else { throw BackupSpaceFailure.invalidPolicy }
+        return .init(maximumTransientBytes: maximum, minimumAvailableBytes: minimum,
+                     finalizationReserveBytes: finalization, maximumTransfers: maximumTransfers)
+    }
+
+    private nonisolated static func backupSpaceInteger(_ raw: Any) throws -> Int64 {
+        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            throw BackupSpaceFailure.invalidPolicy
+        }
+        // Decimal fractions must not become integers by rounding through Double.
+        if number is NSDecimalNumber {
+            guard let integer = Int64(number.stringValue) else { throw BackupSpaceFailure.invalidPolicy }
+            return integer
+        }
+        switch String(cString: number.objCType) {
+        case "f", "d":
+            let value = number.doubleValue
+            guard value.isFinite, let integer = Int64(exactly: value) else { throw BackupSpaceFailure.invalidPolicy }
+            return integer
+        case "c", "s", "i", "l", "q", "C", "S", "I", "L", "Q":
+            guard let integer = Int64(number.stringValue) else { throw BackupSpaceFailure.invalidPolicy }
+            return integer
+        default:
+            throw BackupSpaceFailure.invalidPolicy
         }
     }
 
@@ -278,9 +414,11 @@ final class AppSettings {
         locationWork = nil
         addressSearchFailed = false
         ServerSessions.shared.reset()
+        backupBindingChanged?()
     }
 
     func unpair() {
+        backupBindingChanged?()
         infoWork?.task.cancel()
         revokeCurrentDevice()
         if let serverURL {

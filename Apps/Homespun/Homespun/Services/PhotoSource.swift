@@ -75,6 +75,20 @@ protocol PhotoSource: Sendable {
     func delete(_ ids: [String]) async throws
     /// Sizes by kind and what isn't backed up (setup's first task).
     func measure(excluding backedUp: Set<String>) -> LibraryMeasure.Result
+    func preparationBytes(_ id: String, mode: ServerAPI.StorageMode) throws -> Int
+    func prepareBackup(_ id: String, mode: ServerAPI.StorageMode, directory: URL, maximumBytes: Int,
+                       progress: @escaping @Sendable (String) -> Void) async throws -> PreparedPhoto
+    func resourceFingerprints(_ id: String) async throws -> [ServerAPI.ResourceDescriptor]
+    func sourceGeneration(_ id: String) throws -> PhotoGeneration
+    func backupMetadata(_ id: String) throws -> BackupPhotoMetadata
+    func applyBackupMetadata(_ id: String, metadata: BackupPhotoMetadata) async throws
+    func observePhotosEffect(restoring: Bool) throws -> PhotosObservation
+    func reconcilePhotosEffect(expected: [ServerAPI.ResourceDescriptor], observation: PhotosObservation,
+                               createdIdentifier: String?) async throws -> PhotosReconciliation
+    func importCompact(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String
+    func restoreResources(_ files: [PreparedPhotoResource], metadata: BackupPhotoMetadata) async throws -> String
+    func removeApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult
+    func keepApproved(_ approvals: [PhotosRemovalApproval]) async throws -> PhotosRemovalResult
 
     // Automatic mode: where the library's history is now, and what changed since.
     func changeToken() -> Data?
@@ -130,13 +144,13 @@ struct LibraryContents: Sendable {
 
 /// Free Up Space: checks originals again and removes them (`OriginalRemover`).
 protocol RemovingOriginals: Sendable {
-    func candidates(only: Set<String>?) async -> [(original: String, entry: CompactLedger.Entry)]
+    func candidates(only: Set<String>?) async throws -> [(original: String, entry: CompactLedger.Entry)]
     func removeEligible(limit: Int?, only: Set<String>?,
                         progress: @escaping @Sendable (String) -> Void) async throws -> OriginalRemover.Report
 }
 
 extension RemovingOriginals {
-    func candidates() async -> [(original: String, entry: CompactLedger.Entry)] { await candidates(only: nil) }
+    func candidates() async throws -> [(original: String, entry: CompactLedger.Entry)] { try await candidates(only: nil) }
 }
 
 /// Restore Original: brings originals back from the server (`OriginalRestorer`).
@@ -321,15 +335,21 @@ struct PhotoKitSource: PhotoSource {
 
     private static func hash(_ identifier: String) async throws -> CopyFinder.Hashed? {
         guard let asset = PhotoLibrary.asset(identifier) else { return nil }
-        let resources = PHAssetResource.assetResources(for: asset)
-            .filter { CopyMatching.roles.contains(PhotoLibrary.role(of: $0.type)) }
-        guard !resources.isEmpty else { return nil }
-        var hashed = CopyFinder.Hashed(hashes: [:], bytes: 0)
+        let source = PhotoKitSource()
+        let before = try source.sourceGeneration(identifier)
+        let resources = try ServerCompactor.resources(of: asset, mode: .files)
+        guard !resources.isEmpty, let kind = PhotoLibrary.kind(of: asset) else { return nil }
+        var hashed = CopyFinder.Hashed(hashes: [:], bytes: 0, kind: kind.api, generation: before)
         for resource in resources {
             let (sha256, size) = try await digest(resource)
-            hashed.hashes[PhotoLibrary.role(of: resource.type)] = sha256
-            hashed.bytes += size
+            let role = PhotoLibrary.role(of: resource.type)
+            let (total, overflow) = hashed.bytes.addingReportingOverflow(size)
+            guard size > 0, !overflow else { return nil }
+            hashed.hashes[role] = sha256
+            hashed.bytes = total
+            hashed.resources.append(.init(role: role, filename: resource.originalFilename, size: size, sha256: sha256))
         }
+        guard try source.sourceGeneration(identifier) == before else { return nil }
         return hashed
     }
 

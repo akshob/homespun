@@ -26,6 +26,7 @@ struct RootView: View {
         .tint(Theme.accent)
         .task {
             if !settings.isDemo { await model.status?.clearDepartedDemo() }
+            if settings.isPaired { await model.job.refreshQueue() }
         }
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
         .modifier(QuitUnexpectedly(model: model))
@@ -39,6 +40,7 @@ struct RootView: View {
             #endif
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
+            model.job.setVisible(phase == .active)
             // From the first moment on screen (onChange alone misses the launch).
             if phase == .active {
                 SessionMarker.shared.active()
@@ -94,6 +96,7 @@ struct RootView: View {
                 wasBackground = true
                 SessionMarker.shared.background()
                 model.automatic.schedule()
+                if !settings.isDemo { AppModel.schedulePendingBackup() }
                 model.status?.publishInBackground()
                 Telemetry.shared.flushInBackground()
             default: break
@@ -185,12 +188,14 @@ struct MainTabView: View {
         }
         .task {
             await model.library.start { model.status?.start() }
-            #if DEBUG
+        }
+        #if DEBUG
+        .task {
             if ProcessInfo.processInfo.arguments.contains("-deleteNewestBackedUp") {
                 await model.library.deleteNewestBackedUpForTesting()
             }
-            #endif
         }
+        #endif
     }
 
     /// Free Up Space: a sheet on a phone and iPhone Duo's cover; the whole screen on the open Duo,
@@ -314,6 +319,7 @@ struct StatusAccessory: View {
     var serverName = "your computer"
     let width: CGFloat
     let open: (Action) -> Void
+    let currentFreeUpOffer: () -> AccessoryLadder.Offer?
     @Environment(\.showsTips) private var showsTips
 
     var body: some View {
@@ -325,10 +331,8 @@ struct StatusAccessory: View {
         case .removing(let message):
             row(icon: "checkmark.shield", title: "Freeing up space", detail: message, button: nil) {}
                 .accessibilityIdentifier("remove.progress")
-        case .backingUp(let done, let total, let current):
-            row(icon: "arrow.up.circle", title: "Backing up \(min(done + 1, total)) of \(total)",
-                detail: current, button: nil) { open(.activity) }
-                .accessibilityIdentifier("job.progress")
+        case .backingUp(let done, let total, let current, let offer):
+            backingUp(done: done, total: total, detail: current ?? "Waiting to continue", offer: offer)
         case .almostFull(let bytes):
             row(icon: "exclamationmark.triangle.fill", title: "This iPhone is almost full",
                 detail: "Free up \(LibraryController.bytes(bytes)) here", button: "Free Up") { open(.freeUp(nil)) }
@@ -351,6 +355,42 @@ struct StatusAccessory: View {
             Label("Everything's up to date", systemImage: "checkmark.circle").font(.subheadline)
                 .foregroundStyle(Theme.secondaryLabel).frame(maxWidth: .infinity)
         }
+    }
+
+    private func backingUp(done: Int, total: Int, detail: String, offer: AccessoryLadder.Offer?) -> some View {
+        HStack(spacing: 10) {
+            Button { open(.activity) } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.up.circle").font(.body.weight(.semibold)).foregroundStyle(Theme.accent)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(total > 0 ? "Backing up \(min(done + 1, total)) of \(total)" : "Preparing backup")
+                            .font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(detail).font(.caption).foregroundStyle(Theme.secondaryLabel).lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("job.progress")
+            .accessibilityHint("Shows detailed backup progress in Activity.")
+            if let offer {
+                Button("Free Up") {
+                    guard let current = currentFreeUpOffer(), let originals = current.originals, !originals.isEmpty else { return }
+                    open(.freeUp(originals))
+                }
+                .buttonStyle(.glassProminent).tint(Theme.accent).controlSize(.small)
+                .accessibilityIdentifier("accessory.action")
+                .accessibilityLabel("Free Up, \(offer.count) ready, \(LibraryController.bytes(offer.bytes))")
+                .accessibilityHint("Review the current ready originals. Nothing is removed yet.")
+                .popoverTip(showsTips ? FreeUpTip(server: serverName) : nil)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(width: width)
+        .accessibilityElement(children: .contain)
     }
 
     private func row(icon: String, title: String, detail: String?, button: String?,

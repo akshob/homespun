@@ -356,13 +356,14 @@ final class DemoModeUITests: XCTestCase {
         ready.tap()
     }
 
-    /// Waits until no sample is waiting or backing up.
+    /// Waits for every local and server stage, not just the current local execution lease.
     @MainActor private func waitForBackups() {
-        let busy = app.gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up'}"))
+        let busy = app.pendingBackupItems()
         let progress = app.descendants(matching: .any)["job.progress"]
         let deadline = Date().addingTimeInterval(300)
         repeat { sleep(2) } while (busy.count > 0 || progress.exists) && Date() < deadline
         XCTAssertEqual(busy.count, 0, "samples still backing up after 5 minutes")
+        XCTAssertFalse(progress.exists, "local sample work is still running")
     }
 
     @MainActor private func showAllItems() {

@@ -3,6 +3,13 @@ import os
 import Testing
 @testable import Homespun
 
+@Test func waitingForRemoteEncodingNeverInventsContinuedProcessingProgress() {
+    for step in ["Queued on server", "Compressing on server"] {
+        #expect(LongRun.fraction(step: step, seconds: 3_600) == LongRun.fraction(step: step, seconds: 0))
+        #expect(LongRun.fraction(step: step, seconds: 3_600) < LongRun.fraction(step: "Downloading compact copy", seconds: 0))
+    }
+}
+
 @Test func continuedProcessingExpirationCannotBeCompletedAgainAsSuccess() {
     let results = OSAllocatedUnfairLock(initialState: [Bool]())
     let completion = LongRun.Completion { success in results.withLock { $0.append(success) } }

@@ -33,6 +33,116 @@ import UniformTypeIdentifiers
         try #require(PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject)
     }
 
+    private func opaquePhotoInputs(type: UTType, fileExtension suffix: String) throws
+        -> (directory: URL, workspace: BackupFiles, resource: PreparedPhotoResource) {
+        let directory = try Synthetic.directory()
+        var prepared = false
+        defer { if !prepared { try? FileManager.default.removeItem(at: directory) } }
+        let workspace = BackupFiles(root: directory.appendingPathComponent("Backup"))
+        try workspace.prepare()
+        let operation = UUID()
+        _ = try workspace.prepareStaging(operationID: operation)
+        let opaqueID = UUID()
+        let opaque = workspace.stagedFile(operationID: operation, fileID: opaqueID)
+        try Synthetic.photo(at: opaque, .init(type: type, width: 192, height: 128))
+        try BackupFiles.protect(opaque)
+        let expected = try Fingerprint.digests(of: opaque)
+        let descriptor = ServerAPI.ResourceDescriptor(role: .photo, filename: "declared." + suffix,
+                                                       size: expected.size, sha256: expected.sha256, sha1: expected.sha1)
+        let source = try #require(CGImageSourceCreateWithURL(opaque as CFURL, nil))
+        let actualType = try #require(CGImageSourceGetType(source)) as String
+        #expect(actualType == type.identifier && CGImageSourceGetStatus(source) == .statusComplete)
+        prepared = true
+        return (directory, workspace, .init(fileID: opaqueID, url: opaque, descriptor: descriptor))
+    }
+
+    private func opaqueMetadata(_ resource: PreparedPhotoResource) -> BackupPhotoMetadata {
+        .init(sourceID: "synthetic-opaque-photo", kind: .photo, creationDate: Date(timeIntervalSince1970: 1_100_000_000),
+              locationArchive: nil, favorite: true, hidden: false, albums: [],
+              generation: .init(identifier: "synthetic-opaque-photo", modified: nil, width: 192, height: 128,
+                                resources: [.init(role: .photo, name: resource.descriptor.filename, bytes: resource.descriptor.size)]))
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func opaqueUUIDCompactImportKeepsVerifiedBytesAndDeclaredType() async throws {
+        let photos = PhotoKitSource()
+        for (type, suffix) in [(UTType.jpeg, "jpg"), (UTType.heic, "heic")] {
+            let inputs = try opaquePhotoInputs(type: type, fileExtension: suffix)
+            defer { try? FileManager.default.removeItem(at: inputs.directory) }
+            let resource = inputs.resource
+            let identifier = try await photos.importCompact([resource], metadata: opaqueMetadata(resource))
+            let actual = try await photos.resourceFingerprints(identifier)
+            #expect(BackupValidation.matches([resource.descriptor], actual))
+            let imported = try asset(identifier)
+            #expect(imported.isFavorite && PhotoLibrary.isCompactCopy(imported))
+            #expect(PHAssetResource.assetResources(for: imported).first?.originalFilename == resource.descriptor.filename)
+            let retained = try Fingerprint.digests(of: resource.url)
+            #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+            #expect(try PhotoResourceHandoff.orphans(in: inputs.workspace.staging).isEmpty)
+        }
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func opaqueUUIDRestoreKeepsVerifiedBytesAndDeclaredName() async throws {
+        let photos = PhotoKitSource()
+        for (type, suffix) in [(UTType.jpeg, "jpg"), (UTType.heic, "heic")] {
+            let inputs = try opaquePhotoInputs(type: type, fileExtension: suffix)
+            defer { try? FileManager.default.removeItem(at: inputs.directory) }
+            let resource = inputs.resource
+            let identifier = try await photos.restoreResources([resource], metadata: opaqueMetadata(resource))
+            let actual = try await photos.resourceFingerprints(identifier)
+            #expect(BackupValidation.matches([resource.descriptor], actual))
+            let restored = try asset(identifier)
+            #expect(restored.creationDate == opaqueMetadata(resource).creationDate && restored.location == nil)
+            #expect(PHAssetResource.assetResources(for: restored).first?.originalFilename == resource.descriptor.filename)
+            let retained = try Fingerprint.digests(of: resource.url)
+            #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+            #expect(try PhotoResourceHandoff.orphans(in: inputs.workspace.staging).isEmpty)
+        }
+    }
+
+    @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
+    func opaqueUUIDLivePhotoImportAndRestorePreserveBothResources() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let workspace = BackupFiles(root: directory.appendingPathComponent("Backup"))
+        try workspace.prepare()
+        let operation = UUID(), stillID = UUID(), motionID = UUID(), pairing = UUID().uuidString
+        _ = try workspace.prepareStaging(operationID: operation)
+        let still = workspace.stagedFile(operationID: operation, fileID: stillID)
+        let motion = workspace.stagedFile(operationID: operation, fileID: motionID)
+        try Synthetic.photo(at: still, .init(type: .heic, width: 320, height: 240, contentIdentifier: pairing))
+        try await Synthetic.video(at: motion, .init(width: 320, height: 240, frames: 12, audioChannels: 1, liveIdentifier: pairing))
+        let resources = try [(stillID, ServerAPI.ResourceRole.photo, still, "declared.HEIC"),
+                             (motionID, ServerAPI.ResourceRole.pairedVideo, motion, "declared.MOV")].map { id, role, url, name in
+            try BackupFiles.protect(url)
+            let digest = try Fingerprint.digests(of: url)
+            return PreparedPhotoResource(fileID: id, url: url,
+                descriptor: .init(role: role, filename: name, size: digest.size, sha256: digest.sha256, sha1: digest.sha1))
+        }
+        var metadata = opaqueMetadata(resources[0])
+        metadata.kind = .livePhoto
+        metadata.generation.width = 320; metadata.generation.height = 240
+        metadata.generation.resources = resources.map { .init(role: $0.descriptor.role, name: $0.descriptor.filename, bytes: $0.descriptor.size) }
+        let validation = try await PhotoResourceHandoff.validateLivePhoto(resources)
+        #expect(validation == .valid)
+        #expect(try PhotoResourceHandoff.orphans(in: workspace.staging).isEmpty)
+        let photos = PhotoKitSource()
+        for restore in [false, true] {
+            let identifier: String
+            if restore { identifier = try await photos.restoreResources(resources, metadata: metadata) }
+            else { identifier = try await photos.importCompact(resources, metadata: metadata) }
+            #expect(try asset(identifier).mediaSubtypes.contains(.photoLive))
+            let actual = try await photos.resourceFingerprints(identifier)
+            #expect(BackupValidation.matches(resources.map(\.descriptor), actual))
+            for resource in resources {
+                let retained = try Fingerprint.digests(of: resource.url)
+                #expect(retained.sha256 == resource.descriptor.sha256 && retained.size == resource.descriptor.size)
+            }
+            #expect(try PhotoResourceHandoff.orphans(in: workspace.staging).isEmpty)
+        }
+    }
+
     @Test(.enabled(if: authorized, "Photo library access was not granted to the test host"))
     func compactCopiesKeepTheOriginalsDetails() async throws {
         let directory = try Synthetic.directory()
@@ -159,11 +269,12 @@ import UniformTypeIdentifiers
             == ["2009", "2011", "same", "2018", "undated"])
 }
 
-@Test func gridShowsCompactCopiesWithWhereTheOriginalIs() {
+@Test func legacyGridRelationshipsDoNotPretendToHaveCurrentServerProof() {
     func entry(_ compact: String, server: Bool) -> CompactLedger.Entry {
         .init(compactIdentifier: compact, originalBytes: 100, compactBytes: 10, savedAt: Date(),
               serverAssetID: server ? "sha-\(compact)" : nil)
     }
+
     let ledger = ["orig-kept": entry("copy-kept", server: true),      // original still on the phone
                   "orig-removed": entry("copy-removed", server: true), // original removed after backup
                   "orig-device": entry("copy-device", server: false),  // made on the phone only
@@ -177,18 +288,39 @@ import UniformTypeIdentifiers
     // copy doesn't hide its original, which can still be backed up.
     #expect(state.cells.map(\.id) == ["copy-kept", "copy-removed", "orig-device", "copy-device", "orig-gone", "album-only",
                                       "plain", "busy", "broken"])
-    #expect(badges == ["copy-kept": .originalOnPhone, "copy-removed": .backedUp, "orig-device": .none,
+    #expect(badges == ["copy-kept": .recovery, "copy-removed": .recovery, "orig-device": .none,
                        "copy-device": .compactCopy, "orig-gone": .none, "album-only": .compactCopy, "plain": .none,
                        "busy": .working, "broken": .failed])
     let kept = state.cells[0], device = state.cells[2]
-    #expect(kept.canFree && kept.original == "orig-kept" && device.canCompact && !device.canFree)
+    #expect(!kept.canFree && !kept.canRestore && kept.original == "orig-kept" && device.canCompact && !device.canFree)
     // The Filter menu: needing attention is its own filter, and copies with no known original
     // show only under All Items.
     #expect(state.cells(.notBackedUp).map(\.id) == ["orig-device", "orig-gone", "plain", "busy"])
-    #expect(state.cells(.readyToFree).map(\.id) == ["copy-kept"])
-    #expect(state.cells(.atHome).map(\.id) == ["copy-removed"])
-    #expect(state.cells(.needsAttention).map(\.id) == ["broken"])
-    #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 0, 1, 1, 1])
+    #expect(state.cells(.readyToFree).isEmpty)
+    #expect(state.cells(.atHome).isEmpty)
+    #expect(state.cells(.needsAttention).map(\.id) == ["copy-kept", "copy-removed", "broken"])
+    #expect(LibraryState.Filter.allCases.map { state.count($0) } == [9, 4, 0, 0, 0, 3])
+}
+
+@Test func readyBadgesRequireTheMatchingOriginAndNonPurgeEligibleProof() {
+    let origin = BackupAPI.Origin(serverID: "home", historyEpoch: "history")
+    let hash = Fingerprint.sha256(of: Data("original".utf8))
+    let version = BackupAPI.Version(origin: origin, assetID: hash, manifestID: hash, descriptorGeneration: 1, recipeID: hash)
+    var entry = CompactLedger.Entry(compactIdentifier: "copy", originalBytes: 100, compactBytes: 10,
+        savedAt: Date(), serverAssetID: hash, origin: origin, version: version, requestID: UUID(),
+        compactResources: [.init(role: .photo, filename: "copy.heic", size: 10, sha256: hash)], retention: .permanent)
+    func cell(_ active: BackupAPI.Origin) -> LibraryState.Cell {
+        LibraryState(library: ["original", "copy"], ledger: ["original": entry], album: [], job: [:], origin: active).cells[0]
+    }
+    #expect(cell(origin).canFree)
+    let foreign = cell(.init(serverID: "other", historyEpoch: "history"))
+    #expect(foreign.badge == .recovery && !foreign.canFree && !foreign.canRestore)
+    entry.retention = .deferred
+    #expect(!cell(origin).canFree)
+    entry.retention = .external
+    #expect(!cell(origin).canFree)
+    entry.externalVerification = .fullResourceScrub
+    #expect(cell(origin).canFree)
 }
 
 

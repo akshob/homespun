@@ -298,18 +298,102 @@ final class DuoLayoutUITests: XCTestCase {
         row.tap()
         let field = app.textFields["device.name"]
         XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
         let old = field.value as? String ?? ""
         field.tap()
         field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + "Unfinished family phone")
-        for name in ["landscape", "portrait", "folded"] {
+        // Exercise the stack/split handoff before relying on the host's separate rotation action.
+        for (index, name) in ["landscape", "folded", "landscape", "portrait", "folded"].enumerated() {
             pose(name, file: poses)
+            if name == "folded" {
+                XCTAssertTrue(app.wait(width: 0..<500), "the host didn't fold the display")
+            } else {
+                XCTAssertTrue(app.wait(wide: name == "landscape"), "the host didn't turn \(name)")
+            }
             XCTAssertTrue(field.waitForExistence(timeout: 15), "the Name editor closed in \(name)")
             XCTAssertEqual(field.value as? String, "Unfinished family phone", "the draft was replaced in \(name)")
-            XCTAssertTrue(app.buttons["device.name.save"].isEnabled)
+            let save = app.buttons["device.name.save"]
+            let saveExists = save.exists
+            XCTAssertTrue(saveExists, "the Name Save button disappeared in \(name)")
+            if saveExists {
+                XCTAssertTrue(save.isEnabled)
+                checkNameSaveGeometry(app, pose: "review \(index), \(name)")
+            }
+            XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "focus didn't return in \(name)")
         }
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10), "focus didn't return to the editor")
         // Back abandons the draft; ordinary nonediting pages keep their fold-to-list policy.
         app.goBack()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10), "Back didn't leave the Name editor")
+        XCTAssertFalse(app.buttons["device.name.save"].exists, "Save outlived the Name editor")
+        XCTAssertTrue(app.reveal(row))
+        row.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        XCTAssertEqual(field.value as? String, old, "Back saved or retained the abandoned draft")
+        let reopenedSave = app.buttons["device.name.save"]
+        let reopenedSaveExists = reopenedSave.exists
+        XCTAssertTrue(reopenedSaveExists, "Save didn't return with the Name editor")
+        if reopenedSaveExists { XCTAssertFalse(reopenedSave.isEnabled, "the abandoned draft is still eligible to save") }
+
+        // Prove actual activation on the open display only after the entire unsaved-draft journey.
+        // Open-Duo lists can report not hittable; use the element's coordinates, not rotated screen coordinates.
+        let confirmed = "Continuity \(UUID().uuidString.prefix(8))"
+        pose("landscape", file: poses)
+        XCTAssertTrue(app.wait(wide: true))
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: old.count) + confirmed)
+        XCTAssertEqual(field.value as? String, confirmed)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 10))
+        let activeSave = app.buttons["device.name.save"]
+        XCTAssertTrue(activeSave.exists && activeSave.isEnabled)
+        checkNameSaveGeometry(app, pose: "landscape, before activation")
+        activeSave.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10), "the landscape Save did not close the editor")
+
+        pose("folded", file: poses)
+        XCTAssertTrue(app.wait(width: 0..<500))
+        XCTAssertTrue(app.reveal(row))
+        XCTAssertTrue(row.label.contains(confirmed), "Save did not receive the confirmed name from the server")
+        row.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        // A new draft loads /devices again rather than trusting the locally confirmed setting.
+        XCTAssertEqual(field.value as? String, confirmed, "the server did not retain the landscape rename")
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: confirmed.count) + old)
+        let restoreSave = app.buttons["device.name.save"]
+        XCTAssertTrue(restoreSave.exists && restoreSave.isEnabled)
+        checkNameSaveGeometry(app, pose: "folded, restore original name")
+        restoreSave.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(field.waitForNonExistence(timeout: 10), "restoring the name did not close the editor")
+        XCTAssertTrue(app.reveal(row))
+        row.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        XCTAssertTrue(field.wait(for: \.isEnabled, toEqual: true, timeout: 15))
+        XCTAssertEqual(field.value as? String, old, "the server did not retain the restored name")
+        app.goBack()
+    }
+
+    @MainActor private func checkNameSaveGeometry(_ app: XCUIApplication, pose: String,
+                                                 file: StaticString = #filePath, line: UInt = #line) {
+        let field = app.textFields["device.name"].frame
+        let button = app.buttons["device.name.save"]
+        let save = button.frame
+        let screen = app.windows.firstMatch.frame
+        let keyboard = app.keyboards.firstMatch
+        let keyboardFrame = keyboard.exists ? keyboard.frame : .zero
+        let attachment = XCTAttachment(string: "screen=\(screen) field=\(field) save=\(save)"
+            + " keyboard=\(keyboardFrame) hittable=\(button.isHittable)")
+        attachment.name = "Name geometry, \(pose)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        attach(app, "Name, \(pose)")
+        XCTAssertFalse(save.isEmpty, "\(pose): Save has no touch area", file: file, line: line)
+        XCTAssertTrue(screen.insetBy(dx: -1, dy: -1).contains(save), "\(pose): Save is clipped offscreen",
+                      file: file, line: line)
+        XCTAssertGreaterThanOrEqual(save.minY, field.maxY - 1, "\(pose): Save overlaps the field", file: file, line: line)
+        XCTAssertFalse(save.intersects(keyboardFrame), "\(pose): the keyboard covers Save", file: file, line: line)
     }
 
     @MainActor func testLibraryFillsTheOpenDisplayOnLaunchAndUnfold() throws {
@@ -486,7 +570,7 @@ final class DuoLayoutUITests: XCTestCase {
             return
         }
         let run = app.descendants(matching: .any).matching(identifier: "activity.run").firstMatch
-        XCTAssertTrue(run.exists, "landscape: no list beside the run")
+        XCTAssertTrue(app.scrollSidebar(to: run), "landscape: no list beside the run")
         XCTAssertLessThan(run.frame.maxX, rows.firstMatch.frame.minX + 1, "landscape: the list isn't beside the run")
     }
 
@@ -529,21 +613,16 @@ final class DuoLayoutUITests: XCTestCase {
 
     // MARK: - Poses
 
-    /// Asks `run-class.sh` to fold or turn the simulator, then waits until it has.
+    /// Asks `ui.sh` to fold or turn the simulator and checks this request's result.
     @MainActor private func pose(_ name: String, file: String) {
-        XCTAssertNoThrow(try name.write(toFile: file, atomically: true, encoding: .utf8))
-        let deadline = Date().addingTimeInterval(90)
-        while FileManager.default.fileExists(atPath: file), Date() < deadline { usleep(250_000) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: file), "nobody turned the simulator \(name)")
+        guard requestDuoHostAction(name, requestFile: file, timeout: 90) else { return }
         sleep(3)
     }
 
     /// A screenshot by `run-class.sh` (duoctl): XCTest's own shows the cover, black while the Duo is open.
     @MainActor private func attach(_ app: XCUIApplication, _ name: String) {
         guard let file = ProcessInfo.processInfo.environment["DUO_POSE_FILE"] else { return }
-        try? "shot \(name)".write(toFile: file, atomically: true, encoding: .utf8)
-        let deadline = Date().addingTimeInterval(30)
-        while FileManager.default.fileExists(atPath: file), Date() < deadline { usleep(250_000) }
+        requestDuoHostAction("shot \(name)", requestFile: file, timeout: 30)
     }
 }
 

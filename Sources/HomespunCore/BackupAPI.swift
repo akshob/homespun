@@ -201,6 +201,45 @@ public enum BackupAPI {
         }
     }
 
+    /// Discovery is not proof of retention, nor evidence of which server made a copy.
+    public struct CopyLookup: Codable, Equatable, Sendable {
+        public var origin: Origin
+        public var assetID: String
+        public var compact: Manifest
+
+        public init(origin: Origin, assetID: String, compact: Manifest) {
+            self.origin = origin
+            self.assetID = assetID
+            self.compact = compact
+        }
+
+        enum CodingKeys: String, CodingKey { case origin, assetID = "assetId", compact }
+    }
+
+    public struct CopyCandidate: Codable, Equatable, Sendable {
+        public var origin: Origin
+        public var manifest: Manifest
+        public var captureDate: Date?
+
+        public init(origin: Origin, manifest: Manifest, captureDate: Date? = nil) {
+            self.origin = origin
+            self.manifest = manifest
+            self.captureDate = captureDate
+        }
+    }
+
+    /// The normal principal/operation idempotency key and permanent retention claim apply.
+    /// `compact` describes existing device bytes, not a new server derivative or delivery.
+    public struct CopyAdoption: Codable, Equatable, Sendable {
+        public var request: Request
+        public var compact: Manifest
+
+        public init(request: Request, compact: Manifest) {
+            self.request = request
+            self.compact = compact
+        }
+    }
+
     public struct Derivative: Codable, Equatable, Sendable {
         public var generationID: UUID
         public var version: Version
@@ -358,6 +397,7 @@ public enum BackupAPI {
         public static let snapshotRequired = "snapshot_required"
         public static let idempotencyConflict = "idempotency_conflict"
         public static let versionChanged = "version_changed"
+        public static let unsupportedPreview = "unsupported_preview_history"
     }
 
     public struct OriginalProof: Codable, Equatable, Sendable {

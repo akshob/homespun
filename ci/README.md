@@ -6,8 +6,8 @@ pull request; the extended suite runs after the merge; everything runs every nig
 | Workflow | When | What |
 |---|---|---|
 | `pr.yml` | pull request to `main` | quick checks of what it changes (about 20–25 minutes): the server on Linux, the telemetry Worker, the website, the app's build and unit tests (PhotoKit ones included), and two short UI runs side by side: `quick` (iPhone: pair, back up, compare, Keep Original, free up, the viewer, Select All, rename) and `quick-duo` (iPhone Duo open in every pose). Watch, widget, shared-status or project changes also run `watch`. A draft gets the build and unit tests only. `PR / Result` sums it up; `main` requires it. |
-| `ci.yml` | after a merge to `main` | the extended suite: what changed, with every UI run, one per machine: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`) and iPhone Duo (`duo-cover`, `duo-grid`, `duo-open`), Try the Demo on both (`demo`, no server), and the server's package tests on macOS; the website goes live when it changed (environment `website`). One run at a time; only the newest waiting merge runs next. A failure opens or updates the issue "main is failing"; a pass closes it. |
-| `ci.yml` | Run workflow (any branch) | everything with UI runs `none`, `quick` or `full`; `watch` or `duo-open` builds the app, runs its unit tests and that regression lane only; `package` runs only the macOS package job |
+| `ci.yml` | after a merge to `main` | the extended suite: what changed, with every UI run, one per machine: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`, `resume`) and iPhone Duo (`duo-cover`, `duo-grid`, `duo-open`), Try the Demo on both (`demo`, no server), and the server's package tests on macOS; the website goes live when it changed (environment `website`). One run at a time; only the newest waiting merge runs next. A failure opens or updates the issue "main is failing"; a pass closes it. |
+| `ci.yml` | Run workflow (any branch) | everything with UI runs `none`, `quick` or `full`; an individual UI run builds the app, runs its unit tests and that existing lane only; `copies` also checks both server platforms; `package` runs only the macOS package job |
 | `nightly.yml` | every night | everything on `main`, plus long runs (`large`: 3,000 photos). Failures: the issue "nightly is failing". |
 | `testflight.yml` | on demand, by the owner, who approves each run | only for a commit that passed the extended suite (`release-guard.py`); archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
 | `docker.yml` | `main` and version tags, when the server changes | the server's Docker image |
@@ -55,7 +55,11 @@ attached to this public one.
 
 The iPhone demo run also checks app-side redraw counters (`-perfMonitor YES`): eight backups and Select All must not
 reload the grid, blank unchanged pictures, or reevaluate the root per item. The filtered variant
-checks incremental removals. `perf.sh` backs up twenty items against its own disposable HTTPS
+checks incremental removals. `grid.visibleImageClears` uses the collection view's display lifecycle:
+it must stay zero for unchanged visible pictures. The original `grid.imageClears` total is still
+reported and bounded by thumbnail requests; clearing a recycled, not-yet-displayed cell is not
+visible flicker. Configuration, thumbnail-request and root-render budgets are unchanged.
+`perf.sh` backs up twenty items against its own disposable HTTPS
 server (port 18808) and a disposable clone of the synthetic library: zero frames over 50 ms,
 hitch time ≤ 5 ms/s, `GridApply` p95 ≤ 2 ms,
 and at most one `BuildState` per finished item. These counters and timings appear in `perf.monitor`.
@@ -74,7 +78,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DATED=`, `DUO_POSES=1`, `STUB_PORT=`; `SERVERLESS=1`: no server and no Photos access, for the demo) |
 | `dated-photos.swift` | small synthetic photos taken over the past months (EXIF dates) for `DATED=`: month headers, scrolling across months |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
-| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `--first-device <run\|group>` selects the device for background boot; `RETRY_UI=1` retries a failed run once |
+| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `resume`, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `--first-device <run\|group>` selects the device for background boot; `RETRY_UI=1` retries a failed run once |
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
 | `tls-bench.zsh` | opt-in HTTPS upload measurement: a 1 GiB synthetic file, its own data folder and port 18787; never an installed server |
@@ -113,6 +117,12 @@ the current server PID, data and port so every restarted server is stopped.
 The pairing-retention UI test renames this iPhone, unpairs and pairs again with a fresh code
 from the `pairing-code` host action. It checks the confirmed name and one active Devices row.
 
+The `resume` run (port 8802, its own iPhone and server) quits during a paced Debug upload, then
+quits again before the server makes its compact copy. Both relaunches must continue without
+reselecting anything. The test reads the server's request log to prove reuse of the upload and
+its offset; `compact-settled` waits for the isolated catalog to report a ready result while the
+app is closed. It is not in quick/PR runs and requires a fresh library, not an already completed backup.
+
 Nightly's Linux server job opts into `HOMESPUN_PERF=1 swift test -c release --filter
 tlsUploadThroughput`: 256 MiB through real registration, chunk upload, disk staging and hashing.
 It compares a test-only plaintext listener with the production TLS builder; production never
@@ -128,6 +138,10 @@ passes: `<segment>-timing.tsv`, logs and each `*.xcresult/database.sqlite3` (no 
 15-second wait, each media generation/import, server readiness/pairing, test execution,
 reboot retry, telemetry and cleanup have separate stamps. Duo pose logs include the UTC
 request time and each tool call's start/end; these overlap test time, not simulator setup.
+Pose requests carry a UUID. The host atomically claims each request and returns that UUID's explicit
+success or failure; disappearance of a request file is not success. Late completions cannot acknowledge
+or remove a newer request. `duoctl` waits through a temporarily inactive display within its existing
+screen-switch deadline; a failed hinge or exhausted rotation retry is reported, not acknowledged.
 The output filter is line-buffered, so test lines and first/last-test stamps arrive live.
 
 The summary's **Timing** table gives seconds per segment: simulator setup, media, server,

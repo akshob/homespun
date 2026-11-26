@@ -105,6 +105,7 @@ struct OwnedServerServices: Service {
     let startup: ServingStartup
     let services: [any Service]
     let logger: Logger
+    let immich: ImmichState
 
     func run() async throws {
         do {
@@ -113,8 +114,16 @@ struct OwnedServerServices: Service {
             try await originals.refreshRoot(catalog: catalog)
             try await DeviceRename.recover(catalog: catalog, root: await originals.root)
             try await Trash(catalog: catalog, originals: originals, storage: storage).recover()
+            try await BackupPublication.recover(catalog: catalog, storage: storage, originals: originals)
             try await catalog.assignMissingFolders()
+            _ = try await catalog.backupOrigin()
+            try await catalog.configureBackupExternal(await immich.backupBinding)
             try await catalog.releaseLeases()
+            try await catalog.releaseBackupLeases()
+            try await catalog.releaseBackupCopyLeases()
+            try await catalog.releaseExternalBackupLeases()
+            try await catalog.releaseBackupWakeLeases()
+            try await BackupExternal.cleanupOrphans(catalog: catalog, storage: storage)
             await mover.resume()
             await startup.complete(.success(()), ownership: ownership)
             do {

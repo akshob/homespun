@@ -53,6 +53,8 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           HOMESPUN_BUILDS: ${{ runner.temp }}/builds
+          # 1.1.0 ships without the wake relay (owner decision 2026-11-26).
+          HOMESPUN_WAKE_RELAY_URL: ""
         run: |
           set -euo pipefail
           zsh Apps/Homespun/scripts/testflight.sh | tee upload.log

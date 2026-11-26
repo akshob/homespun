@@ -30,7 +30,7 @@ import Testing
 
     @Test(.enabled(if: PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized,
                    "Photo library access was not granted to the test host"))
-    func findsCopiesMadeElsewhereAndPairsOriginals() async throws {
+    func legacyHintsAloneDoNotCreateMappingsOrSettleCopies() async throws {
         let directory = try Synthetic.directory()
         defer { try? FileManager.default.removeItem(at: directory) }
         func file(_ name: String) -> URL { directory.appendingPathComponent(name) }
@@ -79,37 +79,27 @@ import Testing
         await finder.run(lookup: lookup, ledger: ledger, batch: 3)
         let summary = try #require(finder.summary)
         #expect(asked.value != nil && !summary.stopped && finder.error == nil)
-        #expect(summary.found >= 3 && summary.readyToFree >= 1 && summary.needsAttention >= 1)
+        #expect(summary.found == 0 && summary.readyToFree == 0 && summary.needsAttention >= 4)
 
-        let entries = await ledger.snapshot()
-        #expect(entries[CompactLedger.elsewhere(copy)]?.serverAssetID == String(repeating: "a", count: 64))
-        #expect(entries[CompactLedger.elsewhere(live)]?.serverAssetID == String(repeating: "b", count: 64))
-        // The original still here is paired with its copy: ready to free up, not a second record.
-        #expect(entries[original]?.compactIdentifier == itsCopy && entries[original]?.serverAssetID == String(repeating: "c", count: 64))
-        #expect(entries[CompactLedger.elsewhere(itsCopy)] == nil)
-        #expect(!entries.keys.contains { $0.contains(partial) } && !entries.values.contains { $0.compactIdentifier == partial })
+        let entries = try await ledger.snapshot()
+        #expect(entries.isEmpty)
         let album = PhotoLibrary.albumMembers()
-        #expect(album.isSuperset(of: [copy, live, itsCopy]) && !album.contains(partial) && !album.contains(original))
+        #expect(album.isDisjoint(with: [copy, live, itsCopy, original, partial, eCopy]))
 
-        // The grid shows them backed up; the original whose copy was found can be freed.
         let state = LibraryState(library: [copy, live, itsCopy, original, partial], ledger: entries, album: album, job: [:])
         let badges = Dictionary(uniqueKeysWithValues: state.cells(.all).map { ($0.id, $0.badge) })
-        #expect(badges[copy] == .backedUp && badges[live] == .backedUp && badges[itsCopy] == .originalOnPhone)
-        #expect(badges[original] == nil && badges[partial] == Badge.none)
+        #expect([copy, live, itsCopy, original, partial].allSatisfy { badges[$0] == Badge.none })
+        #expect(try await ledger.entry(for: fOriginal) == nil)
 
-        #expect(entries[CompactLedger.elsewhere(eCopy)] != nil && entries[fOriginal] == nil)
-
-        // Checking again skips what already has an answer (the partial one is checked again), and
-        // pairs what arrived since with what was found before.
+        // A legacy relationship is not a final answer: retry it after upgrading the server.
         let first = finder.total
         let eOriginal = try await Self.create([(.photo, file("e-original.jpg"))])
         let fCopy = try await Self.create([(.photo, file("f-copy.jpg"))])
         await finder.run(lookup: lookup, ledger: ledger)
         #expect(finder.total < first && (finder.summary?.needsAttention ?? 0) >= 1)
-        #expect(finder.summary?.readyToFree == 2 && finder.summary?.alreadyAtHome == 0)
-        let later = await ledger.snapshot()
-        #expect(later[eOriginal]?.compactIdentifier == eCopy && later[CompactLedger.elsewhere(eCopy)] == nil)
-        #expect(later[fOriginal]?.compactIdentifier == fCopy && later[CompactLedger.elsewhere(fCopy)] == nil)
+        #expect(finder.summary?.readyToFree == 0 && finder.summary?.found == 0)
+        let later = try await ledger.snapshot()
+        #expect(later[eOriginal] == nil && later[fOriginal] == nil && later[CompactLedger.elsewhere(fCopy)] == nil)
         let reloaded = CopyFinder(url: directory.appendingPathComponent("finder.json"))
         var saved = try #require(reloaded.summary), current = try #require(finder.summary)
         #expect(abs((saved.finishedAt ?? .distantPast).timeIntervalSince(current.finishedAt ?? .distantFuture)) < 1)

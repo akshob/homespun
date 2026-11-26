@@ -227,15 +227,19 @@ extension BackupStore {
         }
     }
 
-    func claimCleanup(limit: Int = 100) throws -> [Resource] {
+    func claimCleanup(limit: Int = 100, excludingOperations: Set<UUID> = []) throws -> [Resource] {
         guard (1...1_000).contains(limit) else { throw Failure.invalidImport }
         return try mutateState { connection in
+            let excluded = excludingOperations.sorted { $0.uuidString < $1.uuidString }
+            let predicate = excluded.isEmpty ? "" : " AND r.operation NOT IN (\(excluded.map { _ in "?" }.joined(separator: ",")))"
+            let parameters = excluded.map { BackupDatabase.Value.text($0.uuidString) } + [.integer(Int64(limit))]
             let rows = try connection.rows("""
                 SELECT r.body FROM resources r WHERE NOT EXISTS (SELECT 1 FROM file_refs f WHERE f.resource = r.id)
                 AND NOT EXISTS (SELECT 1 FROM transfers t WHERE t.resource = r.id AND t.status NOT IN ('completed', 'failed'))
                 AND coalesce(json_extract(CAST(r.body AS TEXT), '$.fileState'), 'present') != 'removed'
+                \(predicate)
                 ORDER BY r.rowid LIMIT ?
-                """, [.integer(Int64(limit))])
+                """, parameters)
             return try rows.map { row in
                 var resource = try Self.decode(Resource.self, row.blob("body"))
                 resource.fileState = .deleting

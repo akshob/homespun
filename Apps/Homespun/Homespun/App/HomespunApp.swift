@@ -3,6 +3,7 @@ import SwiftUI
 
 @main
 struct HomespunApp: App {
+    @UIApplicationDelegateAdaptor(WakeAppDelegate.self) private var wakeDelegate
     init() {
         PerfMonitor.mainStarted = CACurrentMediaTime()
         Task.detached(priority: .utility) { Keychain.removeLegacyReviewCode() }
@@ -10,6 +11,7 @@ struct HomespunApp: App {
         _ = DemoMode.shared
         Telemetry.shared.resolveDiagnosticNamespace()
         AppModel.registerBackgroundRun()
+        BackupAlertDelegate.install()
         Journey.configureTips()
         _ = SessionMarker.shared
         MetricsReceiver.shared.start()
@@ -37,8 +39,8 @@ private struct AppRoot: View {
                 Theme.background.ignoresSafeArea()
             } else {
                 RootView(model: .shared)
-                    .accessibilityHidden(demo.preparation != nil)
-                    .allowsHitTesting(demo.preparation == nil)
+                    .accessibilityHidden(demo.preparation != nil || demo.settling)
+                    .allowsHitTesting(demo.preparation == nil && !demo.settling)
             }
             // Both start points are in the root window. A future sheet needs its own full-screen cover.
             if demo.preparation != nil {

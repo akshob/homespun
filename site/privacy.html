@@ -16,12 +16,15 @@
   </header>
   <main>
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated November 20, 2026</p>
+    <p class="updated">Last updated November 26, 2026</p>
 
     <p><strong>In short:</strong> Your photos and videos stay on your iPhone or go to a server that you run. The
-      developer of Homespun never receives them. The app has no accounts, ads, or tracking, and it never sells or
-      shares your data. If you choose to share analytics, the developer receives anonymous usage counts and crash
-      reports; if you send a problem report, the developer receives what you write.</p>
+      developer of Homespun never receives them. The app has no accounts, ads, or tracking, and it never sells your
+      data. If you choose to share analytics, the developer receives anonymous usage counts and crash reports;
+      if you send a problem report, the developer receives what you write. Homespun does not use push notifications
+      from the developer and collects no device push token.</p>
+    <p>Version 1.0.0 remains the public App Store release while version 1.1.0 is prepared.
+      Features identified as 1.1.0 below are not enabled in the 1.0.0 app.</p>
 
     <h2>Your photo library</h2>
     <p>With your permission, the Homespun app reads the photos and videos you choose and saves compact copies
@@ -30,6 +33,8 @@
       iOS asks you to confirm every deletion, and deleted items stay in Recently Deleted.</p>
 
     <h2>Your own server</h2>
+    <p>In version 1.1.0, verified backups on Homespun Server remain retained if you delete their photos or
+      videos from Photos. A deletion in Photos does not request deletion of the server backup.</p>
     <p>If you connect Homespun to a server you run, such as Homespun Server or an Immich server, the app sends
       your originals to that server (or lets it find them in your Immich library) and downloads compact copies from it.
       The app connects to Homespun Server over an encrypted connection and keeps its key fingerprint with the
@@ -48,7 +53,15 @@
     <p>If you separately configure a cloud connector on your server, that server sends originals to the service
       you choose. OneDrive sign-in uses a code on Microsoft's website; its tokens stay on your server. The
       developer receives no originals or sign-in details. These connectors are configured separately on the server,
-      not in the 1.0.0 app.</p>
+      not in the 1.0.0 app. Version 1.1.0 adds Premium controls for OneDrive Cloud Copies in the app; the transfer
+      and Microsoft credentials still remain on your server.</p>
+    <p>Version 1.1.0 keeps pending backup choices, verified-copy records and recovery intent in protected local
+      storage. Those logical records can be included in the device backup you configure with Apple. Reconstructible
+      transfer files and resume data are excluded from that backup; pairing credentials stay in
+      device-only Keychain. Restoring a device backup does not restore a native network task or its credentials.</p>
+    <p>Find Compact Copies in version 1.1.0 sends file fingerprints (SHA-256), resource roles and sizes to your
+      paired server to revalidate existing copies. It does not send their media or local file names.
+      An old match alone never authorizes removing an original.</p>
 
     <h2>Analytics you choose to share</h2>
     <p>Homespun asks once, during setup, whether you want to share anonymous analytics with its developer, and you
@@ -86,6 +99,8 @@
       Homespun doesn't read or change your Photos library, records no analytics, sends no problem reports, and pairs
       with no real server. Leaving deletes the demo's settings and records; the drawn samples stay until the next launch.
       Your own server's settings and records stay unchanged.</p>
+    <p>Local demo-time intervals are kept only to exclude delayed or mixed iOS diagnostics from sharing. These
+      intervals stay on the iPhone.</p>
 
     <h2>Where it goes and how long it's kept</h2>
     <p>Analytics, crash reports, and problem reports go to a service the developer runs on Cloudflare
@@ -98,6 +113,14 @@
       identifier: to delete one, email
       <!--email_off--><a href="mailto:support@homespun.photos">support@homespun.photos</a><!--/email_off-->
       with its report number. You can also use that address to request deletion of any report.</p>
+    <p>The updated erasure service retains a permanent anti-replay marker containing only a domain-separated
+      SHA-256 digest of the random analytics install identifier, without the raw identifier, a timestamp or
+      links to other identifiers. This marker is used only to stop late uploads recreating erased data.
+      Separately, cleanup records for an unsettled upload may retain its object reference, associated random
+      install identifier, size and times beyond normal retention, potentially indefinitely until settlement and
+      cleanup can be proven. Erasure acknowledges fencing and deletion of observed content, not instantaneous
+      physical deletion of writes still in flight; their finishing writer or scheduled reconciliation removes
+      late objects. No report or diagnostic content is retained in the anti-replay marker.</p>
 
     <h2>This website</h2>
     <p>This website uses no cookies, analytics, or third-party scripts. It is hosted by Cloudflare, which
@@ -105,9 +128,12 @@
       <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare's privacy policy</a>.</p>
 
     <h2>Purchases</h2>
-    <p>Version 1.0.0 has no in-app purchases and sends no purchase events. Its privacy manifest conservatively
-      retains a purchase-history declaration for code reserved for a later version. If purchases become available,
-      this policy will describe their handling before that version ships.</p>
+    <p>Version 1.0.0 has no in-app purchases and sends no purchase events. Version 1.1.0 enables a one-time Premium
+      purchase with Family Sharing for Automatic Mode, widgets, Apple Watch and OneDrive Cloud Copies.
+      Apple processes payment; the developer never receives card or payment-account details. The app checks
+      entitlement on the device. Only if you share analytics can anonymous Premium feature or purchase-result
+      events be included; no transaction identifier or Apple Account is sent in those events. Manual backup,
+      quality settings, verification and Free Up Space remain free.</p>
 
     <h2>Changes</h2>
     <p>If this policy changes, the new version will be posted on this page with a new date.</p>

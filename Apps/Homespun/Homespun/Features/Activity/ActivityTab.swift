@@ -39,6 +39,29 @@ struct ActivityTab: View {
                     }
                     .listRowBackground(Theme.card)
                 }
+                if let problem = job.queueProblem {
+                    Section {
+                        InlineNotice(tone: .error, title: "Backup queue needs attention", message: problem)
+                    }
+                    .listRowBackground(Theme.card)
+                }
+                if job.pausedCount > 0 {
+                    Section("Saved selections") {
+                        Text("\(job.pausedCount) backups are paused. Their selections are saved.")
+                        Button("Resume Saved Backups") { job.resume() }
+                            .disabled(!model.settings.isPaired)
+                            .accessibilityIdentifier("activity.resumeSaved")
+                    }
+                    .listRowBackground(Theme.card)
+                }
+                if job.remoteCount > 0 {
+                    Section("On your server") {
+                        Text("\(job.remoteCount) compact copies are processing. Their originals are already backed up.")
+                        Text("Remote processing doesn't keep this iPhone awake. Open Homespun to check results; iOS may also allow a background run.")
+                            .font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                    }
+                    .listRowBackground(Theme.card)
+                }
                 JourneyCard(model: model) {
                     if let selection { selection.wrappedValue = .automatic } else { path.append(.automatic) }
                 }
@@ -150,12 +173,16 @@ struct ActivityTab: View {
 
     private var isEmpty: Bool {
         !model.job.isRunning && model.history.runs.isEmpty && model.library.ready.count == 0
+             && model.job.remoteCount == 0 && model.job.pausedCount == 0 && model.job.queueProblem == nil
             && model.settings.freedBytes == 0 && !(model.premium.isUnlocked && model.automatic.enabled)
     }
 
     private func subtitle(attention: Int) -> String {
         let settings = model.settings, server = model.library.serverName
         guard settings.isPaired else { return "Not set up yet" }
+        if model.job.queueProblem != nil { return "Backup queue needs attention · \(server)" }
+        if model.job.pausedCount > 0, !model.job.isRunning { return "Paused selections are saved · \(server)" }
+        if model.job.remoteCount > 0, !model.job.isRunning { return "Processing on \(server)" }
         if model.job.isRunning { return model.job.isPaused ? "Paused · \(server)" : "Backing up to \(server)" }
         if case .unreachable = settings.serverStatus { return "Can't reach \(server)" }
         if attention > 0 { return "\(attention) need\(attention == 1 ? "s" : "") attention · \(server)" }

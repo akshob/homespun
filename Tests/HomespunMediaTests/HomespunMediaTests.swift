@@ -8,6 +8,22 @@ import Glibc
 import Darwin
 #endif
 
+@Test func cancelledVerifiedCopyDoesNotPublishOrReplaceAnExistingOutput() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("out.mov")
+    let original = Data("synthetic original".utf8), existing = Data("existing verified output".utf8)
+    try original.write(to: input)
+    try existing.write(to: output)
+    #expect(throws: CancellationError.self) {
+        try MediaFiles.publishCopy(of: input, to: output, beforePublish: { throw CancellationError() })
+    }
+    #expect(try Data(contentsOf: input) == original)
+    #expect(try Data(contentsOf: output) == existing)
+    #expect(!FileManager.default.fileExists(atPath: MediaFiles.partialURL(for: output).path))
+}
+
 @Test func probeKeepsOnlyDecodableAudio() throws {
     let json = """
     {"streams":[{"index":0,"codec_type":"video","codec_name":"hevc","width":1920,"height":1080,"duration":"12.87"},
@@ -28,6 +44,10 @@ import Darwin
     #expect(args.contains("libx265") && args.contains("hvc1") && args.contains("scale=1280:720"))
     #expect(args[args.firstIndex(of: "-crf")! + 1] == "28")
     #expect(args.contains("0:1") && args.last == "/out.mov" && args.contains("mov"))
+    let selected = VideoProbe(width: 1280, height: 720, videoDuration: 1, containerDuration: 1,
+                              audioStreams: [2, 5], videoStreamIndex: 3)
+    let decode = FFmpegVideoCompressor.decodeArguments(URL(fileURLWithPath: "/input.mov"), probe: selected)
+    #expect(decode.contains("0:3") && decode.contains("0:2") && decode.contains("0:5") && !decode.contains("0:v:0"))
 }
 
 @Test func durationToleranceAllowsAudioTailButNotTruncation() {
@@ -116,6 +136,18 @@ import Darwin
     #expect(cancellation.processID == nil)
     #expect(throws: CancellationError.self) {
         try cancellation.run { try ProcessRunner.run(["sh", "-c", "exit 0"]) }
+    }
+}
+
+@Test(.timeLimit(.minutes(1))) func stalledProcessProgressFailsWithoutATotalRuntimeLimit() throws {
+    let advancing = try ProcessRunner.run(["sh", "-c",
+        "for i in 1 2 3 4 5 6; do printf 'frame=%s\\nout_time_us=%s\\n' \"$i\" \"$i\"; sleep 0.1; done"], progressTimeout: 0.4)
+    #expect(String(decoding: advancing, as: UTF8.self).contains("frame=6"))
+    do {
+        try ProcessRunner.run(["sh", "-c", "printf 'frame=1\\nout_time_us=1\\n'; exec sleep 60"], progressTimeout: 0.1)
+        Issue.record("A stalled progress counter must fail")
+    } catch let failure as ProcessFailure {
+        #expect(failure.stderr.contains("Encoding stalled"))
     }
 }
 

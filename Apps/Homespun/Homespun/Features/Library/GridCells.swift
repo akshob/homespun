@@ -26,6 +26,10 @@ final class GridCell: UICollectionViewCell {
     private var info: MediaInfo?
     private var state: LibraryState.Cell?
     private var serverName = ""
+    private var configuredSelecting = false
+    private var configuredSelected = false
+    private var configuredTraits: UITraitCollection?
+    private var imageIsDisplayed = false
 
     /// Whether the cell has a picture yet (the performance tests count cells shown without one).
     var hasImage: Bool { imageView.image != nil }
@@ -63,7 +67,10 @@ final class GridCell: UICollectionViewCell {
                 // Another item's picture never stays on: blank until this one's arrives (a new size
                 // keeps the old picture meanwhile).
                 let cached = loader.cached(item, pixels: pixels)
-                if imageView.image != nil, cached == nil { RenderProbe.count("grid.imageClears") }
+                if imageView.image != nil, cached == nil {
+                    RenderProbe.count("grid.imageClears")
+                    if imageIsDisplayed { RenderProbe.count("grid.visibleImageClears") }
+                }
                 imageView.image = cached
             }
             cancelRequest()
@@ -84,11 +91,33 @@ final class GridCell: UICollectionViewCell {
         updateMarks()
     }
 
+    func isConfigured(for state: LibraryState.Cell, selecting: Bool, selected: Bool, serverName: String) -> Bool {
+        guard let current = self.state, let previous = configuredTraits else { return false }
+        let selectable = state.canCompact || state.canFree || state.canRestore
+        let wasSelectable = current.canCompact || current.canFree || current.canRestore
+        return current.id == state.id && current.badge == state.badge && selectable == wasSelectable
+            && current.badge.spoken(server: self.serverName, compactAfter: current.compactAfter)
+                == state.badge.spoken(server: serverName, compactAfter: state.compactAfter)
+            && configuredSelecting == selecting && configuredSelected == selected && self.serverName == serverName
+            && previous.preferredContentSizeCategory == traitCollection.preferredContentSizeCategory
+            && previous.displayScale == traitCollection.displayScale
+            && previous.legibilityWeight == traitCollection.legibilityWeight
+            && previous.layoutDirection == traitCollection.layoutDirection
+            && previous.userInterfaceIdiom == traitCollection.userInterfaceIdiom
+            && previous.horizontalSizeClass == traitCollection.horizontalSizeClass
+            && previous.verticalSizeClass == traitCollection.verticalSizeClass
+            && !traitCollection.hasDifferentColorAppearance(comparedTo: previous)
+    }
+
+    func imageWillDisplay() { imageIsDisplayed = true }
+    func imageDidEndDisplaying() { imageIsDisplayed = false }
+
     /// The badge, selection and VoiceOver's words, from the item's current state.
     func update(state: LibraryState.Cell, selecting: Bool, selected: Bool, serverName: String) {
         let badgeChanged = self.state?.badge != state.badge && self.state?.id == state.id
         self.state = state
         self.serverName = serverName
+        configuredTraits = traitCollection
         let size: CGFloat = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ? 28 : 20
         let image = state.badge == .working ? GridStyle.halo(size: size) : GridStyle.badge(state.badge, size: size)
         if badgeChanged, badgeView.image != nil || image != nil {
@@ -103,6 +132,8 @@ final class GridCell: UICollectionViewCell {
 
     func updateSelection(selecting: Bool, selected: Bool) {
         RenderProbe.count("grid.selections")
+        configuredSelecting = selecting
+        configuredSelected = selected
         dim.isHidden = !selected
         let selectable = state.map { $0.canCompact || $0.canFree || $0.canRestore } ?? false
         let mark = selecting ? (selected ? GridStyle.checkmark(traitCollection) : selectable ? GridStyle.circle : nil) : nil
@@ -172,6 +203,8 @@ final class GridCell: UICollectionViewCell {
         // The picture stays until the next item is shown (it's cleared there if the item differs).
         cancelRequest()
         spinner.stopAnimating()
+        configuredTraits = nil
+        imageIsDisplayed = false
     }
 
     private func cancelRequest() {

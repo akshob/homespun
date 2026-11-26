@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import HomespunMedia
+import HomespunTestSupport
+import Observation
 import Photos
+import Synchronization
 import Testing
 import UIKit
 @testable import Homespun
@@ -11,11 +15,12 @@ import UIKit
 /// stay in its own folder and settings.
 @MainActor @Suite(.serialized) struct DemoModeTests {
     /// A demo in a folder of its own, its server answering at once, and its question answered by `answer`.
-    final class Fixture {
+    @MainActor final class Fixture {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("demo-\(UUID().uuidString)")
         let settingsName = "demo-test-\(UUID().uuidString)"
         let session: DemoSession
         let media: URL
+        let ownsMedia: Bool
         let ledger: CompactLedger
         let asked = Asked()
 
@@ -32,12 +37,42 @@ import UIKit
             var all: [DemoLibrary.Question] { lock.withLock { questions } }
         }
 
-        static func make() async throws -> Fixture { Fixture(media: try await DemoTestMedia.ready.value) }
+        static func make(processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil) async throws -> Fixture {
+            Fixture(media: try await DemoTestMedia.ready.value, processingDelay: processingDelay)
+        }
 
-        init(media: URL) {
+        static func makeDelegatedMotion() async throws -> Fixture {
+            let media = try DemoTestMedia.makeRoot()
+            do {
+                let pairing = UUID().uuidString
+                let still = media.appendingPathComponent("synthetic.jpg")
+                let motion = media.appendingPathComponent("synthetic.mov")
+                let compact = media.appendingPathComponent("compact.jpg")
+                try Synthetic.photo(at: still, .init(width: 1600, height: 1200, quality: 1, contentIdentifier: pairing))
+                try await Synthetic.video(at: motion, .init(width: 640, height: 480, frames: 45,
+                    bitrate: 12_000_000, audioChannels: 1, liveIdentifier: pairing))
+                try Synthetic.photo(at: compact, .init(width: 800, height: 600, quality: 0.5, contentIdentifier: pairing))
+                try #require(try await LivePhotoMotionCompressor.contentIdentifier(of: motion) == pairing)
+                try #require(await LivePhotoValidator.validate(photo: still, video: motion) == .valid,
+                             "The delegated fixture must be a real, accepted synthetic Live Photo before staging")
+                let sample = DemoSample(name: "synthetic-live", kind: "live_photo", date: "2024-05-01T12:34:56-07:00",
+                    width: 1600, height: 1200, seconds: 1.5,
+                    files: ["photo": still.lastPathComponent, "paired_video": motion.lastPathComponent],
+                    compact: ["photo": compact.lastPathComponent, "paired_video": motion.lastPathComponent])
+                try JSONEncoder().encode([sample]).write(to: media.appendingPathComponent("samples.json"))
+                return Fixture(media: media, ownsMedia: true)
+            } catch {
+                try? FileManager.default.removeItem(at: media)
+                throw error
+            }
+        }
+
+        init(media: URL, processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil, ownsMedia: Bool = false) {
             self.media = media
+            self.ownsMedia = ownsMedia
             let asked = asked
-            session = DemoSession(folder: folder, defaults: UserDefaults(suiteName: settingsName)!, pace: 0, media: media) { asked.ask($0) }
+            session = DemoSession(folder: folder, defaults: UserDefaults(suiteName: settingsName)!, pace: 0,
+                                  media: media, processingDelay: processingDelay) { asked.ask($0) }
             ledger = CompactLedger(url: folder.appendingPathComponent("ledger.json"))
             DemoServer.running.withLock { $0 = session.server }
             // Setup's pages reach it through the shared session, as while the demo is on.
@@ -48,6 +83,7 @@ import UIKit
             URLProtocol.unregisterClass(DemoURLProtocol.self)
             DemoServer.running.withLock { $0 = nil }
             try? FileManager.default.removeItem(at: folder)
+            if ownsMedia { try? FileManager.default.removeItem(at: media) }
             UserDefaults.standard.removePersistentDomain(forName: settingsName)
         }
 
@@ -56,6 +92,697 @@ import UIKit
                 deviceName: "Test iPhone", installID: try DefaultsInstallation(defaults: session.defaults).load().id)
             return ServerClient(baseURL: DemoServer.baseURL, token: pairing.response.token, trust: .demo)
         }
+    }
+
+    private actor DiscoveryClock {
+        private var pending: [UUID: CheckedContinuation<Void, Error>] = [:]
+        private(set) var intervals: [Duration] = []
+        var waiting: Int { pending.count }
+
+        func sleep(_ duration: Duration) async throws {
+            let id = UUID()
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                    else {
+                        intervals.append(duration)
+                        pending[id] = continuation
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancel(id) }
+            }
+        }
+
+        func advance() -> Bool {
+            guard let id = pending.keys.first, let continuation = pending.removeValue(forKey: id) else { return false }
+            continuation.resume()
+            return true
+        }
+
+        private func cancel(_ id: UUID) { pending.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
+    }
+
+    private actor ControlledRemote: BackupRemote {
+        nonisolated let baseURL: URL
+        private let base: any BackupRemote
+        private let beforeVerify: @Sendable (BackupAPI.Version) async -> Void
+        private let delegatesMotion: Bool
+        private let chunkLimit: Int64?
+        private let appendBarrier: OneShotBarrier?
+        private var released: Bool
+        private(set) var held = 0
+        private(set) var verified: [BackupAPI.Version] = []
+        private(set) var admittedUploadIDs: [UUID] = []
+        private(set) var appends: [(uploadID: UUID, offset: Int64, count: Int)] = []
+
+        init(_ base: any BackupRemote, delaysReady: Bool = false, delegatesMotion: Bool = false,
+             chunkLimit: Int64? = nil, appendBarrier: OneShotBarrier? = nil,
+             beforeVerify: @escaping @Sendable (BackupAPI.Version) async -> Void = { _ in }) {
+            self.base = base
+            baseURL = base.baseURL
+            released = !delaysReady
+            self.delegatesMotion = delegatesMotion
+            self.chunkLimit = chunkLimit
+            self.appendBarrier = appendBarrier
+            self.beforeVerify = beforeVerify
+        }
+
+        private func delivery(_ receipt: BackupAPI.Receipt) -> BackupAPI.Receipt {
+            guard delegatesMotion, var derivative = receipt.derivative,
+                  derivative.resources.contains(where: { $0.role == .pairedVideo }) else { return receipt }
+            var receipt = receipt
+            derivative.resources.removeAll { $0.role == .pairedVideo }
+            derivative.deviceCompresses = [.pairedVideo]
+            receipt.derivative = derivative
+            return receipt
+        }
+
+        func release() { released = true }
+        func changes(after cursor: Int64, epoch: String) async throws -> BackupAPI.Changes {
+            var page = try await base.changes(after: cursor, epoch: epoch)
+            if !released, page.changes.contains(where: { $0.receipt.compact == .ready }) {
+                held += 1
+                return .init(origin: page.origin, cursor: cursor, hasMore: false, changes: [])
+            }
+            page.changes = page.changes.map { .init(sequence: $0.sequence, receipt: delivery($0.receipt)) }
+            return page
+        }
+        func capabilities() async throws -> BackupAPI.Capabilities { try await base.capabilities() }
+        func submit(_ request: BackupAPI.Request) async throws -> BackupAPI.Receipt { delivery(try await base.submit(request)) }
+        func lookup(operationID: UUID) async throws -> [BackupAPI.Receipt] {
+            try await base.lookup(operationID: operationID).map { delivery($0) }
+        }
+        func status(_ requestID: UUID) async throws -> BackupAPI.Receipt { delivery(try await base.status(requestID)) }
+        func command(requestID: UUID, _ command: BackupAPI.Command) async throws -> BackupAPI.Receipt {
+            delivery(try await base.command(requestID: requestID, command))
+        }
+        func admitUpload(_ request: BackupAPI.UploadRequest) async throws -> BackupAPI.UploadAdmission {
+            admittedUploadIDs.append(request.uploadID)
+            return try await base.admitUpload(request)
+        }
+        func uploadPosition(_ uploadID: UUID) async throws -> BackupUploadPosition {
+            var position = try await base.uploadPosition(uploadID)
+            if let chunkLimit { position.maximumChunkBytes = min(position.maximumChunkBytes, chunkLimit) }
+            return position
+        }
+        func append(_ bytes: Data, uploadID: UUID, offset: Int64) async throws -> Int64 {
+            await appendBarrier?.pause()
+            try Task.checkCancellation()
+            let next = try await base.append(bytes, uploadID: uploadID, offset: offset)
+            appends.append((uploadID, offset, bytes.count))
+            return next
+        }
+        func completeUpload(_ uploadID: UUID) async throws -> BackupAPI.Receipt { delivery(try await base.completeUpload(uploadID)) }
+        func snapshot(continuation: String?) async throws -> BackupAPI.Snapshot {
+            var page = try await base.snapshot(continuation: continuation)
+            page.receipts = page.receipts.map { delivery($0) }
+            return page
+        }
+        func download(generation: UUID, resource: ServerAPI.CompactResource, to file: URL) async throws -> HTTPURLResponse {
+            try await base.download(generation: generation, resource: resource, to: file)
+        }
+        func downloadOriginal(version: BackupAPI.Version, requestID: UUID,
+                              resource: ServerAPI.ResourceDescriptor, to file: URL) async throws -> HTTPURLResponse {
+            try await base.downloadOriginal(version: version, requestID: requestID, resource: resource, to: file)
+        }
+        func verify(_ version: BackupAPI.Version) async throws -> BackupAPI.OriginalProof {
+            await beforeVerify(version)
+            let proof = try await base.verify(version)
+            verified.append(version)
+            return proof
+        }
+        func acknowledge(_ acknowledgement: BackupAPI.DeliveryAcknowledgement) async throws { try await base.acknowledge(acknowledgement) }
+    }
+
+    private func eventually(_ condition: @MainActor () async throws -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while ContinuousClock.now < deadline {
+            if try await condition() { return }
+            await Task.yield()
+        }
+        try #require(try await condition(), "The synthetic delivery did not reach its expected state")
+    }
+
+    private actor OneShotBarrier {
+        private let pauseAt: Int
+        private(set) var arrivals = 0
+        private var released = false
+        private var waiter: CheckedContinuation<Void, Never>?
+
+        init(pauseAt: Int = 1) { self.pauseAt = pauseAt }
+
+        func pause() async {
+            arrivals += 1
+            guard arrivals == pauseAt, !released else { return }
+            await withCheckedContinuation { waiter = $0 }
+        }
+
+        func release() {
+            released = true
+            waiter?.resume()
+            waiter = nil
+        }
+    }
+
+    private func automaticRunHoldingRefresh(
+        premium: Premium,
+        exercise: @MainActor (Fixture, AppSettings, CompactJob, AutomaticMode) async throws -> Void
+    ) async throws -> (summary: AutomaticMode.Summary, operations: [BackupStore.Operation]) {
+        let fixture = try await Fixture.make(), barrier = OneShotBarrier()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let job = CompactJob(settings: settings, ledger: fixture.ledger)
+        let automatic = AutomaticMode(url: fixture.folder.appendingPathComponent("automatic.json"),
+            photos: fixture.session.library, system: false, refreshServerInfo: {
+                await $0.refreshServerInfo()
+                await barrier.pause()
+            })
+        let photo = try sample(fixture.session.library, "photo")
+        try await job.ledger.store.setKeptDecision(
+            fixture.session.library.allIdentifiers().filter { $0 != photo.id },
+            namespace: job.ledger.namespace, kept: true)
+        await automatic.enable(existing: true)
+        let run = Task { await automatic.run(settings: settings, job: job, premium: premium, notify: false) }
+        do {
+            try await eventually { await barrier.arrivals > 0 }
+            #expect(automatic.running && settings.serverStatus == .reachable)
+            try await exercise(fixture, settings, job, automatic)
+            #expect(await barrier.arrivals == 1)
+            await barrier.release()
+            let summary = await run.value
+            #expect(!automatic.running)
+            let operations = try await job.ledger.store.operations()
+            await job.stopAndWait()
+            try await job.ledger.store.close()
+            return (summary, operations)
+        } catch {
+            await barrier.release()
+            _ = await run.value
+            await job.stopAndWait()
+            try? await job.ledger.store.close()
+            throw error
+        }
+    }
+
+    @Test func automaticRunOwnsSelectionBeforeItsFirstSuspension() async throws {
+        let premium = Premium(ownBuild: true, listens: false)
+        let result = try await automaticRunHoldingRefresh(premium: premium) { _, settings, job, automatic in
+            let overlap = await automatic.run(settings: settings, job: job, premium: premium, notify: false)
+            #expect(overlap == AutomaticMode.Summary())
+            #expect(automatic.running, "The overlapping call must not release the first run's ownership")
+            let admitted = try await job.ledger.store.operations()
+            #expect(admitted.isEmpty)
+        }
+        #expect(result.summary.queued == 1 && result.summary.skipped == nil)
+        #expect(result.operations.count == 1, "The owning run must still be able to admit its selection")
+    }
+
+    enum AutomaticInvalidation: CaseIterable, Sendable { case disableReenable, repaired, premiumRevoked }
+
+    @Test(arguments: AutomaticInvalidation.allCases)
+    func automaticRunCannotAdmitObsoleteWorkAfterARefresh(_ change: AutomaticInvalidation) async throws {
+        let owned = Mutex(true)
+        let premium = Premium(ownBuild: false, owned: { owned.withLock { $0 } },
+            testFlightWithoutProduct: { false }, listens: false)
+        await premium.refresh()
+        try #require(premium.isUnlocked)
+        let result = try await automaticRunHoldingRefresh(premium: premium) { fixture, settings, job, automatic in
+            switch change {
+            case .disableReenable:
+                automatic.disable()
+                await automatic.enable(existing: true)
+                #expect(automatic.enabled && premium.isUnlocked)
+            case .repaired:
+                let oldToken = settings.client?.token
+                let client = try await fixture.pairedClient()
+                try settings.finishPairing(serverURL: DemoServer.baseURL,
+                    response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                    pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+                #expect(settings.client?.token != oldToken && settings.serverStatus == .reachable)
+            case .premiumRevoked:
+                owned.withLock { $0 = false }
+                await premium.refresh()
+                #expect(!premium.isUnlocked && automatic.enabled)
+            }
+            #expect(try await job.ledger.store.operations().isEmpty)
+        }
+        #expect(result.summary.queued == 0 && result.summary.skipped == nil)
+        #expect(result.operations.isEmpty, "A stale producer must not create even a durable admission")
+    }
+
+    private func withAdmissionJob(
+        _ exercise: @MainActor (Fixture, CompactJob, BackupBindingContext) async throws -> Void
+    ) async throws {
+        let fixture = try await Fixture.make()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let job = CompactJob(settings: settings, ledger: fixture.ledger)
+        defer {
+            job.coordinator.admitted = { _, _ in }
+            job.coordinator.changed = { _ in }
+            job.coordinator.localWork = { _ in }
+            job.onPhaseChange = nil
+        }
+        do {
+            let context = try await settings.backupContext(store: job.ledger.store, namespace: job.ledger.namespace)
+            let policy = try await settings.backupSpacePolicy(store: job.ledger.store)
+            try await job.coordinator.activate(context, policy: policy)
+            try await eventually { job.queueLoaded }
+            try await exercise(fixture, job, context)
+        } catch {
+            await job.stopAndWait()
+            try? await job.ledger.store.close()
+            throw error
+        }
+        await job.stopAndWait()
+        try await job.ledger.store.close()
+    }
+
+    @Test func freshAdmissionSeedsBeforeChangedAndTheFirstLocalWork() async throws {
+        try await withAdmissionJob { fixture, job, context in
+            let admitted = job.coordinator.admitted, changed = job.coordinator.changed, localWork = job.coordinator.localWork
+            var events: [String] = []
+            job.coordinator.admitted = { ids, bindingID in
+                admitted(ids, bindingID)
+                events.append("admitted")
+                #expect(bindingID == context.binding.id && !ids.isEmpty && job.hasPendingWork)
+                #expect(job.runProgress.total == 0)
+                // No older driver exists: visibility starts only inside this fresh admission.
+                job.setVisible(true)
+            }
+            job.coordinator.changed = { ids in
+                if !ids.isEmpty { events.append("changed") }
+                await changed(ids)
+            }
+            job.coordinator.localWork = { count in
+                if count > 0, !events.contains("local") {
+                    events.append("local")
+                    #expect(job.hasPendingWork)
+                }
+                localWork(count)
+            }
+            let photo = try sample(fixture.session.library, "photo")
+            _ = try await job.coordinator.admit([photo.id], compact: true, trigger: .manual)
+            try await eventually { events.contains("local") }
+            #expect(Array(events.prefix(3)) == ["admitted", "changed", "local"])
+        }
+    }
+
+    @Test func admissionMetadataFailureDoesNotPublishASeedOrScheduleProjection() async throws {
+        try await withAdmissionJob { fixture, job, _ in
+            let store = job.ledger.store
+            try await store.mutateState { @Sendable connection in
+                try connection.execute("""
+                    CREATE TRIGGER fail_admission_metadata BEFORE INSERT ON meta
+                    WHEN NEW.key LIKE 'admission:%'
+                    BEGIN SELECT RAISE(ABORT, 'injected admission metadata failure'); END
+                    """)
+            }
+            var admitted = false, changed = false
+            let note = job.coordinator.admitted
+            job.coordinator.admitted = { ids, bindingID in admitted = true; note(ids, bindingID) }
+            job.coordinator.changed = { _ in changed = true }
+            let photo = try sample(fixture.session.library, "photo")
+            await #expect(throws: BackupDatabase.Failure.self) {
+                _ = try await job.coordinator.admit([photo.id], compact: true, trigger: .manual)
+            }
+            #expect(!admitted && !changed && job.admissionSeeds.isEmpty && !job.hasPendingWork)
+            #expect(try await store.currentOperations([photo.id], namespace: job.ledger.namespace).count == 1)
+        }
+    }
+
+    @Test func reusedFinishedAdmissionDrainsItsSeedWithoutInventingPendingWork() async throws {
+        try await withAdmissionJob { fixture, job, context in
+            let photo = try sample(fixture.session.library, "photo"), store = job.ledger.store
+            #expect(await job.enqueue([photo.id], backUpOnly: [photo.id]) == [photo.id])
+            try await job.runOpportunity()
+            try await job.runOpportunity()
+            try await eventually { job.states[photo.id]?.isFinished == true && !job.hasPendingWork }
+            let first = try #require(try await store.currentOperations([photo.id], namespace: job.ledger.namespace).first)
+            try #require(first.bindingID == context.binding.id && first.desired == .active)
+            try #require(first.backup == .retained && !first.wantsCompact && first.delivery != .importedVerified)
+            let finished = CompactJob.project(first, kept: false)
+            try #require(finished.isFinished)
+            job.setVisible(true)
+            #expect(!job.measuresBackupFrames)
+            let note = job.coordinator.admitted
+            var seeded = false, measuring = false
+            job.coordinator.admitted = { ids, bindingID in
+                note(ids, bindingID)
+                seeded = job.hasPendingWork && job.admissionSeeds[first.id] != nil
+                measuring = job.measuresBackupFrames
+            }
+            let reused = try await job.coordinator.admit([photo.id], compact: false, trigger: .automatic)
+            #expect(reused.operationIDs == [first.id])
+            #expect(seeded)
+            #expect(measuring)
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames }
+            #expect(job.states[photo.id] == finished)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func requestedCoverageDrainsNilAndNeverProjectedSupersededAdmissions(superseded: Bool) async throws {
+        try await withAdmissionJob { fixture, job, context in
+            var id = UUID()
+            if superseded {
+                let photo = try sample(fixture.session.library, "photo"), store = job.ledger.store
+                let first = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                    bindingID: context.binding.id, profile: .standard, compact: true)
+                id = try #require(first.operationIDs.first)
+                try await store.rememberAdmission(first, trigger: .manual)
+                job.coordinator.admitted([id], context.binding.id)
+                try await store.setDesired(.cancelled, operationID: id)
+                let replacement = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                    bindingID: context.binding.id, profile: .standard, compact: true)
+                #expect(replacement.operationIDs != first.operationIDs)
+                try await store.setKeptDecision([photo.id], namespace: job.ledger.namespace, kept: true)
+            } else {
+                job.coordinator.admitted([id], context.binding.id)
+            }
+            #expect(job.hasPendingWork && job.admissionSeeds[id] != nil)
+            await job.coordinator.changed([id])
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork }
+            #expect(job.items.count == (superseded ? 1 : 0))
+        }
+    }
+
+    @Test func projectionFailureDropsUnownedSeedsAndSurfacesTheQueueProblem() async throws {
+        try await withAdmissionJob { _, job, context in
+            let id = UUID()
+            job.coordinator.admitted([id], context.binding.id)
+            #expect(job.hasPendingWork)
+            try await job.ledger.store.close()
+            await job.coordinator.changed([id])
+            try await eventually { job.queueProblem != nil && job.admissionSeeds.isEmpty && !job.hasPendingWork }
+        }
+    }
+
+    @Test func admissionSeedsRespectSuspensionResumeReloadBindingResetAndRetirement() async throws {
+        try await withAdmissionJob { _, job, context in
+            let id = UUID()
+            job.setVisible(true)
+            job.coordinator.admitted([id], UUID())
+            #expect(job.admissionSeeds.isEmpty)
+            job.coordinator.admitted([id], context.binding.id)
+            #expect(job.hasPendingWork && job.measuresBackupFrames)
+            await job.suspendAndWait()
+            let suspended = job.admissionSeeds
+            #expect(suspended[id] != nil && job.hasPendingWork && !job.measuresBackupFrames)
+            job.coordinator.admitted([UUID()], context.binding.id)
+            #expect(job.admissionSeeds == suspended)
+            job.resumeExecution()
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames }
+            job.coordinator.admitted([id], context.binding.id)
+            job.invalidateBinding()
+            #expect(job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames)
+            job.retire()
+            job.coordinator.admitted([id], context.binding.id)
+            #expect(job.admissionSeeds.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func aSameIDReseedDuringAnOlderProjectionSurvivesItsCoveredTokenCleanup(reload: Bool) async throws {
+        try await withAdmissionJob { fixture, job, context in
+            let photo = try sample(fixture.session.library, "photo"), store = job.ledger.store
+            let batch = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                bindingID: context.binding.id, profile: .standard, compact: true)
+            let id = try #require(batch.operationIDs.first), late = UUID()
+            var notices = 0
+            job.onPhaseChange = { notices += 1 }
+            await job.coordinator.changed([id])
+            try await eventually { notices == 1 }
+            try await store.setKeptDecision([photo.id], namespace: job.ledger.namespace, kept: true)
+            job.coordinator.admitted([id], context.binding.id)
+            let coveredToken = try #require(job.admissionSeeds[id])
+            let bindingID = context.binding.id
+            // This fires inside the real applyProjection, after its reads but before coverage cleanup.
+            withObservationTracking {
+                _ = job.states
+            } onChange: {
+                MainActor.assumeIsolated { job.coordinator.admitted([id, late], bindingID) }
+            }
+            await job.coordinator.changed(reload ? [] : [id])
+            try await eventually { notices == 2 }
+            #expect(job.states[photo.id]?.phase == .unchanged)
+            #expect(job.admissionSeeds[id] != nil && job.admissionSeeds[id] != coveredToken)
+            #expect(job.admissionSeeds[late] != nil && job.hasPendingWork)
+            // The newer admission's requested pass owns both the new token and the nil fetch.
+            await job.coordinator.changed([id, late])
+            try await eventually { job.admissionSeeds.isEmpty && !job.hasPendingWork }
+        }
+    }
+
+    @Test func fullReloadKeepsCoverageUntilItsLastPage() async throws {
+        try await withAdmissionJob { _, job, context in
+            let ids = (0..<201).map { "admission-coverage-\($0)" }, store = job.ledger.store
+            let batch = try await store.admit(ids, namespace: job.ledger.namespace,
+                bindingID: context.binding.id, profile: .standard, compact: true)
+            try await store.setKeptDecision(ids, namespace: job.ledger.namespace, kept: true)
+            let last = try #require(batch.operationIDs.last)
+            var boundaryCovered = false
+            let lastPageCovered = Mutex<Bool?>(nil)
+            job.onPhaseChange = {
+                if job.items.count == 200 {
+                    boundaryCovered = job.admissionSeeds[last] != nil
+                    withObservationTracking { _ = job.states } onChange: {
+                        MainActor.assumeIsolated {
+                            let covered = job.admissionSeeds[last] != nil
+                            lastPageCovered.withLock { $0 = covered }
+                        }
+                    }
+                }
+            }
+            job.coordinator.admitted([last], context.binding.id)
+            await job.coordinator.changed([])
+            try await eventually { job.items.count == 201 && job.admissionSeeds.isEmpty && !job.hasPendingWork }
+            #expect(boundaryCovered && lastPageCovered.withLock { $0 } == true)
+        }
+    }
+
+    @Test func foregroundDiscoveryDeliversAfterItsInitialBackoffAndPublishesTheFreeUpOffer() async throws {
+        let fixture = try await Fixture.make(), clock = DiscoveryClock()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let job = CompactJob(settings: settings, ledger: fixture.ledger,
+                             discoverySleep: { try await clock.sleep($0) })
+        let automatic = AutomaticMode(url: fixture.folder.appendingPathComponent("automatic.json"),
+                                      photos: fixture.session.library, system: false)
+        let finder = CopyFinder(url: fixture.folder.appendingPathComponent("finder.json"), photos: fixture.session.library)
+        let controller = LibraryController(settings: settings, job: job,
+            premium: Premium(ownBuild: false, listens: false), automatic: automatic, copyFinder: finder)
+        do {
+            let client = try await fixture.pairedClient()
+            try settings.finishPairing(serverURL: DemoServer.baseURL,
+                response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+            var context = try await settings.backupContext(store: job.ledger.store, namespace: job.ledger.namespace)
+            let remote = ControlledRemote(context.remote, delaysReady: true)
+            context.remote = remote
+            let policy = try await settings.backupSpacePolicy(store: job.ledger.store)
+            try await job.coordinator.activate(context, policy: policy)
+            await controller.library.reload()
+            job.setVisible(true)
+            let photo = try sample(fixture.session.library, "photo")
+            controller.backUp([photo.id])
+            try await eventually {
+                let operation = try await job.ledger.store.currentOperations([photo.id], namespace: job.ledger.namespace).first
+                return operation?.backup == .retained && !job.isRunning && job.hasPendingWork && job.hasRemoteWork
+            }
+            for attempt in 1...7 {
+                try await eventually { await clock.waiting == 1 }
+                #expect(await clock.advance())
+                try await eventually { await remote.held == attempt }
+                #expect(!job.isRunning && controller.ready.count == 0 && controller.finished == nil)
+                #expect(job.hasPendingWork && job.hasRemoteWork && !controller.showsRemoteNotice)
+                guard case .backingUp(_, _, let detail, nil)? = AccessoryLadder.pick(controller.accessoryInputs) else {
+                    Issue.record("Server waiting must keep the progress row without inventing a ready offer")
+                    break
+                }
+                #expect(detail == "Processing on \(controller.serverName)")
+                #expect(job.measuresBackupFrames)
+            }
+            try await eventually { await clock.waiting == 1 }
+            let sleeps = await clock.intervals.count
+            job.setVisible(false)
+            #expect(!job.measuresBackupFrames && job.hasPendingWork)
+            job.setVisible(true)
+            #expect(job.measuresBackupFrames)
+            try await eventually {
+                let count = await clock.intervals.count, waiting = await clock.waiting
+                return count > sleeps && waiting == 1
+            }
+            await remote.release()
+            #expect(await clock.advance())
+            try await eventually { controller.finished?.originals == [photo.id] && controller.ready.count == 1 }
+            try await eventually {
+                if case .finished? = AccessoryLadder.pick(controller.accessoryInputs) { return true }
+                return false
+            }
+            let entry = try #require(try await job.ledger.entry(for: photo.id))
+            #expect(entry.verifiedCompact && fixture.session.library.isCopy(entry.compactIdentifier))
+            #expect(!job.isRunning && job.queueProblem == nil)
+            #expect(!job.hasPendingWork && !job.measuresBackupFrames)
+            job.setVisible(false)
+            job.setVisible(true)
+            #expect(!job.measuresBackupFrames)
+        } catch let failure {
+            await controller.stopAndWait()
+            do { try await job.ledger.store.close() } catch { Issue.record(error) }
+            throw failure
+        }
+        await controller.stopAndWait()
+        try await job.ledger.store.close()
+        #expect(await clock.waiting == 0)
+    }
+
+    @Test func retainedGridFactNotifiesWithoutAPhaseChangeAndClearsAcrossBindingLifetime() async throws {
+        let fixture = try await Fixture.make()
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: fixture.session.library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let job = CompactJob(settings: settings, ledger: fixture.ledger)
+        do {
+            let store = job.ledger.store
+            let context = try await settings.backupContext(store: store, namespace: job.ledger.namespace)
+            let policy = try await settings.backupSpacePolicy(store: store)
+            try await job.coordinator.activate(context, policy: policy)
+            let photo = try sample(fixture.session.library, "photo")
+            let batch = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                bindingID: context.binding.id, profile: .standard, compact: true)
+            let id = try #require(batch.operationIDs.first)
+            let lease = try #require(try await store.claim(id, stage: .preparation))
+            let bytes = Data("synthetic original".utf8)
+            let original = ServerAPI.ResourceDescriptor(role: .photo, filename: "original.heic",
+                size: bytes.count, sha256: Fingerprint.sha256(of: bytes))
+            let resource = BackupStore.Resource(fileID: UUID(), operationID: id, kind: .original, descriptor: original)
+            _ = try store.files.prepareStaging(operationID: id)
+            try bytes.write(to: store.files.stagedFile(operationID: id, fileID: resource.fileID))
+            let manifest = BackupAPI.Manifest(kind: .photo, resources: [original])
+            try await store.prepared(lease, manifest: manifest, resources: [resource])
+            var notices = 0
+            job.onPhaseChange = { notices += 1 }
+            await job.coordinator.changed([id])
+            try await eventually { job.states[photo.id]?.phase == .working && notices > 0 }
+            #expect(job.compactInProgress.isEmpty)
+            #expect(job.hasPendingWork && !job.measuresBackupFrames)
+            _ = job.takePhaseChanges()
+            let phaseVersion = job.phaseVersion, beforeNotices = notices
+
+            let recipe = BackupAPI.Recipe(profile: .standard, backend: "test", pipelineVersion: 1)
+            let version = BackupAPI.Version(origin: context.binding.origin, assetID: try manifest.assetID(),
+                manifestID: try manifest.identifier(), descriptorGeneration: 1, recipeID: try recipe.identifier())
+            let compact = Data("c".utf8)
+            let receipt = BackupAPI.Receipt(requestID: UUID(), operationID: id, version: version, revision: 1,
+                backup: .retained, compact: .ready, retention: .permanent, originals: [
+                    .init(role: .photo, sha256: original.sha256, size: original.size, state: .verified,
+                          receivedBytes: original.size, verifiedAt: Date()),
+                ], derivative: .init(generationID: UUID(), version: version, resources: [
+                    .init(role: .photo, filename: "compact.heic", size: compact.count, sha256: Fingerprint.sha256(of: compact)),
+                ]))
+            _ = try await store.apply(receipt, operationID: id, epoch: lease.epoch)
+            await job.coordinator.changed([id])
+            try await eventually { job.compactInProgress == [photo.id] && notices > beforeNotices }
+            #expect(job.states[photo.id]?.phase == .working && job.phaseVersion > phaseVersion)
+            let change = try #require(job.takePhaseChanges()[photo.id])
+            #expect(change?.phase == .working)
+            #expect(!job.isRunning && job.runProgress.done == 0)
+
+            // Hold scheduling, not the presentation: exercise durable transitions without running
+            // this deliberately synthetic descriptor through the real media pipeline.
+            try await job.coordinator.pause()
+            try await eventually { !job.hasPendingWork }
+            job.setVisible(true)
+            #expect(!job.measuresBackupFrames)
+            try await store.setDesired(.active, operationID: id)
+            await job.coordinator.changed([id])
+            try await eventually { job.hasPendingWork && job.measuresBackupFrames }
+            try await job.coordinator.pause()
+            try await eventually { !job.hasPendingWork && !job.measuresBackupFrames }
+            try await store.setDesired(.active, operationID: id)
+            await job.coordinator.changed([id])
+            try await eventually { job.hasPendingWork && job.measuresBackupFrames }
+            let finalization = try #require(try await store.claim(id, stage: .finalization))
+            await job.coordinator.changed([id])
+            #expect(job.measuresBackupFrames && !job.isRunning)
+            try await store.fail(finalization, code: "test.attention", message: "Synthetic attention")
+            await job.coordinator.changed([id])
+            try await eventually { !job.hasPendingWork && !job.measuresBackupFrames }
+            try await store.retry(id)
+            await job.coordinator.changed([id])
+            try await eventually { job.hasPendingWork && job.measuresBackupFrames }
+            try await store.setDesired(.cancelled, operationID: id)
+            await job.coordinator.changed([id])
+            try await eventually { !job.hasPendingWork && !job.measuresBackupFrames }
+            try await store.setDesired(.active, operationID: id)
+            await job.coordinator.changed([id])
+            try await eventually { job.hasPendingWork && job.measuresBackupFrames }
+            await job.suspendAndWait()
+            #expect(job.hasPendingWork && !job.measuresBackupFrames)
+            job.resumeExecution()
+            try await eventually { job.measuresBackupFrames }
+            job.setVisible(false)
+            #expect(job.hasPendingWork && !job.measuresBackupFrames)
+            job.setVisible(true)
+            #expect(job.measuresBackupFrames)
+            job.invalidateBinding()
+            #expect(job.compactInProgress.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames)
+            #expect(job.takePhaseChanges().keys.contains(photo.id))
+            try await eventually { job.compactInProgress == [photo.id] }
+            #expect(job.hasPendingWork && job.measuresBackupFrames)
+            let reattached = try #require(job.bindingContext)
+            #expect(reattached.binding.id != context.binding.id)
+            #expect(try await store.operation(id)?.bindingID == reattached.binding.id)
+
+            try await store.setDesired(.cancelled, operationID: id)
+            let replacement = try await store.admit([photo.id], namespace: job.ledger.namespace,
+                bindingID: reattached.binding.id, profile: .standard, compact: true)
+            let replacementID = try #require(replacement.operationIDs.first)
+            #expect(replacementID != id)
+            let replacementLease = try #require(try await store.claim(replacementID, stage: .preparation))
+            let replacementResource = BackupStore.Resource(fileID: UUID(), operationID: replacementID,
+                kind: .original, descriptor: original)
+            try await store.prepared(replacementLease, manifest: manifest, resources: [replacementResource])
+            _ = job.takePhaseChanges()
+            let beforeSupersession = job.phaseVersion
+            await job.coordinator.changed([id])
+            try await eventually {
+                job.compactInProgress.isEmpty && job.states[photo.id]?.phase == .working && job.phaseVersion > beforeSupersession
+            }
+            #expect(job.takePhaseChanges().keys.contains(photo.id))
+            var replacementReceipt = receipt
+            replacementReceipt.operationID = replacementID
+            replacementReceipt.requestID = UUID()
+            _ = try await store.apply(replacementReceipt, operationID: replacementID, epoch: replacementLease.epoch)
+            await job.coordinator.changed([replacementID])
+            try await eventually { job.compactInProgress == [photo.id] }
+            job.retire()
+            #expect(job.compactInProgress.isEmpty && !job.hasPendingWork && !job.measuresBackupFrames)
+            #expect(job.takePhaseChanges().keys.contains(photo.id))
+            job.setVisible(false)
+            job.setVisible(true)
+            #expect(!job.measuresBackupFrames)
+        } catch let failure {
+            await job.stopAndWait()
+            do { try await job.ledger.store.close() } catch { Issue.record(error) }
+            throw failure
+        }
+        await job.stopAndWait()
+        try await job.ledger.store.close()
     }
 
     @Test func catalogObservationCancelsAndDoesNotRetainTheCatalog() async throws {
@@ -190,12 +917,25 @@ import UIKit
         await model.history.load()
         await model.library.library.reload()
         let id = try sample(fixture.session.library, "photo").id
-        // No pairing: this manual attempt fails without contacting any server.
-        await model.job.enqueue([id])
-        let deadline = ContinuousClock.now + .seconds(10)
-        while model.job.isRunning, ContinuousClock.now < deadline { await Task.yield() }
-        try #require(!model.job.isRunning)
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        await model.job.refreshQueue()
+        let context = try #require(model.job.bindingContext)
+        let batch = try await model.job.ledger.store.admit([id], namespace: model.job.ledger.namespace,
+            bindingID: context.binding.id, profile: .standard, compact: true)
+        let operation = try #require(batch.operationIDs.first)
+        let lease = try #require(try await model.job.ledger.store.claim(operation, stage: .preparation))
+        try await model.job.ledger.store.fail(lease, code: "test_failure", message: "Synthetic attention")
+        await model.job.refreshQueue()
         await model.library.refreshGrid()
+        let deadline = ContinuousClock.now + .seconds(10)
+        while (model.job.states[id]?.phase != .failed || ActivityTab.attention(model).count != 1),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(!model.job.isRunning)
         #expect(model.job.states[id]?.phase == .failed && ActivityTab.attention(model).count == 1)
         #expect(await model.library.keepAsIs(id))
         #expect(model.library.library.state.cell(id)?.badge == .kept)
@@ -203,16 +943,19 @@ import UIKit
 
         let reopened = AutomaticMode(url: fixture.folder.appendingPathComponent("automatic.json"),
                                     photos: fixture.session.library, system: false)
+        reopened.useCanonicalDecisions(try await model.job.ledger.decisions())
         #expect(reopened.keptAsIs == [id])
         await reopened.enable(existing: true)
         #expect(reopened.keptAsIs == [id], "Turning Automatic Mode on must not discard an explicit user decision")
-        reopened.retryKept([id])
+        try await reopened.retryKept([id], ledger: model.job.ledger)
         #expect(reopened.keptAsIs.isEmpty && !reopened.state.settled.contains(id))
         let blocked = fixture.folder.appendingPathComponent("not-a-directory")
         try Data().write(to: blocked)
         let unwritable = AutomaticMode(url: blocked.appendingPathComponent("automatic.json"),
                                        photos: fixture.session.library, system: false)
-        #expect(!unwritable.keepAsIs(id) && unwritable.keptAsIs.isEmpty)
+        let blockedLedger = CompactLedger(url: blocked.appendingPathComponent("ledger.json"))
+        await #expect(throws: Error.self) { try await unwritable.keepAsIs(id, ledger: blockedLedger) }
+        #expect(unwritable.keptAsIs.isEmpty)
         await model.library.stopAndWait()
     }
 
@@ -223,15 +966,17 @@ import UIKit
         try model.settings.finishPairing(serverURL: DemoServer.baseURL,
                                         response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
                                         pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
-        let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: model.job.ledger,
-                                      pollInterval: .zero)
         let photos = Array(fixture.session.library.samples.filter { $0.kind == "photo" }.prefix(12))
         try #require(photos.count == 12)
-        for photo in photos.prefix(11) { _ = try await compactor.compact(photo.id, compactNow: true) { _ in } }
+        #expect(await model.job.enqueue(photos.prefix(11).map(\.id)).count == 11)
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
         await model.library.refreshReady()
         #expect(!model.settings.trialConfirmed && model.library.nextRemovalCount == 11)
         let approved = Set(model.library.ready.originals)
-        _ = try await compactor.compact(photos[11].id, compactNow: true) { _ in }
+        #expect(await model.job.enqueue([photos[11].id]) == [photos[11].id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
         await model.library.refreshReady()
         // The review's explicit They Look Right approval, scoped to what it displayed.
         model.settings.trialConfirmed = true
@@ -243,6 +988,838 @@ import UIKit
 
     private func sample(_ library: DemoLibrary, _ kind: String) throws -> DemoSample {
         try #require(library.samples.first { $0.kind == kind })
+    }
+
+    private func backupDiagnostics(_ store: BackupStore, id: UUID) async throws -> String {
+        guard let operation = try await store.operation(id) else { return "Missing backup operation \(id)" }
+        let transfers = try await store.transfers(operationID: id).map {
+            "\($0.kind) \($0.id): state=\($0.state), session=\($0.sessionID), upload=\(String(describing: $0.uploadID))"
+        }
+        let reservations = try await store.reservations(operationID: id)
+        return """
+        Operation \(id): desired=\(operation.desired), backup=\(operation.backup), compact=\(operation.compact), \
+        delivery=\(operation.delivery), attention=\(operation.attention), problem=\(String(describing: operation.problem)), \
+        lease=\(String(describing: operation.lease)), notBefore=\(String(describing: operation.notBefore))
+        Transfers: \(transfers)
+        Reservations: \(reservations)
+        """
+    }
+
+    @Test func versionedLookupUsesTheServersNotFoundAndSingleReceiptWireContract() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await model.job.enqueue([photo.id]) == [photo.id])
+        let operations = try await model.job.ledger.store.currentOperations([photo.id], namespace: model.job.ledger.namespace)
+        let operation = try #require(operations.first)
+        let missingID = UUID()
+        let missingRequest = try client.request("backup-requests", apiVersion: 2,
+            query: [.init(name: "operation_id", value: missingID.uuidString)])
+        let remote = ServerClientV2(client)
+        let (_, missing) = try await client.data(for: missingRequest)
+        #expect((missing as? HTTPURLResponse)?.statusCode == 404)
+        #expect(try await remote.lookup(operationID: missingID).isEmpty)
+
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let request = try client.request("backup-requests", apiVersion: 2,
+            query: [.init(name: "operation_id", value: operation.id.uuidString)])
+        let (data, found) = try await client.data(for: request)
+        #expect((found as? HTTPURLResponse)?.statusCode == 200)
+        let receipt = try ServerAPI.decoder.decode(BackupAPI.Receipt.self, from: data)
+        #expect(receipt.operationID == operation.id)
+        #expect(try await remote.lookup(operationID: operation.id) == [receipt])
+
+        let unpaired = ServerClientV2(ServerClient(baseURL: DemoServer.baseURL, trust: .demo))
+        do {
+            _ = try await unpaired.lookup(operationID: operation.id)
+            Issue.record("An authorization failure must not look like a missing request")
+        } catch let failure as ServerClient.Failure {
+            #expect(failure.status == 401)
+        }
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
+    @Test func slowServerVideoDoesNotBlockALaterPhotoOrOwnLocalExecution() async throws {
+        let fixture = try await Fixture.make(processingDelay: { $0 == .video ? 3_600 : 0 })
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let video = try sample(fixture.session.library, "video"), photo = try sample(fixture.session.library, "photo")
+        let currentOffer = { model.library.freeUpOffer }
+        #expect(currentOffer() == nil)
+        #expect(await model.job.enqueue([video.id, photo.id]) == [video.id, photo.id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let operations = try await model.job.ledger.store.currentOperations([video.id, photo.id], namespace: model.job.ledger.namespace)
+        let held = try #require(operations.first { $0.itemID == video.id })
+        let finished = try #require(operations.first { $0.itemID == photo.id })
+        #expect(held.backup == .retained && held.compact == .processing)
+        #expect(finished.delivery == .importedVerified)
+        #expect(!model.job.isRunning && !model.premium.isUnlocked)
+        try await eventually { model.job.hasPendingWork && model.library.ready.count == 1 }
+        #expect(!model.job.measuresBackupFrames, "A background opportunity must not own a foreground frame window")
+        #expect(!model.library.showsRemoteNotice)
+        guard case .backingUp(_, _, let detail, let offer)? = AccessoryLadder.pick(model.library.accessoryInputs) else {
+            Issue.record("The ready photo must be offered while the video is still processing")
+            await model.library.stopAndWait()
+            try await model.closeDemoStore()
+            return
+        }
+        #expect(detail == "Processing on \(model.library.serverName)")
+        #expect(offer?.count == 1)
+        let firstOffer = try #require(currentOffer())
+        #expect(firstOffer.originals == [photo.id])
+
+        let later = try #require(fixture.session.library.samples.first { $0.kind == "photo" && $0.id != photo.id })
+        model.library.backUp([later.id])
+        // The controller records this only after adding the accepted items to its offer batch.
+        try await eventually { !model.library.journey.manualBackupDays.isEmpty }
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        try await eventually { model.library.finished?.originals == [later.id] && model.library.ready.count == 2 }
+        #expect(model.job.hasPendingWork && !model.job.isRunning)
+        #expect(currentOffer()?.originals == [later.id], "The current finished offer takes priority over unrelated ready items")
+        model.library.dismissFinished()
+        let expanded = try #require(currentOffer())
+        #expect(expanded.count == 2 && expanded.originals == [photo.id, later.id])
+        #expect(firstOffer.originals == [photo.id], "A retained old row value is not the action's current scope")
+        model.library.retire()
+        #expect(currentOffer() == nil, "An old action cannot open a retired library's former offer")
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
+    private func withDelegatedMotion(
+        _ exercise: @MainActor (Fixture, AppSettings, BackupBindingContext, ControlledRemote, BackupCoordinator, UUID, DemoSample) async throws -> Void
+    ) async throws {
+        let fixture = try await Fixture.makeDelegatedMotion()
+        let library = fixture.session.library, ledger = fixture.ledger
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        var context = try await settings.backupContext(store: ledger.store, namespace: ledger.namespace)
+        // The real synthetic server keeps the complete original. Only its delivery is
+        // presented as Linux's photo-only derivative plus delegated pairedVideo.
+        let remote = ControlledRemote(context.remote, delaysReady: true, delegatesMotion: true)
+        context.remote = remote
+        let coordinator = BackupCoordinator(store: ledger.store, photos: library, namespace: ledger.namespace)
+        do {
+            let live = try sample(library, "live_photo")
+            let policy = try await settings.backupSpacePolicy(store: ledger.store)
+            try await coordinator.activate(context, policy: policy)
+            let batch = try await coordinator.admit([live.id], compact: true, trigger: .manual)
+            let id = try #require(batch.operationIDs.first)
+            for _ in 0..<5 {
+                try await coordinator.runOpportunity()
+                if try await ledger.store.operation(id)?.backup == .retained, await remote.held > 0 { break }
+            }
+            let diagnostics = try await backupDiagnostics(ledger.store, id: id)
+            #expect(try await ledger.store.operation(id)?.backup == .retained, "\(diagnostics)")
+            try #require(await remote.held > 0)
+            try await exercise(fixture, settings, context, remote, coordinator, id, live)
+            try await coordinator.stopAndWait()
+            try await ledger.store.close()
+        } catch {
+            try? await coordinator.stopAndWait()
+            try? await ledger.store.close()
+            throw error
+        }
+    }
+
+    private func delegatedMotionPolicy(coordinator: BackupCoordinator, store: BackupStore, id: UUID,
+                                       receipt: BackupAPI.Receipt, motionCopies: Int) async throws
+        -> (policy: BackupSpacePolicy, transient: Int64, requiredBytes: Int64, details: String) {
+        let workspace = try #require(coordinator.currentWorkspace)
+        // The last upload's spool can be released only after its transfer completes, after apply()'s cleanup.
+        // Measure the stable retained workspace, not bytes the next result reconciliation will reclaim.
+        try await workspace.collectReleasedFiles()
+        let resources = try await store.resources(id), transfers = try await store.transfers(operationID: id)
+        let reservations = try await store.reservations(operationID: id)
+        try #require(resources.allSatisfy { $0.kind != .motion }, "Expected fresh motion; resources=\(resources)")
+        try #require(transfers.allSatisfy { $0.kind == .upload && $0.state == .completed },
+                     "Expected only finished uploads before budgeting; transfers=\(transfers)")
+        try #require(reservations.isEmpty, "Unexpected reservations before budgeting: \(reservations)")
+        let transient = try store.files.spaceObservation().transientBytes
+        let photo = try #require(receipt.derivative?.resources.first { $0.role == .photo })
+        let motion = try #require(resources.first {
+            $0.kind == .original && $0.descriptor.role == .pairedVideo && $0.availability == .present
+        })
+        let required = Int64(2 * photo.size + 4 * motion.descriptor.size)
+        let policy = BackupSpacePolicy(
+            maximumTransientBytes: transient + Int64(2 * photo.size + motionCopies * motion.descriptor.size),
+            minimumAvailableBytes: 0, finalizationReserveBytes: 0, maximumTransfers: 3)
+        return (policy, transient, required,
+                "transient=\(transient), photoBytes=\(photo.size), motionBytes=\(motion.descriptor.size), requiredBytes=\(required), policy=\(policy)")
+    }
+
+    private func expectNoMotionPartials(_ store: BackupStore) throws {
+        let files = try #require(FileManager.default.enumerator(at: store.files.staging, includingPropertiesForKeys: nil))
+        for case let file as URL in files { #expect(!file.lastPathComponent.hasPrefix(".partial-")) }
+        #expect(try PhotoResourceHandoff.orphans(in: store.files.staging, includingActive: true).isEmpty,
+                "Motion reads must also finish or recover their identity-checked typed aliases")
+    }
+
+    @Test func freshDelegatedLinuxMotionIsCompressedOnTheIPhoneAndSavedAsAVerifiedPair() async throws {
+        try await withDelegatedMotion { fixture, _, context, remote, coordinator, id, live in
+            let library = fixture.session.library, ledger = fixture.ledger, store = ledger.store
+            let generation = try library.sourceGeneration(live.id)
+            let original = try await library.resourceFingerprints(live.id)
+            let questions = fixture.asked.all.count
+            let held = try #require(try await store.operation(id)?.receipt)
+            let ready = try await remote.status(held.requestID)
+            let budget = try await delegatedMotionPolicy(coordinator: coordinator, store: store, id: id, receipt: ready, motionCopies: 4)
+            try await coordinator.activate(context, policy: budget.policy)
+            let before = try store.files.spaceObservation()
+            let space = "\(budget.details); beforeFinalization=\(before); activePolicy=\(String(describing: coordinator.currentWorkspace?.policy))"
+            try #require(coordinator.currentWorkspace?.policy == budget.policy, "\(space)")
+            try #require(before.transientBytes == budget.transient, "The measured workspace changed: \(space)")
+            try #require(before.transientBytes + budget.requiredBytes == budget.policy.maximumTransientBytes,
+                         "The positive case must allow exactly the 4x reservation: \(space)")
+            var messages: [String] = []
+            coordinator.progress = { _, message in messages.append(message) }
+            await remote.release()
+            for _ in 0..<5 {
+                try await coordinator.runOpportunity()
+                if try await store.operation(id)?.delivery == .importedVerified { break }
+            }
+            let operation = try #require(try await store.operation(id))
+            let diagnostics = try await backupDiagnostics(store, id: id)
+            #expect(operation.delivery == .importedVerified && !operation.attention && operation.problem == nil && operation.lease == nil,
+                    "\(diagnostics); progress=\(messages); \(space)")
+            let receipt = try #require(operation.receipt), derivative = try #require(receipt.derivative)
+            #expect(derivative.deviceCompresses == [.pairedVideo] && derivative.resources.map(\.role) == [.photo])
+            let compressing = try #require(messages.firstIndex(of: "Compressing motion"), "\(diagnostics); progress=\(messages)")
+            let checking = try #require(messages.firstIndex(of: "Checking Live Photo"), "\(diagnostics); progress=\(messages)")
+            #expect(compressing < checking)
+            let resources = try await store.resources(id)
+            let motions = resources.filter { $0.kind == .motion && $0.descriptor.role == .pairedVideo }
+            try #require(motions.count == 1)
+            let made = try #require(motions.first).descriptor
+            let source = try #require(original.first { $0.role == .pairedVideo })
+            // Simulator bitrate is not deterministic: either byte-identical fallback or a smaller encode is valid.
+            #expect(made.sha256 == source.sha256 && made.size == source.size || made.size < source.size)
+            let intent = try #require(try await store.importIntent(id))
+            #expect(intent.phase == .verified && Set(intent.expected.map(\.role)) == [.photo, .pairedVideo])
+            #expect(intent.expected.first { $0.role == .pairedVideo } == made)
+            let photo = try #require(derivative.resources.first)
+            #expect(intent.expected.first { $0.role == .photo } == .init(
+                role: .photo, filename: photo.filename, size: photo.size, sha256: photo.sha256))
+            let mapping = try #require(try await store.mappings(namespace: ledger.namespace)[live.id])
+            let mapped = try #require(mapping.compactResources)
+            // Saved fingerprints carry Photos' observed names and SHA-1, not the import plan's display fields.
+            #expect(BackupValidation.matches(mapped, intent.expected), "mapped=\(mapped); expected=\(intent.expected)")
+            #expect(mapping.proof?.retention == .permanent, "Expected permanent retention; proof=\(String(describing: mapping.proof))")
+            let copy = try #require(library.demoItem(mapping.entry.compactIdentifier))
+            #expect(copy.kind == .livePhoto && copy.motion != nil)
+            let fingerprints = try await library.resourceFingerprints(copy.localIdentifier)
+            #expect(mapped == fingerprints, "mapped=\(mapped); saved fingerprints=\(fingerprints)")
+            #expect(fingerprints.first { $0.role == .pairedVideo }?.sha256 == made.sha256)
+            #expect(library.existing([live.id], includeHidden: true) == [live.id])
+            #expect(try library.sourceGeneration(live.id) == generation)
+            #expect(try await library.resourceFingerprints(live.id) == original && fixture.asked.all.count == questions)
+            try expectNoMotionPartials(store)
+            let manifest = try #require(operation.manifest), proof = try #require(mapping.proof)
+            #expect(BackupValidation.retained(proof, manifest: manifest, context: context, policy: .permanent))
+            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library)
+            #expect(try await remover.candidates(only: [live.id]).count == 1)
+            #expect(await !remote.verified.isEmpty)
+        }
+    }
+
+    @Test func delegatedMotionReservesFourTimesTheMotionBeforeDownloadingOrEncoding() async throws {
+        try await withDelegatedMotion { fixture, _, context, remote, coordinator, id, live in
+            let library = fixture.session.library, ledger = fixture.ledger, store = ledger.store
+            let identifiers = library.allIdentifiers(), album = library.albumMembers()
+            let generation = try library.sourceGeneration(live.id), questions = fixture.asked.all.count
+            let original = try await library.resourceFingerprints(live.id)
+            let held = try #require(try await store.operation(id)?.receipt)
+            let ready = try await remote.status(held.requestID)
+            let budget = try await delegatedMotionPolicy(coordinator: coordinator, store: store, id: id, receipt: ready, motionCopies: 3)
+            try await coordinator.activate(context, policy: budget.policy)
+            let before = try store.files.spaceObservation()
+            let space = "\(budget.details); beforeFinalization=\(before); activePolicy=\(String(describing: coordinator.currentWorkspace?.policy))"
+            try #require(coordinator.currentWorkspace?.policy == budget.policy, "\(space)")
+            try #require(before.transientBytes == budget.transient, "The measured workspace changed: \(space)")
+            try #require(before.transientBytes + budget.requiredBytes > budget.policy.maximumTransientBytes,
+                         "The negative case must not have room for the 4x reservation: \(space)")
+            await remote.release()
+            try await coordinator.runOpportunity()
+            try await coordinator.runOpportunity()
+            let operation = try #require(try await store.operation(id))
+            let diagnostics = "\(try await backupDiagnostics(store, id: id)); \(space)"
+            #expect(operation.notBefore != nil && !operation.attention && operation.problem == nil, "\(diagnostics)")
+            #expect(operation.delivery != .importedVerified, "\(diagnostics)")
+            let intent = try await store.importIntent(id)
+            #expect(intent == nil, "Expected no import intent; actual=\(String(describing: intent)); \(diagnostics)")
+            let resources = try await store.resources(id)
+            #expect(resources.allSatisfy { $0.kind != .motion }, "Expected no made motion; resources=\(resources); \(diagnostics)")
+            let transfers = try await store.transfers(operationID: id)
+            #expect(transfers.allSatisfy { $0.kind != .download }, "Expected no downloads; transfers=\(transfers); \(diagnostics)")
+            let reservations = try await store.reservations(operationID: id)
+            #expect(reservations.isEmpty, "Expected no reservations; actual=\(reservations); \(diagnostics)")
+            let motion = try #require(resources.first { $0.kind == .original && $0.descriptor.role == .pairedVideo })
+            let digest = try Fingerprint.digests(of: store.files.stagedFile(operationID: id, fileID: motion.fileID))
+            #expect(digest.sha256 == motion.descriptor.sha256 && digest.size == motion.descriptor.size,
+                    "actual=\(digest); expected=\(motion.descriptor); \(diagnostics)")
+            let currentIdentifiers = library.allIdentifiers(), currentAlbum = library.albumMembers()
+            #expect(currentIdentifiers == identifiers && currentAlbum == album,
+                    "identifiers: actual=\(currentIdentifiers), expected=\(identifiers); album: actual=\(currentAlbum), expected=\(album); \(diagnostics)")
+            let currentGeneration = try library.sourceGeneration(live.id)
+            #expect(currentGeneration == generation, "actual=\(currentGeneration); expected=\(generation); \(diagnostics)")
+            let fingerprints = try await library.resourceFingerprints(live.id), asked = fixture.asked.all.count
+            #expect(fingerprints == original && asked == questions,
+                    "fingerprints: actual=\(fingerprints), expected=\(original); questions: actual=\(asked), expected=\(questions); \(diagnostics)")
+            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library)
+            let candidates = try await remover.candidates(only: [live.id])
+            #expect(candidates.isEmpty, "Expected no removal candidates; actual count=\(candidates.count); \(diagnostics)")
+        }
+    }
+
+    @Test func cancelledDelegatedMotionLeavesNoPartialOrImportAndResumesToOnePair() async throws {
+        try await withDelegatedMotion { fixture, settings, context, remote, coordinator, id, _ in
+            let library = fixture.session.library, ledger = fixture.ledger, store = ledger.store
+            let album = library.albumMembers()
+            await remote.release()
+            // Invisible reconciliation applies the receipt without starting finalization.
+            try await coordinator.reconcile()
+            let lease = try #require(try await store.claim(id, stage: .finalization))
+            let operation = try #require(try await store.operation(id))
+            let policy = try await settings.backupSpacePolicy(store: store)
+            let finalizer = BackupFinalizer(store: store, photos: library, workspace: .init(store: store, policy: policy))
+            let handle = Mutex<Task<BackupStore.SavedMapping, Error>?>(nil)
+            let cancellation = Mutex<Task<Void, Never>?>(nil)
+            let task = Task {
+                try await finalizer.run(operation, lease: lease, context: context) { message in
+                    if message == "Compressing motion" {
+                        cancellation.withLock { task in
+                            task = Task {
+                                try? await Task.sleep(for: .milliseconds(150))
+                                handle.withLock { $0 }?.cancel()
+                            }
+                        }
+                    }
+                }
+            }
+            handle.withLock { $0 = task }
+            var cancelled = false
+            do {
+                _ = try await task.value
+                try await store.release(lease)
+            } catch is CancellationError {
+                cancelled = true
+                try await store.deferLease(lease)
+            } catch {
+                await cancellation.withLock { $0 }?.value
+                print("Delegated finalization failed: \(error); \(try await backupDiagnostics(store, id: id))")
+                throw error
+            }
+            await cancellation.withLock { $0 }?.value
+            try expectNoMotionPartials(store)
+            let resources = try await store.resources(id)
+            let recorded = Set(resources.map { $0.fileID.uuidString })
+            let directory = store.files.staging.appendingPathComponent(id.uuidString)
+            for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) {
+                if try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                    #expect(recorded.contains(file.lastPathComponent), "No unrecorded encode output may survive cancellation")
+                }
+            }
+            if cancelled {
+                let intent = try await store.importIntent(id)
+                #expect(intent == nil || intent?.phase == .planned)
+                let mappings = try await store.mappings(namespace: ledger.namespace)
+                #expect(library.albumMembers() == album && mappings.isEmpty)
+            }
+            let cached = resources.first { $0.kind == .motion }
+            if let cached {
+                let digest = try Fingerprint.digests(of: store.files.stagedFile(operationID: id, fileID: cached.fileID))
+                #expect(digest.sha256 == cached.descriptor.sha256 && digest.size == cached.descriptor.size)
+            }
+            var ghosts: [URL] = []
+            if cached == nil {
+                let ghost = UUID()
+                try await store.saveMetadata("delegated-motion-output:" + id.uuidString, value: ghost)
+                ghosts = LivePhotoMotionCompressor.workingFiles(for: store.files.stagedFile(operationID: id, fileID: ghost))
+                for file in ghosts { try Data(repeating: 0xA5, count: 4_096).write(to: file) }
+            }
+            // If cancellation landed after recording, keep that verified motion to exercise cached reuse instead.
+            for _ in 0..<5 {
+                try await coordinator.runOpportunity()
+                if try await store.operation(id)?.delivery == .importedVerified { break }
+            }
+            let diagnostics = try await backupDiagnostics(store, id: id)
+            #expect(try await store.operation(id)?.delivery == .importedVerified, "\(diagnostics)")
+            #expect(library.albumMembers().count == 1)
+            let intent = try #require(try await store.importIntent(id))
+            #expect(intent.phase == .verified)
+            if let cached { #expect(intent.expected.first { $0.role == .pairedVideo } == cached.descriptor) }
+            #expect(ghosts.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+            try expectNoMotionPartials(store)
+        }
+    }
+
+    @Test func uploadAfterAProcessRestartResumesFromTheServersOffsetWithTheSameUploadID() async throws {
+        let fixture = try await Fixture.make(), library = fixture.session.library
+        let settings = AppSettings(defaults: fixture.session.defaults, photos: library,
+            tokens: fixture.session.tokens, session: fixture.session.server.clientSession, isDemo: true)
+        let client = try await fixture.pairedClient()
+        try settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let directory = fixture.folder.appendingPathComponent("Backup")
+        let storeA = BackupStore(directory: directory, legacyURL: nil, processID: UUID())
+        let ledgerA = CompactLedger(store: storeA)
+        let coordinatorA = BackupCoordinator(store: storeA, photos: library, namespace: ledgerA.namespace)
+        let barrier = OneShotBarrier(pauseAt: 3)
+        var contextA = try await settings.backupContext(store: storeA, namespace: ledgerA.namespace)
+        let base = contextA.remote
+        let remoteA = ControlledRemote(base, chunkLimit: 65_536, appendBarrier: barrier)
+        contextA.remote = remoteA
+        let video = try sample(library, "video")
+        let id: UUID
+        let uploadID: UUID
+        let serverOffset: Int64
+        let size: Int64
+        let policyA = try await settings.backupSpacePolicy(store: storeA)
+        try await coordinatorA.activate(contextA, policy: policyA)
+        let batch = try await coordinatorA.admit([video.id], compact: true, trigger: .manual)
+        id = try #require(batch.operationIDs.first)
+        let run = Task { try await coordinatorA.runOpportunity() }
+        do {
+            try await eventually { await barrier.arrivals == 3 }
+            coordinatorA.suspend()
+            await barrier.release()
+            // Suspension cancels execution, not persisted desired intent.
+            do { try await run.value } catch is CancellationError {}
+            try await coordinatorA.stopAndWait()
+            let operation = try #require(try await storeA.operation(id))
+            size = Int64(try #require(operation.manifest?.resources.first { $0.role == .video }).size)
+            uploadID = try #require(await remoteA.admittedUploadIDs.first)
+            serverOffset = try await base.uploadPosition(uploadID).offset
+            try #require(serverOffset > 0 && serverOffset < size)
+            try #require(size - serverOffset > 4 * 65_536, "Resume must cross an upload quantum, not just finish its first four chunks")
+            try await storeA.close()
+        } catch {
+            coordinatorA.suspend()
+            await barrier.release()
+            _ = try? await run.value
+            try? await coordinatorA.stopAndWait()
+            try? await storeA.close()
+            throw error
+        }
+        let storeB = BackupStore(directory: directory, legacyURL: nil, processID: UUID())
+        let ledgerB = CompactLedger(store: storeB)
+        let coordinatorB = BackupCoordinator(store: storeB, photos: library, namespace: ledgerB.namespace)
+        do {
+            var contextB = try await settings.backupContext(store: storeB, namespace: ledgerB.namespace)
+            #expect(contextB.session.id != contextA.session.id)
+            let remoteB = ControlledRemote(contextB.remote, chunkLimit: 65_536)
+            contextB.remote = remoteB
+            let policyB = try await settings.backupSpacePolicy(store: storeB)
+            try await coordinatorB.activate(contextB, policy: policyB)
+            // No second admission or selection: reopening alone restores the original operation.
+            for _ in 0..<5 {
+                try await coordinatorB.runOpportunity()
+                if try await storeB.operation(id)?.delivery == .importedVerified { break }
+            }
+            let operation = try #require(try await storeB.currentOperations([video.id], namespace: ledgerB.namespace).first)
+            let diagnostics = try await backupDiagnostics(storeB, id: id)
+            #expect(operation.id == id && operation.delivery == .importedVerified, "\(diagnostics)")
+            let admittedA = await remoteA.admittedUploadIDs, admittedB = await remoteB.admittedUploadIDs
+            let admitted = admittedA + admittedB
+            #expect(!admitted.isEmpty && Set(admitted) == [uploadID])
+            let appends = await remoteB.appends
+            #expect(appends.first?.offset == serverOffset && appends.allSatisfy { $0.offset > 0 && $0.uploadID == uploadID })
+            #expect(appends.reduce(Int64(0)) { $0 + Int64($1.count) } == size - serverOffset,
+                    "serverOffset=\(serverOffset), size=\(size), appends=\(appends); \(diagnostics)")
+            let transfers = try await storeB.transfers(operationID: id).filter { $0.kind == .upload }
+            let old = transfers.filter { $0.sessionID == contextA.session.id }
+            #expect(!old.isEmpty && old.allSatisfy { $0.state == .failed })
+            #expect(transfers.contains { $0.sessionID == contextB.session.id && $0.state == .completed }, "\(diagnostics)")
+            #expect(try await storeB.reservations().isEmpty, "\(diagnostics)")
+            #expect(library.albumMembers().count == 1, "\(diagnostics)")
+            try await coordinatorB.stopAndWait()
+            try await storeB.close()
+        } catch {
+            try? await coordinatorB.stopAndWait()
+            try? await storeB.close()
+            throw error
+        }
+    }
+
+    @Test func queuedManualWorkSurvivesJoinedRetirementWithoutPremiumOrBlindReimport() async throws {
+        let fixture = try await Fixture.make()
+        let first = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try first.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await first.job.enqueue([photo.id]) == [photo.id])
+        first.settings.defaults.set(true, forKey: "backupAdmissionsDisabled")
+        let other = try #require(fixture.session.library.samples.first { $0.kind == "photo" && $0.id != photo.id })
+        #expect(await first.job.enqueue([other.id]).isEmpty)
+        #expect(try await first.job.ledger.store.currentOperations([other.id], namespace: first.job.ledger.namespace).isEmpty)
+        try await first.job.runOpportunity()
+        let before = try #require(try await first.job.ledger.store.currentOperations([photo.id], namespace: first.job.ledger.namespace).first)
+        await first.library.stopAndWait()
+        try await first.closeDemoStore()
+        await #expect(throws: BackupStore.Failure.storageClosed) { try await first.job.ledger.snapshot() }
+        let resumed = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        try await resumed.job.runOpportunity()
+        let after = try #require(try await resumed.job.ledger.store.currentOperations([photo.id], namespace: resumed.job.ledger.namespace).first)
+        #expect(before.id == after.id && after.delivery == .importedVerified)
+        let copies = fixture.session.library.albumMembers()
+        try await resumed.job.runOpportunity()
+        #expect(fixture.session.library.albumMembers() == copies && copies.count == 1)
+        let receipt = try #require(after.receipt), context = try #require(resumed.job.bindingContext)
+        let cancel = BackupAPI.Command(operationID: UUID(), version: receipt.version, action: .cancel)
+        let accepted = try await context.remote.command(requestID: receipt.requestID, cancel)
+        let retry = try await context.remote.command(requestID: receipt.requestID,
+            .init(operationID: UUID(), version: receipt.version, action: .retry))
+        let replay = try await context.remote.command(requestID: receipt.requestID, cancel)
+        #expect(replay == accepted && retry.revision > accepted.revision)
+        await resumed.library.stopAndWait()
+        try await resumed.closeDemoStore()
+    }
+
+    @Test func keepingAnOriginalDoesNotDeleteASameIDCompactCopyThatChanged() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await model.job.enqueue([photo.id]) == [photo.id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let entry = try #require(try await model.job.ledger.entry(for: photo.id))
+        let copy = try #require(fixture.session.library.demoItem(entry.compactIdentifier))
+        try Data("a newer compact edit".utf8).write(to: copy.main)
+        let before = fixture.asked.all.count
+        await #expect(throws: BackupStageFailure.self) {
+            try await BackupKeeper(ledger: model.job.ledger, photos: fixture.session.library).keep([photo.id])
+        }
+        #expect(fixture.asked.all.count == before)
+        #expect(fixture.session.library.existing([photo.id, entry.compactIdentifier], includeHidden: true).count == 2)
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
+    private func withDurablePhotos(
+        count: Int,
+        exercise: @MainActor (Fixture, AppModel, [DemoSample]) async throws -> Void
+    ) async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        do {
+            let client = try await fixture.pairedClient()
+            try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+                response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+                pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+            let photos = Array(fixture.session.library.samples.filter { $0.kind == "photo" }.prefix(count))
+            try #require(photos.count == count)
+            let ids = Set(photos.map(\.id))
+            try #require(await model.job.enqueue(photos.map(\.id)) == ids)
+            try await model.job.runOpportunity()
+            try await model.job.runOpportunity()
+            let entries = try await model.job.ledger.snapshot()
+            try #require(ids.allSatisfy { entries[$0]?.verifiedCompact == true })
+            await model.library.stopAndWait()
+            try await exercise(fixture, model, photos)
+        } catch {
+            await model.library.stopAndWait()
+            try? await model.closeDemoStore()
+            throw error
+        }
+        try await model.closeDemoStore()
+    }
+
+    enum CompactChange: CaseIterable, Sendable { case deleted, changed }
+
+    @Test(arguments: CompactChange.allCases)
+    func originalRemovalRechecksAnEarlierCompactAfterAnotherItemsRemoteProof(_ change: CompactChange) async throws {
+        try await withDurablePhotos(count: 2) { fixture, model, photos in
+            let library = fixture.session.library, ledger = model.job.ledger
+            var context = try #require(model.job.bindingContext)
+            let barrier = OneShotBarrier(pauseAt: 2)
+            let remote = ControlledRemote(context.remote, beforeVerify: { _ in await barrier.pause() })
+            context.remote = remote
+            let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: library, batchLimit: 2)
+            let candidates = try await remover.candidates(only: Set(photos.map(\.id)))
+            try #require(candidates.count == 2)
+            let removal = Task {
+                try await remover.removeEligible(limit: nil, only: Set(photos.map(\.id)), progress: { _ in })
+            }
+            do {
+                try await eventually { await barrier.arrivals == 2 }
+                // The first complete proof succeeded; a different item's proof is still suspended.
+                let proved = await remote.verified
+                try #require(proved.count == 1)
+                let first = try #require(candidates.first { $0.entry.version == proved[0] })
+                let second = try #require(candidates.first { $0.original != first.original })
+                let secondName = try #require(library.describe(second.original)?.name)
+                let compactID = first.entry.compactIdentifier
+                let before = try library.sourceGeneration(compactID)
+                switch change {
+                case .deleted:
+                    try await library.delete([compactID])
+                    #expect(library.item(compactID) == nil)
+                case .changed:
+                    let compact = try #require(library.demoItem(compactID))
+                    var edited = try Data(contentsOf: compact.main)
+                    edited.append(0)
+                    try edited.write(to: compact.main)
+                    #expect(try library.sourceGeneration(compactID) != before)
+                }
+                let questions = fixture.asked.all.count
+                await barrier.release()
+                let report = try await removal.value
+                #expect(report.removed == [secondName])
+                #expect(report.blocked.count == 1 && !report.cancelled)
+                #expect(report.freedBytes == second.entry.originalBytes)
+                #expect(library.existing(photos.map(\.id), includeHidden: true) == [first.original])
+                #expect(library.item(second.entry.compactIdentifier) != nil)
+                #expect(fixture.asked.all.count == questions + 1)
+                let effect = try #require(try await ledger.store.effects(namespace: ledger.namespace, unfinished: false)
+                    .first { $0.kind == .removeOriginal })
+                #expect(effect.phase == .verified && effect.approvals.count == 2)
+                #expect(effect.approvals.first { $0.compact.identifier == compactID }?.compact == before)
+                #expect(effect.submitted == [second.original],
+                        "A previously checked but now invalid pair must never be submitted for original deletion")
+            } catch {
+                await barrier.release()
+                _ = try? await removal.value
+                throw error
+            }
+        }
+    }
+
+    enum KeepPersistenceFault: CaseIterable, Sendable {
+        case recordPhotosSuccess, completeDecision
+
+        var trigger: String {
+            switch self {
+            case .recordPhotosSuccess:
+                """
+                CREATE TRIGGER fail_keep_persistence BEFORE UPDATE OF phase ON photo_effects
+                WHEN NEW.kind = 'keepOriginal' AND NEW.phase = 'created'
+                BEGIN SELECT RAISE(ABORT, 'injected Photos outcome write failure'); END
+                """
+            case .completeDecision:
+                """
+                CREATE TRIGGER fail_keep_persistence BEFORE INSERT ON decisions WHEN NEW.kept = 1
+                BEGIN SELECT RAISE(ABORT, 'injected Keep Original finalization failure'); END
+                """
+            }
+        }
+    }
+
+    @Test(arguments: KeepPersistenceFault.allCases)
+    func keepOriginalSurfacesPersistenceFailureAndReconcilesAfterRestartWithoutDeletingAgain(
+        _ fault: KeepPersistenceFault
+    ) async throws {
+        try await withDurablePhotos(count: 1) { fixture, model, photos in
+            let library = fixture.session.library, ledger = model.job.ledger, store = ledger.store
+            let original = try #require(photos.first).id
+            let mapping = try #require(try await store.mappings(namespace: ledger.namespace)[original])
+            let compactID = mapping.entry.compactIdentifier
+            let generation = try library.sourceGeneration(original)
+            let questions = fixture.asked.all.count
+            // SQLite aborts the real transaction, not a stand-in for the keeper's result.
+            let trigger = fault.trigger
+            try await store.mutateState { @Sendable connection in try connection.execute(trigger) }
+            await #expect(throws: BackupDatabase.Failure.self) {
+                try await BackupKeeper(ledger: ledger, photos: library).keep([original])
+            }
+            #expect(fixture.asked.all.count == questions + 1)
+            #expect(library.existing([original, compactID], includeHidden: true) == [original])
+            #expect(try library.sourceGeneration(original) == generation)
+            let intent = try #require(try await store.effects(namespace: ledger.namespace).first { $0.kind == .keepOriginal })
+            #expect(intent.phase == (fault == .recordPhotosSuccess ? .uncertain : .created))
+            #expect(intent.problem != nil && intent.mappings.map(\.id) == [mapping.id])
+            #expect(intent.approvals.map(\.original) == [generation])
+            #expect(intent.submitted == (fault == .recordPhotosSuccess ? [] : [compactID]))
+            #expect(try await store.mappings(namespace: ledger.namespace)[original]?.id == mapping.id)
+            #expect(try await ledger.decisions().isEmpty)
+            let rolledBack = try await store.readState { @Sendable connection in
+                try connection.rows("SELECT 1 FROM legacy_backed_up").isEmpty
+            }
+            #expect(rolledBack, "A failed finalization must roll back even the writes before its decision")
+
+            try await store.close()
+            let reopened = BackupStore(directory: store.files.root,
+                legacyURL: fixture.session.folder.appendingPathComponent("ledger.json"),
+                namespace: ledger.namespace, processID: UUID())
+            do {
+                try await reopened.open()
+                #expect(try await reopened.effect(intent.id) == intent)
+                try await reopened.mutateState { @Sendable connection in
+                    try connection.execute("DROP TRIGGER fail_keep_persistence")
+                }
+                let resumedLedger = CompactLedger(store: reopened, namespace: ledger.namespace)
+                let asked = fixture.asked
+                let resumedPhotos = DemoLibrary(folder: library.folder, media: fixture.media, ask: { asked.ask($0) })
+                #expect(resumedPhotos.existing([original, compactID], includeHidden: true) == [original])
+                let keeper = BackupKeeper(ledger: resumedLedger, photos: resumedPhotos)
+                try await keeper.reconcile()
+                let completed = try #require(try await reopened.effect(intent.id))
+                #expect(completed.phase == .verified && completed.submitted == [compactID])
+                #expect(try await resumedLedger.entry(for: original) == nil)
+                #expect(try await resumedLedger.decisions() == [original])
+                let kept = try #require(try await resumedLedger.backedUpSnapshot()[original])
+                #expect(kept.kept == true && kept.version == mapping.proof?.version && kept.origin == mapping.origin)
+                #expect(kept.originalBytes == mapping.entry.originalBytes && kept.operationID != nil)
+                #expect(try resumedPhotos.sourceGeneration(original) == generation)
+                #expect(try await reopened.effects(namespace: ledger.namespace).isEmpty)
+                #expect(!(try await keeper.keep([original])))
+                try await keeper.reconcile()
+                #expect(try await reopened.effect(intent.id) == completed)
+                #expect(try await reopened.effects(namespace: ledger.namespace, unfinished: false).count == 1)
+                #expect(fixture.asked.all.count == questions + 1, "Recovery must not ask Photos to delete again")
+                try await reopened.close()
+            } catch {
+                try? await reopened.close()
+                throw error
+            }
+        }
+    }
+
+    @Test func copyFinderRevalidatesThroughTheRealV2WireContractWithoutUploadingOrInventingHistoricalProvenance() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let photo = try sample(fixture.session.library, "photo")
+        #expect(await model.job.enqueue([photo.id]) == [photo.id])
+        try await model.job.runOpportunity()
+        try await model.job.runOpportunity()
+        let originalEntry = try #require(try await model.job.ledger.entry(for: photo.id))
+        let source = try #require(fixture.session.library.demoItem(photo.id))
+        let metadata = try fixture.session.library.backupMetadata(photo.id)
+        let descriptors = try await fixture.session.library.resourceFingerprints(photo.id)
+        let originalFiles = try source.files.map { role, url in
+            PreparedPhotoResource(fileID: UUID(), url: url,
+                descriptor: try #require(descriptors.first { $0.role == role }))
+        }
+        try await fixture.session.library.delete([photo.id])
+        let context = try #require(model.job.bindingContext)
+        let recovery = BackupStore(directory: fixture.folder.appendingPathComponent("copy-recovery"), legacyURL: nil)
+        try await recovery.bind(context.binding)
+        try await recovery.rememberBinding(context.binding.id, information: context.information)
+        let ledger = CompactLedger(store: recovery)
+        let finderURL = fixture.folder.appendingPathComponent("copy-recovery-finder.json")
+        let finder = CopyFinder(url: finderURL, photos: fixture.session.library)
+        let before = try await client.storage()
+        await finder.run(lookup: { try await client.lookupCopies($0) }, ledger: ledger, context: context)
+        #expect(finder.error == nil && finder.summary?.found == 1 && finder.summary?.readyToFree == 0)
+        let key = CompactLedger.elsewhere(originalEntry.compactIdentifier)
+        let entry = try #require(try await ledger.entry(for: key))
+        #expect(entry.verifiedCompact && entry.revalidatedCopy == true && entry.origin == context.binding.origin)
+        #expect(entry.version?.manifestID == originalEntry.version?.manifestID)
+        let state = LibraryState(library: fixture.session.library.allIdentifiers(), ledger: try await ledger.snapshot(),
+            album: fixture.session.library.albumMembers(), job: [:], origin: context.binding.origin)
+        #expect(state.cells(.all).first { $0.id == entry.compactIdentifier }?.badge == .backedUp)
+        let remover = DurableOriginalRemover(context: context, ledger: ledger, photos: fixture.session.library)
+        #expect(try await remover.candidates(only: nil).isEmpty)
+        var checking = context
+        checking.session.id = UUID()
+        checking.session.identifier = "foreground.copy-recovery"
+        try await recovery.registerSession(checking.session)
+        let coordinator = BackupCoordinator(store: recovery, photos: fixture.session.library, namespace: ledger.namespace)
+        try await coordinator.activate(checking, policy: .init(maximumTransientBytes: 100_000_000,
+            minimumAvailableBytes: 0, finalizationReserveBytes: 1_000_000, maximumTransfers: 1))
+        let count = try await recovery.operations().count
+        await #expect(throws: BackupStageFailure.self) {
+            _ = try await coordinator.admit([entry.compactIdentifier], compact: true, trigger: .manual)
+        }
+        #expect(try await recovery.operations().count == count)
+        try await coordinator.stopAndWait()
+
+        // A later original must match every resource; it is linked using the same real proof
+        // contract, not by turning a legacy asset ID into a trusted deletion record.
+        let restored = try await fixture.session.library.restoreResources(originalFiles, metadata: metadata)
+        await finder.run(lookup: { try await client.lookupCopies($0) }, ledger: ledger, context: context)
+        #expect(finder.error == nil && finder.summary?.readyToFree == 1)
+        let paired = try #require(try await ledger.entry(for: restored))
+        #expect(paired.verifiedCompact && paired.compactIdentifier == entry.compactIdentifier)
+        #expect(try await ledger.entry(for: key) == nil)
+        #expect(try await remover.candidates(only: [restored]).count == 1)
+        #expect(try await client.storage().storedBytes == before.storedBytes)
+        let operations = try await recovery.operations()
+        let receipts = try await context.remote.snapshot(continuation: nil).receipts
+        let reloaded = CopyFinder(url: finderURL, photos: fixture.session.library)
+        await reloaded.run(lookup: { try await client.lookupCopies($0) }, ledger: ledger, context: context)
+        #expect(reloaded.total == 0)
+        #expect(try await recovery.operations().count == operations.count)
+        #expect(try await context.remote.snapshot(continuation: nil).receipts.count == receipts.count)
+
+        // A full compact changed under the same ID cannot cause a Photos deletion, even though
+        // a previously verified canonical badge still exists.
+        let copy = try #require(fixture.session.library.demoItem(paired.compactIdentifier))
+        var changed = try Data(contentsOf: copy.main)
+        changed[0] ^= 1
+        try changed.write(to: copy.main)
+        let questions = fixture.asked.all.count
+        let report = try await remover.removeEligible(limit: nil, only: [restored], progress: { _ in })
+        #expect(report.removed.isEmpty && !report.blocked.isEmpty)
+        #expect(fixture.asked.all.count == questions)
+        #expect(fixture.session.library.existing([restored], includeHidden: true) == [restored])
+        try await recovery.close()
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
+    @Test func durablePreparationIsBoundedAndUncertainImportsRequireAUniqueCompleteMatch() async throws {
+        let fixture = try await Fixture.make()
+        let library = fixture.session.library
+        let photo = try sample(library, "photo")
+        let files = BackupFiles(root: fixture.folder.appendingPathComponent("prepared"))
+        try files.prepare()
+        let id = UUID(), directory = try files.prepareStaging(operationID: id)
+        let size = try library.preparationBytes(photo.id, mode: .files)
+        await #expect(throws: PhotoLibrary.Failure.self) {
+            try await library.prepareBackup(photo.id, mode: .files, directory: directory,
+                                            maximumBytes: size - 1, progress: { _ in })
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
+        let observation = try library.observePhotosEffect(restoring: false)
+        let prepared = try await library.prepareBackup(photo.id, mode: .files, directory: directory,
+                                                       maximumBytes: size, progress: { _ in })
+        for resource in prepared.resources {
+            #expect(resource.url == files.stagedFile(operationID: id, fileID: resource.fileID))
+        }
+        #expect(PhotoKitSource.sameResources(prepared.manifest.resources, try await library.resourceFingerprints(photo.id)))
+        let first = try await library.importCompact(prepared.resources, metadata: prepared.metadata)
+        guard case .unique(let recovered, _) = try await library.reconcilePhotosEffect(
+            expected: prepared.manifest.resources, observation: observation, createdIdentifier: nil)
+        else { Issue.record("The single complete import wasn't recovered"); return }
+        #expect(recovered == first)
+
+        let next = try files.prepareStaging(operationID: UUID())
+        let again = try await library.prepareBackup(photo.id, mode: .files, directory: next,
+                                                    maximumBytes: size, progress: { _ in })
+        _ = try await library.importCompact(again.resources, metadata: again.metadata)
+        guard case .blocked = try await library.reconcilePhotosEffect(
+            expected: prepared.manifest.resources, observation: observation, createdIdentifier: nil)
+        else { Issue.record("Ambiguous complete matches must not be guessed"); return }
+        guard case .unique(let known, _) = try await library.reconcilePhotosEffect(
+            expected: prepared.manifest.resources, observation: observation, createdIdentifier: first)
+        else { Issue.record("The recorded creation fact should remain usable"); return }
+        #expect(known == first)
     }
 
     /// The samples are drawn or cloned for this launch: 30 photos and videos over several years, a Live Photo with
@@ -280,7 +1857,7 @@ import UIKit
             }
             #expect(compactBytes > 0 && compactBytes < originalBytes, "\(kind): \(compactBytes) of \(originalBytes)")
             #expect(library.isCopy(copy) && library.demoItem(copy)?.creationDate == original.created)
-            let entry = try #require(await fixture.ledger.entry(for: original.id))
+            let entry = try #require(try await fixture.ledger.entry(for: original.id))
             #expect(entry.compactIdentifier == copy && entry.serverAssetID != nil)
             // Again: it already has its compact copy.
             #expect(try await compactor.compact(original.id, compactNow: true) { _ in } == .unchanged("Already has a compact copy"))
@@ -305,28 +1882,37 @@ import UIKit
         let photos = library.samples.filter { $0.kind == "photo" }.prefix(3)
         for photo in photos { _ = try await compactor.compact(photo.id, compactNow: true) { _ in } }
         let remover = DemoRemover(client: client, library: library, ledger: fixture.ledger)
-        #expect(await remover.candidates().count == 3)
+        #expect(try await remover.candidates().isEmpty, "Unversioned legacy records must require recovery")
+        #expect(try await remover.removeEligible(limit: nil, only: nil) { _ in }.removed.isEmpty)
+    }
+
+    @Test func legacyRestorationPreservesTheOriginalBytesWithoutManufacturingProvenance() async throws {
+        let fixture = try await Fixture.make()
+        let library = fixture.session.library
+        let client = try await fixture.pairedClient()
+        let compactor = DemoCompactor(client: client, library: library, ledger: fixture.ledger, pollInterval: .zero)
+        let photos = Array(library.samples.filter { $0.kind == "photo" }.prefix(3))
+        for photo in photos { _ = try await compactor.compact(photo.id, compactNow: true) { _ in } }
 
         fixture.asked.answer = false
-        let declined = try await remover.removeEligible(limit: nil, only: nil) { _ in }
-        #expect(declined.cancelled && declined.removed.isEmpty && library.existing(photos.map(\.id), includeHidden: true).count == 3)
+        do { try await library.delete(photos.map(\.id)) } catch {}
+        #expect(library.existing(photos.map(\.id), includeHidden: true).count == 3)
 
         fixture.asked.answer = true
-        let report = try await remover.removeEligible(limit: 2, only: nil) { _ in }
-        #expect(report.removed.count == 2 && report.blocked.isEmpty && report.freedBytes > 0)
+        try await library.delete(Array(photos.prefix(2).map(\.id)))
         #expect(fixture.asked.all.last?.message.contains("nothing is deleted") == true)
         #expect(library.existing(photos.map(\.id), includeHidden: true).count == 1)
         // The drawn originals are still there: only the demo's record changed.
         #expect(photos.allSatisfy { FileManager.default.fileExists(atPath: fixture.media.appendingPathComponent($0.files["photo"]!).path) })
 
         let freed = try #require(photos.first { !library.existing([$0.id], includeHidden: true).contains($0.id) })
-        let entry = try #require(await fixture.ledger.entry(for: freed.id))
+        let entry = try #require(try await fixture.ledger.entry(for: freed.id))
         let restorer = DemoRestorer(client: client, library: library, ledger: fixture.ledger)
         let restored = await restorer.restore([.init(key: freed.id, compact: entry.compactIdentifier,
                                                       serverAssetID: entry.serverAssetID!, originalBytes: entry.originalBytes)]) { _ in }
         #expect(restored.restored == [freed.id] && restored.problems.isEmpty && !restored.copiesKept)
         #expect(library.demoItem(freed.id) != nil && library.demoItem(entry.compactIdentifier) == nil)
-        #expect(await fixture.ledger.backedUpSnapshot()[freed.id]?.kept == true)
+        #expect(try await fixture.ledger.backedUpSnapshot()[freed.id]?.kept == true)
     }
 
     /// The same backup gives the same files and fingerprints every time (no randomness in what's shown).
@@ -418,14 +2004,16 @@ import UIKit
                                         response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
                                         pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
         let photo = try sample(fixture.session.library, "photo")
-        let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: demo.job.ledger,
-                                      pollInterval: .zero)
-        _ = try await compactor.compact(photo.id, compactNow: true) { _ in }
+        #expect(await demo.job.enqueue([photo.id]) == [photo.id])
+        try await demo.job.runOpportunity()
+        try await demo.job.runOpportunity()
         await demo.library.refreshReady()
         await demo.history.load()
-        let end = Date()
-        demo.history.record(.init(kind: .backUp, trigger: .manual, start: end - 60, end: end,
-                                   items: [.init(assetID: photo.id, name: "Sample", result: .saved)]))
+        let deadline = ContinuousClock.now + .seconds(10)
+        while demo.history.lastBackUp == nil, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let run = try #require(demo.history.lastBackUp)
 
         let url = fixture.folder.appendingPathComponent("status.json"), messages = WatchMessages()
         let destination = StatusPublisher.Destination(read: { StatusStore.read(from: url) },
@@ -439,7 +2027,7 @@ import UIKit
         #expect(shown.demo == true && shown.unlocked && !locked.isUnlocked)
         #expect(shown.server?.name == "Homespun Demo" && shown.server?.reachable == true)
         #expect(shown.ready.count == 1 && shown.ready.bytes == demo.library.ready.bytes && shown.ready.bytes > 0)
-        #expect(shown.lastBackup?.count == 1 && shown.lastBackup?.date == end)
+        #expect(shown.lastBackup?.count == 1 && shown.lastBackup?.date == run.end)
         #expect(messages.all.last?.sameFacts(as: shown) == true)
 
         publisher.showDemo(nil)
@@ -519,7 +2107,7 @@ import UIKit
         let original = try sample(fixture.session.library, "photo")
         let compactor = DemoCompactor(client: client, library: fixture.session.library, ledger: fixture.ledger, pollInterval: .zero)
         _ = try await compactor.compact(original.id, compactNow: true) { _ in }
-        let entry = try #require(await fixture.ledger.entry(for: original.id))
+        let entry = try #require(try await fixture.ledger.entry(for: original.id))
         let asset = try #require(entry.serverAssetID)
         let file = try await CompareModel.fetch(client, assetID: asset, role: .photo,
                                                 to: fixture.folder.appendingPathComponent("compare"), name: "original.jpg") { _, _ in }

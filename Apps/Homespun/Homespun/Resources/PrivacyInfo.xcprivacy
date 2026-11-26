@@ -2,10 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Homespun's privacy manifest. Analytics, crash and performance data are collected only if the
      person chooses Share Analytics; an email address and the problem description only when they
-     send a problem report. Nothing is used for tracking or advertising. -->
+     send a problem report. Version 1.1.0 has no wake relay and collects no push token.
+     Nothing is used for tracking or advertising. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-<!-- Purchase-history declaration retained conservatively for disabled, future purchase code.
-     Version 1.0.0 does not query purchase products or entitlements, or send purchase events. -->
+<!-- Version 1.0.0 disables purchases. Version 1.1.0 enables the one-time Premium purchase.
+     Version 1.1.0 has no wake relay and collects no push token. -->
 <plist version="1.0">
 <dict>
 	<key>NSPrivacyTracking</key>
@@ -36,6 +37,7 @@
 			<key>NSPrivacyCollectedDataTypePurposes</key>
 			<array>
 				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
 			</array>
 		</dict>
 		<dict>

@@ -76,9 +76,11 @@ struct OriginalRestorer: Sendable {
                 report.copiesKept = true
             }
         }
-        let entries = await ledger.snapshot()
-        try? await ledger.restored(done.compactMap { pair in entries[pair.item.key].map { (pair.item.key, pair.restored, $0) } },
-                                   copiesDeleted: deleted)
+        do {
+            let entries = try await ledger.snapshot()
+            try await ledger.restored(done.compactMap { pair in entries[pair.item.key].map { (pair.item.key, pair.restored, $0) } },
+                                      copiesDeleted: deleted)
+        } catch { report.problems.append("Photos changed, but recording the restored mapping failed: \(error.localizedDescription)") }
         return report
     }
 

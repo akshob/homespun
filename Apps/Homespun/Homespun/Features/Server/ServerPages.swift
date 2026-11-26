@@ -105,7 +105,8 @@ struct AutomaticModeView: View {
             } header: {
                 Text("Status")
             } footer: {
-                Text("Automatic mode never removes originals. You choose when to free up space.")
+                Text("Automatic mode never removes originals. You choose when to free up space. "
+                     + "Deleting an item in Photos does not delete its verified backup from your server.")
             }
             .listRowBackground(Theme.card)
         }
@@ -186,8 +187,8 @@ struct AutomaticModeView: View {
             Text(shown == 0
                  ? "Each new photo or video gets its compact copy as soon as it's backed up."
                  : "New photos and videos are backed up right away, and get their compact copies once they're older "
-                    + "than this. Delete one before then and it never comes back as a compact copy; \(model.library.serverName) "
-                    + "keeps its original in its trash for 30 days.")
+                    + "than this. Deleting one before then doesn't schedule a compact copy. Versioned original backups "
+                    + "are retained conservatively; Homespun doesn't promise automatic 30-day server cleanup.")
         }
         .disabled(!enabled)
         .listRowBackground(Theme.card)
@@ -259,15 +260,7 @@ struct NotificationsView: View {
     @Environment(\.openURL) private var openURL
 
     var body: some View {
-        if ReleaseFeatures.automaticMode {
-            content
-        } else {
-            List {
-                Text("Backup results are in Activity. Homespun doesn't send notifications in this version.")
-            }
-            .homespunList()
-            .navigationTitle("Notifications")
-        }
+        content
     }
 
     private var content: some View {
@@ -276,10 +269,9 @@ struct NotificationsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     Image(systemName: "bell").font(.largeTitle).foregroundStyle(Theme.accent).accessibilityHidden(true)
                     Text("Homespun tells you when space is ready").displayTitle().accessibilityAddTraits(.isHeader)
-                    promise("iphone", "Only when space is ready",
-                            "At most once a day, after a night of backing up: “1.2 GB ready to free up.”")
-                    promise("exclamationmark.triangle", "Or when something needs you",
-                            "Only if backing up has failed for 3 nights in a row.")
+                    promise("iphone", "When space is ready",
+                            "A grouped alert after compact copies are saved and verified. Manual backups don't need Premium.")
+                    promise("hand.tap", "Review before removing", "An alert opens Free Up Space. It never removes an original.")
                     promise("hand.raised", "Nothing else", "No tips, no offers, no streaks.")
                 }
                 .padding(.vertical, 8)
@@ -316,8 +308,7 @@ struct NotificationsView: View {
                     EmptyView()
                 default:
                     InlineNotice(tone: .success, title: "Notifications are on",
-                                 message: model.automatic.enabled ? nil
-                                    : "They come after automatic mode backs up overnight, so they start once it's on.")
+                                 message: "Ready alerts don't require Automatic Mode. Background Wakeups is a separate, optional setting.")
                 }
             }
             .listRowBackground(Color.clear)
@@ -342,6 +333,7 @@ struct NotificationsView: View {
     }
 
     private func load() async {
+        guard !model.settings.isDemo else { return }
         status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
     }
 }
@@ -570,7 +562,7 @@ struct ExistingLibraryView: View {
         .navigationTitle("Existing Library")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $finding) {
-            CopyFinderView(finder: finder, settings: settings, ledger: model.job.ledger)
+            CopyFinderView(finder: finder, settings: settings, ledger: model.job.ledger, job: model.job)
         }
     }
 

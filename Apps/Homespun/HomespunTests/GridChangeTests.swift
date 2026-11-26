@@ -13,6 +13,41 @@ private func gridData(_ cells: [LibraryState.Cell], months: [String: Int] = [:])
 }
 
 struct GridChangeTests {
+    @Test @MainActor func cellConfigurationTracksDirectSelectionAndReuseWithoutRepeatingUnchangedWork() {
+        let cell = GridCell(frame: .zero), state = gridCell("original", badge: .working)
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))
+        cell.update(state: state, selecting: true, selected: false, serverName: "Home")
+        #expect(cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))
+        cell.updateSelection(selecting: true, selected: true)
+        #expect(cell.accessibilityTraits.contains(.selected))
+        #expect(cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Home"))
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Other"))
+        cell.prepareForReuse()
+        #expect(!cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Home"))
+        cell.update(state: state, selecting: true, selected: true, serverName: "Home")
+        #expect(cell.isConfigured(for: state, selecting: true, selected: true, serverName: "Home"))
+    }
+
+    @Test @MainActor func cellConfigurationUsesVisibleMeaningRatherThanUnrenderedProvenance() {
+        let cell = GridCell(frame: .zero), state = gridCell("original", badge: .kept)
+        cell.update(state: state, selecting: false, selected: false, serverName: "Home")
+        var metadata = state
+        metadata.serverOrigin = .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
+        metadata.serverName = "Confirmed server"
+        metadata.compactAfter = Date(timeIntervalSince1970: 2_000_000_000)
+        #expect(cell.isConfigured(for: metadata, selecting: false, selected: false, serverName: "Home"))
+        var actionable = gridCell("copy", badge: .originalOnPhone, original: "original")
+        actionable.canFree = false
+        cell.update(state: actionable, selecting: true, selected: false, serverName: "Home")
+        actionable.canFree = true
+        #expect(!cell.isConfigured(for: actionable, selecting: true, selected: false, serverName: "Home"))
+        cell.update(state: gridCell("recent", badge: .copyLater), selecting: false, selected: false, serverName: "Home")
+        var scheduled = gridCell("recent", badge: .copyLater)
+        scheduled.compactAfter = metadata.compactAfter
+        #expect(!cell.isConfigured(for: scheduled, selecting: false, selected: false, serverName: "Home"))
+    }
+
     @Test func jobDiffOnlyIncludesChangedBadges() {
         var state = LibraryState(cells: [gridCell("a"), gridCell("b", badge: .working),
                                         gridCell("copy", badge: .originalOnPhone, original: "c")])
@@ -23,10 +58,64 @@ struct GridChangeTests {
         #expect(state.version == version)
     }
 
+    @Test(arguments: [false, true])
+    func savedJobWaitsForTheVerifiedLedgerSwap(hasBackup: Bool) {
+        let backedUp: [String: Date?] = hasBackup ? ["original": Date(timeIntervalSince1970: 2_000_000_000)] : [:]
+        for job in [CompactJob.State.working("Saving compact copy"), .processing("Making compact copy")] {
+            var state = LibraryState(library: ["original"], ledger: [:], album: [], job: ["original": job], backedUp: backedUp)
+            let before = state
+            let version = state.version
+            let counts = LibraryState.Filter.allCases.map { state.count($0) }
+            #expect(state.apply(job: ["original": .saved(originalBytes: 100, compactBytes: 10)]).isEmpty)
+            #expect(state == before && state.version == version)
+            #expect(LibraryState.Filter.allCases.map { state.count($0) } == counts)
+        }
+    }
+
+    @Test @MainActor func retainedCompactWorkHasOneBadgeWithoutBecomingActionableOrReenteringNotBackedUp() throws {
+        let downloading = CompactJob.State.working("Downloading 40%")
+        var state = LibraryState(library: ["retained", "uploading"], ledger: [:], album: [],
+            job: ["retained": downloading, "uploading": .working("Uploading 62%")], compactInProgress: ["retained"])
+        #expect(state.cell("retained")?.badge == .processing)
+        #expect(state.cell("uploading")?.badge == .working)
+        #expect(state.cells(.notBackedUp).map(\.id) == ["uploading"])
+        #expect(state.cell("retained")?.canCompact == false && state.cell("retained")?.canFree == false)
+        let cell = GridCell(frame: .zero)
+        cell.update(state: try #require(state.cell("retained")), selecting: false, selected: false, serverName: "Home")
+        #expect(cell.accessibilityValue == "Compact copy in progress")
+        let version = state.version
+        #expect(state.apply(job: ["retained": .processing("Making compact copy")]).isEmpty)
+        #expect(state.apply(job: ["retained": .working("Verifying saved copy")]).isEmpty)
+        #expect(state.version == version && state.count(.notBackedUp) == 1)
+
+        var incremental = LibraryState(library: ["retained"], ledger: [:], album: [], job: ["retained": downloading])
+        #expect(incremental.count(.notBackedUp) == 1)
+        #expect(incremental.apply(job: ["retained": downloading], compactInProgress: ["retained"]) == ["retained"])
+        #expect(incremental.cell("retained")?.badge == .processing && incremental.count(.notBackedUp) == 0)
+        #expect(incremental.version == 1)
+        #expect(incremental.apply(job: ["retained": downloading], compactInProgress: []) == ["retained"])
+        #expect(incremental.cell("retained")?.badge == .working && incremental.count(.notBackedUp) == 1)
+    }
+
     @Test func rebuiltDiffIncludesOriginalAndCopy() {
         let previous = LibraryState(cells: [gridCell("a"), gridCell("b")])
         let new = LibraryState(cells: [gridCell("copy", badge: .originalOnPhone, original: "a"), gridCell("b")])
         #expect(new.changedIDs(from: previous) == ["a", "copy"])
+    }
+
+    @Test func importingCopyDoesNotInsertATemporaryDuplicateOrConcealUnownedCopies() {
+        let pending = LibraryState(library: ["original", "new-copy", "unowned-copy"], ledger: [:],
+            album: ["new-copy", "unowned-copy"], job: ["original": .working("Verifying saved copy")],
+            pendingImports: ["new-copy"])
+        #expect(pending.cells.map(\.id) == ["original", "unowned-copy"])
+        #expect(pending.cell("original")?.badge == .working)
+        #expect(pending.cell("unowned-copy")?.badge == .compactCopy)
+        let entry = CompactLedger.Entry(compactIdentifier: "new-copy", originalBytes: 100, compactBytes: 10,
+                                       savedAt: Date(), serverAssetID: "original-hash")
+        let published = LibraryState(library: ["original", "new-copy", "unowned-copy"], ledger: ["original": entry],
+            album: ["new-copy", "unowned-copy"], job: [:], pendingImports: ["new-copy"])
+        #expect(published.cells.map(\.id) == ["new-copy", "unowned-copy"])
+        #expect(GridChange.replacements(from: gridData(pending.cells), to: gridData(published.cells)) == [0])
     }
 
     @Test func replacementsRequireSamePhotoAndShape() {

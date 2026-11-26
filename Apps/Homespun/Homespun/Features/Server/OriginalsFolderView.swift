@@ -58,6 +58,7 @@ struct OriginalsFolderView: View {
                                                     + info.originalsFolder)
                                 .accessibilityIdentifier("originals.folder")
                             Text(folderDetail(info)).font(.subheadline).foregroundStyle(Theme.secondaryLabel)
+                                .accessibilityIdentifier("originals.summary")
                         }
                     }
                     .padding(.vertical, 2)

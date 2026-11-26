@@ -54,7 +54,8 @@ final class GridRedrawUITests: XCTestCase {
         XCTAssertLessThanOrEqual(delta("render.mainTab"), 2)
         XCTAssertLessThanOrEqual(delta("render.library"), 4)
         XCTAssertEqual(delta("grid.reloads"), 0)
-        XCTAssertEqual(delta("grid.imageClears"), 0)
+        XCTAssertEqual(delta("grid.visibleImageClears"), 0)
+        XCTAssertLessThanOrEqual(delta("grid.imageClears"), delta("grid.thumbRequests"))
         XCTAssertLessThanOrEqual(delta("grid.thumbRequests"), 8)
         XCTAssertLessThanOrEqual(delta("grid.configs"), 40)
     }
@@ -102,12 +103,16 @@ final class GridRedrawUITests: XCTestCase {
         XCTAssertEqual(app.renderReport()["render.root"], before["render.root"])
         try tap("compact.selected")
         let progress = app.descendants(matching: .any)["job.progress"].firstMatch
-        XCTAssertTrue(progress.waitForExistence(timeout: 15))
         let deadline = Date().addingTimeInterval(180)
-        repeat { sleep(5) } while progress.exists && Date() < deadline
-        XCTAssertFalse(progress.exists, "backup did not finish")
+        var after = before
+        repeat {
+            sleep(5)
+            after = app.renderReport()
+        } while (after["job.finished"] ?? 0) - (before["job.finished"] ?? 0) < Double(expected)
+            && Date() < deadline
         sleep(2)
-        let after = app.renderReport()
+        after = app.renderReport()
+        XCTAssertFalse(progress.exists, "local work still running after item completion")
         func delta(_ key: String) -> Double { (after[key] ?? 0) - (before[key] ?? 0) }
         let n = delta("job.finished")
         let text = after.keys.sorted().map { "\($0)=\(delta($0))" }.joined(separator: ";")
@@ -123,7 +128,8 @@ final class GridRedrawUITests: XCTestCase {
         XCTAssertEqual(delta("grid.reloads"), 0)
         if allItems {
             XCTAssertGreaterThanOrEqual(delta("grid.swaps"), 1)
-            XCTAssertEqual(delta("grid.imageClears"), 0)
+            XCTAssertEqual(delta("grid.visibleImageClears"), 0)
+            XCTAssertLessThanOrEqual(delta("grid.imageClears"), delta("grid.thumbRequests"))
             XCTAssertLessThanOrEqual(delta("grid.thumbRequests"), n)
             XCTAssertLessThanOrEqual(delta("grid.configs"), (selectAll ? 2.5 : 4) * n + 8)
             XCTAssertLessThanOrEqual(delta("grid.layouts"), 4)

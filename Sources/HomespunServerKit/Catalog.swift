@@ -67,6 +67,9 @@ struct Job: Equatable, Sendable {
     var type: String
     var assetID: String
     var attempts: Int
+    var owner: String
+    var fence: Int64
+    var generation: Int64
 }
 
 /// The server's SQLite catalog (WAL, foreign keys, numbered migrations). The actor is the
@@ -257,6 +260,10 @@ public actor Catalog {
         CREATE INDEX resource_history_device ON resource_history (device_id);
         CREATE INDEX resource_history_sha256 ON resource_history (sha256);
         """,
+        backupMigration,
+        backupConnectorMigration,
+        backupExternalMigration,
+        backupWakeMigration,
     ]
 
     static func migrate(_ database: SQLiteDatabase) throws {
@@ -472,6 +479,13 @@ public actor Catalog {
             SELECT asset_id, role, stored_path, size, sha256 FROM resources WHERE stored_path IS NOT NULL
             UNION ALL
             SELECT asset_id, role, stored_path, size, sha256 FROM resource_history WHERE stored_path IS NOT NULL
+            UNION ALL
+            SELECT m.asset_id, o.role, o.stored_path, o.size, o.sha256 FROM backup_objects o
+              JOIN backup_manifests m ON m.id = o.manifest_id WHERE o.stored_path IS NOT NULL
+            UNION ALL
+            SELECT m.asset_id, o.role, p.relative_path AS stored_path, o.size, o.sha256 FROM backup_publications p
+              JOIN backup_objects o ON o.manifest_id = p.manifest_id AND o.role = p.role
+              JOIN backup_manifests m ON m.id = p.manifest_id
             """) {
             guard let asset = row["asset_id"]?.string, let path = row["stored_path"]?.string,
                   let sha256 = row["sha256"]?.string else { continue }
@@ -487,8 +501,10 @@ public actor Catalog {
     func pathReferenceCount(_ path: String) throws -> Int {
         let row = try database.query("""
             SELECT (SELECT count(*) FROM resources WHERE stored_path = ?) +
-                   (SELECT count(*) FROM resource_history WHERE stored_path = ?) AS n
-            """, [.text(path), .text(path)]).first
+                   (SELECT count(*) FROM resource_history WHERE stored_path = ?) +
+                   (SELECT count(*) FROM backup_objects WHERE stored_path = ?) +
+                   (SELECT count(*) FROM backup_publications WHERE relative_path = ?) AS n
+            """, [.text(path), .text(path), .text(path), .text(path)]).first
         return row?["n"]?.int ?? 0
     }
 
@@ -531,6 +547,25 @@ public actor Catalog {
                     try database.execute("UPDATE resource_history SET stored_path = ? WHERE id = ?",
                                          [.text(moved), .integer(Int64(key))])
                 }
+                for row in try database.query("""
+                    SELECT o.manifest_id, o.role, o.stored_path FROM backup_objects o
+                    JOIN backup_manifests m ON m.id = o.manifest_id WHERE m.device_id = ? AND o.stored_path IS NOT NULL
+                    """, [.text(id)]) {
+                    guard let path = row["stored_path"]?.string,
+                          let moved = DeviceRename.moved(path, from: from, to: folder) else { continue }
+                    try database.execute("UPDATE backup_objects SET stored_path = ? WHERE manifest_id = ? AND role = ?",
+                        [.text(moved), .text(row["manifest_id"]!.string!), .text(row["role"]!.string!)])
+                }
+                for row in try database.query("""
+                    SELECT p.upload_id, p.relative_path FROM backup_publications p
+                    JOIN backup_manifests m ON m.id = p.manifest_id WHERE m.device_id = ?
+                    """, [.text(id)]) {
+                    if let path = row["relative_path"]?.string,
+                       let moved = DeviceRename.moved(path, from: from, to: folder) {
+                        try database.execute("UPDATE backup_publications SET relative_path = ? WHERE upload_id = ?",
+                                             [.text(moved), .text(row["upload_id"]!.string!)])
+                    }
+                }
             }
             try setSetting(journal, nil)
         }
@@ -554,7 +589,7 @@ public actor Catalog {
         try database.execute("UPDATE devices SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
                              [.text(Timestamp.string()), .text(deviceID)])
         let changed = database.changes > 0
-        if changed { log("device_revoked", device: deviceID) }
+        if changed { try removeBackupWake(principal: deviceID); log("device_revoked", device: deviceID) }
         return changed
     }
 
@@ -644,6 +679,10 @@ public actor Catalog {
                 try database.execute(
                     "UPDATE assets SET state = ?, message = NULL, imported_at = NULL, updated_at = ?, generation = generation + 1 WHERE id = ?",
                     [.text(initialState.rawValue), .text(now), .text(assetID)])
+                try database.execute("""
+                    UPDATE jobs SET status = 'cancelled', generation = (SELECT generation FROM assets WHERE id = ?),
+                        fence = fence + 1, lease_owner = NULL, lease_expires_at = NULL WHERE asset_id = ?
+                    """, [.text(assetID), .text(assetID)])
             }
             return existing.isEmpty ? .created : changed ? .changed : .unchanged
         }
@@ -677,6 +716,7 @@ public actor Catalog {
             FROM made_copies m
             WHERE m.sha256 = ? AND NOT EXISTS (SELECT 1 FROM resources r WHERE r.sha256 = m.sha256)
               AND NOT EXISTS (SELECT 1 FROM resource_history h WHERE h.sha256 = m.sha256)
+              AND NOT EXISTS (SELECT 1 FROM backup_objects o WHERE o.sha256 = m.sha256)
             """, [.text(sha256)]).first, let assetID = row["asset_id"]?.string else { return nil }
         return (assetID, row["name"]?.string)
     }
@@ -696,12 +736,21 @@ public actor Catalog {
             guard let sha256 = row["sha256"]?.string, let asset = row["asset_id"]?.string else { continue }
             found[sha256] = (asset, Role(rawValue: row["role"]?.string ?? "") ?? .other, true)
         }
+        for row in try database.query("""
+            SELECT o.sha256, m.asset_id, o.role FROM backup_objects o
+            JOIN backup_manifests m ON m.id = o.manifest_id
+            WHERE o.sha256 IN (\(marks)) AND o.stored_path IS NOT NULL AND o.verified_at IS NOT NULL
+            """, values) {
+            guard let hash = row["sha256"]?.string, let asset = row["asset_id"]?.string,
+                  let text = row["role"]?.string, let role = Role(rawValue: text) else { continue }
+            found[hash] = (asset, role, true)
+        }
         var originals: [String: (verified: Bool, bytes: Int)] = [:]
         return try found.sorted { $0.key < $1.key }.map { sha256, match in
             if originals[match.assetID] == nil {
                 let resources = try resources(match.assetID)
                 originals[match.assetID] = (!resources.isEmpty && resources.allSatisfy { $0.state == .verified },
-                                            resources.reduce(0) { $0 + $1.size })
+                                            Int(try StorageBytes.sum(resources.map(\.size))))
             }
             let summary = originals[match.assetID]!
             return .init(sha256: sha256, assetID: match.assetID, role: match.role, isOriginal: match.isOriginal,
@@ -849,15 +898,19 @@ public actor Catalog {
     func setTrashed(_ assetID: String, generation: Int, paths: [Role: String], at date: String?, state: ServerAPI.AssetState) throws {
         try database.transaction {
             guard let asset = try asset(assetID), asset.generation == generation, !asset.purging,
-                  date == nil || !asset.permanent else {
+                  state != .trashed || [.stored, .receiving, .trashed].contains(asset.state) else {
                 throw Trash.Failure(description: "The asset changed during its trash mutation; its journal was kept.")
             }
+            let retainedTrash = state == .trashed && asset.permanent
+            let effectiveDate = retainedTrash ? nil : date
             for (role, path) in paths {
                 try database.execute("UPDATE resources SET stored_path = ? WHERE asset_id = ? AND role = ?",
                                      [.text(path), .text(assetID), .text(role.rawValue)])
             }
-            try database.execute("UPDATE assets SET state = ?, message = NULL, trashed_at = ?, updated_at = ? WHERE id = ?",
-                                 [.text(state.rawValue), date.sqlValue, .text(Timestamp.string()), .text(assetID)])
+            try database.execute("UPDATE assets SET state = ?, message = ?, trashed_at = ?, updated_at = ? WHERE id = ?",
+                                 [.text(state.rawValue),
+                                  retainedTrash ? .text("Retained by a permanent request; this original will not expire.") : .null,
+                                  effectiveDate.sqlValue, .text(Timestamp.string()), .text(assetID)])
             try setSetting(Trash.journal(assetID), nil)
         }
         log(date == nil ? "asset_restored" : "asset_trashed", asset: assetID)
@@ -881,7 +934,7 @@ public actor Catalog {
     func trashTotals() throws -> (count: Int, bytes: Int64) {
         let originals = try storedOriginals().filter { Trash.restored($0.path) != nil }
         let ids = try database.query("SELECT id FROM assets WHERE state = 'trashed'").compactMap { $0["id"]?.string }
-        return (Set(ids + originals.map(\.assetID)).count, originals.reduce(0) { $0 + Int64($1.size) })
+        return (Set(ids + originals.map(\.assetID)).count, try StorageBytes.sum(originals.map(\.size)))
     }
 
     /// Forgets an asset whose trash time is up (its files are already deleted).
@@ -942,7 +995,9 @@ public actor Catalog {
     }
 
     func markResource(_ assetID: String, role: Role, state: ServerAPI.ResourceState, storedPath: String? = nil,
-                      immichAssetID: String? = nil, expected: ResourceRecord? = nil, assetGeneration: Int? = nil) throws {
+                      immichAssetID: String? = nil, expected: ResourceRecord? = nil, assetGeneration: Int? = nil,
+                      job: Job? = nil) throws {
+        if let job, try !legacyJobCurrent(job) { throw CancellationError() }
         let verified = state == .verified ? Timestamp.string() : nil
         var predicate = "asset_id = ? AND role = ?"
         var values: [SQLValue] = [
@@ -982,15 +1037,17 @@ public actor Catalog {
         log("resource_\(state.rawValue)", asset: assetID, detail: role.rawValue)
     }
 
-    func setState(_ assetID: String, _ state: ServerAPI.AssetState, message: String? = nil) throws {
+    func setState(_ assetID: String, _ state: ServerAPI.AssetState, message: String? = nil, job: Job? = nil) throws {
+        if let job, try !legacyJobCurrent(job) { throw CancellationError() }
         try database.execute("UPDATE assets SET state = ?, message = ?, updated_at = ? WHERE id = ?",
                              [.text(state.rawValue), message.sqlValue, .text(Timestamp.string()), .text(assetID)])
         log("asset_\(state.rawValue)", asset: assetID, detail: message)
     }
 
     func storeCompact(_ assetID: String, _ files: [CompactRecord], deviceCompresses: [Role],
-                      state: ServerAPI.AssetState, message: String?) throws {
+                      state: ServerAPI.AssetState, message: String?, job: Job? = nil) throws {
         try database.transaction {
+            if let job, try !legacyJobCurrent(job) { throw CancellationError() }
             try database.execute("DELETE FROM compact WHERE asset_id = ?", [.text(assetID)])
             for file in files {
                 try database.execute("INSERT INTO compact (asset_id, role, filename, size, sha256, path) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1029,7 +1086,8 @@ public actor Catalog {
     // MARK: Connector copies
 
     func setCopyState(_ assetID: String, connector: String, state: String, reference: String? = nil,
-                      message: String? = nil) throws {
+                      message: String? = nil, job: Job? = nil) throws {
+        if let job, try !legacyJobCurrent(job) { throw CancellationError() }
         try database.execute(
             """
             INSERT INTO connector_copies (asset_id, connector, state, reference, message, updated_at) VALUES (?, ?, ?, ?, ?, ?)
@@ -1060,6 +1118,10 @@ public actor Catalog {
             default: counts.pending += n
             }
         }
+        let versioned = try versionedCopyCounts(connector: connector)
+        counts.copied += versioned.copied
+        counts.pending += versioned.pending
+        counts.failed += versioned.failed
         return counts
     }
 
@@ -1077,6 +1139,10 @@ public actor Catalog {
 
     /// Drops queued jobs of a type (a connector being removed), and their pending copies.
     func cancelJobs(prefix type: String) throws {
+        try database.execute("""
+            UPDATE jobs SET status = 'cancelled', fence = fence + 1, lease_owner = NULL, lease_expires_at = NULL
+            WHERE type = ? AND status = 'leased'
+            """, [.text(type)])
         try database.execute("DELETE FROM jobs WHERE type = ? AND status IN ('queued', 'retry_wait')", [.text(type)])
         let connector = String(type.dropFirst(ConnectorHub.jobPrefix.count))
         try database.execute("DELETE FROM connector_copies WHERE connector = ? AND state IN ('queued', 'copying')",
@@ -1085,7 +1151,8 @@ public actor Catalog {
 
     // MARK: Jobs
 
-    func enqueue(_ type: String, assetID: String) throws {
+    func enqueue(_ type: String, assetID: String, job: Job? = nil) throws {
+        if let job, try !legacyJobCurrent(job) { throw CancellationError() }
         let now = Timestamp.string()
         try database.execute(
             """
@@ -1099,57 +1166,105 @@ public actor Catalog {
 
     /// Claims the oldest ready job of one lane: connector copies (`connectors`) or everything else,
     /// so a long backlog of copies never delays compact copies.
-    func claim(owner: String, lease: TimeInterval, connectors: Bool = false) throws -> Job? {
+    func claim(owner: String, lease: TimeInterval, connectors: Bool = false, lane: String? = nil) throws -> Job? {
         let now = Date()
+        let schedulingLane = "legacy-" + (connectors ? "connector" : lane ?? "all")
+        #if os(macOS)
+        let photoCondition = "a.kind = 'photo'"
+        #else
+        let photoCondition = "a.kind != 'video'"
+        #endif
         return try database.transaction {
             try database.execute(
                 "UPDATE jobs SET status = 'queued', lease_owner = NULL WHERE status = 'leased' AND lease_expires_at <= ?",
                 [.text(Timestamp.string(now))])
             guard let row = try database.query(
                 """
-                SELECT id, type, asset_id, attempts FROM jobs
-                WHERE status IN ('queued', 'retry_wait') AND available_at <= ?
-                  AND (substr(type, 1, length(?)) = ?) = ?
-                ORDER BY id LIMIT 1
+                SELECT j.id, j.type, j.asset_id, j.attempts, j.fence, a.generation AS generation,
+                    COALESCE(a.device_id, 'imported') AS principal FROM jobs j
+                JOIN assets a ON a.id = j.asset_id
+                WHERE j.status IN ('queued', 'retry_wait') AND j.available_at <= ?
+                  AND (substr(j.type, 1, length(?)) = ?) = ?
+                  AND (? IS NULL OR (CASE WHEN \(photoCondition) THEN 'photo' ELSE 'video' END) = ?)
+                ORDER BY COALESCE((SELECT s.last_claim FROM backup_scheduler s
+                    WHERE s.principal = COALESCE(a.device_id, 'imported') AND s.lane = ?), 0), j.id LIMIT 1
                 """, [.text(Timestamp.string(now)), .text(ConnectorHub.jobPrefix), .text(ConnectorHub.jobPrefix),
-                      .integer(connectors ? 1 : 0)]).first, let id = row["id"]?.int else { return nil }
+                      .integer(connectors ? 1 : 0), lane.sqlValue, lane.sqlValue, .text(schedulingLane)]).first, let id = row["id"]?.int else { return nil }
+            try database.execute("""
+                INSERT INTO backup_scheduler(principal, lane, last_claim)
+                VALUES (?, ?, (SELECT COALESCE(MAX(last_claim), 0) + 1 FROM backup_scheduler))
+                ON CONFLICT(principal, lane) DO UPDATE SET last_claim = excluded.last_claim
+                """, [.text(row["principal"]!.string!), .text(schedulingLane)])
+            let fence = Int64(row["fence"]!.int! + 1), generation = Int64(row["generation"]!.int!)
             try database.execute(
-                "UPDATE jobs SET status = 'leased', lease_owner = ?, lease_expires_at = ?, attempts = attempts + 1 WHERE id = ?",
-                [.text(owner), .text(Timestamp.string(now.addingTimeInterval(lease))), .integer(Int64(id))])
+                """
+                UPDATE jobs SET status = 'leased', lease_owner = ?, lease_expires_at = ?, attempts = attempts + 1,
+                    fence = ?, generation = ? WHERE id = ?
+                """,
+                [.text(owner), .text(Timestamp.string(now.addingTimeInterval(lease))), .integer(fence), .integer(generation), .integer(Int64(id))])
             return Job(id: id, type: row["type"]?.string ?? "", assetID: row["asset_id"]?.string ?? "",
-                       attempts: (row["attempts"]?.int ?? 0) + 1)
+                       attempts: (row["attempts"]?.int ?? 0) + 1, owner: owner, fence: fence, generation: generation)
         }
     }
 
     func finish(_ job: Job) throws {
-        try database.execute("UPDATE jobs SET status = 'succeeded', lease_owner = NULL, lease_expires_at = NULL WHERE id = ?",
-                             [.integer(Int64(job.id))])
+        guard try legacyJobCurrent(job) else { throw CancellationError() }
+        try database.execute("""
+            UPDATE jobs SET status = 'succeeded', lease_owner = NULL, lease_expires_at = NULL
+            WHERE id = ? AND lease_owner = ? AND fence = ? AND generation = ? AND status = 'leased'
+            """, [.integer(Int64(job.id)), .text(job.owner), .integer(job.fence), .integer(job.generation)])
     }
 
     /// Schedules a retry with backoff, or gives up after `maximumAttempts`. Returns true if retrying.
     func fail(_ job: Job, error: String) throws -> Bool {
+        guard try legacyJobCurrent(job) else { throw CancellationError() }
         let retry = job.attempts < Self.maximumAttempts
         let backoff = Double(30 << min(job.attempts, 6))
+        if !retry, !job.type.hasPrefix(ConnectorHub.jobPrefix) {
+            try setState(job.assetID, .failed, message: "Gave up after repeated errors: \(error)", job: job)
+        }
         try database.execute(
-            "UPDATE jobs SET status = ?, last_error = ?, available_at = ?, lease_owner = NULL, lease_expires_at = NULL WHERE id = ?",
+            """
+            UPDATE jobs SET status = ?, last_error = ?, available_at = ?, lease_owner = NULL, lease_expires_at = NULL
+            WHERE id = ? AND lease_owner = ? AND fence = ? AND generation = ? AND status = 'leased'
+            """,
             [.text(retry ? "retry_wait" : "failed"), .text(error), .text(Timestamp.string(Date().addingTimeInterval(backoff))),
-             .integer(Int64(job.id))])
+             .integer(Int64(job.id)), .text(job.owner), .integer(job.fence), .integer(job.generation)])
         log(retry ? "job_retry" : "job_failed", asset: job.assetID, detail: "\(job.type): \(error)")
         return retry
     }
 
     /// Waits before trying a job again without counting the attempt (the destination is full or offline).
     func postpone(_ job: Job, by delay: TimeInterval, reason: String) throws {
+        guard try legacyJobCurrent(job) else { throw CancellationError() }
         try database.execute(
             """
             UPDATE jobs SET status = 'retry_wait', attempts = max(attempts - 1, 0), last_error = ?, available_at = ?,
-                lease_owner = NULL, lease_expires_at = NULL WHERE id = ?
-            """, [.text(reason), .text(Timestamp.string(Date().addingTimeInterval(delay))), .integer(Int64(job.id))])
+                lease_owner = NULL, lease_expires_at = NULL
+            WHERE id = ? AND lease_owner = ? AND fence = ? AND generation = ? AND status = 'leased'
+            """, [.text(reason), .text(Timestamp.string(Date().addingTimeInterval(delay))), .integer(Int64(job.id)),
+                   .text(job.owner), .integer(job.fence), .integer(job.generation)])
     }
 
     /// At startup nothing can hold a lease, so leased jobs from a previous run are queued again.
     func releaseLeases() throws {
-        try database.execute("UPDATE jobs SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL WHERE status = 'leased'")
+        try database.execute("UPDATE jobs SET status = 'queued', fence = fence + 1, lease_owner = NULL, lease_expires_at = NULL WHERE status = 'leased'")
+    }
+
+    func legacyJobCurrent(_ job: Job, now: Date = Date()) throws -> Bool {
+        !(try database.query("""
+            SELECT j.id FROM jobs j JOIN assets a ON a.id = j.asset_id WHERE j.id = ? AND j.status = 'leased'
+              AND j.lease_owner = ? AND j.fence = ? AND j.generation = ? AND a.generation = j.generation
+              AND j.lease_expires_at > ?
+            """, [.integer(Int64(job.id)), .text(job.owner), .integer(job.fence), .integer(job.generation), .text(Timestamp.string(now))]).isEmpty)
+    }
+
+    func heartbeatLegacyJob(_ job: Job, lease: TimeInterval = 90) throws -> Bool {
+        guard try legacyJobCurrent(job) else { return false }
+        try database.execute("UPDATE jobs SET lease_expires_at = ? WHERE id = ? AND lease_owner = ? AND fence = ? AND generation = ?",
+            [.text(Timestamp.string(Date().addingTimeInterval(lease))), .integer(Int64(job.id)),
+             .text(job.owner), .integer(job.fence), .integer(job.generation)])
+        return database.changes == 1
     }
 
     func jobStatus(_ type: String, assetID: String) throws -> String? {

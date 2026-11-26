@@ -379,7 +379,6 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
                 thumbnails.invalidate(changed)
                 for case let cell as GridCell in collectionView.visibleCells {
                     guard let id = cell.item, changed.contains(id) else { continue }
-                    cell.invalidateImage()
                     cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
                 }
                 watchContent()
@@ -617,16 +616,19 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         guard let cell, let indexPath, let position = position(indexPath) else { return }
         RenderProbe.count("grid.configs")
         let id = data.cells[position].id
-        cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels)
+        let state = library.state.cell(id) ?? data.cells[position]
+        let keepImage = cell.item.map { state.original == $0 } ?? false
+        cell.show(id, info: library.info(id), loader: thumbnails, pixels: pixels, keepImage: keepImage)
         update(cell, position: position)
     }
 
     private func update(_ cell: GridCell, position: Int) {
-        RenderProbe.count("grid.configs")
         let initial = data.cells[position]
         let state = library.state.cell(initial.id) ?? initial
-        cell.update(state: state, selecting: selection.active, selected: selection.active && selection.ids.contains(initial.id),
-                    serverName: input.serverName)
+        let selecting = selection.active, selected = selecting && selection.ids.contains(initial.id)
+        guard !cell.isConfigured(for: state, selecting: selecting, selected: selected, serverName: input.serverName) else { return }
+        RenderProbe.count("grid.configs")
+        cell.update(state: state, selecting: selecting, selected: selected, serverName: input.serverName)
     }
 
     func collectionView(_ collectionView: UICollectionView, viewForSupplementaryElementOfKind kind: String,
@@ -697,7 +699,14 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
 
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
         // A cell made ahead of time may show an older badge or selection.
-        if let cell = cell as? GridCell, let position = position(indexPath) { update(cell, position: position) }
+        if let cell = cell as? GridCell, let position = position(indexPath) {
+            cell.imageWillDisplay()
+            update(cell, position: position)
+        }
+    }
+
+    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        (cell as? GridCell)?.imageDidEndDisplaying()
     }
 
     // MARK: Prefetching

@@ -177,8 +177,10 @@ struct LibraryView: View, Equatable {
 
     /// The grid's UIKit cells are also the viewer's zoom sources.
     private var grid: some View {
-        GridView(library: controller.library, selection: selection, counts: counts, store: store, input: gridInput,
-                 actions: gridActions)
+        LibraryAggregate {
+            GridView(library: controller.library, selection: selection, counts: counts, store: store, input: gridInput,
+                     actions: gridActions)
+        }
             .ignoresSafeArea()
             .onAppear { Self.recordLaunch() }
     }
@@ -212,8 +214,11 @@ struct LibraryView: View, Equatable {
         let notice = Self.noticeKey(problem: settings.connectionProblem, limited: controller.access == .limited,
                                     paired: settings.isPaired)
         let empty = !store.isEmpty ? "" : controller.library.count == 0 ? "none"
-            : filter == .notBackedUp && media == .all ? "done.\(controller.serverName)" : "nothing.\(filter.rawValue)"
-        return [notice, empty].filter { !$0.isEmpty }.joined(separator: " ")
+            : filter == .notBackedUp && media == .all
+                ? "done.\(controller.serverName).\(controller.library.state.count(.needsAttention))" : "nothing.\(filter.rawValue)"
+        return [notice, empty, controller.job.queueProblem ?? "",
+                controller.showsRemoteNotice ? "remote" : ""]
+            .filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     static func noticeKey(problem: String?, limited: Bool, paired: Bool) -> String {
@@ -228,6 +233,20 @@ struct LibraryView: View, Equatable {
     }
 
     @ViewBuilder private var notice: some View {
+        if let problem = controller.job.queueProblem {
+            InlineNotice(tone: .warning, title: "Backup queue needs attention", message: problem) {
+                Button("Try Again") { Task { await controller.job.refreshQueue(); await controller.refreshGrid() } }
+                    .accessibilityIdentifier("queue.retry")
+            }
+            .padding(.horizontal)
+        }
+        if controller.showsRemoteNotice {
+            InlineNotice(tone: .info, title: "Compact copies are processing on your server",
+                         message: "Their originals are already backed up. Server work continues without keeping this screen awake. "
+                            + "Open Homespun later to discover and save ready copies.")
+                .padding(.horizontal)
+                .accessibilityIdentifier("queue.remote")
+        }
         if let problem = settings.connectionProblem {
             InlineNotice(tone: .error, title: "Connection needs attention", message: problem) {
                 Button("Check Server") { sheet = .identity }.font(.subheadline.weight(.semibold))
@@ -254,12 +273,22 @@ struct LibraryView: View, Equatable {
             ContentUnavailableView("No photos or videos", systemImage: "photo.on.rectangle",
                                    description: Text("Photos and videos you take appear here."))
         } else if filter == .notBackedUp, media == .all {
-            ContentUnavailableView {
-                Label("Everything's backed up", systemImage: "checkmark.circle.fill")
-            } description: {
-                Text("All your photos and videos have their originals on \(controller.serverName).")
-            } actions: {
-                Button("Show All Items") { filter = .all }
+            if controller.library.state.count(.needsAttention) > 0 {
+                ContentUnavailableView {
+                    Label("Some backups need attention", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text("Earlier mappings aren't current-server verification. Review them before removing any originals.")
+                } actions: {
+                    Button("Show Needs Attention") { filter = .needsAttention }
+                }
+            } else {
+                ContentUnavailableView {
+                    Label("Everything's backed up", systemImage: "checkmark.circle.fill")
+                } description: {
+                    Text("All your photos and videos have their originals on \(controller.serverName).")
+                } actions: {
+                    Button("Show All Items") { filter = .all }
+                }
             }
         } else {
             ContentUnavailableView {
@@ -287,6 +316,8 @@ struct LibraryView: View, Equatable {
         }
         guard settings.isPaired else { return demo + "\(state.cells.count.formatted()) items · not connected" }
         if case .unreachable = settings.serverStatus { return demo + "Can't reach \(controller.serverName)" }
+        let attention = state.count(.needsAttention)
+        if attention > 0 { return demo + "\(attention.formatted()) need attention · \(controller.serverName)" }
         let open = state.count(.notBackedUp)
         return demo + (open == 0 ? "All backed up · \(controller.serverName)"
             : "\(open.formatted()) not backed up · \(controller.serverName)")

@@ -4,6 +4,7 @@ import SwiftUI
 
 /// What Details shows about an item, from PhotoKit, the ledger and the server.
 struct ItemDetails: Equatable {
+    var failure: String?
     /// The item shown: the compact copy when there is one.
     var shown = MediaFacts()
     var shownMotion: Int?
@@ -17,7 +18,7 @@ struct ItemDetails: Equatable {
     /// The server left Live Photo motion for this iPhone to compress (a Linux server).
     var motionOnPhone = false
 
-    @MainActor static func load(model: AppModel, cell: LibraryState.Cell) async -> ItemDetails {
+    @MainActor static func load(model: AppModel, cell: LibraryState.Cell) async throws -> ItemDetails {
         var details = ItemDetails()
         let photos = model.settings.photos
         if let asset = photos.item(cell.id) {
@@ -27,7 +28,7 @@ struct ItemDetails: Equatable {
             details.isLive = asset.itemKind == .livePhoto
         }
         guard let original = cell.original else { return details }
-        let entry = await model.job.ledger.entry(for: original)
+        let entry = try await model.job.ledger.entry(for: original)
         details.entry = entry
         details.backedUpAt = entry?.savedAt
         if let asset = photos.item(original) {
@@ -133,7 +134,10 @@ struct ItemDetailsSheet: View {
         .presentationDetents([.medium, .large])
         .task(id: cell.id) {
             decisionProblem = nil
-            await loader.load(id: cell.id) { await ItemDetails.load(model: model, cell: cell) }
+            await loader.load(id: cell.id) {
+                do { return try await ItemDetails.load(model: model, cell: cell) }
+                catch { model.job.showQueueProblem(error); return ItemDetails(failure: error.localizedDescription) }
+            }
         }
     }
 
@@ -144,7 +148,9 @@ struct ItemDetailsSheet: View {
             Section("Where it is") { whereRows }
                 .listRowBackground(Theme.card)
             Section {
-                if let details { sizeRows(details) } else { ProgressView().frame(maxWidth: .infinity) }
+                if let failure = details?.failure {
+                    InlineNotice(tone: .error, title: "Backup records couldn't be read", message: failure)
+                } else if let details { sizeRows(details) } else { ProgressView().frame(maxWidth: .infinity) }
             } header: {
                 Text("Sizes")
             } footer: {
@@ -161,10 +167,15 @@ struct ItemDetailsSheet: View {
         case .originalOnPhone, .backedUp:
             row("checkmark.shield", immich ? "Original in Immich (checked)" : "Original on \(server)", backedUpLine)
             row("photo.on.rectangle", "Compact copy in Photos", "Homespun album · same date, place, favorite")
+            if details?.entry?.revalidatedCopy == true {
+                row("checkmark.shield", "Existing copy revalidated",
+                    "An equivalent original was checked on this server. Where this copy was first made is unknown.")
+            }
             if cell.badge == .originalOnPhone {
                 row("iphone", "Original still on this iPhone", "Free Up Space removes it here", tint: Theme.amber)
             } else {
-                row("iphone.slash", "Not on this iPhone", "Freed up. The compact copy stays in Photos.")
+                row("iphone.slash", "Not on this iPhone", details?.entry?.revalidatedCopy == true
+                    ? "Only the compact copy is on this iPhone." : "Freed up. The compact copy stays in Photos.")
             }
         case .compactCopy:
             row("square.on.square", "A Homespun compact copy", "This iPhone has no record of where its original is.")
@@ -175,8 +186,23 @@ struct ItemDetailsSheet: View {
         case .copyLater:
             row("checkmark.shield", "Original on \(server)", "Backed up · checked (SHA-256)")
             row("clock", "Compact copy later", Badge.compactLater(cell.compactAfter).capitalizedFirst
-                + ". Delete it here before then and it never comes back; the server keeps its original 30 days.")
+                + ". The original remains retained; this version doesn't automatically expire deferred server originals.")
             row("iphone", "Original still on this iPhone", "Free Up Space can remove it once the compact copy is in Photos.")
+        case .processing:
+            row("checkmark.shield", "Original on \(server)", "Its verified backup is independent of compact-copy processing.")
+            switch job {
+            case .working(let step)?:
+                row("iphone", "Saving the compact copy to this iPhone", step)
+            case .processing?:
+                row("gearshape.2", "Processing on your server", "The iPhone doesn't need to stay open for server processing. Open it later to discover and save results.")
+            default:
+                row("photo.on.rectangle", "Compact copy in progress",
+                    "The compact copy will appear here after its verified Photos record is published.")
+            }
+        case .recovery:
+            row("questionmark.folder", "Original server needs recovery",
+                cell.serverName.map { "This mapping belongs to \($0), not necessarily the currently paired server. Reconnect it before restoring or removing anything." }
+                    ?? "The historical server or complete resource proof is unknown. The mapping has been preserved; no duplicate is made automatically.")
         case .none, .kept, .failed:
             row("iphone", "Only on this iPhone", model.settings.isPaired
                 ? "Not backed up yet. Back Up keeps the original on \(server)."

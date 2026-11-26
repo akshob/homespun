@@ -326,7 +326,7 @@ final class DemoLibrary: ItemCatalog, Sendable {
     // MARK: Changes
 
     /// Saves a compact copy of `original` from these downloaded files (moved into the library).
-    func addCompactCopy(of original: String, files: [ServerAPI.ResourceRole: URL]) async throws -> String {
+    func addCompactCopy(of original: String, files: [ServerAPI.ResourceRole: URL], move: Bool = true) async throws -> String {
         guard !isRetired else { throw CancellationError() }
         let number = state.withLock { state -> Int in
             state.made += 1
@@ -339,7 +339,8 @@ final class DemoLibrary: ItemCatalog, Sendable {
         for (role, url) in files {
             let destination = place.appendingPathComponent(url.lastPathComponent)
             try? FileManager.default.removeItem(at: destination)
-            try FileManager.default.moveItem(at: url, to: destination)
+            if move { try FileManager.default.moveItem(at: url, to: destination) }
+            else { try FileManager.default.copyItem(at: url, to: destination) }
             names[role.rawValue] = "copies/\(number)/\(url.lastPathComponent)"
         }
         let main = place.appendingPathComponent(((files[.video] ?? files[.photo])?.lastPathComponent) ?? "")
@@ -409,13 +410,16 @@ final class DemoLibrary: ItemCatalog, Sendable {
         var hashed: [String: CopyFinder.Hashed] = [:]
         for id in ids {
             guard let item = demoItem(id) else { continue }
-            var entry = CopyFinder.Hashed(hashes: [:], bytes: 0)
-            for (role, url) in item.files where CopyMatching.roles.contains(role) {
-                guard let digests = try? Fingerprint.digests(of: url) else { continue }
+            guard let kind = item.itemKind, let generation = try? sourceGeneration(id) else { continue }
+            var entry = CopyFinder.Hashed(hashes: [:], bytes: 0, kind: kind.api, generation: generation)
+            for (role, url) in item.files {
+                guard let digests = try? Fingerprint.digests(of: url) else { break }
                 entry.hashes[role] = digests.sha256
                 entry.bytes += digests.size
+                entry.resources.append(.init(role: role, filename: url.lastPathComponent, size: digests.size, sha256: digests.sha256))
             }
-            if !entry.hashes.isEmpty { hashed[id] = entry }
+            if !entry.hashes.isEmpty, entry.resources.count == item.files.count,
+               (try? sourceGeneration(id)) == generation { hashed[id] = entry }
         }
         return hashed
     }

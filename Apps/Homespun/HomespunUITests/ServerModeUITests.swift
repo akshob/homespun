@@ -201,10 +201,12 @@ final class ServerModeUITests: XCTestCase {
         app.openTab("Library")
 
         // Nothing selected, yet the rest gets compact copies.
-        let busy = app.gridItems().matching(NSPredicate(format: "value IN {'Waiting', 'Backing up'}"))
+        let busy = app.pendingBackupItems()
         let progress = app.descendants(matching: .any)["job.progress"]
         let deadline = Date().addingTimeInterval(900)
         repeat { sleep(2) } while (busy.count > 0 || progress.exists) && Date() < deadline
+        XCTAssertEqual(busy.count, 0, "automatic backups are still pending")
+        XCTAssertFalse(progress.exists, "local backup work is still running")
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Automatic"
         screenshot.lifetime = .keepAlways

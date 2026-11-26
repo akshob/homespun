@@ -1,8 +1,10 @@
 # Homespun
 
-### Optional wake relay (implementation preview)
+### Optional wake relay (dormant; not part of 1.1.0)
 
-`homespun-notify` is separate, opt-in infrastructure for content-free APNs background hints.
+Homespun 1.1.0 ships without it: the app shows no Background Wakeups setting, never registers for
+remote notifications and sends no push token. `homespun-notify` remains unreleased infrastructure
+for content-free APNs background hints.
 It is not started by `homespun-server`, has not been deployed as part of this change, and does
 not make iOS background execution or delivery guaranteed. The result cursor remains authoritative.
 Deployment and any hosting spend require a separate owner decision.
@@ -77,6 +79,9 @@ the pair as a Live Photo.
 - Outputs are written to a temporary name, verified (dimensions, audio tracks,
   duration within 0.5 s or 1%, full decode), then published. A video that does not
   get smaller keeps the original.
+- Live Photo motion held unchanged still has to decode before its byte-identical copy is
+  published. Cancellation stops its reader/writer and joins the media lanes before removing
+  the unpublished file.
 
 ## Build and test
 
@@ -126,6 +131,11 @@ and favorite and hidden state; edited items are compressed as they currently loo
 first removal it explains what removal means (including iCloud Photos) and shows the compact
 copies to compare with their originals (from the server); "They Look Right" frees them up. Setup
 and the Get Started card open the Library to pick a few items to try.
+For a requested compact copy, once the server retains the original, "Compact copy in progress"
+covers both making the copy on the server and saving it to this iPhone. Details distinguishes those
+steps; the item is not ready to free up until its saved copy is verified.
+Ready items can be reviewed from Free Up while other backups continue. Confirming removal waits
+for local backup work to stop; backups can be paused in Activity.
 
 Videos play in the item viewer, with Play/Pause and a position slider below the picture.
 The viewer zooms over the whole app from the tapped thumbnail, without changing the tabs or
@@ -165,11 +175,12 @@ launch if the Keychain is unavailable. The demo uses only drawn and bundled medi
   - **Compact copies later**: originals go home right away, but compact copies are made only
     once an item is older than a cutoff you set with a slider (Right Away, 1 Week, 1 Month
     (default), 2 Months, 3 Months), counted from when it was taken or added, whichever is later.
-    Until then the item shows "Backed up" and the server keeps it as `stored`, sending nothing
-    back. Favorites can be kept as they are. Backing up by hand compacts right away.
-  - **Cleaned-up items**: a waiting item you delete on the iPhone (Photos reports the deletion)
-    moves to the server's trash, `<originals>/.trash/<item>/`, and is deleted after 30 days;
-    recovering it on the iPhone puts it back. Anything with a compact copy is never trashed.
+    Until then the item shows "Backed up" and the server retains its complete original, sending no
+    compact copy back. Favorites can be kept as they are. Backing up by hand compacts right away.
+  - **Cleaned-up items**: version 1.1.0 requests permanent retention, including recent Automatic
+    backups. Deleting an item in Photos does not withdraw its server claim or move its original to
+    server trash. Legacy deferred cleanup is not applied to these backups, and no existing permanent
+    request is reclassified as temporary.
 - **Widgets**: what's ready to free up (size and items), the last backup (when, how many), whether
   the server can be reached (by name) and Automatic Mode ("Tonight while charging", "Off"), on the
   Home Screen (small, medium), the Lock Screen (circular, rectangular, inline) and Apple Watch
@@ -445,7 +456,7 @@ If processing fails in files mode, "Try Again" re-registers the item and retries
 using originals the server already holds and has verified; they don't need to be uploaded again.
 
 Originals go in a folder per phone, by capture month: `<originals>/<phone name>/YYYY/MM/`
-(the phone's name when it paired; renaming the phone later keeps the folder). The originals
+(the phone's chosen name; renaming it from the app moves its folder). The originals
 folder is `<data>/originals` unless `install-service --originals DIR` (or `HOMESPUN_ORIGINALS`)
 says otherwise, so the catalog and originals can live apart: for example `--data
 /Volumes/Homespun/.homespun --originals /Volumes/Homespun` on a Mac with a Homespun volume
@@ -454,7 +465,125 @@ server never creates a folder whose parent is missing, so a disk that isn't conn
 silently replaced by a folder on the startup disk; the self-check says so instead. To change
 the folder later, use the app (Server › Originals Folder › Change Folder): the server copies
 every original there, checks each one, holds new backups for a moment while it switches, and
-only then removes the old copies. A move interrupted by a restart picks up where it left off.
+switches the catalog to the new folder. Previous good copies remain pending safe cleanup;
+their old roots are recorded in the catalog. A move interrupted by a restart keeps its plan.
+
+### Versioned foreground backups
+
+The authenticated `/api/v2` API separates original retention, processing, and delivery.
+Capabilities advertise only `foreground_offset`: this is **not native/background resumable
+upload support**. Transfers may stop when the app is closed; opening the app resumes selected
+backups from the server's durable upload offset and fetches compact copies finished while it was
+closed, without selecting the items again. Manual/permanent claims survive cancellation and missing import acknowledgements;
+`compact: false` can still request permanent original retention. Existing ambiguous trash is retained
+after migration, not given a new expiry. Versioned deferred claims are explicit and currently retained
+without automatic expiry; they do not authorize a permanent deletion proof.
+
+Create an idempotent request at `POST /api/v2/backup-requests`, then use its request ID or
+`GET /api/v2/backup-requests?operation_id=<UUID>` after a lost response. Every receipt has a
+per-request monotonic `revision`; the change feed's `sequence` is a separate global cursor.
+An operation lookup returns one receipt, or HTTP 404 if it has not been admitted, never an array.
+Commands use `POST /api/v2/backup-requests/<id>/commands` with the exact expected version.
+Server-side photo and video lanes progress independently within shared codec/storage limits.
+Versioned originals keep their phone/capture-month folders and readable names, with an immutable
+manifest-qualified directory for each complete resource set.
+Legacy managed/imported originals are only reuse candidates: the server freshly copies and hashes
+them into the immutable local version before issuing its retained receipt. Explicit permanent
+consumers also protect matching legacy temporary copies from automatic expiry.
+
+`POST /api/v2/uploads` admits a bounded foreground transfer. `HEAD /api/v2/uploads/<id>` returns
+`Upload-Offset`, `Upload-Length`, and `Upload-Max-Chunk`, without a body. `PATCH` requires the integer
+`Upload-Offset` and `Content-Type: application/offset+octet-stream`; successful durable writes return
+204 and the new offset. A conflicting offset requires HEAD, not blind appending. Complete with
+`POST /api/v2/uploads/<id>/complete`; size, SHA-256, durable publication and catalog commitment precede
+a retained receipt. Failed/unfinished publication keeps a recovery journal. Storage pressure is
+explicit backpressure, never permission to delete originals.
+
+The phone yields its upload slot after four chunks. Further quanta re-admit the same immutable
+transfer intent and query the durable offset again; an execution state from the previous quantum
+is not a new admission. Failed local intent admission releases its working-space reservation.
+
+Use `/api/v2/changes?after=<cursor>&epoch=<historyEpoch>` or `/api/v2/snapshot` to reconcile results.
+Snapshot continuation tokens are opaque, expiring, and bound to the authenticated device.
+Immutable `/api/v2/derivatives/<generation>/resources/<role>` downloads provide exact lengths,
+strong ETags, and single Range/If-Range support. Version-qualified source resources are available at
+`/api/v2/assets/<asset>/versions/<manifest>/resources/<role>?request_id=<request>`; Linux Live Photo
+motion still requires AVFoundation on the phone, never FFmpeg pairing. Delivery acknowledgement IDs
+are client-generated UUIDs posted to `/api/v2/deliveries/<id>/ack`; acknowledgements only account for
+delivery. Fresh `/api/v2/assets/<asset>/versions/<manifest>/verify` accepts `BackupAPI.Version` and
+requires that device's permanent local claim. No endpoint falls back to mutable v1 proof.
+
+With a Linux server the receipt delegates Live Photo motion (`device_compresses: ["paired_video"]`).
+The iPhone re-encodes the retained original motion with AVFoundation (`LivePhotoMotionCompressor`),
+reserving the motion's size four times over for the encode, checks the pair with `PHLivePhoto`,
+and imports it only after the server's retained-original proof; the saved pair is verified before
+any original can be offered for removal. Motion that does not get smaller is kept byte-identical.
+A hard bound on total working space is planned for a later release. Native/background transfers
+remain unavailable.
+
+The retained motion is read through an identity-checked typed hard link, and its encoding partial
+keeps a `.mov` suffix so AVFoundation can reopen it for verification even when the authoritative
+workspace file is an extensionless UUID. Retry cleanup covers both encoding and byte-copy partials.
+
+Immich remains read-only. Its independently scheduled acquisition downloads and checks every
+expected original resource by positive size and SHA-256, using SHA-1/search only to locate it.
+Edited/RAW/auxiliary-resource manifests are rejected explicitly. No upload protocol is advertised
+in Immich mode, and no permanent duplicate original is added to the managed originals root.
+Temporary checked processing inputs are bounded and reclaimed after their worker references end.
+
+Immich capabilities negotiate `external_verification: full_resource_scrub`. Every strengthened
+external proof freshly downloads **all** expected resources again, checks sizes/SHA-256 and live
+association/availability, and returns `retention: external`, never permanent-local retention.
+Version-qualified external original downloads also verify complete requested bytes before serving
+a range. A scrub establishes observed identity/availability, not immunity to a later Immich
+operator change. The phone must negotiate this contract, verify its current complete local
+resources and imported compact, and bound proof age before iOS confirmation; mode alone is not proof.
+
+Cloud Copies includes retained immutable v2 manifests. OneDrive names contain the full manifest,
+role and resource hash; retries deduplicate verified objects and conflicts never overwrite older
+originals. Generation-fenced jobs retry durable transfers under shared connector capacity.
+`GET /api/v2/backup-requests/<id>/copies` returns owner-bound per-connector `ConnectorCounts`;
+the normal connector counts include v1 and v2. Destination changes fence old completions.
+Cloud copies and their status never substitute for local retention or fresh external byte proof.
+
+An optional owner-configured `HOMESPUN_WAKE_RELAY_URL` (HTTPS, default absent) enables a content-free
+wake sender. Not used by Homespun 1.1.0: leave `HOMESPUN_WAKE_RELAY_URL` unset.
+This does not deploy or advertise a functioning relay. After the phone opts in and
+activates its relay route, `POST /api/v2/wake/enrollment` accepts only `WakeRelayAPI.Sender`
+(`route_id`, `generation_id`, canonical 32-byte `token`) for that authenticated device.
+Without an owner endpoint it returns `wake_unavailable` and stores nothing. It returns an ETag
+containing the enrolled generation. `DELETE /api/v2/wake/enrollment` sends that generation as
+`If-Match`; a stale retirement cannot erase a newer route. Unpair/revoke disables the route.
+No APNs token, provider key or client-supplied relay URL is accepted.
+
+The durable outbox coalesces hints, retries the same content-free nonce after lost responses,
+and preserves newer changes for a new nonce. Route/generation/lease fences reject stale completions.
+Acceptance is not device delivery/execution. Sends are throttled to about three per hour per
+consumer; a gone route is retired without touching work or retention. The service joins sends and
+shuts down its HTTPS client explicitly. Authenticated changes/snapshots remain correct without push.
+
+After an **offline, consistent catalog restore**, run `homespun-server resync-history` before
+restarting. It preserves the server ID and originals but advances the history epoch and requires
+client snapshots. Silent database replacement within one epoch is unsupported. Older binaries
+refuse the newer schema; a downgrade must preserve newer files and use a deliberate recovery path.
+
+Unreleased preview catalogs containing descriptor generation zero are unsupported. Requests, lookups
+and result feeds fail closed with `unsupported_preview_history`; neither retries nor `resync-history`
+repair these immutable identities. Preserve the entire old data directory and originals. Only for
+disposable preview/test data, stop the server, choose a new empty `--data` directory with a separate
+originals root, then re-pair and reselect originals that remain available. Never delete the old
+originals to work around this error. No automatic migration or repair command is provided.
+
+Conservative defaults are one photo slot, one video slot, two verification slots, two bounded
+chunk writers, one connector slot, 128 active upload records, a 64 GiB staging reservation limit
+and a 1 GiB free-space floor.
+`HOMESPUN_PHOTO_WORKERS`/`HOMESPUN_VIDEO_WORKERS` allow 1–2 shared slots;
+`HOMESPUN_MAX_STAGING_BYTES` and `HOMESPUN_MIN_FREE_BYTES` configure storage limits.
+FFmpeg/x265 and libvips thread use is bounded; FFmpeg limits individual allocations, not total
+process RSS. FFmpeg output is bounded to twice its source while deciding whether to keep the
+original, and processing reserves space for the input snapshot plus working output. An encoder
+may run for hours while its frame/media-time counter advances; only
+30 minutes without progress triggers the stalled-work watchdog. No energy improvement is claimed.
 
 ### Run on a NAS with Docker
 
@@ -613,7 +742,11 @@ homespun-server import library.jsonl --dry-run   # checks the files, records not
 homespun-server import library.jsonl             # hashes the originals and records them
 ```
 
-It runs beside a running server, and running it again is safe (finished items are skipped).
+Stop the serving process before a mutating import, including in-place linking. Imports require
+exclusive catalog ownership and refuse to race a live service or an unfinished originals move.
+`--dry-run` remains read-only and can run alongside the service.
+
+Running the import again is safe (finished items are skipped).
 By default the originals stay where they are: Homespun reads them, never moves, changes, or
 deletes them, and hashes them again where they are whenever the app checks an item. With
 `--copy`, each is copied into the originals folder under `--folder NAME` (default "Camera
@@ -634,10 +767,25 @@ An original may carry `"sha256"` and `"sha1"` (as recorded when it was fetched, 
 service reports it) to make sure it hasn't changed.
 
 Then, in the app, open Server › Existing Library › Find Compact Copies. It hashes the photos and
-videos Homespun doesn't know yet and asks the server about them (`POST /api/v1/copies/lookup`;
-only hashes leave the phone). Copies it finds count as backed up and join the Homespun album;
-an original still on the phone whose copy is found becomes ready to free up. It also restores
-what Homespun knew after reinstalling the app or moving to a new iPhone.
+videos Homespun doesn't know yet. Hash lookup (`POST /api/v1/copies/lookup`) supplies hints only.
+In 1.1, `POST /api/v2/copies/resolve` resolves the complete compact resource set to one exact
+original manifest; `/copies/adopt` admits an idempotent, device-owned permanent request using
+the normal immutable-original adoption path. The server freshly copies and checks legacy
+originals when needed; in-place imports remain untouched. Existing immutable objects are reused.
+Only hashes, file roles and sizes leave the phone, not media or its local file names.
+After a fresh versioned server byte proof and another full local compact check, Copy Finder
+writes the canonical verified mapping and adds the copy to the Homespun album, without importing
+or uploading it again. An original here becomes ready only if **all** its resources match too;
+Free Up Space still performs its separate fresh proof and iOS confirmation.
+
+A Live Photo whose motion the iPhone compressed (Linux server) cannot yet be re-linked by
+Find Compact Copies; its original stays retained and nothing is removed.
+
+This establishes an equivalent backup on the **current authenticated server**, not where an
+old copy was first made. Unknown historical provenance remains unknown. Partial or ambiguous
+resource sets, changed originals, older servers and Immich-only sources stay untrusted and show
+recovery guidance; keep the items, reconnect the original archive and run again after updating
+the server if necessary. Neither a legacy match nor a remembered URL authorizes deletion.
 
 ## Analytics and problem reports
 

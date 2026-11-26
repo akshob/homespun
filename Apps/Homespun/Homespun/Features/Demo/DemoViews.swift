@@ -103,7 +103,9 @@ extension View {
     }
 
     /// In the demo, a Demo mark in the toolbar that leaves it (setup's pages).
-    func demoMarker(_ active: Bool) -> some View { modifier(DemoMarker(active: active)) }
+    func demoMarker(_ active: Bool, leave: @escaping () -> Void) -> some View {
+        modifier(DemoMarker(active: active, leave: leave))
+    }
 }
 
 /// The Server tab's top card in the demo: what it is, and the way out.
@@ -132,7 +134,7 @@ struct DemoCard: View {
 
 private struct DemoMarker: ViewModifier {
     let active: Bool
-    @State private var confirming = false
+    let leave: () -> Void
 
     func body(content: Content) -> some View {
         if active {
@@ -141,7 +143,7 @@ private struct DemoMarker: ViewModifier {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
                             Button("Leave the Demo", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
-                                confirming = true
+                                leave()
                             }
                             .accessibilityIdentifier("demo.leave")
                         } label: {
@@ -152,7 +154,6 @@ private struct DemoMarker: ViewModifier {
                         .accessibilityIdentifier("demo.menu")
                     }
                 }
-                .leaveDemoAlert(isPresented: $confirming)
         } else {
             content
         }

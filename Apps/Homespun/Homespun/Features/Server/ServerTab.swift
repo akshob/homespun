@@ -10,13 +10,14 @@ struct ServerTab: View {
 
     enum Route: Hashable {
         case check, originals, existingLibrary, immich, automatic, connectors, compactCopies, devices, addDevice
-        case notifications, premium, help, analytics, deviceName
+        case notifications, wake, premium, help, analytics, deviceName
 
         var isAvailable: Bool {
             switch self {
-            case .automatic, .notifications: ReleaseFeatures.automaticMode
+            case .automatic: ReleaseFeatures.automaticMode
             case .connectors: ReleaseFeatures.cloudCopies
             case .premium: ReleaseFeatures.premium
+            case .wake: WakeSystem.relayConfigured
             default: true
             }
         }
@@ -285,12 +286,18 @@ struct ServerTab: View {
                 .accessibilityIdentifier("settings.deviceName")
                 .sidebarRow(Route.deviceName)
             }
-            if ReleaseFeatures.automaticMode {
-                NavigationLink(value: Route.notifications) {
-                    ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
+            NavigationLink(value: Route.notifications) {
+                ServerRow(title: "Notifications", symbol: "bell", value: notificationsValue)
+            }
+            .accessibilityIdentifier("settings.notifications")
+            .sidebarRow(Route.notifications)
+            if Route.wake.isAvailable {
+                NavigationLink(value: Route.wake) {
+                    ServerRow(title: "Background Wakeups", symbol: "antenna.radiowaves.left.and.right",
+                              value: model.settings.isDemo ? "Off in the demo" : nil)
                 }
-                .accessibilityIdentifier("settings.notifications")
-                .sidebarRow(Route.notifications)
+                .accessibilityIdentifier("settings.wake")
+                .sidebarRow(Route.wake)
             }
             NavigationLink(value: Route.analytics) {
                 ServerRow(title: "Share Analytics", symbol: "chart.bar",
@@ -330,17 +337,27 @@ struct ServerTab: View {
             }
         case .compactCopies: CompactCopiesView(server: settings.server)
         case .devices: DevicesView(settings: settings, rename: { path.append(.deviceName) }) { path.append(.addDevice) }
-        case .deviceName: DeviceNameView(settings: settings, draft: nameDraft) { updated in
-            thisDevice = updated
-            devices = devices?.map { $0.isThisDevice ? updated : $0 }
-        }
+        case .deviceName: nameEditor
         case .addDevice: AddDeviceView(settings: settings)
         case .notifications: NotificationsView(model: model)
+        case .wake:
+            if Route.wake.isAvailable { WakeSettingsView(enrollment: WakeSystem.enrollment, demo: settings.isDemo) }
         case .premium:
             if ReleaseFeatures.premium { PremiumView(premium: model.premium, model: model) }
         case .help: HelpAboutView(model: model)
         case .analytics: AnalyticsSettingsView(demo: settings.isDemo)
         }
+    }
+
+    private var nameEditor: DeviceNameView {
+        let draft = nameDraft
+        return DeviceNameView(settings: model.settings, draft: draft, renamed: { updated in
+            thisDevice = updated
+            devices = devices?.map { $0.isThisDevice ? updated : $0 }
+        }, close: {
+            guard nameDraft === draft, path.last == .deviceName else { return }
+            path.removeLast()
+        })
     }
 
     // MARK: Values
@@ -411,7 +428,7 @@ struct ServerTab: View {
     }
 
     private func loadNotifications() async {
-        guard ReleaseFeatures.automaticMode else { return }
+        guard !model.settings.isDemo else { return }
         // Off the main thread: the first call sets up the notification framework.
         notifications = await Task.detached(priority: .userInitiated) {
             await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
