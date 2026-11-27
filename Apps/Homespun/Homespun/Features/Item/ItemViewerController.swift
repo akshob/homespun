@@ -33,9 +33,12 @@ final class ItemViewerController: UIHostingController<ItemViewerScreen> {
     var closed: () -> Void = {}
     var resumed: () -> Void = {}
     private var finished = false
+    private var pendingDetails: String?
 
     init(model: AppModel, state: ItemViewerState, showsTips: Bool) {
         self.state = state
+        pendingDetails = state.details
+        state.details = nil
         super.init(rootView: ItemViewerScreen(model: model, state: state, showsTips: showsTips))
         state.host = self
         // Full-screen removal changes the presenter's insets before it returns to the window.
@@ -52,6 +55,11 @@ final class ItemViewerController: UIHostingController<ItemViewerScreen> {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        // Show Details from the grid menu only after the viewer's zoom transition finishes.
+        if let pendingDetails {
+            self.pendingDetails = nil
+            state.details = pendingDetails
+        }
         resumed()
     }
 
@@ -112,7 +120,11 @@ struct ItemViewerScreen: View {
     let state: ItemViewerState
     let showsTips: Bool
     @State private var freeUp: FreeUpRequest?
+    @State private var lastDetails: String?
     @Environment(\.horizontalSizeClass) private var sizeClass
+
+    // Keep content while the sheet or column animates away.
+    private var detailsID: String? { state.details ?? lastDetails }
 
     var body: some View {
         NavigationStack {
@@ -120,11 +132,20 @@ struct ItemViewerScreen: View {
                 freeUp = FreeUpRequest(scope: $0, wide: sizeClass == .regular)
             }
         }
-        .inspector(isPresented: Binding(get: { state.details != nil }, set: { if !$0 { state.details = nil } })) {
-            if let id = state.details {
+        .inspector(isPresented: showsDetails(regular: true)) {
+            if let id = detailsID {
                 ItemDetailsPanel(model: model, id: id) { state.details = nil }
                     .inspectorColumnWidth(min: 280, ideal: 320, max: 400)
             }
+        }
+        .sheet(isPresented: showsDetails(regular: false)) {
+            if let id = detailsID {
+                ItemDetailsPanel(model: model, id: id) { state.details = nil }
+                    .presentationBackgroundInteraction(.enabled(upThrough: .medium))
+            }
+        }
+        .onChange(of: state.details, initial: true) { _, new in
+            if let new { lastDetails = new }
         }
         .modifier(FreeUpPresentation(model: model, request: $freeUp))
         .environment(\.showsTips, showsTips)
@@ -132,5 +153,12 @@ struct ItemViewerScreen: View {
         .tint(Theme.accent)
         // The performance report must remain reachable while the app behind is covered.
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
+    }
+
+    private func showsDetails(regular: Bool) -> Binding<Bool> {
+        Binding(get: { state.details != nil && (sizeClass == .regular) == regular }, set: {
+            // Folding dismisses the inactive presentation without closing Details.
+            if !$0, (sizeClass == .regular) == regular { state.details = nil }
+        })
     }
 }
