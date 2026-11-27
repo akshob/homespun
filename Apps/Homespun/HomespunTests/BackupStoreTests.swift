@@ -732,6 +732,128 @@ private func abandonedPhotoHandoff(_ files: BackupFiles, operationID: UUID,
     #expect(repeated == mapping)
 }
 
+@Test func onePointZeroJournalMigrationThroughSymlinkPreservesSourcesAndRejectsUnreadableSnapshot() async throws {
+    // Frozen stored Codable shapes from b35fc19: CompactLedger, AutomaticMode.State and CompactSchedule.
+    struct Entry: Codable {
+        var compactIdentifier: String
+        var originalBytes: Int
+        var compactBytes: Int
+        var savedAt: Date
+        var serverAssetID: String?
+    }
+    struct BackedUp: Codable {
+        var serverAssetID: String
+        var originalBytes: Int
+        var backedUpAt: Date
+        var kept: Bool? = nil
+    }
+    struct Change: Codable {
+        var set: [String: Entry]?
+        var remove: [String]?
+    }
+    struct Schedule: Codable {
+        var days = 30
+        var keepFavorites = true
+    }
+    struct AutomaticState: Codable {
+        var enabled = false
+        var since = Date.distantPast
+        var token: Data?
+        var attempts: [String: Int] = [:]
+        var settled: Set<String> = []
+        var lastRun: Date?
+        var lastSummary: String?
+        var pending: Set<String> = []
+        var notifies = true
+        var schedule = Schedule()
+        var firstSeen: [String: Date] = [:]
+        var removalToken: Data?
+        var removed: [String: Date] = [:]
+    }
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appendingPathComponent("one-point-zero-\(UUID().uuidString)", isDirectory: true)
+    defer { try? manager.removeItem(at: root) }
+    let real = root.appendingPathComponent("real", isDirectory: true)
+    let linked = root.appendingPathComponent("container", isDirectory: true)
+    try manager.createDirectory(at: real, withIntermediateDirectories: true)
+    try manager.createSymbolicLink(at: linked, withDestinationURL: real)
+    let support = linked.appendingPathComponent("Library/Application Support/Homespun", isDirectory: true)
+    try manager.createDirectory(at: support, withIntermediateDirectories: true)
+    let date = Date(timeIntervalSince1970: 1_735_787_045)
+    let original = Entry(compactIdentifier: "original-copy", originalBytes: 100, compactBytes: 10,
+                         savedAt: date, serverAssetID: String(repeating: "a", count: 64))
+    let added = Entry(compactIdentifier: "added-copy", originalBytes: 200, compactBytes: 20,
+                      savedAt: date, serverAssetID: String(repeating: "b", count: 64))
+    let after = Entry(compactIdentifier: "after-copy", originalBytes: 300, compactBytes: 30,
+                      savedAt: date, serverAssetID: String(repeating: "c", count: 64))
+    let snapshotEncoder = JSONEncoder()
+    snapshotEncoder.dateEncodingStrategy = .iso8601
+    snapshotEncoder.outputFormatting = [.sortedKeys]
+    let journalEncoder = JSONEncoder()
+    journalEncoder.dateEncodingStrategy = .iso8601
+    func line(_ change: Change) throws -> Data {
+        var data = try journalEncoder.encode(change)
+        data.append(UInt8(ascii: "\n"))
+        return data
+    }
+    var journal = try line(Change(set: ["added": added]))
+    let torn = try journalEncoder.encode(Change(set: ["partial": after], remove: ["original"]))
+    journal.append(contentsOf: torn.prefix(torn.count / 2))
+    // 1.0 append() starts a new line after reopening an interrupted write.
+    journal.append(UInt8(ascii: "\n"))
+    journal.append(try line(Change(set: ["after": after], remove: ["removed"])))
+    let backedUp = [
+        "deferred": BackedUp(serverAssetID: String(repeating: "d", count: 64), originalBytes: 400, backedUpAt: date),
+        "kept": BackedUp(serverAssetID: String(repeating: "e", count: 64), originalBytes: 500, backedUpAt: date, kept: true),
+    ]
+    var automatic = AutomaticState()
+    automatic.settled = ["old-settled"]
+    automatic.lastRun = date
+    let sources = [
+        "ledger.json": try snapshotEncoder.encode(["original": original, "removed": added]),
+        "ledger.journal": journal,
+        "backed-up.json": try snapshotEncoder.encode(backedUp),
+        // The 1.0 automatic state uses default numeric dates, unlike ledger files.
+        "automatic.json": try JSONEncoder().encode(automatic),
+    ]
+    for (name, data) in sources { try data.write(to: support.appendingPathComponent(name)) }
+    let legacyURL = support.appendingPathComponent("ledger.json")
+    let directory = support.appendingPathComponent("Backup", isDirectory: true)
+    let store = BackupStore(directory: directory, legacyURL: legacyURL)
+    try await store.open()
+    let projection = try await store.ledgerProjection(namespace: "photos")
+    #expect(Set(projection.entries.keys) == ["original", "added", "after"])
+    #expect(projection.entries["original"]?.compactIdentifier == original.compactIdentifier)
+    #expect(projection.entries["added"]?.compactIdentifier == added.compactIdentifier)
+    #expect(projection.entries["after"]?.compactIdentifier == after.compactIdentifier)
+    #expect(projection.entries.values.allSatisfy {
+        $0.savedAt == date && $0.origin == nil && $0.version == nil && $0.requestID == nil && !$0.verifiedCompact
+    })
+    #expect(Set(projection.backedUp.keys) == ["deferred", "kept"])
+    #expect(projection.backedUp["deferred"]?.kept == nil && projection.backedUp["kept"]?.kept == true)
+    #expect(projection.backedUp.values.allSatisfy { $0.backedUpAt == date && $0.origin == nil && $0.version == nil })
+    #expect(projection.kept.isEmpty, "1.0 settled must not be guessed to mean a new keep decision")
+    #expect(try await store.metadata("legacy_journal_fragments", as: Int.self) == 1)
+    let mappings = try await store.mappings(namespace: "photos")
+    #expect(mappings.values.allSatisfy { $0.origin == nil && $0.proof == nil })
+    try await store.close()
+    let reopened = BackupStore(directory: directory, legacyURL: legacyURL)
+    #expect(try await reopened.mappings(namespace: "photos") == mappings)
+    #expect(try await reopened.metadata("legacy_journal_fragments", as: Int.self) == 1)
+    for (name, data) in sources { #expect(try Data(contentsOf: support.appendingPathComponent(name)) == data) }
+    try await reopened.close()
+
+    let unreadable = support.appendingPathComponent("Unreadable", isDirectory: true)
+    try manager.createDirectory(at: unreadable, withIntermediateDirectories: true)
+    var damagedSources = sources
+    damagedSources["ledger.json"] = Data("{".utf8)
+    for (name, data) in damagedSources { try data.write(to: unreadable.appendingPathComponent(name)) }
+    let blocked = BackupStore(directory: unreadable.appendingPathComponent("Backup", isDirectory: true),
+                              legacyURL: unreadable.appendingPathComponent("ledger.json"))
+    await #expect(throws: BackupStore.Failure.legacyUnreadable) { try await blocked.open() }
+    for (name, data) in damagedSources { #expect(try Data(contentsOf: unreadable.appendingPathComponent(name)) == data) }
+}
+
 @Test func legacyMigrationPreservesUnknownOriginAndExplicitDecisionsWithoutRewritingFiles() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: root) }

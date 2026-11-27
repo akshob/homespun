@@ -787,6 +787,11 @@ resource sets, changed originals, older servers and Immich-only sources stay unt
 recovery guidance; keep the items, reconnect the original archive and run again after updating
 the server if necessary. Neither a legacy match nor a remembered URL authorizes deletion.
 
+Migration preserves the 1.0 source files byte for byte. Like 1.0, it replays only complete
+journal lines, including changes appended after an earlier crash fragment; fragments are
+counted locally, not reconstructed or treated as verified backup records. An unreadable
+ledger or backed-up snapshot still blocks migration rather than becoming an empty ledger.
+
 ## Analytics and problem reports
 
 The app asks once, during setup (after pairing, before Photos access), whether to share

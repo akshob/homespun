@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import os
 
 actor BackupStore {
     enum Failure: Error, LocalizedError, Equatable {
@@ -662,6 +663,7 @@ actor BackupStore {
         var entries: [String: CompactLedger.Entry] = [:]
         var backedUp: [String: CompactLedger.BackedUp] = [:]
         var kept: Set<String> = []
+        var journalFragments = 0
         if let legacyURL {
             let journal = legacyURL.deletingPathExtension().appendingPathExtension("journal")
             let backedUpURL = legacyURL.deletingLastPathComponent().appendingPathComponent("backed-up.json")
@@ -678,13 +680,14 @@ actor BackupStore {
                 if let data = try legacyData(legacyURL) { entries = try decoder.decode([String: CompactLedger.Entry].self, from: data) }
                 if let data = try legacyData(backedUpURL) { backedUp = try decoder.decode([String: CompactLedger.BackedUp].self, from: data) }
                 if let data = try legacyData(journal) {
-                    let lines = data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
-                    for (index, line) in lines.enumerated() where !line.isEmpty {
+                    for line in data.split(separator: UInt8(ascii: "\n")) {
                         let change: LegacyChange
                         do { change = try decoder.decode(LegacyChange.self, from: Data(line)) }
                         catch {
-                            guard index == lines.count - 1, data.last != UInt8(ascii: "\n") else { throw error }
-                            break
+                            // 1.0 resumed after a torn write by inserting a newline, leaving a
+                            // fragment in the middle. Replay only whole changes, just as 1.0 did.
+                            journalFragments += 1
+                            continue
                         }
                         for key in change.remove ?? [] { entries[key] = nil }
                         entries.merge(change.set ?? [:]) { _, latest in latest }
@@ -714,7 +717,12 @@ actor BackupStore {
                 try connection.execute("INSERT INTO decisions (namespace, item, kept) VALUES (?, ?, 1)",
                                        [.text(namespace), .text(item)])
             }
+            try Self.saveMetadata("legacy_journal_fragments", value: journalFragments, connection)
             try connection.execute("INSERT INTO meta (key, value) VALUES ('legacy_sources', ?)", [.blob(try encode(sourceFiles))])
+        }
+        if journalFragments > 0 {
+            Logger(subsystem: "photos.homespun.app", category: "backup-store")
+                .warning("Legacy journal migration preserved \(journalFragments, privacy: .public) unreadable fragments; only complete changes were replayed.")
         }
     }
 
