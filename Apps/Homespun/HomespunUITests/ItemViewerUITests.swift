@@ -3,8 +3,8 @@ import XCTest
 
 /// Opens items from the Library: the viewer's state line, Details, Compare (from this iPhone, and
 /// downloaded from the server once the original has been freed), and swiping between items.
-/// Needs a fresh simulator with synthetic media and a server (pass with a `TEST_RUNNER_` prefix):
-/// `HOMESPUN_SERVER` and `HOMESPUN_PAIRING_CODE`. The tests run in order and share the pairing.
+/// Needs a fresh simulator with synthetic media. test0 needs no server; the later tests share a
+/// pairing (`HOMESPUN_SERVER` and `HOMESPUN_PAIRING_CODE`, passed with a `TEST_RUNNER_` prefix).
 final class ItemViewerUITests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -17,6 +17,122 @@ final class ItemViewerUITests: XCTestCase {
         app.launchArguments += ["-onboardingComplete", "YES", "-hideTips"] + arguments
         app.launch()
         return app
+    }
+
+    @MainActor func test0DetailsSwipeDownKeepsTheViewerUsable() {
+        let app = launch()
+        let photos = app.gridItems().matching(NSPredicate(format: "label BEGINSWITH 'Photo' OR label BEGINSWITH 'Live Photo'"))
+        XCTAssertTrue(photos.firstMatch.waitForExistence(timeout: 30), "no seeded photos")
+        XCTAssertGreaterThanOrEqual(photos.count, 2, "needs two synthetic photos")
+        let viewer = app.descendants(matching: .any)["item.viewer"].firstMatch
+        let details = app.descendants(matching: .any)["details.list"].firstMatch
+        let back = app.buttons["item.close"], done = app.buttons["details.done"]
+        var index = 0
+        XCTAssertTrue(open(photos.element(boundBy: index), app), "the photo didn't open")
+
+        func require(_ condition: Bool, _ message: String) {
+            if !condition {
+                let hierarchy = XCTAttachment(string: app.debugDescription)
+                hierarchy.name = message
+                hierarchy.lifetime = .keepAlways
+                add(hierarchy)
+                attach(app, message)
+            }
+            XCTAssertTrue(condition, message)
+        }
+        func checkViewer(_ when: String) {
+            require(viewer.exists && back.exists && back.isHittable, "\(when): no usable viewer Back")
+            require(app.staticTexts["item.state"].exists, "\(when): no viewer state")
+            let page = app.shownPage()
+            let deadline = Date().addingTimeInterval(10)
+            while page.exists, page.value as? String == "Loading", Date() < deadline { usleep(200_000) }
+            require(page.exists && page.value as? String != "Loading", "\(when): no photo")
+            // Check without the bright Details sheet, which could hide a blank viewer underneath.
+            require(XCUIApplication.colourful(app.screenshot().image) > 0.12, "\(when): the screen is blank")
+        }
+        func sheetTop() -> XCUICoordinate {
+            let grabber = app.buttons["Sheet Grabber"].firstMatch
+            if grabber.exists { return grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)) }
+            let bar = app.navigationBars["Details"]
+            if bar.exists { return bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)) }
+            // The cover's navigation buttons move to its strip; the sheet's top stays above its list.
+            return details.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0))
+                .withOffset(CGVector(dx: 0, dy: -20))
+        }
+        checkViewer("opened")
+
+        for recipe in ["above the sheet", "short hold", "sheet top", "list, medium", "list, large"] {
+            app.buttons["item.details"].tap()
+            require(details.waitForExistence(timeout: 5), "\(recipe): no Details")
+            let screen = app.windows.firstMatch.frame
+            switch recipe {
+            case "above the sheet", "short hold":
+                let frame = viewer.frame
+                let y = frame.minY + (details.frame.minY - frame.minY) * 0.5
+                require(y > frame.minY + 40, "\(recipe): no uncovered photo above the sheet")
+                let start = viewer.coordinate(withNormalizedOffset: .zero)
+                    .withOffset(CGVector(dx: frame.width * 0.5, dy: y - frame.minY))
+                if recipe == "short hold" {
+                    start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 40)),
+                                withVelocity: .slow, thenHoldForDuration: 0.5)
+                } else {
+                    start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 300)),
+                                withVelocity: .fast, thenHoldForDuration: 0)
+                }
+            case "sheet top":
+                sheetTop().press(forDuration: 0.05,
+                                 thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)),
+                                 withVelocity: .fast, thenHoldForDuration: 0)
+            default:
+                if recipe == "list, large" {
+                    let before = details.frame.minY
+                    sheetTop().press(forDuration: 0.05,
+                                     thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)),
+                                     withVelocity: .fast, thenHoldForDuration: 0)
+                    let deadline = Date().addingTimeInterval(5)
+                    while details.exists, details.frame.minY >= before - 80, Date() < deadline { usleep(200_000) }
+                    require(details.exists && details.frame.minY < before - 80, "\(recipe): the sheet didn't expand")
+                }
+                let start = details.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+                let distance = min(400, screen.maxY - 12 - (details.frame.minY + details.frame.height * 0.3))
+                start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: distance)),
+                            withVelocity: .fast, thenHoldForDuration: 0)
+            }
+            sleep(2)
+            require(viewer.exists && back.exists, "\(recipe): swiping Details lost the viewer")
+            if recipe == "above the sheet" || recipe == "short hold" {
+                require(details.exists, "\(recipe): the viewer's drag closed Details")
+            } else if recipe == "sheet top" {
+                require(details.waitForNonExistence(timeout: 5), "\(recipe): the sheet's own swipe didn't dismiss Details")
+            }
+            if recipe == "above the sheet" {
+                app.pageItem(older: false)
+                require(details.exists, "\(recipe): paging closed Details")
+                app.pageItem(older: true)
+                require(details.exists, "\(recipe): paging back closed Details")
+            }
+            if details.exists {
+                require(done.exists && done.isHittable, "\(recipe): no usable Details Done")
+                done.tap()
+                require(details.waitForNonExistence(timeout: 5), "\(recipe): Done didn't close Details")
+            }
+            checkViewer(recipe)
+            let shown = viewer.value as? String
+            app.goBack()
+            require(viewer.waitForNonExistence(timeout: 5), "\(recipe): Back didn't close the viewer")
+            require(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 5), "\(recipe): no grid after Back")
+            index = 1 - index
+            let next = photos.element(boundBy: index)
+            require(app.reveal(next) && next.isHittable, "\(recipe): the grid is blocked")
+            require(open(next, app), "\(recipe): another photo didn't open")
+            require(viewer.value as? String != shown, "\(recipe): another photo wasn't shown")
+            checkViewer("\(recipe), another photo")
+        }
+        let start = viewer.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 300)),
+                    withVelocity: .fast, thenHoldForDuration: 0)
+        require(viewer.waitForNonExistence(timeout: 5), "swiping without Details didn't close the viewer")
+        require(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 5), "no grid after swipe-to-close")
     }
 
     @MainActor func test1ViewerDetailsAndCompare() throws {

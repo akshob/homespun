@@ -482,6 +482,22 @@ final class DuoLayoutUITests: XCTestCase {
         attach(app, "\(pose), item details")
         XCTAssertGreaterThan(details.frame.minX, screen.midX, "\(pose): Details isn't at the side")
         XCTAssertTrue(viewer.exists && viewer.frame.width > screen.width * 0.4, "\(pose): Details covers the photo")
+        // Element-relative coordinates work in every open pose, unlike rotated screen coordinates.
+        for startY in [0.2, 0.02] {
+            details.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: startY))
+                .press(forDuration: 0.05, thenDragTo: details.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.9)),
+                       withVelocity: .fast, thenHoldForDuration: 0)
+            sleep(2)
+            let usable = viewer.exists && details.exists && app.buttons["details.done"].exists
+            if !usable {
+                let hierarchy = XCTAttachment(string: app.debugDescription)
+                hierarchy.name = "\(pose), Details drag \(startY)"
+                hierarchy.lifetime = .keepAlways
+                add(hierarchy)
+            }
+            attach(app, "\(pose), Details drag \(startY)")
+            XCTAssertTrue(usable, "\(pose): a Details column drag lost the viewer or Done")
+        }
         app.buttons["details.done"].tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5), "\(pose): Details didn't close")
         app.closeItem()

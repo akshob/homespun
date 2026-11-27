@@ -173,28 +173,12 @@ final class ItemPagingUITests: XCTestCase {
         // XCTest's screenshots of the open iPhone Duo show its cover; elsewhere, the photo is on screen.
         if poses == nil {
             let screenshot = app.screenshot()
-            XCTAssertGreaterThan(Self.colourful(screenshot.image), 0.12, "\(when): the screen is blank", file: file, line: line)
+            XCTAssertGreaterThan(XCUIApplication.colourful(screenshot.image), 0.12, "\(when): the screen is blank",
+                                 file: file, line: line)
             let attachment = XCTAttachment(screenshot: screenshot)
             attachment.name = when
             add(attachment)
         }
-    }
-
-    /// The share of the screen that isn't near black (the viewer's background).
-    private static func colourful(_ image: UIImage) -> Double {
-        guard let cgImage = image.cgImage else { return 0 }
-        let width = 60, height = 120
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
-            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
-                                          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-            return true
-        }
-        guard drawn else { return 0 }
-        let bright = stride(from: 0, to: pixels.count, by: 4).filter { max(pixels[$0], pixels[$0 + 1], pixels[$0 + 2]) > 48 }
-        return Double(bright.count) / Double(width * height)
     }
 
     /// Asks `ui.sh` to fold or turn the simulator, then waits until it has (as DuoLayoutUITests does).
