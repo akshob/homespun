@@ -26,7 +26,7 @@ jobs:
       site: true
       app: true
       package: true
-      ui: '["iphone","library","later","copies","onboarding","telemetry","resume","oldserver","duo-cover","duo-grid","duo-open","demo","watch","large"]'
+      ui: '["iphone","library","later","copies","onboarding","telemetry","resume","oldserver","oldapp","oldapp-copies","oldapp-upgrade","duo-cover","duo-grid","duo-open","demo","watch","large"]'
       retry: true
       performance: true
 

@@ -58,6 +58,21 @@ class TargetedUIPlanTests(unittest.TestCase):
             result = plan({"MODE": "pr", "DRAFT": draft}, ["Apps/Homespun/HomespunUITests/OldServerUITests.swift"])
             self.assertNotIn("oldserver", result["ui"])
 
+    def test_released_app_lanes_are_extended_only_even_for_server_and_ui_test_changes(self):
+        lanes = {"oldapp", "oldapp-copies", "oldapp-upgrade"}
+        self.assertTrue(lanes.isdisjoint(QUICK))
+        for path in ("Sources/HomespunServerKit/Routes.swift",
+                     "Apps/Homespun/HomespunUITests/ServerModeUITests.swift"):
+            for draft in ("true", "false"):
+                with self.subTest(path=path, draft=draft):
+                    result = plan({"MODE": "pr", "DRAFT": draft}, [path])
+                    self.assertTrue(result["app"])
+                    self.assertTrue(lanes.isdisjoint(result["ui"]))
+        for env in ({"MODE": "main"}, {"MODE": "manual", "UI_INPUT": "full"}):
+            with self.subTest(env=env):
+                result = plan(env, ["Sources/HomespunServerKit/Routes.swift"])
+                self.assertTrue(lanes.issubset(result["ui"]))
+
     def test_manual_copy_recovery_keeps_server_contracts_without_unrelated_ui(self):
         result = plan({"MODE": "manual", "UI_INPUT": "copies"}, [])
         self.assertEqual(result["ui"], ["copies"])

@@ -104,6 +104,99 @@ test_without_building "$RESULTS/watch.xcresult" -parallel-testing-enabled NO
         self.assertIn("-xctestrun\n" + str(watch) + "\n", run.stdout)
         self.assertNotIn("-project", run.stdout)
 
+    def test_old_app_requires_one_immutable_manifest_and_never_falls_back_to_the_current_app(self):
+        current = Path(self.env["DD"]) / "Build/Products"
+        current.mkdir(parents=True)
+        (current / "Homespun_iphonesimulator27.2.xctestrun").touch()
+        products = Path(self.env["DD"]) / "app-b35fc19/Build/Products"
+        missing = self.shell('old_app_xctestrun', OLD_APP_PRODUCTS=str(products))
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("1.0 app fixture (b35fc19)", missing.stderr)
+        self.assertEqual(missing.stdout, "")
+        products.mkdir(parents=True)
+        spec = products / "Homespun_iphonesimulator27.2.xctestrun"
+        spec.touch()
+        found = self.shell('old_app_xctestrun', OLD_APP_PRODUCTS=str(products))
+        self.assertEqual(found.returncode, 0, found.stderr)
+        self.assertEqual(found.stdout, str(spec) + "\n")
+        forwarded = self.shell("""
+xcodebuild() { printf '%s\\n' "$@"; }
+XCTESTRUN=$(old_app_xctestrun) || exit 1
+test_without_building "$RESULTS/oldapp.xcresult" -only-testing:HomespunUITests/ItemViewerUITests
+""", OLD_APP_PRODUCTS=str(products))
+        self.assertEqual(forwarded.returncode, 0, forwarded.stderr)
+        self.assertIn("-xctestrun\n" + str(spec) + "\n", forwarded.stdout)
+        (products / "Homespun_extra_iphonesimulator27.2.xctestrun").touch()
+        ambiguous = self.shell('old_app_xctestrun', OLD_APP_PRODUCTS=str(products))
+        self.assertEqual(ambiguous.returncode, 1)
+        self.assertIn("exactly one", ambiguous.stderr)
+
+    def test_quarantine_override_does_not_read_the_current_app_quarantine(self):
+        default = next(line.split()[0] for line in (self.checkout / "ci/quarantine.txt").read_text().splitlines()
+                       if line.strip() and not line.startswith("#"))
+        old = "HomespunUITests/ServerTabUITests/testIntendedServerChange"
+        alternate = self.root / "old app quarantine.txt"
+        alternate.write_text(f"{old} #123 intended server behaviour\n")
+        run = self.shell('quarantined "$ONLY" "$RESULTS/probe-quarantined.txt"',
+                         ONLY=default + "," + old, QUARANTINE=str(alternate))
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout, "-skip-testing:" + old + "\n")
+        self.assertEqual((self.root / "probe-quarantined.txt").read_text(),
+                         f"{old} #123 intended server behaviour\n")
+
+    def test_strict_selection_requires_every_exact_method_even_when_xcodebuild_succeeds(self):
+        viewer = "HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare"
+        restore = "HomespunUITests/ServerModeUITests/test3RestoreOriginals"
+        passed = "Test Case '-[HomespunUITests.ItemViewerUITests test1ViewerDetailsAndCompare]' passed (1.0 seconds).\n"
+        failed = "Test Case '-[HomespunUITests.ServerModeUITests test3RestoreOriginals]' failed (1.0 seconds).\n"
+        path = self.root / "strict.log"
+        for log, selection, status in [
+            (passed + failed.replace("failed", "passed"), viewer + "," + restore, 0),
+            (passed + failed, viewer + "," + restore, 0),  # xcodebuild owns test failures.
+            (passed, viewer + "," + restore, 1),
+            (passed.replace("test1ViewerDetailsAndCompare", "test1ViewerDetailsAndCompareExtra"), viewer, 1),
+            ("** TEST EXECUTE SUCCEEDED **\n", viewer, 1),
+        ]:
+            with self.subTest(log=log, selection=selection):
+                path.write_text(log)
+                run = self.shell('require_selected_tests_ran "$RESULTS/strict.log" "$ONLY"', ONLY=selection)
+                self.assertEqual(run.returncode, status, run.stderr)
+
+    def test_strict_selection_rejects_every_runtime_skip_including_tests_outside_the_selection(self):
+        path = self.root / "strict.log"
+        path.write_text(
+            "Test Case '-[HomespunUITests.ItemViewerUITests test1ViewerDetailsAndCompare]' passed (1.0 seconds).\n"
+            "Test Case '-[HomespunUITests.ServerTabUITests test7RePairKeepsTheConfirmedNameAndOneActiveDevice]' skipped (0.0 seconds).\n")
+        run = self.shell('require_selected_tests_ran "$RESULTS/strict.log" "$ONLY"',
+                         ONLY="HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare")
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("a 1.0 test skipped", run.stderr)
+
+    def test_strict_selection_exempts_only_explicit_quarantine_and_checks_class_selectors(self):
+        viewer = "HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare"
+        automatic = "HomespunUITests/ServerModeUITests/test2AutomaticModeBacksUpTheRest"
+        path = self.root / "strict.log"
+        path.write_text("Test Case '-[HomespunUITests.ItemViewerUITests test1ViewerDetailsAndCompare]' passed (1.0 seconds).\n")
+        listing = self.root / "probe-quarantined.txt"
+        listing.write_text(automatic + " #123 intended unshipped-feature behaviour\n")
+        for selection, status in [
+            (viewer + "," + automatic, 0),
+            ("HomespunUITests/ItemViewerUITests", 0),
+            ("HomespunUITests/CopyFinderUITests", 1),
+        ]:
+            with self.subTest(selection=selection):
+                run = self.shell('require_selected_tests_ran "$RESULTS/strict.log" "$ONLY"', ONLY=selection)
+                self.assertEqual(run.returncode, status, run.stderr)
+        listing.write_text("")
+        run = self.shell('require_selected_tests_ran "$RESULTS/strict.log" "$ONLY"', ONLY=viewer + "," + automatic)
+        self.assertEqual(run.returncode, 1)
+        # The upgrade phase has its own exclusion list, not the pre-upgrade phase's.
+        upgraded = self.root / "probe-upgraded-quarantined.txt"
+        upgraded.write_text(automatic + " #123 intended unshipped-feature behaviour\n")
+        run = self.shell('require_selected_tests_ran "$RESULTS/strict.log" "$ONLY" "$RESULTS/probe-upgraded-quarantined.txt"',
+                         ONLY=viewer + "," + automatic)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
     def test_unit_runs_both_manifests_and_requires_the_release_regression_to_execute(self):
         products = Path(self.env["DD"]) / "Build/Products"
         products.mkdir(parents=True)
@@ -217,6 +310,8 @@ else:
     def test_first_device_matches_each_distinct_lane_kind_and_rejects_unknown(self):
         for lane, device in [("quick-duo", "iPhone-Duo"), ("demo", "iPhone-18-Pro"),
                              ("oldserver", "iPhone-18-Pro"),
+                             ("oldapp", "iPhone-18-Pro"), ("oldapp-copies", "iPhone-18-Pro"),
+                             ("oldapp-upgrade", "iPhone-18-Pro"),
                              ("watch", "Apple-Watch-Series-12-46mm")]:
             run = self.shell(f'zsh "$ROOT/ci/lane.sh" --first-device {lane}')
             self.assertEqual(run.returncode, 0, run.stderr)

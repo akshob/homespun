@@ -63,7 +63,7 @@ for listing in sorted(glob.glob(os.path.join(results, "*-quarantined.txt"))):
 if failures:
     lines += ["", "#### Failures", *failures]
 if quarantined:
-    lines += ["", "#### Skipped: known failures (ci/quarantine.txt)",
+    lines += ["", "#### Skipped: known failures (ci/quarantine*.txt)",
               *[f"- `{parts[0]}` {parts[1] if len(parts) > 1 else ''}" for parts in quarantined]]
 if perf:
     lines += ["", "#### Performance", "```", *perf, "```"]

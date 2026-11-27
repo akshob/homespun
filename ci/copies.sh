@@ -7,6 +7,7 @@
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 PORT=$2
+ONLY=${ONLY:-HomespunUITests/CopyFinderUITests}
 stamp segment.start
 timed simulator.slot take_sim_slot
 SIM=$(new_simulator iPhone-18-Pro "HS CI $NAME $PORT") || exit 1
@@ -37,11 +38,15 @@ kill -0 $SERVER 2>/dev/null || { echo "the test server didn't start"; cat $DATA.
 CODE=$(timed server.pair pairing_output | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p")
 [[ -n $CODE ]] || { echo "no pairing code"; exit 1; }
 RESULT=$RESULTS/$NAME.xcresult; rm -rf $RESULT
+SKIP=($(quarantined $ONLY $RESULTS/$NAME-quarantined.txt)) || exit 1
 stamp xcodebuild.start
 TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_COPIES=3 \
-  test_without_building $RESULT -only-testing:HomespunUITests/CopyFinderUITests $(test_retries) \
+  test_without_building $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} $SKIP $(test_retries) \
   2>&1 | tee $RESULTS/$NAME.log | filter
 STATUS=${pipestatus[1]}
 stamp xcodebuild.end
 require_test_environment $RESULTS/$NAME.log || STATUS=1
+if [[ -n ${STRICT_SELECTION:-} ]]; then
+    require_selected_tests_ran $RESULTS/$NAME.log $ONLY || STATUS=1
+fi
 exit $STATUS

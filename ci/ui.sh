@@ -10,6 +10,8 @@
 # Duo (it writes a pose to TEST_RUNNER_DUO_POSE_FILE; screenshots go to $RESULTS/<name>-shots);
 # STUB_PORT=p sends telemetry to a local stub and checks what arrived. SERVERLESS=1 (Try the Demo): no
 # temporary server, and no Photos access, so iOS would ask if anything needed it.
+# UPGRADE_THEN=ids: after the selected tests pass on OLD_SERVER_FIXTURE, upgrade that server
+# in place and run these tests with the same app and simulator. STRICT_SELECTION=1 rejects skips.
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 TYPE=$2 ONLY=$3 PORT=$4 POSE=${5:-}
@@ -195,22 +197,24 @@ if [[ -n ${DUO_POSES:-} ]]; then
     export TEST_RUNNER_DUO_POSE_FILE=$POSEFILE
 fi
 RESULT=$RESULTS/$NAME.xcresult
-SKIP=($(quarantined $ONLY $RESULTS/$NAME-quarantined.txt))
+LOG=$RESULTS/$NAME.log
+QUARANTINED=$RESULTS/$NAME-quarantined.txt
+SKIP=($(quarantined $ONLY $QUARANTINED)) || exit 1
 run_tests() {
     rm -rf $RESULT
     stamp xcodebuild.start
     TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_PAIR_LINK="$LINK" \
     TEST_RUNNER_HOMESPUN_REMOVE=1 \
       test_without_building $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} $SKIP $(test_retries) \
-      2>&1 | tee $RESULTS/$NAME.log | filter
+      2>&1 | tee $LOG | filter
     local code=${pipestatus[1]}
     stamp xcodebuild.end
     return $code
 }
 run_tests; STATUS=$?
 # Now and then the simulator can't start or reach the test runner, and no test runs: once more, rebooted.
-if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
-    && grep -qE "failed to launch|Failed to establish communication|Channel disconnected|crashed while preparing" $RESULTS/$NAME.log; then
+if (( STATUS != 0 )) && ! grep -q "^Test Case" $LOG \
+    && grep -qE "failed to launch|Failed to establish communication|Channel disconnected|crashed while preparing" $LOG; then
     echo "the test runner didn't start; rebooting the simulator and trying once more"
     stamp simulator.reboot.start
     xcrun simctl shutdown $SIM; xcrun simctl boot $SIM && xcrun simctl bootstatus $SIM -b >/dev/null
@@ -218,7 +222,32 @@ if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
     run_tests; STATUS=$?
 fi
 if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests|BackupResumeUITests|OldServerUITests)* ]]; then
-    require_test_environment $RESULTS/$NAME.log || STATUS=1
+    require_test_environment $LOG || STATUS=1
+fi
+if [[ -n ${STRICT_SELECTION:-} ]]; then
+    require_selected_tests_ran $LOG $ONLY $QUARANTINED || STATUS=1
+fi
+if [[ -n ${UPGRADE_THEN:-} ]] && (( STATUS == 0 )); then
+    [[ -n ${OLD_SERVER_FIXTURE:-} && -z ${SERVERLESS:-} ]] \
+      || { echo "error: UPGRADE_THEN requires the isolated old server fixture" >&2; exit 1; }
+    rm -f $DATA/server-upgraded
+    print upgrade-server > $ACTIONFILE
+    upgraded=""
+    for attempt in {1..120}; do
+        if [[ -f $DATA/server-upgraded ]]; then upgraded=1; break; fi
+        kill -0 $SERVER 2>/dev/null || break
+        sleep 1
+    done
+    [[ -n $upgraded ]] || { echo "error: test server did not upgrade within 120 seconds" >&2; exit 1; }
+    ONLY=$UPGRADE_THEN
+    RESULT=$RESULTS/$NAME-upgraded.xcresult LOG=$RESULTS/$NAME-upgraded.log
+    QUARANTINED=$RESULTS/$NAME-upgraded-quarantined.txt
+    SKIP=($(quarantined $ONLY $QUARANTINED)) || exit 1
+    run_tests; STATUS=$?
+    require_test_environment $LOG || STATUS=1
+    if [[ -n ${STRICT_SELECTION:-} ]]; then
+        require_selected_tests_ran $LOG $ONLY $QUARANTINED || STATUS=1
+    fi
 fi
 if [[ -n ${STUB_PORT:-} ]]; then
     timed telemetry.check python3 ${0:A:h}/telemetry-check.py $STUBLOG "Home Mac" "127.0.0.1:$PORT" "IMG_200" || STATUS=1

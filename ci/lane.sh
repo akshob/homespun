@@ -4,7 +4,8 @@
 # take one run each (the ci workflow's matrix); on one Mac, name several, or a group.
 #   lane.sh <run|group> ...
 #   runs:   quick quick-duo (a pull request's) · iphone library later copies onboarding telemetry resume
-#           duo-cover duo-grid duo-open demo watch (after a merge) · large (nightly)
+#           oldserver oldapp oldapp-copies oldapp-upgrade duo-cover duo-grid duo-open demo watch
+#           (after a merge) · large (nightly)
 #   groups: pr (both quick runs), iphone-all, duo-all, full (every run after a merge)
 # Ports differ, so runs of different jobs can share a Mac. RETRY_UI=1: a failing test runs once
 # more in place (Xcode's retry; the summary names tests that passed then as flaky). Tests in
@@ -15,7 +16,7 @@ if [[ ${1:-} == --first-device ]]; then
     case ${2:-} in
       quick-duo|duo-cover|duo-grid|duo-open|duo-all) print -r -- iPhone-Duo ;;
       watch) print -r -- Apple-Watch-Series-12-46mm ;;
-      quick|iphone|library|later|copies|onboarding|telemetry|resume|oldserver|demo|large|pr|iphone-all|full)
+      quick|iphone|library|later|copies|onboarding|telemetry|resume|oldserver|oldapp|oldapp-copies|oldapp-upgrade|demo|large|pr|iphone-all|full)
         print -r -- iPhone-18-Pro ;;
       *) echo "unknown run: ${2:-}" >&2; exit 1 ;;
     esac
@@ -33,9 +34,9 @@ runs=()
 for name in "$@"; do
   case $name in
     pr) runs+=(quick quick-duo) ;;
-    iphone-all) runs+=(iphone library later copies onboarding telemetry resume oldserver) ;;
+    iphone-all) runs+=(iphone library later copies onboarding telemetry resume oldserver oldapp oldapp-copies oldapp-upgrade) ;;
     duo-all) runs+=(duo-cover duo-grid duo-open) ;;
-    full) runs+=(iphone library later copies onboarding telemetry resume oldserver duo-cover duo-grid duo-open demo watch) ;;
+    full) runs+=(iphone library later copies onboarding telemetry resume oldserver oldapp oldapp-copies oldapp-upgrade duo-cover duo-grid duo-open demo watch) ;;
     *) runs+=($name) ;;
   esac
 done
@@ -76,6 +77,26 @@ for one in $runs; do
     oldserver)
       run oldserver env OLD_SERVER_FIXTURE=1 EXTRA=2 zsh $D/ui.sh oldserver iPhone-18-Pro \
         HomespunUITests/OldServerUITests 8804 ;;
+    oldapp|oldapp-copies|oldapp-upgrade)
+      # The immutable 1.0 app and its own tests; never substitute this commit's app or tests.
+      spec=$(old_app_xctestrun) || { failed+=$one; continue; }
+      case $one in
+        oldapp)
+          run oldapp env XCTESTRUN=$spec STRICT_SELECTION=1 QUARANTINE=$D/quarantine-oldapp.txt \
+            zsh $D/ui.sh oldapp iPhone-18-Pro \
+            HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare,HomespunUITests/ItemViewerUITests/test2CompareDownloadsAFreedOriginal,HomespunUITests/ItemViewerUITests/test3ScreensForReview,HomespunUITests/ServerModeUITests/test1CompactThroughServerAndRemoveOriginals,HomespunUITests/ServerModeUITests/test2AutomaticModeBacksUpTheRest,HomespunUITests/ServerModeUITests/test3RestoreOriginals,HomespunUITests/ServerTabUITests/test7RePairKeepsTheConfirmedNameAndOneActiveDevice,HomespunUITests/ServerTabUITests/test8ServerFollowsItsPinnedKeyToANewAddress,HomespunUITests/ServerTabUITests/test9ServerKeyChangeIsConfirmed,HomespunUITests/ServerTabUITests/testRenameThisIPhone,HomespunUITests/ServerTabUITests/testServerTabAndActivityHistory 8805 ;;
+        oldapp-copies)
+          run oldapp-copies env XCTESTRUN=$spec STRICT_SELECTION=1 QUARANTINE=$D/quarantine-oldapp.txt \
+            ONLY=HomespunUITests/CopyFinderUITests/testFindsCompactCopiesMadeElsewhere \
+            zsh $D/copies.sh oldapp-copies 8806 ;;
+        oldapp-upgrade)
+          # Back up on 1.0, then Free Up and Restore on the current binary with the same data/key.
+          run oldapp-upgrade env XCTESTRUN=$spec OLD_SERVER_FIXTURE=1 STRICT_SELECTION=1 \
+            QUARANTINE=$D/quarantine-oldapp.txt \
+            UPGRADE_THEN=HomespunUITests/ItemViewerUITests/test2CompareDownloadsAFreedOriginal,HomespunUITests/ServerModeUITests/test3RestoreOriginals \
+            zsh $D/ui.sh oldapp-upgrade iPhone-18-Pro \
+            HomespunUITests/ItemViewerUITests/test1ViewerDetailsAndCompare 8807 ;;
+      esac ;;
     watch)
       run watch zsh $D/watch.sh ;;
     duo-cover)

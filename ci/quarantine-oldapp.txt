@@ -1,0 +1,4 @@
+# 1.0 app tests (b35fc19) excluded only for an intended current-server behaviour change:
+# <test id> <PR/commit> <why it is intended and what a 1.0 user sees>.
+# Never for pairing, Free Up / verify, Restore, Find Compact Copies or data-safety failures:
+# those are regressions and block the merge-to-main suite and TestFlight (release-guard.py).

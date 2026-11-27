@@ -18,6 +18,7 @@ SEED=${SEED:-$ROOT/ci/seed}
 # The release server the UI tests run, kept with the build (build.sh) so other machines get it too.
 SERVER_BIN=${SERVER_BIN:-$DD/homespun-server}
 OLD_SERVER_BIN=${OLD_SERVER_BIN:-$DD/homespun-server-b35fc19}
+OLD_APP_PRODUCTS=${OLD_APP_PRODUCTS:-$DD/app-b35fc19/Build/Products}
 # iPhone Duo's fold, rotate and screenshot tool.
 DUOCTL=${DUOCTL:-$ROOT/ci/tools/duoctl/duoctl}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$CI_STATE/duo-cache}
@@ -114,6 +115,13 @@ new_simulator() {
     echo $sim
 }
 
+old_app_xctestrun() {
+    local specs=($OLD_APP_PRODUCTS/Homespun_*iphonesimulator*.xctestrun(N))
+    (( ${#specs} == 1 )) \
+      || { echo "error: the 1.0 app fixture (b35fc19) must contain exactly one simulator .xctestrun" >&2; return 1; }
+    print -r -- $specs[1]
+}
+
 # An archived .xctestrun is relocatable with Build/Products and never resolves the package graph.
 test_without_building() {
     local result=$1; shift
@@ -139,6 +147,37 @@ require_test_environment() {
     fi
 }
 
+# Old app selectors must not pass green when a test was misspelled or skipped by XCTSkip.
+require_selected_tests_ran() {
+    python3 - "$1" "$2" "${3:-$RESULTS/$NAME-quarantined.txt}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+log_path, selection, quarantine_path = sys.argv[1:]
+log = Path(log_path).read_text(errors="replace")
+quarantine = Path(quarantine_path)
+excluded = [line.split()[0] for line in quarantine.read_text().splitlines() if line.strip()] \
+    if quarantine.exists() else []
+ran = {f"{module}/{kind}/{method}" for module, kind, method in re.findall(
+    r"Test Case '-\[([^\s.]+)\.([^\s]+) ([^\]]+)\]' (?:passed|failed)\b", log)}
+missing = []
+for selected in selection.split(","):
+    if any(selected == item or selected.startswith(item + "/") for item in excluded):
+        continue
+    if not any((test == selected or test.startswith(selected + "/")) and
+               not any(test == item or test.startswith(item + "/") for item in excluded) for test in ran):
+        missing.append(selected)
+skipped = re.search(r"Test Case '.*?' skipped\b", log)
+if missing or skipped:
+    if missing:
+        print(f"error: selected 1.0 tests did not run ({log_path}): {', '.join(missing)}", file=sys.stderr)
+    if skipped:
+        print(f"error: a 1.0 test skipped ({log_path}); compatibility coverage is required", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 # Waits until nothing answers on this port (a server from an earlier try may still be stopping).
 wait_port_free() {
     local tries=0
@@ -148,7 +187,7 @@ wait_port_free() {
     done
 }
 
-# Tests listed in quarantine.txt (known failures, each with its issue) that fall within these
+# Tests listed in QUARANTINE (default quarantine.txt) that fall within these
 # -only-testing ids: prints -skip-testing arguments, and writes them to $2 for the summary.
 quarantined() {
     local only=(${(s:,:)1}) line id
@@ -161,7 +200,7 @@ quarantined() {
                 print -r -- "-skip-testing:$id"
             fi
         done
-    done < $ROOT/ci/quarantine.txt
+    done < ${QUARANTINE:-$ROOT/ci/quarantine.txt}
 }
 
 # Xcode's own retry: a failing test runs once more in place (RETRY_UI=1), so a flaky query or a slow

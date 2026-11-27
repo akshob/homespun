@@ -404,6 +404,10 @@ import and asks you to check Recents; both copies are kept unless the restored o
 verified byte for byte and iOS approves compact-copy removal. Server downgrades after v2
 backups are unsupported; preserve the newer catalog and originals rather than replacing them.
 
+After every code merge, CI checks that the released 1.0 app still pairs, backs up, frees up,
+restores and finds compact copies with the current server, including Free Up and Restore
+after upgrading a 1.0 server in place.
+
 - **Mac or Linux, installed from source:** in the existing checkout, run
   `git pull --ff-only`, rebuild with `swift build -c release --product homespun-server`,
   then rerun `.build/release/homespun-server install-service` with the **same data folder
