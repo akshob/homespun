@@ -787,6 +787,17 @@ resource sets, changed originals, older servers and Immich-only sources stay unt
 recovery guidance; keep the items, reconnect the original archive and run again after updating
 the server if necessary. Neither a legacy match nor a remembered URL authorizes deletion.
 
+After upgrading from Homespun 1.0, the app checks earlier backups against the paired server's
+verified catalog, in batches of at most 500 fingerprints, without reading or hashing media on
+the iPhone. A matching original and total byte count show **Original at home** (or **Backed up**
+when the original is still on the phone), with the check's date and server in Details. These
+display-only observations last at most seven days, apply only to the current authenticated
+server binding and history epoch, and are refreshed when needed. Unconfirmed items keep
+recovery guidance. To restore or free up space for earlier backups, run
+Server › Existing Library › Find Compact Copies first: catalog observations never supply a
+versioned backup record, authorize removal or replace the separate fresh proof.
+The demo does not run these upgrade checks.
+
 Migration preserves the 1.0 source files byte for byte. Like 1.0, it replays only complete
 journal lines, including changes appended after an earlier crash fragment; fragments are
 counted locally, not reconstructed or treated as verified backup records. An unreadable

@@ -96,8 +96,8 @@ final class GridCell: UICollectionViewCell {
         let selectable = state.canCompact || state.canFree || state.canRestore
         let wasSelectable = current.canCompact || current.canFree || current.canRestore
         return current.id == state.id && current.badge == state.badge && selectable == wasSelectable
-            && current.badge.spoken(server: self.serverName, compactAfter: current.compactAfter)
-                == state.badge.spoken(server: serverName, compactAfter: state.compactAfter)
+            && current.badge.spoken(server: self.serverName, compactAfter: current.compactAfter, legacy: current.legacy)
+                == state.badge.spoken(server: serverName, compactAfter: state.compactAfter, legacy: state.legacy)
             && configuredSelecting == selecting && configuredSelected == selected && self.serverName == serverName
             && previous.preferredContentSizeCategory == traitCollection.preferredContentSizeCategory
             && previous.displayScale == traitCollection.displayScale
@@ -166,7 +166,7 @@ final class GridCell: UICollectionViewCell {
     }
 
     override var accessibilityValue: String? {
-        get { state.map { $0.badge.spoken(server: serverName, compactAfter: $0.compactAfter) } }
+        get { state.map { $0.badge.spoken(server: serverName, compactAfter: $0.compactAfter, legacy: $0.legacy) } }
         set {}
     }
 

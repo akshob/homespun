@@ -39,7 +39,7 @@ struct ItemDetails: Equatable {
         } else {
             details.original.bytes = entry?.originalBytes
         }
-        guard let assetID = entry?.serverAssetID, var client = model.settings.client else { return details }
+        guard !cell.legacy, let assetID = entry?.serverAssetID, var client = model.settings.client else { return details }
         client.timeout = 6
         guard let status = try? await client.status(assetID) else { return details }
         let main = status.resources.first { $0.role == (status.kind == .video ? .video : .photo) }
@@ -70,9 +70,9 @@ struct ItemDetails: Equatable {
     }
 
     /// Under Sizes: where the motion was compressed and what freeing up saves.
-    func footer(server: String, backedUp: Bool) -> String? {
+    func footer(server: String, backedUp: Bool, legacy: Bool = false) -> String? {
         var parts: [String] = []
-        if isLive, backedUp { parts.append("Motion was compressed on \(motionOnPhone ? "this iPhone" : server).") }
+        if isLive, backedUp, !legacy { parts.append("Motion was compressed on \(motionOnPhone ? "this iPhone" : server).") }
         if let entry, entry.originalBytes > entry.compactBytes {
             let saved = MediaFacts.size(entry.originalBytes - entry.compactBytes)
             parts.append(originalOnPhone ? "Saves \(saved) when you free up space." : "Saved \(saved) on this iPhone.")
@@ -154,7 +154,7 @@ struct ItemDetailsSheet: View {
             } header: {
                 Text("Sizes")
             } footer: {
-                if let footer = details?.footer(server: server, backedUp: backedUp) { Text(footer) }
+                if let footer = details?.footer(server: server, backedUp: backedUp, legacy: cell.legacy) { Text(footer) }
             }
             .listRowBackground(Theme.card)
         }
@@ -179,15 +179,21 @@ struct ItemDetailsSheet: View {
             }
         case .compactCopy:
             row("square.on.square", "A Homespun compact copy", "This iPhone has no record of where its original is.")
+        case .legacyBackedUp:
+            legacyRows
         case .waiting, .working:
             let step: String? = if case .working(let step)? = job { step } else { nil }
             row("arrow.up.circle", "Backing up to \(server)", step ?? "Waiting to start")
             row("iphone", "Original on this iPhone", "Only here until it's backed up.")
         case .copyLater:
-            row("checkmark.shield", "Original on \(server)", "Backed up · checked (SHA-256)")
-            row("clock", "Compact copy later", Badge.compactLater(cell.compactAfter).capitalizedFirst
-                + ". The original remains retained; this version doesn't automatically expire deferred server originals.")
-            row("iphone", "Original still on this iPhone", "Free Up Space can remove it once the compact copy is in Photos.")
+            if cell.legacy {
+                legacyRows
+            } else {
+                row("checkmark.shield", "Original on \(server)", "Backed up · checked (SHA-256)")
+                row("clock", "Compact copy later", Badge.compactLater(cell.compactAfter).capitalizedFirst
+                    + ". The original remains retained; this version doesn't automatically expire deferred server originals.")
+                row("iphone", "Original still on this iPhone", "Free Up Space can remove it once the compact copy is in Photos.")
+            }
         case .processing:
             row("checkmark.shield", "Original on \(server)", "Its verified backup is independent of compact-copy processing.")
             switch job {
@@ -200,14 +206,31 @@ struct ItemDetailsSheet: View {
                     "The compact copy will appear here after its verified Photos record is published.")
             }
         case .recovery:
-            row("questionmark.folder", "Original server needs recovery",
-                cell.serverName.map { "This mapping belongs to \($0), not necessarily the currently paired server. Reconnect it before restoring or removing anything." }
-                    ?? "The historical server or complete resource proof is unknown. The mapping has been preserved; no duplicate is made automatically.")
+            row("questionmark.folder", "Backup not confirmed",
+                cell.serverOrigin == nil
+                    ? "Homespun 1.0 recorded this backup, but \(server) doesn't confirm it right now. Run Find Compact Copies (Server › Existing Library)."
+                    : "This mapping needs a current-server resource check. Run Server › Existing Library › Find Compact Copies on the server holding its original before restoring or freeing up space.")
         case .none, .kept, .failed:
             row("iphone", "Only on this iPhone", model.settings.isPaired
                 ? "Not backed up yet. Back Up keeps the original on \(server)."
                 : "Set up your home computer to back it up.")
         }
+    }
+
+    @ViewBuilder private var legacyRows: some View {
+        if let checkedAt = cell.legacyCheckedAt {
+            row("checkmark.circle", "Original on \(cell.serverName ?? server)",
+                ItemText.legacyDetails(checkedAt: checkedAt, server: cell.serverName ?? server))
+        }
+        if cell.original != nil {
+            row("photo.on.rectangle", "Compact copy in Photos", "Homespun album · same date, place, favorite")
+            row("iphone", cell.badge == .legacyBackedUp(originalOnPhone: true)
+                ? "Original still on this iPhone" : "Only the compact copy is on this iPhone", "")
+        } else {
+            row("iphone", "Original still on this iPhone", "A compact copy hasn't been linked to this backup.")
+        }
+        row("checkmark.shield", "Check before restoring or freeing up",
+            "Homespun needs a versioned backup record and a fresh check. Run Server › Existing Library › Find Compact Copies.")
     }
 
     private var backedUpLine: String {

@@ -62,6 +62,292 @@ private struct BackupStoreFixture {
 
 private enum PhotoHandoffTestFailure: Error, Equatable { case interrupted }
 
+private struct LegacyUpgradeFixture: Sendable {
+    let root: URL
+    let directory: URL
+    let legacyURL: URL
+    let sources: [URL: Data]
+    let store: BackupStore
+    let binding: BackupStore.Binding
+    static let checkedAt = Date(timeIntervalSince1970: 1_800_000_000)
+
+    static func make() async throws -> Self {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("upgrade-\(UUID().uuidString)")
+        let real = root.appendingPathComponent("real", isDirectory: true)
+        let link = root.appendingPathComponent("container", isDirectory: true)
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        let support = link.appendingPathComponent("Library/Application Support/Homespun", isDirectory: true)
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        func entry(_ copy: String, _ hash: String?, bytes: Int = 100) -> String {
+            """
+            {"compactIdentifier":"\(copy)","originalBytes":\(bytes),"compactBytes":10,
+            "savedAt":"2025-01-02T03:04:05Z"\(hash.map { ",\"serverAssetID\":\"" + String(repeating: $0, count: 64) + "\"" } ?? "")}
+            """
+        }
+        let files = [
+            "ledger.json": """
+            {"pair":\(entry("pair-copy", "a")),"elsewhere:home-copy":\(entry("home-copy", "b")),
+            "live":\(entry("live-copy", "c", bytes: 300)),"on-phone":\(entry("local-copy", nil)),
+            "removed":\(entry("removed-copy", "0"))}
+            """,
+            "ledger.journal": """
+            {"set":{"journal":\(entry("journal-copy", "d", bytes: 200))}}
+            {"remove":["removed"]}
+            {"set":
+            """,
+            "backed-up.json": """
+            {"backed":{"serverAssetID":"\(String(repeating: "e", count: 64))","originalBytes":100,"backedUpAt":"2025-01-02T03:04:05Z"},
+            "kept":{"serverAssetID":"\(String(repeating: "f", count: 64))","originalBytes":100,"backedUpAt":"2025-01-02T03:04:05Z","kept":true}}
+            """,
+            // 1.0 had settled, not keptAsIs. It must not be reinterpreted as a new decision.
+            "automatic.json": #"{"settled":["old-settled"],"lastChecked":"2025-01-02T03:04:05Z"}"#,
+        ]
+        var sources: [URL: Data] = [:]
+        for (name, text) in files {
+            let url = support.appendingPathComponent(name), data = Data(text.utf8)
+            try data.write(to: url)
+            sources[url] = data
+        }
+        let directory = support.appendingPathComponent("Backup"), legacyURL = support.appendingPathComponent("ledger.json")
+        let store = BackupStore(directory: directory, legacyURL: legacyURL)
+        let binding = BackupStore.Binding(id: UUID(),
+            origin: .init(serverID: UUID().uuidString, historyEpoch: UUID().uuidString),
+            trustEpoch: UUID(), baseURL: URL(string: "https://server.invalid")!, keychainReference: "legacy-test")
+        try await store.bind(binding)
+        return Self(root: root, directory: directory, legacyURL: legacyURL, sources: sources, store: store, binding: binding)
+    }
+
+    static func candidates(_ projection: BackupStore.LedgerProjection) -> [LegacyCheck.Candidate] {
+        LegacyCheck.candidates(projection) { $0 == "journal-copy" ? .video : .photo }
+    }
+
+    static func match(_ candidate: LegacyCheck.Candidate) -> ServerAPI.CopyLookupResponse.Match {
+        .init(sha256: candidate.asset, assetID: candidate.asset, role: candidate.role,
+              isOriginal: true, originalsVerified: true, originalBytes: candidate.bytes)
+    }
+}
+
+@MainActor private final class LegacyCheckCurrent {
+    var value = true
+}
+
+private actor LegacyLookupBatches {
+    let candidates: [String: LegacyCheck.Candidate]
+    let failSecond: Bool
+    private(set) var sizes: [Int] = []
+
+    init(_ candidates: [LegacyCheck.Candidate], failSecond: Bool) {
+        self.candidates = Dictionary(uniqueKeysWithValues: candidates.map { ($0.asset, $0) })
+        self.failSecond = failSecond
+    }
+
+    func lookup(_ hashes: [String]) throws -> [ServerAPI.CopyLookupResponse.Match] {
+        sizes.append(hashes.count)
+        if failSecond && sizes.count == 2 { throw PhotoHandoffTestFailure.interrupted }
+        return hashes.compactMap { candidates[$0].map(LegacyUpgradeFixture.match) }
+    }
+}
+
+@Test @MainActor func onePointZeroUpgradeThroughASymlinkChecksCatalogWithoutChangingLegacyRecordsOrActionProofs() async throws {
+    let fixture = try await LegacyUpgradeFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let ledger = CompactLedger(store: fixture.store)
+    let projection = try await ledger.projection()
+    #expect(Set(projection.entries.keys) == ["pair", "elsewhere:home-copy", "live", "on-phone", "journal"])
+    #expect(projection.entries.values.allSatisfy { $0.origin == nil && $0.version == nil && !$0.verifiedCompact })
+    #expect(Set(projection.backedUp.keys) == ["backed", "kept"])
+    #expect(projection.backedUp.values.allSatisfy { $0.origin == nil && $0.version == nil })
+    #expect(projection.backedUp["kept"]?.kept == true && projection.kept.isEmpty)
+    let marker = try await fixture.store.readState {
+        try $0.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
+    }
+    #expect(marker != nil)
+    let candidates = LegacyUpgradeFixture.candidates(projection)
+    #expect(candidates.count == 6 && !candidates.contains { $0.item == "on-phone" || $0.item == "removed" })
+    let matches = candidates.map(LegacyUpgradeFixture.match)
+    try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+        lookup: { hashes in
+            #expect(hashes.count == 6)
+            return matches.filter { hashes.contains($0.sha256) }
+        }, current: { true }, serverOrigin: { fixture.binding.origin }, now: { LegacyUpgradeFixture.checkedAt })
+    // The facade's previously cached projection must observe the check transaction.
+    let checked = try await ledger.projection()
+    let confirmed = checked.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt)
+    #expect(confirmed.count == 6)
+    #expect(checked.entries == projection.entries && checked.backedUp == projection.backedUp)
+    #expect(try await ledger.serverBacked().isEmpty)
+    let state = LibraryState(library: ["pair", "pair-copy", "home-copy", "live-copy", "journal-copy",
+        "on-phone", "local-copy", "backed", "kept", "new"], ledger: checked.entries, album: ["local-copy"], job: [:],
+        origin: fixture.binding.origin, legacyConfirmed: confirmed, legacyServerName: "polonium")
+    #expect(state.cell("pair") == nil && state.cell("pair-copy")?.badge == .legacyBackedUp(originalOnPhone: true))
+    #expect(state.cell("home-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
+    #expect(state.cell("live-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
+    #expect(state.cell("journal-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
+    #expect(state.cell("backed")?.badge == .copyLater && state.cell("backed")?.compactAfter == nil)
+    #expect(state.cell("local-copy")?.badge == .compactCopy && state.cell("on-phone")?.badge == .none)
+    #expect(state.count(.atHome) == 3 && state.count(.needsAttention) == 0 && state.count(.notBackedUp) == 2)
+    #expect(state.cells.filter(\.legacy).count == 6 && state.cells.allSatisfy { !$0.canFree && !$0.canRestore })
+    #expect(state.cells.filter(\.legacy).allSatisfy { !$0.canCompact && ItemAction.for($0) == .none })
+    #expect(LibraryView.backupSubtitle(state: state, server: "polonium") == "2 not backed up · polonium")
+    var incremental = state
+    #expect(incremental.apply(job: ["backed": .failed("old job"), "kept": .notYet("old job")]).isEmpty)
+    #expect(incremental == state)
+    let unconfirmed = LibraryState(library: ["pair", "pair-copy", "home-copy"], ledger: checked.entries,
+        album: [], job: [:], origin: fixture.binding.origin)
+    #expect(unconfirmed.cell("pair-copy")?.badge == .recovery && unconfirmed.count(.needsAttention) == 2)
+    #expect(LibraryView.backupSubtitle(state: unconfirmed, server: "polonium") == "2 need attention · polonium")
+    let mappings = try await fixture.store.mappings(namespace: "photos")
+    try await fixture.store.close()
+    let reopened = BackupStore(directory: fixture.directory, legacyURL: fixture.legacyURL)
+    let reloaded = try await reopened.ledgerProjection(namespace: "photos")
+    #expect(try await reopened.mappings(namespace: "photos") == mappings)
+    #expect(reloaded.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt) == confirmed)
+    let reopenedMarker = try await reopened.readState {
+        try $0.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
+    }
+    #expect(reopenedMarker == marker)
+    for (url, data) in fixture.sources { #expect(try Data(contentsOf: url) == data) }
+    try await reopened.close()
+}
+
+@Test @MainActor func legacyLookupRequiresTheWholeCatalogMatchAndExpiresEvenACachedProjection() async throws {
+    let fixture = try await LegacyUpgradeFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let ledger = CompactLedger(store: fixture.store)
+    let candidates = LegacyUpgradeFixture.candidates(try await ledger.projection())
+    let matches = candidates.compactMap { candidate -> ServerAPI.CopyLookupResponse.Match? in
+        var match = LegacyUpgradeFixture.match(candidate)
+        switch candidate.item {
+        case "pair": match.originalBytes += 1
+        case "live": match.originalsVerified = false
+        case "journal": match.role = .photo
+        case "backed": match.assetID = String(repeating: "0", count: 64)
+        case "kept": return nil
+        default: break
+        }
+        return match
+    }
+    try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+        lookup: { _ in matches }, current: { true }, serverOrigin: { fixture.binding.origin },
+        now: { LegacyUpgradeFixture.checkedAt })
+    let projection = try await ledger.projection(), now = LegacyUpgradeFixture.checkedAt
+    #expect(Set(projection.legacyConfirmed(binding: fixture.binding, now: now).keys) == ["elsewhere:home-copy"])
+    #expect(projection.legacyChecks.count == 6)
+    #expect(LegacyCheck.pending(candidates, projection: projection, binding: fixture.binding, now: now).isEmpty)
+    #expect(projection.legacyConfirmed(binding: fixture.binding, now: now.addingTimeInterval(LegacyCheck.maximumAge)).count == 1)
+    #expect(projection.legacyConfirmed(binding: fixture.binding, now: now.addingTimeInterval(LegacyCheck.maximumAge + 1)).isEmpty)
+    #expect(projection.legacyConfirmed(binding: fixture.binding, now: now.addingTimeInterval(-1)).isEmpty)
+    #expect(LegacyCheck.pending(candidates, projection: projection, binding: fixture.binding,
+        now: now.addingTimeInterval(LegacyCheck.maximumAge + 1)).count == 6)
+    var other = fixture.binding
+    other.id = UUID()
+    try await fixture.store.bind(other)
+    #expect(projection.legacyConfirmed(binding: other, now: now).isEmpty)
+    other = fixture.binding
+    other.origin.historyEpoch = UUID().uuidString
+    #expect(projection.legacyConfirmed(binding: other, now: now).isEmpty)
+    other = fixture.binding
+    other.origin.serverID = UUID().uuidString
+    #expect(projection.legacyConfirmed(binding: other, now: now).isEmpty)
+    try await fixture.store.retireBinding(fixture.binding.id)
+    #expect(try await ledger.projection().legacyChecks.isEmpty)
+    await #expect(throws: BackupStore.Failure.retiredBinding) {
+        try await fixture.store.recordLegacyChecks(Array(projection.legacyChecks.values),
+                                                   binding: fixture.binding, namespace: "photos")
+    }
+    try await fixture.store.close()
+}
+
+@Test @MainActor func legacyLookupDoesNotTurnCompactHintsUnrelatedHashesOrErrorsIntoConfirmation() async throws {
+    let fixture = try await LegacyUpgradeFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let ledger = CompactLedger(store: fixture.store)
+    let candidates = LegacyUpgradeFixture.candidates(try await ledger.projection())
+    let wrong = candidates.map { candidate in
+        var match = LegacyUpgradeFixture.match(candidate)
+        if candidate.item == "pair" { match.isOriginal = false }
+        else { match.sha256 = String(repeating: "0", count: 64) }
+        return match
+    }
+    try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+        lookup: { _ in wrong }, current: { true }, serverOrigin: { fixture.binding.origin },
+        now: { LegacyUpgradeFixture.checkedAt })
+    #expect(try await ledger.projection().legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).isEmpty)
+    try await fixture.store.discardLegacyChecks(bindingID: fixture.binding.id)
+    await #expect(throws: PhotoHandoffTestFailure.interrupted) {
+        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+            lookup: { _ in throw PhotoHandoffTestFailure.interrupted }, current: { true },
+            serverOrigin: { fixture.binding.origin })
+    }
+    #expect(try await ledger.projection().legacyChecks.isEmpty, "A failed request is not a negative catalog result")
+    let current = LegacyCheckCurrent()
+    let lookup: CopyFinder.Lookup = { _ in
+        await MainActor.run { current.value = false }
+        return candidates.map(LegacyUpgradeFixture.match)
+    }
+    await #expect(throws: CancellationError.self) {
+        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding, lookup: lookup,
+            current: { current.value }, serverOrigin: { fixture.binding.origin })
+    }
+    #expect(try await ledger.projection().legacyChecks.isEmpty, "An answer after a binding/trust change must be discarded")
+    let anotherOrigin = BackupAPI.Origin(serverID: fixture.binding.origin.serverID, historyEpoch: UUID().uuidString)
+    await #expect(throws: LegacyCheck.Failure.serverChanged) {
+        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+            lookup: { _ in Issue.record("A changed server epoch must stop before any fingerprint is sent"); return [] },
+            current: { true }, serverOrigin: { anotherOrigin })
+    }
+    #expect(try await ledger.projection().legacyChecks.isEmpty)
+    try await fixture.store.close()
+}
+
+@Test @MainActor func legacyLookupBatchesAtFiveHundredAndResumesOnlyUnansweredItemsAfterAnError() async throws {
+    let fixture = try await LegacyUpgradeFixture.make()
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let ledger = CompactLedger(store: fixture.store, namespace: "batch-test")
+    let entries = Dictionary(uniqueKeysWithValues: (0..<1_001).map { index in
+        ("item-\(index)", CompactLedger.Entry(compactIdentifier: "copy-\(index)", originalBytes: 100, compactBytes: 10,
+            savedAt: LegacyUpgradeFixture.checkedAt, serverAssetID: Fingerprint.sha256(of: Data("original-\(index)".utf8))))
+    })
+    try await ledger.record(entries)
+    let candidates = LegacyUpgradeFixture.candidates(try await ledger.projection())
+    let interrupted = LegacyLookupBatches(candidates, failSecond: true)
+    await #expect(throws: PhotoHandoffTestFailure.interrupted) {
+        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+            lookup: { try await interrupted.lookup($0) }, current: { true }, serverOrigin: { fixture.binding.origin },
+            now: { LegacyUpgradeFixture.checkedAt })
+    }
+    #expect(await interrupted.sizes == [500, 500])
+    let partial = try await ledger.projection()
+    #expect(partial.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).count == 500)
+    let pending = LegacyCheck.pending(candidates, projection: partial, binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt)
+    #expect(pending.count == 501)
+    let resumed = LegacyLookupBatches(pending, failSecond: false)
+    try await LegacyCheck.run(pending, ledger: ledger, binding: fixture.binding,
+        lookup: { try await resumed.lookup($0) }, current: { true }, serverOrigin: { fixture.binding.origin },
+        now: { LegacyUpgradeFixture.checkedAt })
+    #expect(await resumed.sizes == [500, 1])
+    let complete = try await ledger.projection()
+    #expect(complete.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).count == 1_001)
+    #expect(LegacyCheck.pending(candidates, projection: complete, binding: fixture.binding,
+                              now: LegacyUpgradeFixture.checkedAt).isEmpty)
+    try await ledger.record(["new": .init(compactIdentifier: "new-copy", originalBytes: 100, compactBytes: 10,
+        savedAt: Date(), serverAssetID: String(repeating: "a", count: 64))])
+    let extended = try await ledger.projection()
+    #expect(LegacyCheck.pending(LegacyUpgradeFixture.candidates(extended), projection: extended,
+                               binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).map(\.item) == ["new"])
+    var changed = try #require(entries["item-0"])
+    changed.originalBytes += 1
+    try await ledger.record(["item-0": changed])
+    #expect(try await ledger.projection().legacyChecks["item-0"] == nil)
+    let old = try #require(candidates.first { $0.item == "item-0" })
+    try await LegacyCheck.run([old], ledger: ledger, binding: fixture.binding,
+        lookup: { _ in [LegacyUpgradeFixture.match(old)] }, current: { true }, serverOrigin: { fixture.binding.origin },
+        now: { LegacyUpgradeFixture.checkedAt })
+    #expect(try await ledger.projection().legacyChecks["item-0"] == nil, "A late response cannot confirm a changed mapping")
+    try await fixture.store.close()
+}
+
 @Test func failedUploadIntentAdmissionReleasesItsReservation() async throws {
     let fixture = try await BackupStoreFixture.make()
     defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -95,6 +381,15 @@ private enum PhotoHandoffTestFailure: Error, Equatable { case interrupted }
     let historical = "old-installation-original"
     try await ledger.record(original: historical, compact: "found-copy", originalBytes: fixture.original.size,
                             compactBytes: fixture.compact.size, serverAssetID: fixture.receipt.version.assetID)
+    let legacyCandidate = LegacyCheck.Candidate(item: historical, asset: fixture.receipt.version.assetID,
+        bytes: fixture.original.size, role: .photo, compact: "found-copy")
+    try await fixture.store.recordLegacyChecks([.init(candidate: legacyCandidate, bindingID: fixture.binding.id,
+        origin: fixture.binding.origin, verified: true, checkedAt: Date())], binding: fixture.binding, namespace: "photos")
+    let legacyProjection = try await ledger.projection()
+    #expect(legacyProjection.legacyConfirmed(binding: fixture.binding).count == 1)
+    let legacyState = LibraryState(library: ["found-copy"], ledger: legacyProjection.entries, album: [], job: [:],
+        origin: fixture.binding.origin, legacyConfirmed: legacyProjection.legacyConfirmed(binding: fixture.binding))
+    #expect(legacyState.cell("found-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
     let operation = try await fixture.store.planCopyAdoption(compactID: "found-copy", originalID: nil,
         candidate: candidate, compact: compact, bindingID: fixture.binding.id, namespace: "photos", profile: .standard)
     #expect(try await fixture.store.deviceRunnable(.upload, binding: fixture.binding, namespace: "photos").isEmpty)
@@ -129,6 +424,11 @@ private enum PhotoHandoffTestFailure: Error, Equatable { case interrupted }
     #expect(entry.verifiedCompact && entry.origin == fixture.binding.origin && entry.requestID == receipt.requestID)
     #expect(entry.operationID == operation.id && entry.bindingID == fixture.binding.id && entry.revalidatedCopy == true)
     #expect(entry.compactResources == [fixture.compact])
+    let adoptedProjection = try await restoredLedger.projection()
+    #expect(adoptedProjection.legacyChecks.isEmpty)
+    let adoptedState = LibraryState(library: ["found-copy"], ledger: adoptedProjection.entries, album: [], job: [:],
+        origin: fixture.binding.origin)
+    #expect(adoptedState.cell("found-copy")?.badge == .backedUp && adoptedState.cell("found-copy")?.canRestore == true)
     let anotherPrincipal = await CopyFinder.known([key: entry], origin: fixture.binding.origin, bindingID: UUID())
     #expect(anotherPrincipal.isEmpty)
     #expect(try await restoredLedger.entry(for: historical) == nil)

@@ -63,6 +63,21 @@ final class LibraryController {
     private var operations = 0
     private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
     private var localRetirements: [UUID: @MainActor () async -> Void] = [:]
+    @ObservationIgnored private var legacyCheckTask: Task<Void, Never>?
+    private var legacyCheckAttempt: Date?
+    private var legacyCount = 0
+    private var dismissedLegacyNotice: UUID?
+    private var legacyRejectedBinding: UUID?
+    @ObservationIgnored private var legacyChecksInvalidated = false
+
+    var legacyNotice: String? {
+        guard legacyCount > 0, let binding = job.bindingContext?.binding, settings.matchesBackupBinding(binding),
+              dismissedLegacyNotice != binding.id, legacyRejectedBinding != binding.id else { return nil }
+        return "\(legacyCount.formatted()) backups from Homespun 1.0 are on \(serverName). To free up space or restore originals, "
+            + "run Server › Existing Library › Find Compact Copies."
+    }
+
+    func dismissLegacyNotice() { dismissedLegacyNotice = job.bindingContext?.binding.id }
 
     func observeRetirement(_ retire: @escaping @MainActor () async -> Void) -> CatalogObservation? {
         guard !retired else { return nil }
@@ -96,6 +111,7 @@ final class LibraryController {
         library.onChange = nil
         library.stopObserving()
         pendingRebuild?.cancel()
+        legacyCheckTask?.cancel()
         restoreTask?.cancel()
         job.retire()
         copyFinder.retire()
@@ -109,6 +125,7 @@ final class LibraryController {
         await job.stopAndWait()
         await restoreTask?.value
         await copyFinder.stopAndWait()
+        await legacyCheckTask?.value
         await pendingRebuild?.value
         if operations > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
         await job.history?.load()
@@ -118,10 +135,12 @@ final class LibraryController {
     func suspendAndWait() async {
         suspended = true
         pendingRebuild?.cancel()
+        legacyCheckTask?.cancel()
         restoreTask?.cancel()
         await job.suspendAndWait()
         await restoreTask?.value
         await copyFinder.suspendAndWait()
+        await legacyCheckTask?.value
         await pendingRebuild?.value
         if operations > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
         await job.history?.flush()
@@ -151,6 +170,9 @@ final class LibraryController {
             self.ready = Ready()
             self.readyChecked = false
             self.finished = nil
+            self.legacyCheckTask?.cancel()
+            self.legacyCheckAttempt = nil
+            self.legacyCount = 0
             self.scheduleRefreshGrid()
         }
         job.onRunFinished = { [weak self] in
@@ -161,6 +183,24 @@ final class LibraryController {
                 await self.jobFinished()
                 self.finishingBackups -= 1
                 if !self.settings.isDemo { await Telemetry.shared.flush() }
+            }
+        }
+        observeLegacyTrust()
+    }
+
+    private func observeLegacyTrust() {
+        guard !retired, !settings.isDemo else { return }
+        withObservationTracking {
+            if case .blocked = settings.connectionTrust { legacyChecksInvalidated = true }
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, !self.retired else { return }
+                self.observeLegacyTrust()
+                guard self.admit() else { return }
+                defer { self.finishedOperation() }
+                self.legacyCheckTask?.cancel()
+                self.legacyCheckAttempt = nil
+                await self.refreshGrid()
             }
         }
     }
@@ -207,6 +247,7 @@ final class LibraryController {
     func refresh() async {
         guard admit() else { return }
         defer { finishedOperation() }
+        legacyCheckAttempt = nil
         let now = settings.photos.authorization()
         // The whole library is read at launch and when access changes; after that Photos' change
         // observer keeps it current (re-reading 35,000 items on every return to the app is slow).
@@ -219,6 +260,7 @@ final class LibraryController {
         }
         if settings.isPaired { await settings.refreshServerInfo() }
         await job.refreshQueue()
+        await refreshLegacyBinding()
         await refreshReady()
         await refreshGrid()
     }
@@ -234,19 +276,33 @@ final class LibraryController {
     func refreshGrid() async {
         guard !retired, !suspended else { return }
         do {
+        let blocked: Bool = if case .blocked = settings.connectionTrust { true } else { false }
+        if !settings.isDemo && (blocked || legacyChecksInvalidated) {
+            try await job.ledger.store.discardLegacyChecks()
+            legacyChecksInvalidated = false
+        }
         let projection = try await job.ledger.projection()
         let kept = projection.kept, backed = projection.backedUp
+        let binding = job.bindingContext?.binding
+        let confirmed = binding.flatMap {
+            settings.matchesBackupBinding($0) && !settings.isDemo && legacyRejectedBinding != $0.id ? $0 : nil
+        }
+            .map { projection.legacyConfirmed(binding: $0) } ?? [:]
         let recovering = Set(backed.filter { $0.value.origin == nil || $0.value.version == nil || $0.value.origin != job.activeOrigin }.keys)
+            .subtracting(confirmed.keys)
         automatic.useCanonicalDecisions(kept)
         var states = job.states
         let compactInProgress = job.compactInProgress
         for id in kept where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
         await library.update(ledger: projection.entries, job: states,
                              backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
-                             pendingImports: projection.pendingImports, compactInProgress: compactInProgress)
+                             pendingImports: projection.pendingImports, compactInProgress: compactInProgress,
+                             legacyConfirmed: confirmed, legacyServerName: serverName)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
+        legacyCount = state.cells.reduce(0) { $0 + ($1.legacy ? 1 : 0) }
+        scheduleLegacyCheck(projection)
         if !settings.isDemo {
             TipState.notBackedUp = state.count(.notBackedUp)
             TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
@@ -255,6 +311,70 @@ final class LibraryController {
         }
         await refreshNewSinceBackup()
         } catch { job.showQueueProblem(error) }
+    }
+
+    private func rejectLegacyBinding(_ binding: BackupStore.Binding) async {
+        legacyRejectedBinding = binding.id
+        try? await job.ledger.store.discardLegacyChecks(bindingID: binding.id)
+        if job.bindingContext?.binding.id == binding.id { job.invalidateBinding() }
+    }
+
+    /// A cached engine context may predate a server history restore. Learn its current epoch even
+    /// when every legacy observation is still within its seven-day display lifetime.
+    private func refreshLegacyBinding() async {
+        guard !settings.isDemo, let context = job.bindingContext, settings.matchesBackupBinding(context.binding),
+              var client = settings.client else { return }
+        client.timeout = 6
+        do {
+            let projection = try await job.ledger.projection()
+            guard projection.entries.values.contains(where: { $0.origin == nil && $0.serverAssetID != nil })
+                || projection.backedUp.values.contains(where: { $0.origin == nil }) else { return }
+            let origin = try await ServerClientV2(client).capabilities().origin
+            guard !retired, !suspended, !Task.isCancelled, settings.matchesBackupBinding(context.binding),
+                  job.bindingContext?.binding == context.binding else { return }
+            if origin != context.binding.origin { await rejectLegacyBinding(context.binding) }
+        } catch {
+            // Offline observations remain displayable until expiry, but cannot authorize actions.
+        }
+    }
+
+    private func scheduleLegacyCheck(_ projection: BackupStore.LedgerProjection) {
+        guard !settings.isDemo, !retired, !suspended, !Task.isCancelled, legacyCheckTask == nil,
+              let context = job.bindingContext, legacyRejectedBinding != context.binding.id,
+              settings.matchesBackupBinding(context.binding),
+              var client = settings.client,
+              legacyCheckAttempt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true else { return }
+        let binding = context.binding
+        client.timeout = 6
+        let lookupClient = client
+        let candidates = LegacyCheck.candidates(projection) { id in
+            guard let kind = library.info(id)?.kind else { return nil }
+            return kind == .video ? .video : .photo
+        }
+        let pending = LegacyCheck.pending(candidates, projection: projection, binding: binding, now: Date())
+        guard !pending.isEmpty else { return }
+        legacyCheckAttempt = Date()
+        legacyCheckTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.legacyCheckTask = nil
+                self.scheduleRefreshGrid()
+            }
+            do {
+                try await LegacyCheck.run(pending, ledger: self.job.ledger, binding: binding,
+                    lookup: { try await lookupClient.lookupCopies($0) }, current: { [weak self] in
+                        guard let self else { return false }
+                        return !self.retired && !self.suspended && self.settings.matchesBackupBinding(binding)
+                            && self.job.bindingContext?.binding == binding
+                    }, serverOrigin: { try await ServerClientV2(lookupClient).capabilities().origin })
+                self.legacyCheckAttempt = nil
+            } catch LegacyCheck.Failure.serverChanged {
+                await self.rejectLegacyBinding(binding)
+            } catch {
+                // This display check is best effort. Missing/expired observations remain recovery;
+                // transport errors are retried on a later refresh, never recorded as a catalog answer.
+            }
+        }
     }
 
     /// Items backed up without a compact copy, with when automatic mode makes it (nil: a kept favorite).

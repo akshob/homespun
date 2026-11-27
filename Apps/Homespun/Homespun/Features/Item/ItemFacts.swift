@@ -29,11 +29,13 @@ enum ItemText {
 
     /// The sentence beside the badge, under the photo: what the badge means for this item.
     static func sentence(_ badge: Badge, server: String, immich: Bool, job: CompactJob.State? = nil,
-                         compactAfter: Date? = nil) -> String {
+                         compactAfter: Date? = nil, legacy: Bool = false) -> String {
         let home = immich ? "in Immich" : "on \(server)"
         switch badge {
         case .originalOnPhone: return "Ready to free up · original \(home)"
         case .backedUp: return "Original at home · \(home)"
+        case .legacyBackedUp(let onPhone):
+            return "\(onPhone ? "Backed up" : "Original at home") · \(home) · Homespun 1.0"
         case .none:
             if case .notYet(let reason)? = job { return "Not backed up yet · \(reason)" }
             return "Not backed up · only on this iPhone"
@@ -52,10 +54,14 @@ enum ItemText {
             default:
                 return "Original backed up · compact copy in progress"
             }
-        case .recovery: return "Backup needs recovery · reconnect its original server"
+        case .recovery: return "Backup not confirmed · Server › Existing Library › Find Compact Copies"
         case .compactCopy: return "Compact copy · made by Homespun"
-        case .copyLater: return "Backed up · " + Badge.compactLater(compactAfter)
+        case .copyLater: return legacy ? "Backed up · \(home) · Homespun 1.0" : "Backed up · " + Badge.compactLater(compactAfter)
         }
+    }
+
+    static func legacyDetails(checkedAt: Date, server: String) -> String {
+        "Backed up with Homespun 1.0 · checked \(checkedAt.formatted(date: .abbreviated, time: .shortened)) on \(server)"
     }
 
     /// The sentence for VoiceOver: "Ready to free up, original on Home Mac."
@@ -74,6 +80,7 @@ enum ItemAction: Equatable {
     case none
 
     static func `for`(_ cell: LibraryState.Cell) -> ItemAction {
+        guard !cell.legacy else { return .none }
         if cell.canFree, let original = cell.original { return .freeUp(original: original) }
         switch cell.badge {
         case .none: return .backUp
