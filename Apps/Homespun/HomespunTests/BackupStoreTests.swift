@@ -259,7 +259,7 @@ private actor LegacyLookupBatches {
     #expect(state.cell("live-copy")?.badge == .backedUp)
     #expect(state.cell("journal-copy")?.badge == .backedUp)
     #expect(state.cell("backed")?.badge == .copyLater && state.cell("backed")?.compactAfter == nil)
-    #expect(state.cell("local-copy")?.badge == .compactCopy && state.cell("on-phone")?.badge == .none)
+    #expect(state.cell("local-copy")?.badge == .compactCopy && state.cell("on-phone")?.badge == Badge.none)
     #expect(state.count(.atHome) == 3 && state.count(.needsAttention) == 0 && state.count(.notBackedUp) == 2)
     #expect(state.cells.filter(\.legacy).count == 6 && state.cells.allSatisfy { !$0.canFree && !$0.canRestore })
     #expect(state.cells.filter(\.legacy).allSatisfy { !$0.canCompact && ItemAction.for($0) == .none })

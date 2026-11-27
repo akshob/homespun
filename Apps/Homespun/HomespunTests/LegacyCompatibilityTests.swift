@@ -15,6 +15,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
         init(_ server: DemoServer) { self.server = Mutex(server) }
     }
     static let contexts = Mutex<[String: Context]>([:])
+    static let key = ServerKeyFingerprint(base64url: "IlypPJ-wE200U-L1DoKMtMQyrDczNQMel-ae_YH5OgU")!
     private var loading: Task<Void, Never>?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -44,6 +45,11 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
                 let server = context.server.withLock { $0 }
                 var answer = await server.handle(method: request.httpMethod ?? "GET", url: url, token: token,
                     body: payload, headers: request.allHTTPHeaderFields ?? [:])
+                if path == "/api/v1/info", answer.status == 200 {
+                    var info = try ServerAPI.decoder.decode(ServerAPI.ServerInfo.self, from: answer.body)
+                    info.tls?.fingerprint = LegacyProtocol.key
+                    answer.body = try ServerAPI.encoder.encode(info)
+                }
                 if let transform = context.transform.withLock({ $0 }) { answer = try await transform(path, answer) }
                 guard !Task.isCancelled else { return }
                 var headers = answer.headers
@@ -106,7 +112,9 @@ private final class Counter: Sendable {
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [LegacyProtocol.self]
             configuration.httpAdditionalHeaders = ["X-Legacy-Test": id]
-            session = URLSession(configuration: configuration)
+            let delegate = ServerTrustDelegate(policy: .pinned([LegacyProtocol.key]))
+            try #require(delegate.evaluate(try serverTrustFixture()))
+            session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
             settings = AppSettings(defaults: defaults, photos: library, tokens: DemoTokens(defaults: defaults),
                 session: session, installationStore: DefaultsInstallation(defaults: defaults))
             ledger = CompactLedger(url: folder.appendingPathComponent("ledger.json"))
@@ -119,9 +127,10 @@ private final class Counter: Sendable {
             let response = await server.handle(method: "POST", url: DemoServer.baseURL.appendingPathComponent("api/v1/pair"),
                 token: nil, body: try ServerAPI.encoder.encode(ServerAPI.PairRequest(code: "DEMO-2468", deviceName: "Test",
                     challenge: ticket.id)))
-            let pairing = try ServerAPI.decoder.decode(ServerAPI.PairResponse.self, from: response.body)
+            var pairing = try ServerAPI.decoder.decode(ServerAPI.PairResponse.self, from: response.body)
+            pairing.server.tls?.fingerprint = LegacyProtocol.key
             try settings.finishPairing(serverURL: DemoServer.baseURL, response: pairing,
-                pins: .init(pins: [DemoServer.fingerprint], source: "test"))
+                pins: .init(pins: [LegacyProtocol.key], source: "test"))
             await settings.refreshServerInfo(forceBackupCheck: true)
             _ = try await settings.legacyScope()
         }
@@ -186,10 +195,10 @@ private final class Counter: Sendable {
         #expect(projection.legacyConfirmed(scope: fixture.scope, origin: origin).count == 1)
         let token = fixture.client.token!
         let changes = [
-            LegacyCheck.scope(url: URL(string: "https://other.local")!, pins: [DemoServer.fingerprint], token: token, consumer: fixture.defaults.string(forKey: "serverDeviceID")!),
+            LegacyCheck.scope(url: URL(string: "https://other.local")!, pins: [LegacyProtocol.key], token: token, consumer: fixture.defaults.string(forKey: "serverDeviceID")!),
             LegacyCheck.scope(url: DemoServer.baseURL, pins: [], token: token, consumer: fixture.defaults.string(forKey: "serverDeviceID")!),
-            LegacyCheck.scope(url: DemoServer.baseURL, pins: [DemoServer.fingerprint], token: "another", consumer: fixture.defaults.string(forKey: "serverDeviceID")!),
-            LegacyCheck.scope(url: DemoServer.baseURL, pins: [DemoServer.fingerprint], token: token, consumer: "another"),
+            LegacyCheck.scope(url: DemoServer.baseURL, pins: [LegacyProtocol.key], token: "another", consumer: fixture.defaults.string(forKey: "serverDeviceID")!),
+            LegacyCheck.scope(url: DemoServer.baseURL, pins: [LegacyProtocol.key], token: token, consumer: "another"),
         ]
         for scope in changes { #expect(projection.legacyConfirmed(scope: scope, origin: nil).isEmpty) }
         let grid = LibraryState(library: fixture.library.allIdentifiers(), ledger: projection.entries,
