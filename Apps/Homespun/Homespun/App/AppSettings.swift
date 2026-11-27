@@ -706,28 +706,28 @@ final class AppSettings {
             AppLog.server.notice("server unreachable: \(Telemetry.Event.code(error), privacy: .public)")
             serverStatus = .unreachable("Can't reach \(server?.name ?? "the server"). Make sure this iPhone is on your home network.")
         }
+    }
 
-        private func checkBackupSupport(info: ServerAPI.ServerInfo, force: Bool) async {
-            guard let client else { return }
-            if info.backupAPI == BackupAPI.version {
-                if backupAPI != .current { rememberBackupSupport(.current) }
-                return
-            }
-            guard force || (backupCheckedAt.map({ Date().timeIntervalSince($0) >= 600 }) ?? true) else { return }
-            let url = client.baseURL, token = client.token, trust = client.trust
-            func current() -> Bool {
-                !isRetired && serverURL == url && self.client?.token == token && connectionTrust == trust
-            }
-            do {
-                let capabilities = try await ServerClientV2(client).capabilities()
-                guard current(), !Task.isCancelled else { return }
-                rememberBackupSupport(.current, origin: capabilities.origin)
-            } catch let failure as ServerClient.Failure where failure.status == 404 || failure.status == 405 {
-                guard current(), !Task.isCancelled else { return }
-                rememberBackupSupport(.needsUpdate(Date()))
-            } catch {
-                // Reachability and TLS remain independent of backup protocol support.
-            }
+    private func checkBackupSupport(info: ServerAPI.ServerInfo, force: Bool) async {
+        guard let client else { return }
+        if info.backupAPI == BackupAPI.version {
+            if backupAPI != .current { rememberBackupSupport(.current) }
+            return
+        }
+        guard force || (backupCheckedAt.map({ Date().timeIntervalSince($0) >= 600 }) ?? true) else { return }
+        let url = client.baseURL, token = client.token, trust = client.trust
+        func current() -> Bool {
+            !isRetired && serverURL == url && self.client?.token == token && connectionTrust == trust
+        }
+        do {
+            let capabilities = try await ServerClientV2(client).capabilities()
+            guard current(), !Task.isCancelled else { return }
+            rememberBackupSupport(.current, origin: capabilities.origin)
+        } catch let failure as ServerClient.Failure where failure.status == 404 || failure.status == 405 {
+            guard current(), !Task.isCancelled else { return }
+            rememberBackupSupport(.needsUpdate(Date()))
+        } catch {
+            // Reachability and TLS remain independent of backup protocol support.
         }
     }
 
