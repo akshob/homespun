@@ -76,10 +76,12 @@ public enum ServerAPI {
         public var freeBytes: Int64?
         public var tls: TLSInfo?
         public var deviceName: String?
+        /// Missing on servers with only the original backup API.
+        public var backupAPI: Int?
 
         public init(name: String, version: String, apiVersion: Int = ServerAPI.version, mode: StorageMode,
                     profile: CompressionProfile, platform: ServerSetup.Platform? = nil, hardware: Hardware? = nil,
-                    freeBytes: Int64? = nil, tls: TLSInfo? = nil, deviceName: String? = nil) {
+                    freeBytes: Int64? = nil, tls: TLSInfo? = nil, deviceName: String? = nil, backupAPI: Int? = nil) {
             self.name = name
             self.version = version
             self.apiVersion = apiVersion
@@ -90,6 +92,12 @@ public enum ServerAPI {
             self.freeBytes = freeBytes
             self.tls = tls
             self.deviceName = deviceName
+            self.backupAPI = backupAPI
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case name, version, apiVersion, mode, profile, platform, hardware, freeBytes, tls, deviceName
+            case backupAPI = "backupApi"
         }
     }
 
