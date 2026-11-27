@@ -1,9 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import HomespunCore
+import Synchronization
 
 /// Catalog observations for presentation only. These never supply a version, import proof or removal permission.
 enum LegacyCheck {
+    final class Generation: Sendable {
+        private let value = Mutex(0)
+        func invalidate() { value.withLock { $0 &+= 1 } }
+        func authorization() -> @Sendable () -> Bool {
+            let captured = value.withLock { $0 }
+            return { [self] in value.withLock { $0 == captured } }
+        }
+    }
+
+    static func scope(url: URL, pins: [ServerKeyFingerprint], token: String, consumer: String) -> String {
+        Fingerprint.sha256(of: Data(("v1|" + url.absoluteString + "|"
+            + pins.map(\.base64url).sorted().joined(separator: ",") + "|"
+            + Fingerprint.sha256(of: Data(token.utf8)) + "|" + consumer).utf8))
+    }
     static let maximumAge: TimeInterval = 7 * 24 * 60 * 60
     enum Failure: Error, Equatable { case serverChanged }
 
@@ -27,14 +42,14 @@ enum LegacyCheck {
 
     struct Record: Equatable, Sendable {
         var candidate: Candidate
-        var bindingID: UUID
-        var origin: BackupAPI.Origin
+        var scope: String
+        var origin: BackupAPI.Origin?
         var verified: Bool
         var checkedAt: Date
 
-        func isCurrent(binding: BackupStore.Binding, now: Date) -> Bool {
+        func isCurrent(scope: String, origin: BackupAPI.Origin?, now: Date) -> Bool {
             let age = now.timeIntervalSince(checkedAt)
-            return !binding.retired && bindingID == binding.id && origin == binding.origin
+            return self.scope == scope && (self.origin == nil || origin == nil || self.origin == origin)
                 && age >= 0 && age <= LegacyCheck.maximumAge
         }
     }
@@ -60,25 +75,26 @@ enum LegacyCheck {
     }
 
     static func pending(_ candidates: [Candidate], projection: BackupStore.LedgerProjection,
-                        binding: BackupStore.Binding, now: Date) -> [Candidate] {
+                        scope: String, origin: BackupAPI.Origin?, now: Date) -> [Candidate] {
         candidates.filter {
             guard let record = projection.legacyChecks[$0.item] else { return true }
-            return record.candidate != $0 || !record.isCurrent(binding: binding, now: now)
+            return record.candidate != $0 || !record.isCurrent(scope: scope, origin: origin, now: now)
         }
     }
 
-    @MainActor static func run(_ candidates: [Candidate], ledger: CompactLedger, binding: BackupStore.Binding,
+    @MainActor static func run(_ candidates: [Candidate], ledger: CompactLedger, scope: String, origin: BackupAPI.Origin?,
                                lookup: CopyFinder.Lookup, current: @MainActor @Sendable () -> Bool,
-                               serverOrigin: @Sendable () async throws -> BackupAPI.Origin,
+                               authorized: @Sendable () -> Bool = { true },
+                               serverOrigin: @Sendable () async throws -> BackupAPI.Origin? = { nil },
                                now: @Sendable () -> Date = { Date() }) async throws {
         try Task.checkCancellation()
-        guard current(), !binding.retired else { throw CancellationError() }
-        guard try await serverOrigin() == binding.origin else { throw Failure.serverChanged }
+        guard current() else { throw CancellationError() }
+        if let origin, let actual = try await serverOrigin(), actual != origin { throw Failure.serverChanged }
         let grouped = Dictionary(grouping: candidates, by: \.asset)
         let hashes = grouped.keys.sorted()
         for start in stride(from: 0, to: hashes.count, by: ServerAPI.CopyLookupRequest.maximumCount) {
             try Task.checkCancellation()
-            guard current(), !binding.retired else { throw CancellationError() }
+            guard current() else { throw CancellationError() }
             let chunk = Array(hashes[start..<min(start + ServerAPI.CopyLookupRequest.maximumCount, hashes.count)])
             let matches = Dictionary(grouping: try await lookup(chunk), by: { $0.sha256.lowercased() })
             try Task.checkCancellation()
@@ -90,11 +106,12 @@ enum LegacyCheck {
                         $0.isOriginal && $0.originalsVerified && $0.assetID.lowercased() == candidate.asset
                             && $0.role == candidate.role && $0.originalBytes == candidate.bytes
                     }
-                    return Record(candidate: candidate, bindingID: binding.id, origin: binding.origin,
+                    return Record(candidate: candidate, scope: scope, origin: origin,
                                   verified: verified, checkedAt: checkedAt)
                 }
             }
-            try await ledger.store.recordLegacyChecks(records, binding: binding, namespace: ledger.namespace)
+            try await ledger.store.recordLegacyChecks(records, scope: scope, namespace: ledger.namespace,
+                current: current, authorized: authorized)
         }
     }
 }

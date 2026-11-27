@@ -188,6 +188,9 @@ final class CompactJob {
 
     func showQueueProblem(_ error: Error) {
         guard !retired else { return }
+        if settings.needsBackupUpdate, let failure = error as? ServerClient.Failure,
+           failure.status == 404 || failure.status == 405 { queueProblem = nil; return }
+        if AppSettings.isCancellation(error) { return }
         queueProblem = error.localizedDescription
     }
 
@@ -422,6 +425,7 @@ final class CompactJob {
 
     func refreshQueue() async {
         guard !retired, !suspended, suppliedCompactor == nil else { return }
+        guard !settings.needsBackupUpdate else { queueProblem = nil; return }
         do {
             try await ensureContext()
             try await coordinator.reconcile()
@@ -431,6 +435,7 @@ final class CompactJob {
 
     private func ensureContext() async throws {
         guard !retired, !suspended else { throw CancellationError() }
+        guard !settings.needsBackupUpdate else { throw CancellationError() }
         if let context = coordinator.context, settings.matchesBackupBinding(context.binding) { return }
         if let contextWork { try await contextWork.value; return }
         let work = Task {
@@ -469,6 +474,7 @@ final class CompactJob {
     }
 
     func runOpportunity() async throws {
+        guard !settings.needsBackupUpdate else { return }
         try await ensureContext()
         try await coordinator.runOpportunity()
     }
@@ -539,13 +545,15 @@ final class CompactJob {
     }
 
     func remover() -> DurableOriginalRemover? {
+        guard !settings.needsBackupUpdate else { return nil }
         guard let context = coordinator.context, settings.matchesBackupBinding(context.binding) else { return nil }
         let settings = settings
         return .init(context: context, ledger: ledger, photos: settings.photos,
-                     current: { settings.matchesBackupBinding(context.binding) })
+                     current: { !settings.needsBackupUpdate && settings.matchesBackupBinding(context.binding) })
     }
 
     func restorer() -> DurableOriginalRestorer? {
+        guard !settings.needsBackupUpdate else { return nil }
         guard let context = coordinator.context, settings.matchesBackupBinding(context.binding),
               let workspace = coordinator.currentWorkspace else { return nil }
         return .init(context: context, ledger: ledger, photos: settings.photos, workspace: workspace)
@@ -676,6 +684,11 @@ final class CompactJob {
             return Set(assetIdentifiers.filter { states[$0] != nil })
         }
         guard !retired, !suspended, !assetIdentifiers.isEmpty, authorized() else { return [] }
+        guard !settings.needsBackupUpdate else {
+            queueProblem = nil
+            if trigger != .automatic { settings.showingBackUpUpdate = true }
+            return []
+        }
         guard settings.backupAdmissionsEnabled else {
             queueProblem = "New backup selections are paused. Previously saved work still reconciles and can be recovered."
             return []
@@ -709,7 +722,10 @@ final class CompactJob {
             }
             queueProblem = nil
             if !accepted.isEmpty, !settings.isDemo { AppModel.schedulePendingBackup() }
-        } catch { showQueueProblem(error) }
+        } catch {
+            showQueueProblem(error)
+            if settings.needsBackupUpdate, trigger != .automatic { settings.showingBackUpUpdate = true }
+        }
         return accepted
     }
 

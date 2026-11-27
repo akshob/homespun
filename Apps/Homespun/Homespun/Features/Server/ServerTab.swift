@@ -76,7 +76,13 @@ struct ServerTab: View {
         let unreachable: String? = if case .unreachable(let reason) = settings.serverStatus { reason } else { nil }
         return List(selection: selection) {
             if settings.isDemo { DemoCard() }
-            if let problem = model.job.queueProblem {
+            if settings.needsBackupUpdate {
+                Section {
+                    Text("Update available · earlier Homespun Server").foregroundStyle(Theme.secondaryLabel)
+                    ServerUpdateNotice(controller: model.library)
+                }
+            }
+            if let problem = model.job.queueProblem, !settings.needsBackupUpdate {
                 Section {
                     InlineNotice(tone: .warning, title: "Backup queue needs attention", message: problem)
                         .accessibilityIdentifier("server.queueProblem")

@@ -66,18 +66,25 @@ final class LibraryController {
     @ObservationIgnored private var legacyCheckTask: Task<Void, Never>?
     private var legacyCheckAttempt: Date?
     private var legacyCount = 0
-    private var dismissedLegacyNotice: UUID?
-    private var legacyRejectedBinding: UUID?
+    private var dismissedLegacyNotice: String?
     @ObservationIgnored private var legacyChecksInvalidated = false
+    private(set) var legacyCheckFinished = false
+    var checkingEarlierBackups: Bool { !legacyCheckFinished && settings.isPaired && !settings.isDemo }
 
     var legacyNotice: String? {
-        guard legacyCount > 0, let binding = job.bindingContext?.binding, settings.matchesBackupBinding(binding),
-              dismissedLegacyNotice != binding.id, legacyRejectedBinding != binding.id else { return nil }
-        return "\(legacyCount.formatted()) backups from Homespun 1.0 are on \(serverName). To free up space or restore originals, "
-            + "run Server › Existing Library › Find Compact Copies."
+        guard legacyCount > 0, let scope = settings.currentLegacyScope,
+              dismissedLegacyNotice != scope, !settings.needsBackupUpdate else { return nil }
+        return "\(legacyCount.formatted()) earlier backups are confirmed on \(serverName). "
+            + "Homespun checks them again before freeing up or restoring."
     }
 
-    func dismissLegacyNotice() { dismissedLegacyNotice = job.bindingContext?.binding.id }
+    func dismissLegacyNotice() { dismissedLegacyNotice = settings.currentLegacyScope }
+    var updateMessage: String {
+        let earlier = legacyCount > 0
+            ? "Your \(legacyCount.formatted()) earlier backups are safe there and work as before."
+            : "Homespun checks your earlier backups with it; originals and compact copies stay as they are."
+        return "\(serverName) runs an earlier Homespun Server. \(earlier) New photos wait here until \(serverName) is updated."
+    }
 
     func observeRetirement(_ retire: @escaping @MainActor () async -> Void) -> CatalogObservation? {
         guard !retired else { return nil }
@@ -258,7 +265,7 @@ final class LibraryController {
             // home) updates it after.
             await refreshGrid()
         }
-        if settings.isPaired { await settings.refreshServerInfo() }
+        if settings.isPaired { await settings.refreshServerInfo(forceBackupCheck: true) }
         await job.refreshQueue()
         await refreshLegacyBinding()
         await refreshReady()
@@ -283,11 +290,11 @@ final class LibraryController {
         }
         let projection = try await job.ledger.projection()
         let kept = projection.kept, backed = projection.backedUp
-        let binding = job.bindingContext?.binding
-        let confirmed = binding.flatMap {
-            settings.matchesBackupBinding($0) && !settings.isDemo && legacyRejectedBinding != $0.id ? $0 : nil
-        }
-            .map { projection.legacyConfirmed(binding: $0) } ?? [:]
+        let scope = settings.currentLegacyScope
+        if let scope { try await job.ledger.store.discardLegacyChecks(exceptScope: scope) }
+        let confirmed = !settings.isDemo ? scope.map {
+            projection.legacyConfirmed(scope: $0, origin: settings.legacyOrigin)
+        } ?? [:] : [:]
         let recovering = Set(backed.filter { $0.value.origin == nil || $0.value.version == nil || $0.value.origin != job.activeOrigin }.keys)
             .subtracting(confirmed.keys)
         automatic.useCanonicalDecisions(kept)
@@ -297,7 +304,9 @@ final class LibraryController {
         await library.update(ledger: projection.entries, job: states,
                              backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
                              pendingImports: projection.pendingImports, compactInProgress: compactInProgress,
-                             legacyConfirmed: confirmed, legacyServerName: serverName)
+                             legacyConfirmed: confirmed, legacyServerName: serverName,
+                             legacyActions: false,
+                             checkingLegacy: checkingEarlierBackups, legacyKept: kept)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
@@ -314,15 +323,15 @@ final class LibraryController {
     }
 
     private func rejectLegacyBinding(_ binding: BackupStore.Binding) async {
-        legacyRejectedBinding = binding.id
-        try? await job.ledger.store.discardLegacyChecks(bindingID: binding.id)
+        try? await job.ledger.store.discardLegacyChecks(origin: binding.origin)
         if job.bindingContext?.binding.id == binding.id { job.invalidateBinding() }
     }
 
     /// A cached engine context may predate a server history restore. Learn its current epoch even
     /// when every legacy observation is still within its seven-day display lifetime.
     private func refreshLegacyBinding() async {
-        guard !settings.isDemo, let context = job.bindingContext, settings.matchesBackupBinding(context.binding),
+        guard !settings.isDemo, settings.backupAPI == .current,
+              let context = job.bindingContext, settings.matchesBackupBinding(context.binding),
               var client = settings.client else { return }
         client.timeout = 6
         do {
@@ -333,6 +342,7 @@ final class LibraryController {
             guard !retired, !suspended, !Task.isCancelled, settings.matchesBackupBinding(context.binding),
                   job.bindingContext?.binding == context.binding else { return }
             if origin != context.binding.origin { await rejectLegacyBinding(context.binding) }
+            settings.rememberBackupSupport(.current, origin: origin)
         } catch {
             // Offline observations remain displayable until expiry, but cannot authorize actions.
         }
@@ -340,36 +350,46 @@ final class LibraryController {
 
     private func scheduleLegacyCheck(_ projection: BackupStore.LedgerProjection) {
         guard !settings.isDemo, !retired, !suspended, !Task.isCancelled, legacyCheckTask == nil,
-              let context = job.bindingContext, legacyRejectedBinding != context.binding.id,
-              settings.matchesBackupBinding(context.binding),
+              settings.isPaired,
               var client = settings.client,
               legacyCheckAttempt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true else { return }
-        let binding = context.binding
         client.timeout = 6
         let lookupClient = client
         let candidates = LegacyCheck.candidates(projection) { id in
             guard let kind = library.info(id)?.kind else { return nil }
             return kind == .video ? .video : .photo
         }
-        let pending = LegacyCheck.pending(candidates, projection: projection, binding: binding, now: Date())
-        guard !pending.isEmpty else { return }
+        if case .blocked = settings.connectionTrust { return }
+        let initialScope = settings.currentLegacyScope
+        let origin = settings.legacyOrigin
+        let pending = initialScope.map {
+            LegacyCheck.pending(candidates, projection: projection, scope: $0, origin: origin, now: Date())
+        } ?? candidates
+        guard !pending.isEmpty else { legacyCheckFinished = true; return }
         legacyCheckAttempt = Date()
         legacyCheckTask = Task { [weak self] in
             guard let self else { return }
             defer {
                 self.legacyCheckTask = nil
+                self.legacyCheckFinished = true
                 self.scheduleRefreshGrid()
             }
             do {
-                try await LegacyCheck.run(pending, ledger: self.job.ledger, binding: binding,
+                let scope = try await self.settings.legacyScope()
+                guard initialScope == nil || scope == initialScope else { throw CancellationError() }
+                let authorization = self.settings.legacyCheckAuthorization(scope: scope)
+                try await LegacyCheck.run(pending, ledger: self.job.ledger, scope: scope, origin: origin,
                     lookup: { try await lookupClient.lookupCopies($0) }, current: { [weak self] in
                         guard let self else { return false }
-                        return !self.retired && !self.suspended && self.settings.matchesBackupBinding(binding)
-                            && self.job.bindingContext?.binding == binding
-                    }, serverOrigin: { try await ServerClientV2(lookupClient).capabilities().origin })
+                        return !self.retired && !self.suspended && self.settings.currentLegacyScope == scope
+                            && self.settings.legacyOrigin == origin
+                    }, authorized: authorization, serverOrigin: {
+                        origin == nil ? nil : try await ServerClientV2(lookupClient).capabilities().origin
+                    })
                 self.legacyCheckAttempt = nil
+                await self.refreshReady()
             } catch LegacyCheck.Failure.serverChanged {
-                await self.rejectLegacyBinding(binding)
+                if let binding = self.job.bindingContext?.binding { await self.rejectLegacyBinding(binding) }
             } catch {
                 // This display check is best effort. Missing/expired observations remain recovery;
                 // transport errors are retried on a later refresh, never recorded as a catalog answer.
@@ -474,6 +494,7 @@ final class LibraryController {
     /// copy comes back to Photos.
     func backUp(_ identifiers: [String]) {
         guard !retired, !identifiers.isEmpty else { return }
+        guard !settings.needsBackupUpdate else { settings.showingBackUpUpdate = true; return }
         finished = nil
         if case .done = removal { removal = .idle }
         Announce.say("Saving your backup selection.")

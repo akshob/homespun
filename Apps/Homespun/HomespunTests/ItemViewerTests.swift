@@ -68,15 +68,14 @@ import UIKit
     @Test func legacyDisplayExplainsTheCatalogCheckWithoutOfferingVersionedActions() {
         let checkedAt = Date(timeIntervalSince1970: 1_800_000_000)
         let line = ItemText.legacyDetails(checkedAt: checkedAt, server: "polonium")
-        #expect(line.contains("Backed up with Homespun 1.0 · checked "))
-        #expect(line.contains(checkedAt.formatted(date: .abbreviated, time: .shortened)) && line.hasSuffix(" on polonium"))
+        #expect(line.contains("Backed up with Homespun 1.0 · polonium has this original (checked "))
         for onPhone in [false, true] {
-            let cell = LibraryState.Cell(id: "copy", badge: .legacyBackedUp(originalOnPhone: onPhone),
+            let cell = LibraryState.Cell(id: "copy", badge: onPhone ? .copyLater : .backedUp,
                 original: "original", canFree: false, legacyCheckedAt: checkedAt)
             #expect(cell.badge.label == (onPhone ? "Backed up" : "Original at home"))
             #expect(ItemAction.for(cell) == .none && !cell.canCompact && !cell.canRestore && !cell.canFree)
             #expect(!ItemAction.canRestore(cell, immich: false) && !ItemAction.canCompare(cell, immich: false))
-            #expect(ItemText.sentence(cell.badge, server: "polonium", immich: false).contains("Homespun 1.0"))
+            #expect(ItemText.sentence(cell.badge, server: "polonium", immich: false, legacy: true).contains("Homespun 1.0"))
         }
         let backed = LibraryState.Cell(id: "original", badge: .copyLater, original: nil,
             canFree: false, legacyCheckedAt: checkedAt)

@@ -217,6 +217,7 @@ struct LibraryView: View, Equatable {
             : filter == .notBackedUp && media == .all
                 ? "done.\(controller.serverName).\(controller.library.state.count(.needsAttention))" : "nothing.\(filter.rawValue)"
         return [notice, empty, controller.job.queueProblem ?? "",
+                settings.needsBackupUpdate && !settings.updateNoticeDismissed ? controller.updateMessage : "",
                 controller.showsRemoteNotice ? "remote" : "", controller.legacyNotice ?? ""]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
@@ -233,6 +234,7 @@ struct LibraryView: View, Equatable {
     }
 
     @ViewBuilder private var notice: some View {
+        ServerUpdateNotice(controller: controller).padding(.horizontal)
         if let message = controller.legacyNotice {
             HStack(alignment: .top) {
                 Text(message).font(.footnote).foregroundStyle(Theme.secondaryLabel)
@@ -242,7 +244,7 @@ struct LibraryView: View, Equatable {
             .padding(.horizontal)
             .accessibilityIdentifier("library.legacy")
         }
-        if let problem = controller.job.queueProblem {
+        if let problem = controller.job.queueProblem, !settings.needsBackupUpdate {
             InlineNotice(tone: .warning, title: "Backup queue needs attention", message: problem) {
                 Button("Try Again") { Task { await controller.job.refreshQueue(); await controller.refreshGrid() } }
                     .accessibilityIdentifier("queue.retry")
@@ -325,6 +327,7 @@ struct LibraryView: View, Equatable {
         }
         guard settings.isPaired else { return demo + "\(state.cells.count.formatted()) items · not connected" }
         if case .unreachable = settings.serverStatus { return demo + "Can't reach \(controller.serverName)" }
+        if state.cells.contains(where: \.checkingLegacy) { return "Checking with \(controller.serverName)…" }
         return demo + Self.backupSubtitle(state: state, server: controller.serverName)
     }
 
@@ -565,7 +568,8 @@ struct LibraryView: View, Equatable {
     private func backUp(_ ids: [String]) {
         guard !ids.isEmpty else { return }
         let bytes = selectionBytes?.bytes ?? 0
-        if ids.count > 200 || bytes > 5_000_000_000 {
+        if settings.needsBackupUpdate { settings.showingBackUpUpdate = true }
+        else if ids.count > 200 || bytes > 5_000_000_000 {
             sheet = .backUp(ids)
         } else {
             controller.backUp(ids)

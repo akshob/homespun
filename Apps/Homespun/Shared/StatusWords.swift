@@ -41,6 +41,7 @@ enum StatusWords {
     /// "Home Mac · Connected", "Can't reach Home Mac", "No server yet".
     static func server(_ server: StatusSnapshot.Server?) -> String {
         guard let server else { return "No server yet" }
+        if server.needsUpdate == true, server.reachable { return "Update \(server.name)" }
         return server.reachable ? "\(server.name)\(separator)Connected" : "Can't reach \(server.name)"
     }
 
@@ -134,6 +135,7 @@ enum StatusWords {
         case .facts:
             guard let snapshot, let server = snapshot.server else { return "Homespun" }
             if !server.reachable { return "Can't reach \(server.name)" }
+            if server.needsUpdate == true { return "Update \(server.name)" }
             if snapshot.ready.count > 0 { return readyHeadline(snapshot.ready) }
             if let backup = snapshot.lastBackup { return "Backed up \(when(backup.date, now: now, calendar: calendar))" }
             return "Nothing to free up"

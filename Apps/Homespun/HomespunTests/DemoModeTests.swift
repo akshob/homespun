@@ -1722,10 +1722,11 @@ import UIKit
                 isOriginal: true, originalsVerified: true, originalBytes: $0.bytes)
         }
         // Stand in for a catalog answer to exercise the action gates, not the demo scheduler.
-        try await LegacyCheck.run(candidates.filter { $0.item != ids[1] }, ledger: model.job.ledger, binding: context.binding,
+        try await LegacyCheck.run(candidates.filter { $0.item != ids[1] }, ledger: model.job.ledger,
+            scope: context.binding.id.uuidString, origin: context.binding.origin,
             lookup: { _ in matches }, current: { true }, serverOrigin: { context.binding.origin })
         let checked = try await model.job.ledger.projection()
-        #expect(checked.legacyConfirmed(binding: context.binding).count == 2)
+        #expect(checked.legacyConfirmed(scope: context.binding.id.uuidString, origin: context.binding.origin).count == 2)
         let remover = try #require(model.job.remover())
         #expect(try await remover.candidates().isEmpty, "Neither confirmed nor unconfirmed legacy pairs are candidates")
         let removal = try await remover.removeEligible(limit: nil, only: nil, progress: { _ in })

@@ -165,22 +165,22 @@ struct ItemDetailsSheet: View {
     @ViewBuilder private var whereRows: some View {
         switch cell.badge {
         case .originalOnPhone, .backedUp:
-            row("checkmark.shield", immich ? "Original in Immich (checked)" : "Original on \(server)", backedUpLine)
-            row("photo.on.rectangle", "Compact copy in Photos", "Homespun album · same date, place, favorite")
-            if details?.entry?.revalidatedCopy == true {
-                row("checkmark.shield", "Existing copy revalidated",
-                    "An equivalent original was checked on this server. Where this copy was first made is unknown.")
-            }
-            if cell.badge == .originalOnPhone {
-                row("iphone", "Original still on this iPhone", "Free Up Space removes it here", tint: Theme.amber)
-            } else {
-                row("iphone.slash", "Not on this iPhone", details?.entry?.revalidatedCopy == true
-                    ? "Only the compact copy is on this iPhone." : "Freed up. The compact copy stays in Photos.")
+            if cell.legacy { legacyRows } else {
+                row("checkmark.shield", immich ? "Original in Immich (checked)" : "Original on \(server)", backedUpLine)
+                row("photo.on.rectangle", "Compact copy in Photos", "Homespun album · same date, place, favorite")
+                if details?.entry?.revalidatedCopy == true {
+                    row("checkmark.shield", "Existing copy revalidated",
+                        "An equivalent original was checked on this server. Where this copy was first made is unknown.")
+                }
+                if cell.badge == .originalOnPhone {
+                    row("iphone", "Original still on this iPhone", "Free Up Space removes it here", tint: Theme.amber)
+                } else {
+                    row("iphone.slash", "Not on this iPhone", details?.entry?.revalidatedCopy == true
+                        ? "Only the compact copy is on this iPhone." : "Freed up. The compact copy stays in Photos.")
+                }
             }
         case .compactCopy:
             row("square.on.square", "A Homespun compact copy", "This iPhone has no record of where its original is.")
-        case .legacyBackedUp:
-            legacyRows
         case .waiting, .working:
             let step: String? = if case .working(let step)? = job { step } else { nil }
             row("arrow.up.circle", "Backing up to \(server)", step ?? "Waiting to start")
@@ -208,7 +208,7 @@ struct ItemDetailsSheet: View {
         case .recovery:
             row("questionmark.folder", "Backup not confirmed",
                 cell.serverOrigin == nil
-                    ? "Homespun 1.0 recorded this backup, but \(server) doesn't confirm it right now. Run Find Compact Copies (Server › Existing Library)."
+                    ? "Homespun 1.0 recorded this backup, but \(server) doesn't have its original on record right now. Keep this compact copy. If \(server) was restored or moved, check its originals folder."
                     : "This mapping needs a current-server resource check. Run Server › Existing Library › Find Compact Copies on the server holding its original before restoring or freeing up space.")
         case .none, .kept, .failed:
             row("iphone", "Only on this iPhone", model.settings.isPaired
@@ -224,13 +224,17 @@ struct ItemDetailsSheet: View {
         }
         if cell.original != nil {
             row("photo.on.rectangle", "Compact copy in Photos", "Homespun album · same date, place, favorite")
-            row("iphone", cell.badge == .legacyBackedUp(originalOnPhone: true)
+            row("iphone", cell.badge == .originalOnPhone || cell.badge == .copyLater
                 ? "Original still on this iPhone" : "Only the compact copy is on this iPhone", "")
         } else {
-            row("iphone", "Original still on this iPhone", "A compact copy hasn't been linked to this backup.")
+            row("iphone", "Original still on this iPhone", model.settings.needsBackupUpdate
+                ? "The original is safe on \(server). Its compact copy comes after \(server) is updated."
+                : "A compact copy hasn't been linked to this backup.")
         }
         row("checkmark.shield", "Check before restoring or freeing up",
-            "Homespun needs a versioned backup record and a fresh check. Run Server › Existing Library › Find Compact Copies.")
+            immich ? (model.settings.needsBackupUpdate ? "Update \(server) to free up space with Immich."
+                : "Run Find Compact Copies on \(server) to use its complete-resource Immich check.")
+                : "Homespun checks it again before freeing up or restoring.")
     }
 
     private var backedUpLine: String {

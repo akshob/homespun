@@ -189,7 +189,7 @@ final class StatusPublisher {
                       lastBackup: run.map { ($0.end, Self.backedUp(in: $0)) }, historyLoaded: history.loaded,
                       serverName: settings.serverURL == nil ? nil : settings.server?.name, status: settings.serverStatus,
                       checkedAt: settings.serverCheckedAt, automatic: automatic.enabled, lastRun: automatic.state.lastRun,
-                      isDemo: demo != nil)
+                      isDemo: demo != nil, needsBackupUpdate: settings.needsBackupUpdate)
     }
 
     struct Inputs: Sendable {
@@ -204,6 +204,7 @@ final class StatusPublisher {
         var automatic: Bool
         var lastRun: Date?
         var isDemo = false
+        var needsBackupUpdate = false
     }
 
     private func schedule() {
@@ -234,7 +235,8 @@ final class StatusPublisher {
             case .unreachable, .identityProblem, .needsServerUpdate: false
             case .checking, .unknown, .securing: previous?.server?.reachable ?? true
             }
-            server = StatusSnapshot.Server(name: name, reachable: reachable, checkedAt: inputs.checkedAt ?? previous?.server?.checkedAt)
+            server = StatusSnapshot.Server(name: name, reachable: reachable, checkedAt: inputs.checkedAt ?? previous?.server?.checkedAt,
+                                           needsUpdate: inputs.needsBackupUpdate ? true : nil)
         }
         let ready = inputs.ready.map { StatusSnapshot.Ready(bytes: $0.bytes, count: $0.count) } ?? previous?.ready
             ?? StatusSnapshot.Ready(bytes: 0, count: 0)

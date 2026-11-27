@@ -11,9 +11,9 @@ extension BackupStore {
         var legacyChecks: [String: LegacyCheck.Record] = [:]
 
         /// Filter at use time, not cache-build time: a cached projection must still expire.
-        func legacyConfirmed(binding: Binding, now: Date = Date()) -> [String: LegacyCheck.Record] {
+        func legacyConfirmed(scope: String, origin: BackupAPI.Origin?, now: Date = Date()) -> [String: LegacyCheck.Record] {
             legacyChecks.filter {
-                $0.value.verified && $0.value.isCurrent(binding: binding, now: now) && $0.value.candidate.matches(self)
+                $0.value.verified && $0.value.isCurrent(scope: scope, origin: origin, now: now) && $0.value.candidate.matches(self)
             }
         }
     }

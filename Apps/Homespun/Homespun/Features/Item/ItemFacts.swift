@@ -32,10 +32,8 @@ enum ItemText {
                          compactAfter: Date? = nil, legacy: Bool = false) -> String {
         let home = immich ? "in Immich" : "on \(server)"
         switch badge {
-        case .originalOnPhone: return "Ready to free up · original \(home)"
-        case .backedUp: return "Original at home · \(home)"
-        case .legacyBackedUp(let onPhone):
-            return "\(onPhone ? "Backed up" : "Original at home") · \(home) · Homespun 1.0"
+        case .originalOnPhone: return "Ready to free up · original \(home)" + (legacy ? " · Homespun 1.0" : "")
+        case .backedUp: return "Original at home · \(home)" + (legacy ? " · Homespun 1.0" : "")
         case .none:
             if case .notYet(let reason)? = job { return "Not backed up yet · \(reason)" }
             return "Not backed up · only on this iPhone"
@@ -61,7 +59,7 @@ enum ItemText {
     }
 
     static func legacyDetails(checkedAt: Date, server: String) -> String {
-        "Backed up with Homespun 1.0 · checked \(checkedAt.formatted(date: .abbreviated, time: .shortened)) on \(server)"
+        "Backed up with Homespun 1.0 · \(server) has this original (checked \(checkedAt.formatted(.relative(presentation: .named)))."
     }
 
     /// The sentence for VoiceOver: "Ready to free up, original on Home Mac."
@@ -80,8 +78,8 @@ enum ItemAction: Equatable {
     case none
 
     static func `for`(_ cell: LibraryState.Cell) -> ItemAction {
-        guard !cell.legacy else { return .none }
         if cell.canFree, let original = cell.original { return .freeUp(original: original) }
+        guard !cell.legacy else { return .none }
         switch cell.badge {
         case .none: return .backUp
         case .failed: return .tryAgain
@@ -101,6 +99,7 @@ enum ItemAction: Equatable {
     }
 
     static func canCompare(_ cell: LibraryState.Cell, immich: Bool) -> Bool {
+        guard !cell.legacy || cell.legacyActions else { return false }
         guard cell.original != nil else { return false }
         switch cell.badge {
         case .originalOnPhone: return true

@@ -77,7 +77,6 @@ extension BackupStore {
                 throw Failure.retiredBinding
             }
             var binding = try Self.decode(Binding.self, row.blob("body"))
-            try connection.execute("DELETE FROM legacy_checks WHERE binding = ?", [.text(id.uuidString)])
             binding.retired = true
             try connection.execute("UPDATE bindings SET retired = 1, body = ? WHERE id = ?",
                                    [.blob(try Self.encode(binding)), .text(id.uuidString)])

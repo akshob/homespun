@@ -517,7 +517,7 @@ struct ExistingLibraryView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(settings.client == nil)
+                .disabled(settings.client == nil || settings.needsBackupUpdate)
                 .accessibilityIdentifier("settings.findCopies")
                 if finder.isRunning {
                     HStack(spacing: 14) {
@@ -542,6 +542,8 @@ struct ExistingLibraryView: View {
                 } else {
                     Text("2 · On this iPhone")
                 }
+            } footer: {
+                if settings.needsBackupUpdate { Text("Available after \(server) is updated.") }
             }
             .listRowBackground(Theme.card)
             if !immich {

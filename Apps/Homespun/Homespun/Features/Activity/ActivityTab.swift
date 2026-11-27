@@ -39,7 +39,10 @@ struct ActivityTab: View {
                     }
                     .listRowBackground(Theme.card)
                 }
-                if let problem = job.queueProblem {
+                if model.settings.needsBackupUpdate, !model.settings.updateNoticeDismissed {
+                    Section { ServerUpdateNotice(controller: model.library) }.listRowBackground(Theme.card)
+                }
+                if let problem = job.queueProblem, !model.settings.needsBackupUpdate {
                     Section {
                         InlineNotice(tone: .error, title: "Backup queue needs attention", message: problem)
                     }
@@ -191,6 +194,7 @@ struct ActivityTab: View {
     private func subtitle(attention: Int) -> String {
         let settings = model.settings, server = model.library.serverName
         guard settings.isPaired else { return "Not set up yet" }
+        if settings.needsBackupUpdate { return "Update \(server) · new photos are waiting" }
         if model.job.queueProblem != nil { return "Backup queue needs attention · \(server)" }
         if model.job.pausedCount > 0, !model.job.isRunning { return "Paused selections are saved · \(server)" }
         if model.job.remoteCount > 0, !model.job.isRunning { return "Processing on \(server)" }

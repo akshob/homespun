@@ -240,24 +240,24 @@ private actor LegacyLookupBatches {
     let candidates = LegacyUpgradeFixture.candidates(projection)
     #expect(candidates.count == 6 && !candidates.contains { $0.item == "on-phone" || $0.item == "removed" })
     let matches = candidates.map(LegacyUpgradeFixture.match)
-    try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+    try await LegacyCheck.run(candidates, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
         lookup: { hashes in
             #expect(hashes.count == 6)
             return matches.filter { hashes.contains($0.sha256) }
         }, current: { true }, serverOrigin: { fixture.binding.origin }, now: { LegacyUpgradeFixture.checkedAt })
     // The facade's previously cached projection must observe the check transaction.
     let checked = try await ledger.projection()
-    let confirmed = checked.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt)
+    let confirmed = checked.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: LegacyUpgradeFixture.checkedAt)
     #expect(confirmed.count == 6)
     #expect(checked.entries == projection.entries && checked.backedUp == projection.backedUp)
     #expect(try await ledger.serverBacked().isEmpty)
     let state = LibraryState(library: ["pair", "pair-copy", "home-copy", "live-copy", "journal-copy",
         "on-phone", "local-copy", "backed", "kept", "new"], ledger: checked.entries, album: ["local-copy"], job: [:],
         origin: fixture.binding.origin, legacyConfirmed: confirmed, legacyServerName: "polonium")
-    #expect(state.cell("pair") == nil && state.cell("pair-copy")?.badge == .legacyBackedUp(originalOnPhone: true))
-    #expect(state.cell("home-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
-    #expect(state.cell("live-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
-    #expect(state.cell("journal-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
+    #expect(state.cell("pair") == nil && state.cell("pair-copy")?.badge == .copyLater)
+    #expect(state.cell("home-copy")?.badge == .backedUp)
+    #expect(state.cell("live-copy")?.badge == .backedUp)
+    #expect(state.cell("journal-copy")?.badge == .backedUp)
     #expect(state.cell("backed")?.badge == .copyLater && state.cell("backed")?.compactAfter == nil)
     #expect(state.cell("local-copy")?.badge == .compactCopy && state.cell("on-phone")?.badge == .none)
     #expect(state.count(.atHome) == 3 && state.count(.needsAttention) == 0 && state.count(.notBackedUp) == 2)
@@ -276,7 +276,7 @@ private actor LegacyLookupBatches {
     let reopened = BackupStore(directory: fixture.directory, legacyURL: fixture.legacyURL)
     let reloaded = try await reopened.ledgerProjection(namespace: "photos")
     #expect(try await reopened.mappings(namespace: "photos") == mappings)
-    #expect(reloaded.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt) == confirmed)
+    #expect(reloaded.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: LegacyUpgradeFixture.checkedAt) == confirmed)
     let reopenedMarker = try await reopened.readState { @Sendable connection in
         try connection.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
     }
@@ -340,33 +340,33 @@ private actor LegacyLookupBatches {
         }
         return match
     }
-    try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+    try await LegacyCheck.run(candidates, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
         lookup: { _ in matches }, current: { true }, serverOrigin: { fixture.binding.origin },
         now: { LegacyUpgradeFixture.checkedAt })
     let projection = try await ledger.projection(), now = LegacyUpgradeFixture.checkedAt
-    #expect(Set(projection.legacyConfirmed(binding: fixture.binding, now: now).keys) == ["elsewhere:home-copy"])
+    #expect(Set(projection.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: now).keys) == ["elsewhere:home-copy"])
     #expect(projection.legacyChecks.count == 6)
-    #expect(LegacyCheck.pending(candidates, projection: projection, binding: fixture.binding, now: now).isEmpty)
-    #expect(projection.legacyConfirmed(binding: fixture.binding, now: now.addingTimeInterval(LegacyCheck.maximumAge)).count == 1)
-    #expect(projection.legacyConfirmed(binding: fixture.binding, now: now.addingTimeInterval(LegacyCheck.maximumAge + 1)).isEmpty)
-    #expect(projection.legacyConfirmed(binding: fixture.binding, now: now.addingTimeInterval(-1)).isEmpty)
-    #expect(LegacyCheck.pending(candidates, projection: projection, binding: fixture.binding,
+    #expect(LegacyCheck.pending(candidates, projection: projection, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: now).isEmpty)
+    #expect(projection.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: now.addingTimeInterval(LegacyCheck.maximumAge)).count == 1)
+    #expect(projection.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: now.addingTimeInterval(LegacyCheck.maximumAge + 1)).isEmpty)
+    #expect(projection.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: now.addingTimeInterval(-1)).isEmpty)
+    #expect(LegacyCheck.pending(candidates, projection: projection, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
         now: now.addingTimeInterval(LegacyCheck.maximumAge + 1)).count == 6)
     var other = fixture.binding
     other.id = UUID()
     try await fixture.store.bind(other)
-    #expect(projection.legacyConfirmed(binding: other, now: now).isEmpty)
+    #expect(projection.legacyConfirmed(scope: other.id.uuidString, origin: other.origin, now: now).isEmpty)
     other = fixture.binding
     other.origin.historyEpoch = UUID().uuidString
-    #expect(projection.legacyConfirmed(binding: other, now: now).isEmpty)
+    #expect(projection.legacyConfirmed(scope: other.id.uuidString, origin: other.origin, now: now).isEmpty)
     other = fixture.binding
     other.origin.serverID = UUID().uuidString
-    #expect(projection.legacyConfirmed(binding: other, now: now).isEmpty)
+    #expect(projection.legacyConfirmed(scope: other.id.uuidString, origin: other.origin, now: now).isEmpty)
     try await fixture.store.retireBinding(fixture.binding.id)
-    #expect(try await ledger.projection().legacyChecks.isEmpty)
-    await #expect(throws: BackupStore.Failure.retiredBinding) {
+    #expect(try await ledger.projection().legacyChecks.count == 6, "Display scopes do not depend on a v2 binding")
+    await #expect(throws: CancellationError.self) {
         try await fixture.store.recordLegacyChecks(Array(projection.legacyChecks.values),
-                                                   binding: fixture.binding, namespace: "photos")
+                                                   scope: fixture.binding.id.uuidString, namespace: "photos", current: { false })
     }
     try await fixture.store.close()
 }
@@ -382,13 +382,13 @@ private actor LegacyLookupBatches {
         else { match.sha256 = String(repeating: "0", count: 64) }
         return match
     }
-    try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+    try await LegacyCheck.run(candidates, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
         lookup: { _ in wrong }, current: { true }, serverOrigin: { fixture.binding.origin },
         now: { LegacyUpgradeFixture.checkedAt })
-    #expect(try await ledger.projection().legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).isEmpty)
-    try await fixture.store.discardLegacyChecks(bindingID: fixture.binding.id)
+    #expect(try await ledger.projection().legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: LegacyUpgradeFixture.checkedAt).isEmpty)
+    try await fixture.store.discardLegacyChecks()
     await #expect(throws: PhotoHandoffTestFailure.interrupted) {
-        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+        try await LegacyCheck.run(candidates, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
             lookup: { _ in throw PhotoHandoffTestFailure.interrupted }, current: { true },
             serverOrigin: { fixture.binding.origin })
     }
@@ -399,13 +399,13 @@ private actor LegacyLookupBatches {
         return candidates.map(LegacyUpgradeFixture.match)
     }
     await #expect(throws: CancellationError.self) {
-        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding, lookup: lookup,
+        try await LegacyCheck.run(candidates, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, lookup: lookup,
             current: { current.value }, serverOrigin: { fixture.binding.origin })
     }
     #expect(try await ledger.projection().legacyChecks.isEmpty, "An answer after a binding/trust change must be discarded")
     let anotherOrigin = BackupAPI.Origin(serverID: fixture.binding.origin.serverID, historyEpoch: UUID().uuidString)
     await #expect(throws: LegacyCheck.Failure.serverChanged) {
-        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+        try await LegacyCheck.run(candidates, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
             lookup: { _ in Issue.record("A changed server epoch must stop before any fingerprint is sent"); return [] },
             current: { true }, serverOrigin: { anotherOrigin })
     }
@@ -425,35 +425,35 @@ private actor LegacyLookupBatches {
     let candidates = LegacyUpgradeFixture.candidates(try await ledger.projection())
     let interrupted = LegacyLookupBatches(candidates, failSecond: true)
     await #expect(throws: PhotoHandoffTestFailure.interrupted) {
-        try await LegacyCheck.run(candidates, ledger: ledger, binding: fixture.binding,
+        try await LegacyCheck.run(candidates, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
             lookup: { try await interrupted.lookup($0) }, current: { true }, serverOrigin: { fixture.binding.origin },
             now: { LegacyUpgradeFixture.checkedAt })
     }
     #expect(await interrupted.sizes == [500, 500])
     let partial = try await ledger.projection()
-    #expect(partial.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).count == 500)
-    let pending = LegacyCheck.pending(candidates, projection: partial, binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt)
+    #expect(partial.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: LegacyUpgradeFixture.checkedAt).count == 500)
+    let pending = LegacyCheck.pending(candidates, projection: partial, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: LegacyUpgradeFixture.checkedAt)
     #expect(pending.count == 501)
     let resumed = LegacyLookupBatches(pending, failSecond: false)
-    try await LegacyCheck.run(pending, ledger: ledger, binding: fixture.binding,
+    try await LegacyCheck.run(pending, ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
         lookup: { try await resumed.lookup($0) }, current: { true }, serverOrigin: { fixture.binding.origin },
         now: { LegacyUpgradeFixture.checkedAt })
     #expect(await resumed.sizes == [500, 1])
     let complete = try await ledger.projection()
-    #expect(complete.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).count == 1_001)
-    #expect(LegacyCheck.pending(candidates, projection: complete, binding: fixture.binding,
+    #expect(complete.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: LegacyUpgradeFixture.checkedAt).count == 1_001)
+    #expect(LegacyCheck.pending(candidates, projection: complete, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
                               now: LegacyUpgradeFixture.checkedAt).isEmpty)
     try await ledger.record(["new": .init(compactIdentifier: "new-copy", originalBytes: 100, compactBytes: 10,
         savedAt: Date(), serverAssetID: String(repeating: "a", count: 64))])
     let extended = try await ledger.projection()
     #expect(LegacyCheck.pending(LegacyUpgradeFixture.candidates(extended), projection: extended,
-                               binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt).map(\.item) == ["new"])
+                               scope: fixture.binding.id.uuidString, origin: fixture.binding.origin, now: LegacyUpgradeFixture.checkedAt).map(\.item) == ["new"])
     var changed = try #require(entries["item-0"])
     changed.originalBytes += 1
     try await ledger.record(["item-0": changed])
     #expect(try await ledger.projection().legacyChecks["item-0"] == nil)
     let old = try #require(candidates.first { $0.item == "item-0" })
-    try await LegacyCheck.run([old], ledger: ledger, binding: fixture.binding,
+    try await LegacyCheck.run([old], ledger: ledger, scope: fixture.binding.id.uuidString, origin: fixture.binding.origin,
         lookup: { _ in [LegacyUpgradeFixture.match(old)] }, current: { true }, serverOrigin: { fixture.binding.origin },
         now: { LegacyUpgradeFixture.checkedAt })
     #expect(try await ledger.projection().legacyChecks["item-0"] == nil, "A late response cannot confirm a changed mapping")
@@ -495,13 +495,13 @@ private actor LegacyLookupBatches {
                             compactBytes: fixture.compact.size, serverAssetID: fixture.receipt.version.assetID)
     let legacyCandidate = LegacyCheck.Candidate(item: historical, asset: fixture.receipt.version.assetID,
         bytes: fixture.original.size, role: .photo, compact: "found-copy")
-    try await fixture.store.recordLegacyChecks([.init(candidate: legacyCandidate, bindingID: fixture.binding.id,
-        origin: fixture.binding.origin, verified: true, checkedAt: Date())], binding: fixture.binding, namespace: "photos")
+    try await fixture.store.recordLegacyChecks([.init(candidate: legacyCandidate, scope: fixture.binding.id.uuidString,
+        origin: fixture.binding.origin, verified: true, checkedAt: Date())], scope: fixture.binding.id.uuidString, namespace: "photos")
     let legacyProjection = try await ledger.projection()
-    #expect(legacyProjection.legacyConfirmed(binding: fixture.binding).count == 1)
+    #expect(legacyProjection.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin).count == 1)
     let legacyState = LibraryState(library: ["found-copy"], ledger: legacyProjection.entries, album: [], job: [:],
-        origin: fixture.binding.origin, legacyConfirmed: legacyProjection.legacyConfirmed(binding: fixture.binding))
-    #expect(legacyState.cell("found-copy")?.badge == .legacyBackedUp(originalOnPhone: false))
+        origin: fixture.binding.origin, legacyConfirmed: legacyProjection.legacyConfirmed(scope: fixture.binding.id.uuidString, origin: fixture.binding.origin))
+    #expect(legacyState.cell("found-copy")?.badge == .backedUp)
     let operation = try await fixture.store.planCopyAdoption(compactID: "found-copy", originalID: nil,
         candidate: candidate, compact: compact, bindingID: fixture.binding.id, namespace: "photos", profile: .standard)
     #expect(try await fixture.store.deviceRunnable(.upload, binding: fixture.binding, namespace: "photos").isEmpty)
