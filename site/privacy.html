@@ -61,6 +61,8 @@
       device-only Keychain. Restoring a device backup does not restore a native network task or its credentials.</p>
     <p>Find Compact Copies in version 1.1.0 sends file fingerprints (SHA-256), resource roles and sizes to your
       paired server to revalidate existing copies. It does not send their media or local file names.
+      The app also checks fingerprints already recorded by Homespun 1.0 with that paired server to
+      update backup labels, without reading the media again.
       An old match alone never authorizes removing an original.</p>
 
     <h2>Analytics you choose to share</h2>

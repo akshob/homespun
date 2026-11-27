@@ -45,6 +45,17 @@ struct ActivityTab: View {
                     }
                     .listRowBackground(Theme.card)
                 }
+                if let message = model.library.legacyNotice {
+                    Section {
+                        HStack(alignment: .top) {
+                            Text(message).font(.footnote).foregroundStyle(Theme.secondaryLabel)
+                            Button("Dismiss", systemImage: "xmark", action: model.library.dismissLegacyNotice)
+                                .labelStyle(.iconOnly)
+                        }
+                        .accessibilityIdentifier("activity.legacy")
+                    }
+                    .listRowBackground(Theme.card)
+                }
                 if job.pausedCount > 0 {
                     Section("Saved selections") {
                         Text("\(job.pausedCount) backups are paused. Their selections are saved.")

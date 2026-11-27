@@ -217,7 +217,7 @@ struct LibraryView: View, Equatable {
             : filter == .notBackedUp && media == .all
                 ? "done.\(controller.serverName).\(controller.library.state.count(.needsAttention))" : "nothing.\(filter.rawValue)"
         return [notice, empty, controller.job.queueProblem ?? "",
-                controller.showsRemoteNotice ? "remote" : ""]
+                controller.showsRemoteNotice ? "remote" : "", controller.legacyNotice ?? ""]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
 
@@ -233,6 +233,15 @@ struct LibraryView: View, Equatable {
     }
 
     @ViewBuilder private var notice: some View {
+        if let message = controller.legacyNotice {
+            HStack(alignment: .top) {
+                Text(message).font(.footnote).foregroundStyle(Theme.secondaryLabel)
+                Button("Dismiss", systemImage: "xmark", action: controller.dismissLegacyNotice)
+                    .labelStyle(.iconOnly)
+            }
+            .padding(.horizontal)
+            .accessibilityIdentifier("library.legacy")
+        }
         if let problem = controller.job.queueProblem {
             InlineNotice(tone: .warning, title: "Backup queue needs attention", message: problem) {
                 Button("Try Again") { Task { await controller.job.refreshQueue(); await controller.refreshGrid() } }
@@ -316,11 +325,14 @@ struct LibraryView: View, Equatable {
         }
         guard settings.isPaired else { return demo + "\(state.cells.count.formatted()) items · not connected" }
         if case .unreachable = settings.serverStatus { return demo + "Can't reach \(controller.serverName)" }
+        return demo + Self.backupSubtitle(state: state, server: controller.serverName)
+    }
+
+    static func backupSubtitle(state: LibraryState, server: String) -> String {
         let attention = state.count(.needsAttention)
-        if attention > 0 { return demo + "\(attention.formatted()) need attention · \(controller.serverName)" }
+        if attention > 0 { return "\(attention.formatted()) need attention · \(server)" }
         let open = state.count(.notBackedUp)
-        return demo + (open == 0 ? "All backed up · \(controller.serverName)"
-            : "\(open.formatted()) not backed up · \(controller.serverName)")
+        return open == 0 ? "All backed up · \(server)" : "\(open.formatted()) not backed up · \(server)"
     }
 
     private var selectionTitle: String {

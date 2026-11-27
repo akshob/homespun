@@ -97,6 +97,8 @@ extension BackupStore {
             let mapping = SavedMapping(id: UUID(), namespace: operation.namespace, originalID: operation.itemID,
                 entry: entry, origin: operation.origin, proof: proof, compactResources: actual)
             try Self.insertMapping(mapping, connection)
+            try connection.execute("DELETE FROM legacy_checks WHERE namespace = ? AND (item = ? OR compact = ?)",
+                                   [.text(operation.namespace), .text(operation.itemID), .text(intent.compactID)])
             try connection.execute("""
                 UPDATE lineages SET current_mapping = ? WHERE namespace = ? AND item = ? AND current_operation = ?
                 """, [.text(mapping.id.uuidString), .text(operation.namespace), .text(operation.itemID), .text(id.uuidString)])
