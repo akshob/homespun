@@ -60,7 +60,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
 }
 
 @MainActor @Suite(.serialized) struct LegacyCompatibilityTests {
-    private final class Fixture {
+    @MainActor private final class Fixture {
         let id = UUID().uuidString
         let folder: URL
         let defaults: UserDefaults
@@ -201,31 +201,32 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
                 namespace: fixture.ledger.namespace, authorized: authorization)
         }
 
-        @Test func transientCapabilitiesFailuresKeepTheKnownOldServerReachable() async throws {
-            let fixture = try Fixture()
-            try await fixture.pair()
-            for status in [401, 500] {
-                fixture.context.transform.withLock { $0 = { path, answer in
-                    path == "/api/v2/capabilities" ? DemoServer.error(status, "Interrupted") : answer
-                } }
-                await fixture.settings.refreshServerInfo(forceBackupCheck: true)
-                #expect(fixture.settings.needsBackupUpdate && fixture.settings.serverStatus == .reachable)
-                #expect(fixture.settings.connectionProblem == nil)
-            }
-            try await fixture.close()
-        }
+        try await fixture.close()
+    }
 
-        @Test func widgetsAndWatchDescribeAnUpdateWithoutLosingReachability() {
-            let now = Date()
-            let inputs = StatusPublisher.Inputs(unlocked: true, ready: (0, 0), lastBackup: nil, historyLoaded: true,
-                serverName: "polonium", status: .reachable, checkedAt: now, automatic: true, lastRun: nil,
-                needsBackupUpdate: true)
-            let snapshot = StatusPublisher.snapshot(inputs, previous: nil, now: now)
-            #expect(snapshot.server?.reachable == true)
-            #expect(StatusWords.server(snapshot.server) == "Update polonium")
-            #expect(StatusWords.headline(snapshot, now: now, watch: true) == "Update polonium")
+    @Test func transientCapabilitiesFailuresKeepTheKnownOldServerReachable() async throws {
+        let fixture = try Fixture()
+        try await fixture.pair()
+        for status in [401, 500] {
+            fixture.context.transform.withLock { $0 = { path, answer in
+                path == "/api/v2/capabilities" ? DemoServer.error(status, "Interrupted") : answer
+            } }
+            await fixture.settings.refreshServerInfo(forceBackupCheck: true)
+            #expect(fixture.settings.needsBackupUpdate && fixture.settings.serverStatus == .reachable)
+            #expect(fixture.settings.connectionProblem == nil)
         }
         try await fixture.close()
+    }
+
+    @Test func widgetsAndWatchDescribeAnUpdateWithoutLosingReachability() {
+        let now = Date()
+        let inputs = StatusPublisher.Inputs(unlocked: true, ready: (0, 0), lastBackup: nil, historyLoaded: true,
+            serverName: "polonium", status: .reachable, checkedAt: now, automatic: true, lastRun: nil,
+            needsBackupUpdate: true)
+        let snapshot = StatusPublisher.snapshot(inputs, previous: nil, now: now)
+        #expect(snapshot.server?.reachable == true)
+        #expect(StatusWords.server(snapshot.server) == "Update polonium")
+        #expect(StatusWords.headline(snapshot, now: now, watch: true) == "Update polonium")
     }
 
     enum Block: CaseIterable, Sendable {

@@ -164,37 +164,6 @@ import Testing
             return
         }
 
-        @Test func missingCapabilitiesBackstopPreservesTheServerUpdateExplanation() async throws {
-            let name = "server-update-backstop-\(UUID().uuidString)"
-            let defaults = try #require(UserDefaults(suiteName: name))
-            let folder = URL.applicationSupportDirectory.appendingPathComponent(name)
-            defer {
-                UserDefaults.standard.removePersistentDomain(forName: name)
-                try? FileManager.default.removeItem(at: folder)
-            }
-            let (settings, session) = try pairedSettings(defaults: defaults)
-            defer { session.invalidateAndCancel() }
-            let store = BackupStore(directory: folder, legacyURL: nil)
-            let request = Task { try await settings.backupContext(store: store, namespace: "photos") }
-            defer { request.cancel() }
-            try await pendingRequest()
-            let stub = try #require(ServerCheckProtocol.pending.take())
-            let response = try #require(HTTPURLResponse(url: stub.request.url!, statusCode: 404, httpVersion: nil, headerFields: nil))
-            stub.client?.urlProtocol(stub, didReceive: response, cacheStoragePolicy: .notAllowed)
-            stub.client?.urlProtocolDidFinishLoading(stub)
-            do {
-                _ = try await request.value
-                Issue.record("A missing v2 API must not create a context")
-            } catch let failure as ServerClient.Failure {
-                #expect(failure.message == "Home Server runs an older Homespun Server. Update it to back up with this version of the app. "
-                    + "Nothing on your iPhone or server has changed. "
-                    + "Mac/Linux: update the source, rebuild and rerun install-service. "
-                    + "Docker: pull ghcr.io/akshob/homespun-server:latest and recreate the container.")
-            }
-            #expect(settings.needsBackupUpdate && settings.connectionProblem == nil)
-            #expect(try await store.bindings().isEmpty)
-            try await store.close()
-        }
         let unreachable = settings.serverStatus
         let checkedAt = settings.serverCheckedAt
         let retry = Task { await settings.refreshServerInfo() }
@@ -204,6 +173,38 @@ import Testing
         ServerCheckProtocol.fail()
         await retry.value
         #expect(settings.serverStatus == unreachable)
+    }
+
+    @Test func missingCapabilitiesBackstopPreservesTheServerUpdateExplanation() async throws {
+        let name = "server-update-backstop-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        let folder = URL.applicationSupportDirectory.appendingPathComponent(name)
+        defer {
+            UserDefaults.standard.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let (settings, session) = try pairedSettings(defaults: defaults)
+        defer { session.invalidateAndCancel() }
+        let store = BackupStore(directory: folder, legacyURL: nil)
+        let request = Task { try await settings.backupContext(store: store, namespace: "photos") }
+        defer { request.cancel() }
+        try await pendingRequest()
+        let stub = try #require(ServerCheckProtocol.pending.take())
+        let response = try #require(HTTPURLResponse(url: stub.request.url!, statusCode: 404, httpVersion: nil, headerFields: nil))
+        stub.client?.urlProtocol(stub, didReceive: response, cacheStoragePolicy: .notAllowed)
+        stub.client?.urlProtocolDidFinishLoading(stub)
+        do {
+            _ = try await request.value
+            Issue.record("A missing v2 API must not create a context")
+        } catch let failure as ServerClient.Failure {
+            #expect(failure.message == "Home Server runs an older Homespun Server. Update it to back up with this version of the app. "
+                + "Nothing on your iPhone or server has changed. "
+                + "Mac/Linux: update the source, rebuild and rerun install-service. "
+                + "Docker: pull ghcr.io/akshob/homespun-server:latest and recreate the container.")
+        }
+        #expect(settings.needsBackupUpdate && settings.connectionProblem == nil)
+        #expect(try await store.bindings().isEmpty)
+        try await store.close()
     }
 
     @Test(arguments: [false, true])
