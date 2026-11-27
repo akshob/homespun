@@ -143,6 +143,8 @@ for local backup work to stop; backups can be paused in Activity.
 Videos play in the item viewer, with Play/Pause and a position slider below the picture.
 The viewer zooms over the whole app from the tapped thumbnail, without changing the tabs or
 the Library's layout. Back or a downward swipe returns it to the thumbnail of the item shown.
+Close Details or any other sheet first to swipe the viewer closed. Details' own sheet can still
+be swiped down, and paging works while Details is open.
 Connection and backup messages also float above the content: appearing or disappearing changes
 the scroll range, not the visible cells, tabs or title.
 Autoplay follows the iPhone's accessibility setting. On the open iPhone Duo, Compare can show
