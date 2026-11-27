@@ -378,13 +378,31 @@ motion, because only AVFoundation keeps the still and its motion paired.
 
 ### Server compatibility and updates
 
-Homespun app **1.1 needs Homespun Server 1.1** (the **0.2.x server with `/api/v2`**).
-Update the server before backing up with the new app. A 1.0-era server can also report
+Homespun app **1.1 needs Homespun Server 1.1** (with **`/api/v2`**) for new backups.
+Homespun Server now reports version `1.1.0` and `backup_api: 2` in `/api/v1/info`.
+A 1.0-era server can report
 version `0.2.0`, and both generations report `api_version: 1` in `/api/v1/info` and
 `/api/v1/health`; those fields alone do not mean it supports the new backup queue.
 If `/api/v2/capabilities` is missing, the app explains that the server needs updating
 in Activity, the Library notice and the Server tab. That failed check creates no backup
-binding or selection and changes no photos or server data. There is no v1 backup fallback.
+binding or selection and changes no photos or server data. New photos wait until the server
+is updated; Automatic Mode keeps collecting them without increasing retry counts. There is
+no v1 fallback for new backups. Pairing and server settings still work over v1.
+
+Earlier backups confirmed by the paired server keep their 1.0 badges. In files mode,
+Free Up Space and Restore Original continue over v1, including after updating the server;
+Find Compact Copies is optional, not a prerequisite. Before either action Homespun reads
+the complete local resources, freshly rehashes the server originals, checks that they are
+not in server trash before and after verification, and confirms every compact resource's
+hash and role against that server's record. Removal uses a proof no older than 30 seconds,
+unchanged Photos generations and iOS confirmation. Missing hashes (including unrecorded
+Live Photo motion) block removal and keep both items. Legacy actions stay off in Immich
+mode because v1 cannot supply the complete-resource scrub required by 1.1.
+
+Restore records an intent before creating a Photos item. If interrupted, it refuses another
+import and asks you to check Recents; both copies are kept unless the restored original is
+verified byte for byte and iOS approves compact-copy removal. Server downgrades after v2
+backups are unsupported; preserve the newer catalog and originals rather than replacing them.
 
 - **Mac or Linux, installed from source:** in the existing checkout, run
   `git pull --ff-only`, rebuild with `swift build -c release --product homespun-server`,
@@ -814,13 +832,15 @@ the server if necessary. Neither a legacy match nor a remembered URL authorizes 
 
 After upgrading from Homespun 1.0, the app checks earlier backups against the paired server's
 verified catalog, in batches of at most 500 fingerprints, without reading or hashing media on
-the iPhone. A matching original and total byte count show **Original at home** (or **Backed up**
-when the original is still on the phone), with the check's date and server in Details. These
+the iPhone. A matching original and total byte count show **Original at home** (or **Ready to free up**
+when the original is still on the phone and legacy actions are available), with the check's date
+and server in Details. Originals without a compact copy show **Backed up**. These
 display-only observations last at most seven days, apply only to the current authenticated
-server binding and history epoch, and are refreshed when needed. Unconfirmed items keep
-recovery guidance. To restore or free up space for earlier backups, run
-Server › Existing Library › Find Compact Copies first: catalog observations never supply a
-versioned backup record, authorize removal or replace the separate fresh proof.
+server's HTTPS address, pinned key (or system trust), pairing token and v1 device ID, and
+are refreshed when needed. Observations made before the server acquired v2 remain valid
+after its update; a known v2 history-epoch change invalidates observations made in that epoch.
+Unconfirmed items keep recovery guidance. Catalog observations never supply a versioned
+backup record, authorize removal or replace the separate fresh proof required by legacy actions.
 The demo does not run these upgrade checks.
 
 Migration preserves the 1.0 source files byte for byte. Like 1.0, it replays only complete

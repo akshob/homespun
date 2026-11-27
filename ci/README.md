@@ -48,6 +48,17 @@ normal install path; the optional download cache is deferred. The watch job stil
 its own watchOS test bundle, then runs its own `.xctestrun` without resolving the graph a
 second time.
 
+The extended `oldserver` run (port 8804, never in the quick PR lanes) uses the immutable
+`b35fc1901551ea1b01807a26f6a73cbbf68d8058` server. The build job checks out that commit separately,
+caches its release binary by commit and macOS/Xcode image, and includes it in the build archive.
+`OldServerUITests` seeds three real v1 backups with a Debug-only use of the retained 1.0 compactor,
+checks badges and the update alert, frees/restores through iOS confirmation, then asks the host
+watcher to restart the current server on the same data folder and port. It checks unchanged
+legacy display/actions and new v2 admission without duplicate grid items. Both servers use
+the existing key-pinned HTTPS readiness probe and are stopped before the disposable data and
+simulator are removed. The nightly run list includes this lane; its remotely disabled state
+is not changed or enabled by this compatibility work.
+
 Performance budgets (`perf.sh`) need a Mac with a large iPhone Duo library (`setup-perf-sim.sh`,
 35,000 photos) and steady timings, which shared cloud machines don't give; the owner runs them
 nightly on a Mac of their own, from a separate private repository, so no self-hosted runner is ever
