@@ -173,6 +173,7 @@ enum AVSupport {
         struct Control: Sendable {
             var stopped: @Sendable () -> Bool
             var failed: @Sendable () -> Void
+            var willReadSample: @Sendable (AVMediaType) -> Void = { _ in }
             var didAppend: @Sendable (AVMediaType) -> Void
         }
 
@@ -214,6 +215,7 @@ enum AVSupport {
                             self.finish(lane, markAsFinished: false)
                             return
                         }
+                        control?.willReadSample(lane.input.mediaType)
                         guard let sample = lane.output.copyNextSampleBuffer() else {
                             self.finish(lane, markAsFinished: control?.stopped() != true)
                             return
@@ -282,7 +284,7 @@ enum AVSupport {
 
     /// Decodes every frame of the first video track; returns the frame count.
     static func decodeVideo(_ url: URL, cancellable: Bool = false,
-                            didDecodeFrame: @escaping @Sendable () -> Void = {}) async throws -> Int {
+                            observer: MotionObserver = .init()) async throws -> Int {
         if cancellable { try Task.checkCancellation() }
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
@@ -297,16 +299,16 @@ enum AVSupport {
         let decoder = VideoDecoder(reader: reader, output: output)
         if cancellable {
             return try await withTaskCancellationHandler {
-                try decoder.decode(cancellable: true, didDecodeFrame: didDecodeFrame)
+                try decoder.decode(cancellable: true, observer: observer)
             } onCancel: {
                 decoder.cancel()
             }
         }
-        return try decoder.decode(cancellable: false, didDecodeFrame: didDecodeFrame)
+        return try decoder.decode(cancellable: false, observer: observer)
     }
 
-    /// Only start/cancel may race. Reading is synchronous on the caller, so its return joins
-    /// the decode loop; cancelling the reader also interrupts an outstanding sample read.
+    /// Cancellation only marks the loop stopped. The synchronous caller retains the reader
+    /// and cancels it after its last sample read and observation callback have returned.
     private final class VideoDecoder: @unchecked Sendable {
         let reader: AVAssetReader
         let output: AVAssetReaderTrackOutput
@@ -319,14 +321,17 @@ enum AVSupport {
         }
 
         func cancel() {
-            lock.withLock {
-                cancelled = true
-                reader.cancelReading()
-            }
+            lock.withLock { cancelled = true }
         }
 
-        func decode(cancellable: Bool, didDecodeFrame: @Sendable () -> Void) throws -> Int {
-            defer { if cancellable { cancel() } }
+        func decode(cancellable: Bool, observer: MotionObserver) throws -> Int {
+            defer {
+                if cancellable {
+                    observer.didJoinLanes()
+                    reader.cancelReading()
+                    observer.didCancelReader()
+                }
+            }
             let started = try lock.withLock {
                 if cancelled { throw CancellationError() }
                 if cancellable { try Task.checkCancellation() }
@@ -339,10 +344,11 @@ enum AVSupport {
             var frames = 0
             while true {
                 if cancellable { try Task.checkCancellation() }
+                observer.willReadSample(.video)
                 guard let sample = output.copyNextSampleBuffer() else { break }
                 if CMSampleBufferGetImageBuffer(sample) != nil {
                     frames += 1
-                    didDecodeFrame()
+                    observer.didDecodeFrame()
                 }
             }
             if cancellable { try Task.checkCancellation() }

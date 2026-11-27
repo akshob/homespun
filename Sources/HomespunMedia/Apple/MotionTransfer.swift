@@ -7,8 +7,11 @@ import Foundation
 extension AVSupport {
     /// Internal observation points let tests hold real in-flight work at deterministic barriers.
     struct MotionObserver: Sendable {
+        var willReadSample: @Sendable (AVMediaType) -> Void = { _ in }
         var didAppend: @Sendable (AVMediaType) -> Void = { _ in }
         var didDecodeFrame: @Sendable () -> Void = {}
+        var didJoinLanes: @Sendable () -> Void = {}
+        var didCancelReader: @Sendable () -> Void = {}
         var didJoin: @Sendable (AVAssetReader.Status, AVAssetWriter.Status) -> Void = { _, _ in }
     }
 
@@ -94,7 +97,7 @@ extension AVSupport {
                 self.pump.start(control: .init(stopped: { [weak self] in self?.stopped ?? true }, failed: { [weak self] in
                     guard let self else { return }
                     self.fail("append: \(String(describing: self.writer.error))")
-                }, didAppend: self.observer.didAppend)) {
+                }, willReadSample: self.observer.willReadSample, didAppend: self.observer.didAppend)) {
                     self.queue.async { self.lanesFinished() }
                 }
                 if self.stopped { self.stop() }
@@ -103,19 +106,21 @@ extension AVSupport {
 
         private func stop() {
             guard continuation != nil, !completing else { return }
-            // Interrupt an in-flight read before asking every lane to close. The writer is
-            // stopped only after all appends/markAsFinished calls have returned.
-            reader.cancelReading()
+            // Cancelling a reader during copyNextSampleBuffer tears down state under the read.
+            // Keep it alive and join every lane before stopping either reader or writer.
             if pumping {
                 pump.stop()
                 return
             }
+            reader.cancelReading()
+            observer.didCancelReader()
             writer.cancelWriting()
             if !finishing { complete() }
         }
 
         private func lanesFinished() {
             pumping = false
+            observer.didJoinLanes()
             if reader.status == .failed { fail("reader: \(String(describing: reader.error))") }
             guard !stopped else { stop(); return }
             finishing = true
