@@ -159,8 +159,8 @@ private actor LegacyLookupBatches {
     #expect(Set(projection.backedUp.keys) == ["backed", "kept"])
     #expect(projection.backedUp.values.allSatisfy { $0.origin == nil && $0.version == nil })
     #expect(projection.backedUp["kept"]?.kept == true && projection.kept.isEmpty)
-    let marker = try await fixture.store.readState {
-        try $0.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
+    let marker = try await fixture.store.readState { @Sendable connection in
+        try connection.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
     }
     #expect(marker != nil)
     let candidates = LegacyUpgradeFixture.candidates(projection)
@@ -203,8 +203,8 @@ private actor LegacyLookupBatches {
     let reloaded = try await reopened.ledgerProjection(namespace: "photos")
     #expect(try await reopened.mappings(namespace: "photos") == mappings)
     #expect(reloaded.legacyConfirmed(binding: fixture.binding, now: LegacyUpgradeFixture.checkedAt) == confirmed)
-    let reopenedMarker = try await reopened.readState {
-        try $0.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
+    let reopenedMarker = try await reopened.readState { @Sendable connection in
+        try connection.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
     }
     #expect(reopenedMarker == marker)
     for (url, data) in fixture.sources { #expect(try Data(contentsOf: url) == data) }
