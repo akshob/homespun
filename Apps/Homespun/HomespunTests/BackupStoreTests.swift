@@ -62,6 +62,101 @@ private struct BackupStoreFixture {
 
 private enum PhotoHandoffTestFailure: Error, Equatable { case interrupted }
 
+/// Frozen on-disk Codable shapes from b35fc19's CompactLedger, AutomaticMode.State and CompactSchedule.
+/// Do not encode migration fixtures with today's models: that would silently change the source format.
+private enum HomespunOneDisk {
+    struct Entry: Codable {
+        var compactIdentifier: String
+        var originalBytes: Int
+        var compactBytes: Int
+        var savedAt: Date
+        var serverAssetID: String?
+    }
+
+    struct BackedUp: Codable {
+        var serverAssetID: String
+        var originalBytes: Int
+        var backedUpAt: Date
+        var kept: Bool? = nil
+    }
+
+    struct Change: Codable {
+        var set: [String: Entry]?
+        var remove: [String]?
+    }
+
+    struct Schedule: Codable {
+        var days = 30
+        var keepFavorites = true
+    }
+
+    struct AutomaticState: Codable {
+        var enabled = false
+        var since = Date.distantPast
+        var token: Data?
+        var attempts: [String: Int] = [:]
+        var settled: Set<String> = []
+        var lastRun: Date?
+        var lastSummary: String?
+        var pending: Set<String> = []
+        var notifies = true
+        var schedule = Schedule()
+        var firstSeen: [String: Date] = [:]
+        var removalToken: Data?
+        var removed: [String: Date] = [:]
+    }
+
+    static func ledgerEncoder(sorted: Bool) -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if sorted { encoder.outputFormatting = [.sortedKeys] }
+        return encoder
+    }
+
+    static func journalLine(_ change: Change) throws -> Data {
+        var line = try ledgerEncoder(sorted: false).encode(change)
+        line.append(UInt8(ascii: "\n"))
+        return line
+    }
+
+    static func sources(interruptedMiddle: Bool = false) throws -> [String: Data] {
+        let date = Date(timeIntervalSince1970: 1_735_787_045)
+        func entry(_ copy: String, _ hash: String?, bytes: Int = 100) -> Entry {
+            .init(compactIdentifier: copy, originalBytes: bytes, compactBytes: 10, savedAt: date,
+                  serverAssetID: hash.map { String(repeating: $0, count: 64) })
+        }
+        let entries = ["pair": entry("pair-copy", "a"), "elsewhere:home-copy": entry("home-copy", "b"),
+            "live": entry("live-copy", "c", bytes: 300), "on-phone": entry("local-copy", nil),
+            "removed": entry("removed-copy", "0")]
+        let backedUp = [
+            "backed": BackedUp(serverAssetID: String(repeating: "e", count: 64), originalBytes: 100, backedUpAt: date),
+            "kept": BackedUp(serverAssetID: String(repeating: "f", count: 64), originalBytes: 100, backedUpAt: date, kept: true),
+        ]
+        var automatic = AutomaticState()
+        automatic.settled = ["old-settled"]
+        automatic.lastRun = date
+        automatic.firstSeen = ["backed": date]
+        var journal = try journalLine(Change(set: ["journal": entry("journal-copy", "d", bytes: 200)]))
+        if interruptedMiddle {
+            let interrupted = try ledgerEncoder(sorted: false).encode(Change(
+                set: ["uncommitted": entry("unknown-copy", "9")], remove: ["pair"]))
+            journal.append(contentsOf: interrupted.prefix(interrupted.count / 2))
+            // 1.0 append() inserted this separator after reopening a torn journal.
+            journal.append(UInt8(ascii: "\n"))
+        }
+        journal.append(try journalLine(Change(remove: ["removed"])))
+        let torn = try ledgerEncoder(sorted: false).encode(Change(set: ["truncated": entry("unfinished-copy", "8")]))
+        journal.append(contentsOf: torn.prefix(torn.count / 2))
+        return [
+            "ledger.json": try ledgerEncoder(sorted: true).encode(entries),
+            "ledger.journal": journal,
+            "backed-up.json": try ledgerEncoder(sorted: true).encode(backedUp),
+            // Unlike ledger files, 1.0 automatic.json used default numeric Date encoding.
+            "automatic.json": try JSONEncoder().encode(automatic),
+        ]
+    }
+}
+
 private struct LegacyUpgradeFixture: Sendable {
     let root: URL
     let directory: URL
@@ -71,7 +166,7 @@ private struct LegacyUpgradeFixture: Sendable {
     let binding: BackupStore.Binding
     static let checkedAt = Date(timeIntervalSince1970: 1_800_000_000)
 
-    static func make() async throws -> Self {
+    static func make(interruptedMiddle: Bool = false) async throws -> Self {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("upgrade-\(UUID().uuidString)")
         let real = root.appendingPathComponent("real", isDirectory: true)
         let link = root.appendingPathComponent("container", isDirectory: true)
@@ -79,33 +174,9 @@ private struct LegacyUpgradeFixture: Sendable {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
         let support = link.appendingPathComponent("Library/Application Support/Homespun", isDirectory: true)
         try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        func entry(_ copy: String, _ hash: String?, bytes: Int = 100) -> String {
-            """
-            {"compactIdentifier":"\(copy)","originalBytes":\(bytes),"compactBytes":10,
-            "savedAt":"2025-01-02T03:04:05Z"\(hash.map { ",\"serverAssetID\":\"" + String(repeating: $0, count: 64) + "\"" } ?? "")}
-            """
-        }
-        let files = [
-            "ledger.json": """
-            {"pair":\(entry("pair-copy", "a")),"elsewhere:home-copy":\(entry("home-copy", "b")),
-            "live":\(entry("live-copy", "c", bytes: 300)),"on-phone":\(entry("local-copy", nil)),
-            "removed":\(entry("removed-copy", "0"))}
-            """,
-            "ledger.journal": """
-            {"set":{"journal":\(entry("journal-copy", "d", bytes: 200))}}
-            {"remove":["removed"]}
-            {"set":
-            """,
-            "backed-up.json": """
-            {"backed":{"serverAssetID":"\(String(repeating: "e", count: 64))","originalBytes":100,"backedUpAt":"2025-01-02T03:04:05Z"},
-            "kept":{"serverAssetID":"\(String(repeating: "f", count: 64))","originalBytes":100,"backedUpAt":"2025-01-02T03:04:05Z","kept":true}}
-            """,
-            // 1.0 had settled, not keptAsIs. It must not be reinterpreted as a new decision.
-            "automatic.json": #"{"settled":["old-settled"],"lastChecked":"2025-01-02T03:04:05Z"}"#,
-        ]
         var sources: [URL: Data] = [:]
-        for (name, text) in files {
-            let url = support.appendingPathComponent(name), data = Data(text.utf8)
+        for (name, data) in try HomespunOneDisk.sources(interruptedMiddle: interruptedMiddle) {
+            let url = support.appendingPathComponent(name)
             try data.write(to: url)
             sources[url] = data
         }
@@ -158,11 +229,14 @@ private actor LegacyLookupBatches {
     #expect(projection.entries.values.allSatisfy { $0.origin == nil && $0.version == nil && !$0.verifiedCompact })
     #expect(Set(projection.backedUp.keys) == ["backed", "kept"])
     #expect(projection.backedUp.values.allSatisfy { $0.origin == nil && $0.version == nil })
-    #expect(projection.backedUp["kept"]?.kept == true && projection.kept.isEmpty)
+    #expect(projection.backedUp["kept"]?.kept == true && projection.backedUp["backed"]?.kept == nil && projection.kept.isEmpty)
+    #expect(projection.entries["pair"]?.savedAt == Date(timeIntervalSince1970: 1_735_787_045))
+    #expect(projection.backedUp["kept"]?.backedUpAt == projection.entries["pair"]?.savedAt)
     let marker = try await fixture.store.readState { @Sendable connection in
         try connection.rows("SELECT value FROM meta WHERE key = 'legacy_sources'").first?.blob("value")
     }
     #expect(marker != nil)
+    #expect(try await fixture.store.metadata("legacy_journal_fragments", as: Int.self) == 1)
     let candidates = LegacyUpgradeFixture.candidates(projection)
     #expect(candidates.count == 6 && !candidates.contains { $0.item == "on-phone" || $0.item == "removed" })
     let matches = candidates.map(LegacyUpgradeFixture.match)
@@ -209,6 +283,44 @@ private actor LegacyLookupBatches {
     #expect(reopenedMarker == marker)
     for (url, data) in fixture.sources { #expect(try Data(contentsOf: url) == data) }
     try await reopened.close()
+}
+
+@Test func onePointZeroUpgradeReplaysWholeChangesAfterAnEarlierTornAppendWithoutGuessingItsIntent() async throws {
+    let fixture = try await LegacyUpgradeFixture.make(interruptedMiddle: true)
+    defer { try? FileManager.default.removeItem(at: fixture.root) }
+    let ledger = CompactLedger(store: fixture.store)
+    let projection = try await ledger.projection()
+    // The interrupted change both set an item and removed the pair. Neither partial intent is applied.
+    #expect(Set(projection.entries.keys) == ["pair", "elsewhere:home-copy", "live", "on-phone", "journal"])
+    #expect(projection.entries["pair"]?.compactIdentifier == "pair-copy")
+    #expect(projection.entries["journal"]?.compactIdentifier == "journal-copy" && projection.entries["removed"] == nil)
+    #expect(projection.entries["uncommitted"] == nil && projection.entries["truncated"] == nil)
+    #expect(projection.entries.values.allSatisfy {
+        $0.origin == nil && $0.version == nil && $0.requestID == nil && !$0.verifiedCompact
+    })
+    #expect(Set(projection.backedUp.keys) == ["backed", "kept"] && projection.backedUp["kept"]?.kept == true)
+    #expect(projection.kept.isEmpty, "1.0 settled mixes completed and held items; it isn't a versioned keep decision")
+    #expect(try await ledger.serverBacked().isEmpty)
+    #expect(try await fixture.store.metadata("legacy_journal_fragments", as: Int.self) == 2)
+    let mappings = try await fixture.store.mappings(namespace: "photos")
+    try await fixture.store.close()
+    let reopened = BackupStore(directory: fixture.directory, legacyURL: fixture.legacyURL)
+    #expect(try await reopened.mappings(namespace: "photos") == mappings)
+    #expect(try await reopened.metadata("legacy_journal_fragments", as: Int.self) == 2)
+    for (url, data) in fixture.sources { #expect(try Data(contentsOf: url) == data) }
+    try await reopened.close()
+}
+
+@Test func unreadableOnePointZeroBackedUpSnapshotStillBlocksMigrationWithoutChangingAnySources() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("unreadable-upgrade-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    var sources = try HomespunOneDisk.sources()
+    sources["backed-up.json"] = Data("not json".utf8)
+    for (name, data) in sources { try data.write(to: root.appendingPathComponent(name)) }
+    let store = BackupStore(directory: root.appendingPathComponent("Backup"), legacyURL: root.appendingPathComponent("ledger.json"))
+    await #expect(throws: BackupStore.Failure.legacyUnreadable) { try await store.open() }
+    for (name, data) in sources { #expect(try Data(contentsOf: root.appendingPathComponent(name)) == data) }
 }
 
 @Test @MainActor func legacyLookupRequiresTheWholeCatalogMatchAndExpiresEvenACachedProjection() async throws {
