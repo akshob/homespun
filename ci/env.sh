@@ -17,6 +17,7 @@ RESULTS=${RESULTS:-$ROOT/ci-results}
 SEED=${SEED:-$ROOT/ci/seed}
 # The release server the UI tests run, kept with the build (build.sh) so other machines get it too.
 SERVER_BIN=${SERVER_BIN:-$DD/homespun-server}
+OLD_SERVER_BIN=${OLD_SERVER_BIN:-$DD/homespun-server-b35fc19}
 # iPhone Duo's fold, rotate and screenshot tool.
 DUOCTL=${DUOCTL:-$ROOT/ci/tools/duoctl/duoctl}
 export XDG_CACHE_HOME=${XDG_CACHE_HOME:-$CI_STATE/duo-cache}

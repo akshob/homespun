@@ -72,6 +72,11 @@ if [[ -n ${DATED:-} ]]; then
 fi
 CODE="" LINK=""
 if [[ -z ${SERVERLESS:-} ]]; then
+    CURRENT_SERVER_BIN=$SERVER_BIN
+    if [[ -n ${OLD_SERVER_FIXTURE:-} ]]; then
+        [[ -x $OLD_SERVER_BIN ]] || { echo "the immutable b35fc19 server fixture is missing"; exit 1; }
+        SERVER_BIN=$OLD_SERVER_BIN
+    fi
     export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
            HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=127.0.0.1:$PORT
     timed server.port wait_port_free $PORT || exit 1
@@ -80,7 +85,7 @@ if [[ -z ${SERVERLESS:-} ]]; then
     ACTIONFILE=$DATA/host-action
     print online > $CONTROL
     (
-        child="" currentData=$DATA currentPort=$PORT currentLog=$DATA.log
+        child="" currentData=$DATA currentPort=$PORT currentLog=$DATA.log activeBinary=$SERVER_BIN
         stop_server() {
             [[ -z $child ]] && return
             kill $child 2>/dev/null
@@ -94,7 +99,7 @@ if [[ -z ${SERVERLESS:-} ]]; then
             mkdir -p $currentData/originals
             HOMESPUN_DATA=$currentData HOMESPUN_ORIGINALS=$currentData/originals \
                 HOMESPUN_PORT=$currentPort HOMESPUN_PUBLIC_URL=127.0.0.1:$currentPort \
-                $SERVER_BIN serve >> $currentLog 2>&1 & child=$!
+                $activeBinary serve >> $currentLog 2>&1 & child=$!
             print -r -- $child > $PIDFILE
             HOMESPUN_DATA=$currentData wait_for_server $currentPort
         }
@@ -110,6 +115,15 @@ if [[ -z ${SERVERLESS:-} ]]; then
                 print online > $CONTROL.ack
                 if [[ -f $ACTIONFILE ]]; then
                     case $(cat $ACTIONFILE) in
+                        upgrade-server)
+                            [[ -n ${OLD_SERVER_FIXTURE:-} ]] || exit 1
+                            stamp server.upgrade.start
+                            stop_server
+                            wait_port_free $currentPort || exit 1
+                            activeBinary=$CURRENT_SERVER_BIN
+                            start_server || exit 1
+                            print upgraded > $DATA/server-upgraded
+                            stamp server.upgrade.end;;
                         rotate-key)
                             HOMESPUN_DATA=$currentData $SERVER_BIN certificate --new-key \
                                 >> $RESULTS/$NAME-host-actions.log 2>&1;;
@@ -154,6 +168,7 @@ if [[ -z ${SERVERLESS:-} ]]; then
     OUT=$(timed server.pair pairing_output) || { echo "no pairing code"; exit 1; }
     CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
     export TEST_RUNNER_HOMESPUN_HOST_ACTION_FILE=$ACTIONFILE
+    export TEST_RUNNER_HOMESPUN_SERVER_UPGRADED_FILE=$DATA/server-upgraded
     export TEST_RUNNER_HOMESPUN_MOVED_SERVER=127.0.0.1:$MOVEPORT
     export TEST_RUNNER_HOMESPUN_ROGUE_LOG=$RESULTS/$NAME-rogue-server.log
     export TEST_RUNNER_HOMESPUN_PAIRING_OUTPUT_FILE=$DATA/pairing-again
@@ -202,7 +217,7 @@ if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
     stamp simulator.reboot.end
     run_tests; STATUS=$?
 fi
-if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests|BackupResumeUITests)* ]]; then
+if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests|BackupResumeUITests|OldServerUITests)* ]]; then
     require_test_environment $RESULTS/$NAME.log || STATUS=1
 fi
 if [[ -n ${STUB_PORT:-} ]]; then

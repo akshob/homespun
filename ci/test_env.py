@@ -216,6 +216,7 @@ else:
 
     def test_first_device_matches_each_distinct_lane_kind_and_rejects_unknown(self):
         for lane, device in [("quick-duo", "iPhone-Duo"), ("demo", "iPhone-18-Pro"),
+                             ("oldserver", "iPhone-18-Pro"),
                              ("watch", "Apple-Watch-Series-12-46mm")]:
             run = self.shell(f'zsh "$ROOT/ci/lane.sh" --first-device {lane}')
             self.assertEqual(run.returncode, 0, run.stderr)

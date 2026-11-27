@@ -270,6 +270,9 @@ final class LibraryController {
         await refreshLegacyBinding()
         await refreshReady()
         await refreshGrid()
+        #if DEBUG
+        await seedLegacyBackupsForTesting()
+        #endif
     }
 
     func requestAccess() async {
@@ -788,6 +791,33 @@ final class LibraryController {
     static func bytes(_ count: Int) -> String { count.formatted(.byteCount(style: .file)) }
 
     #if DEBUG
+    @ObservationIgnored private var seedingLegacy = false
+
+    private func seedLegacyBackupsForTesting() async {
+        let count = settings.defaults.integer(forKey: "legacyBackUp")
+        guard count > 0, !seedingLegacy, !settings.isDemo, settings.needsBackupUpdate,
+              settings.defaults.string(forKey: "legacyBackUpSeeded") != settings.currentLegacyScope,
+              let compactor = settings.compactor(ledger: job.ledger) else { return }
+        seedingLegacy = true
+        defer { seedingLegacy = false }
+        let summaries = settings.photos.summaries(settings.photos.allIdentifiers())
+        let identifiers = summaries.keys.filter {
+            settings.photos.describe($0)?.name.hasPrefix("IMG_200") == true
+        }.sorted {
+            let lhs = summaries[$0]?.created ?? .distantPast, rhs = summaries[$1]?.created ?? .distantPast
+            return lhs == rhs ? $0 < $1 : lhs > rhs
+        }.prefix(min(count, 3))
+        do {
+            for id in identifiers {
+                _ = try await compactor.compact(id, compactNow: true) { _ in }
+            }
+            settings.defaults.set(settings.currentLegacyScope, forKey: "legacyBackUpSeeded")
+            legacyCheckAttempt = nil
+            legacyCheckFinished = false
+            await refreshGrid()
+        } catch { AppLog.job.error("Legacy fixture setup failed: \(error.localizedDescription)") }
+    }
+
     @ObservationIgnored private var testingDeletionStarted = false
 
     /// UI tests: deletes the newest item backed up without a compact copy, as a person cleaning up

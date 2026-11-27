@@ -15,7 +15,7 @@ if [[ ${1:-} == --first-device ]]; then
     case ${2:-} in
       quick-duo|duo-cover|duo-grid|duo-open|duo-all) print -r -- iPhone-Duo ;;
       watch) print -r -- Apple-Watch-Series-12-46mm ;;
-      quick|iphone|library|later|copies|onboarding|telemetry|resume|demo|large|pr|iphone-all|full)
+      quick|iphone|library|later|copies|onboarding|telemetry|resume|oldserver|demo|large|pr|iphone-all|full)
         print -r -- iPhone-18-Pro ;;
       *) echo "unknown run: ${2:-}" >&2; exit 1 ;;
     esac
@@ -33,9 +33,9 @@ runs=()
 for name in "$@"; do
   case $name in
     pr) runs+=(quick quick-duo) ;;
-    iphone-all) runs+=(iphone library later copies onboarding telemetry resume) ;;
+    iphone-all) runs+=(iphone library later copies onboarding telemetry resume oldserver) ;;
     duo-all) runs+=(duo-cover duo-grid duo-open) ;;
-    full) runs+=(iphone library later copies onboarding telemetry resume duo-cover duo-grid duo-open demo watch) ;;
+    full) runs+=(iphone library later copies onboarding telemetry resume oldserver duo-cover duo-grid duo-open demo watch) ;;
     *) runs+=($name) ;;
   esac
 done
@@ -73,6 +73,9 @@ for one in $runs; do
     resume)
       # Quit mid-upload and while the server processes: each relaunch resumes without re-selecting.
       run resume zsh $D/ui.sh resume iPhone-18-Pro HomespunUITests/BackupResumeUITests 8802 ;;
+    oldserver)
+      run oldserver env OLD_SERVER_FIXTURE=1 EXTRA=2 zsh $D/ui.sh oldserver iPhone-18-Pro \
+        HomespunUITests/OldServerUITests 8804 ;;
     watch)
       run watch zsh $D/watch.sh ;;
     duo-cover)

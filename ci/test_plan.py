@@ -51,6 +51,13 @@ class PackagePlanTests(unittest.TestCase):
 
 
 class TargetedUIPlanTests(unittest.TestCase):
+    def test_old_server_fixture_is_extended_only(self):
+        self.assertIn("oldserver", FULL)
+        self.assertNotIn("oldserver", QUICK)
+        for draft in ("true", "false"):
+            result = plan({"MODE": "pr", "DRAFT": draft}, ["Apps/Homespun/HomespunUITests/OldServerUITests.swift"])
+            self.assertNotIn("oldserver", result["ui"])
+
     def test_manual_copy_recovery_keeps_server_contracts_without_unrelated_ui(self):
         result = plan({"MODE": "manual", "UI_INPUT": "copies"}, [])
         self.assertEqual(result["ui"], ["copies"])

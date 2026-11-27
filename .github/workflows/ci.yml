@@ -14,7 +14,7 @@ on:
       ui:
         description: Checks or UI runs
         type: choice
-        options: [none, quick, full, iphone, library, later, copies, onboarding, telemetry, resume, duo-cover, duo-grid, duo-open, demo, watch, package]
+        options: [none, quick, full, iphone, library, later, copies, onboarding, telemetry, resume, oldserver, duo-cover, duo-grid, duo-open, demo, watch, package]
         default: quick
 
 permissions:
