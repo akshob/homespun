@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+import Darwin
 import Foundation
 import HomespunCore
+import SQLite3
 import Testing
 @testable import Homespun
 
@@ -556,6 +558,79 @@ private func abandonedPhotoHandoff(_ files: BackupFiles, operationID: UUID,
     #expect(due.map(\.id) == [acknowledgement.id])
     try await store.acknowledgeOutbox(acknowledgement.id)
     #expect(try await !store.needsResultDiscovery(bindingID: fixture.binding.id, namespace: "photos"))
+}
+
+@Test func backupStoreThroughSymlinkedAncestorPersistsAndProtectsDatabaseFiles() async throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? manager.removeItem(at: root) }
+    let real = root.appendingPathComponent("real", isDirectory: true)
+    let linked = root.appendingPathComponent("linked", isDirectory: true)
+    try manager.createDirectory(at: real, withIntermediateDirectories: true)
+    try manager.createSymbolicLink(at: linked, withDestinationURL: real)
+    let directory = linked.appendingPathComponent("Library/Application Support/Homespun/Backup", isDirectory: true)
+    let store = BackupStore(directory: directory, legacyURL: nil)
+    try await store.open()
+    try await store.keepAsIs(["persisted-item"], namespace: "photos", kept: true)
+    let openedPath = try #require(try await store.readState { connection in
+        try connection.rows("PRAGMA database_list").first?.text("file")
+    })
+    for suffix in ["", "-wal", "-shm"] {
+        let actualPath = openedPath + suffix
+        let linkedPath = store.files.database.path + suffix
+        #expect(manager.fileExists(atPath: actualPath))
+        #expect(manager.fileExists(atPath: linkedPath))
+        #expect(try PhotoResourceHandoff.file(URL(fileURLWithPath: actualPath)).identity
+            == PhotoResourceHandoff.file(URL(fileURLWithPath: linkedPath)).identity)
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: actualPath)
+    }
+    try store.files.protectDatabase()
+    for suffix in ["", "-wal", "-shm"] {
+        let attributes = try manager.attributesOfItem(atPath: openedPath + suffix)
+        #expect(attributes[.posixPermissions] as? Int == 0o600)
+    }
+    try await store.close()
+    let reopened = BackupStore(directory: directory, legacyURL: nil)
+    try await reopened.open()
+    #expect(try await reopened.decision("persisted-item", namespace: "photos"))
+    try await reopened.close()
+}
+
+@Test func backupDatabaseRejectsSymlinkedFileThroughSymlinkedAncestor() throws {
+    let manager = FileManager.default
+    let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    defer { try? manager.removeItem(at: root) }
+    let real = root.appendingPathComponent("real", isDirectory: true)
+    let linked = root.appendingPathComponent("linked", isDirectory: true)
+    try manager.createDirectory(at: real, withIntermediateDirectories: true)
+    try manager.createSymbolicLink(at: linked, withDestinationURL: real)
+    let files = BackupFiles(root: linked.appendingPathComponent("Backup", isDirectory: true))
+    try files.prepare()
+    let target = real.appendingPathComponent("untouched.sqlite")
+    try Data().write(to: target)
+    try manager.createSymbolicLink(at: files.database, withDestinationURL: target)
+    do {
+        _ = try BackupDatabase(url: files.database)
+        Issue.record("A database file that is itself a symlink must not be opened.")
+    } catch let failure as BackupDatabase.Failure {
+        guard case .sqlite(let code) = failure else { throw failure }
+        #expect(code & 0xFF == SQLITE_CANTOPEN)
+    }
+    #expect(try Data(contentsOf: target).isEmpty)
+    #expect(try files.database.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
+}
+
+@Test func backupDatabaseReportsUnresolvableParentDirectory() throws {
+    let missing = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        .appendingPathComponent("backup.sqlite")
+    do {
+        _ = try BackupDatabase(url: missing)
+        Issue.record("An unresolved database parent must not be opened.")
+    } catch let failure as BackupDatabase.Failure {
+        guard case .directoryResolution(let code) = failure else { throw failure }
+        #expect(code == ENOENT)
+    }
 }
 
 @Test func durableAdmissionDeduplicatesAndSurvivesReopening() async throws {

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Darwin
 import Foundation
 import os
 import SQLite3
@@ -8,6 +9,7 @@ import Synchronization
 final class BackupDatabase: Sendable {
     enum Failure: Error, LocalizedError {
         case sqlite(Int32)
+        case directoryResolution(Int32)
         case invalidValue
         case closed
         case durableStorageUnavailable
@@ -15,6 +17,7 @@ final class BackupDatabase: Sendable {
         var errorDescription: String? {
             switch self {
             case .sqlite(let code): "Backup progress could not be saved (storage error \(code))."
+            case .directoryResolution(let code): "The backup storage folder could not be resolved (system error \(code))."
             case .invalidValue: "Stored backup progress is unreadable. No new changes will be made."
             case .closed: "Backup storage is closed."
             case .durableStorageUnavailable: "This storage cannot safely save resumable backup progress."
@@ -136,8 +139,15 @@ final class BackupDatabase: Sendable {
     private let handle: Mutex<OpaquePointer?>
 
     init(url: URL) throws {
+        guard let directory = Darwin.realpath(url.deletingLastPathComponent().path, nil) else {
+            throw Failure.directoryResolution(errno)
+        }
+        defer { Darwin.free(directory) }
+        // SQLite rejects symlinked ancestors too, including iOS's /var. Resolve only the
+        // parent so NOFOLLOW still rejects a symlink at the database file itself.
+        let path = String(cString: directory) + "/" + url.lastPathComponent
         var pointer: OpaquePointer?
-        let result = sqlite3_open_v2(url.path, &pointer,
+        let result = sqlite3_open_v2(path, &pointer,
                                      SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
         guard result == SQLITE_OK, let pointer else {
             if let pointer { sqlite3_close_v2(pointer) }
