@@ -49,7 +49,7 @@ public struct LivePhotoMotionCompressor: Sendable {
         try await compress(input: input, output: output, observer: .init())
     }
 
-    func compress(input: URL, output: URL, observer: AVSupport.MotionObserver) async throws -> VideoCompressionResult {
+    @_spi(Testing) public func compress(input: URL, output: URL, observer: MotionObserver) async throws -> VideoCompressionResult {
         try Task.checkCancellation()
         guard try MediaFiles.size(of: input) > 0 else { throw VideoCompressionError.emptyInput }
         let asset = AVURLAsset(url: input)
@@ -81,7 +81,7 @@ public struct LivePhotoMotionCompressor: Sendable {
             }
         }
         if !held.isEmpty {
-            _ = try await AVSupport.decodeVideo(input, cancellable: true, didDecodeFrame: observer.didDecodeFrame)
+            _ = try await AVSupport.decodeVideo(input, cancellable: true, observer: observer)
             try Task.checkCancellation()
             let copy = try MediaFiles.publishCopy(of: input, to: output, beforePublish: { try Task.checkCancellation() })
             return VideoCompressionResult(mode: .originalKeptHeld, sha256: copy.sha256, size: copy.size,
@@ -217,7 +217,7 @@ public struct LivePhotoMotionCompressor: Sendable {
             where !VideoVerification.durationsMatch(before, after, absolute: 0.1, relative: 0) {
             throw VideoCompressionError.durationMismatch("\(label) \(before)s vs \(after)s")
         }
-        _ = try await AVSupport.decodeVideo(partial, cancellable: true, didDecodeFrame: observer.didDecodeFrame)
+        _ = try await AVSupport.decodeVideo(partial, cancellable: true, observer: observer)
         try Task.checkCancellation()
 
         if try MediaFiles.size(of: partial) >= MediaFiles.size(of: input) {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import Testing
-@testable import HomespunMedia
+@_spi(Testing) @testable import HomespunMedia
 
 @Test func jpegIntegrityRequiresEndOfImage() {
     // SOI, APP0, SOS with entropy data containing a stuffed 0xFF00 and a restart marker, EOI.
@@ -233,20 +233,48 @@ private func files(in directory: URL) throws -> [String] {
                                             audioChannels: 1, liveIdentifier: "5E4F1A2B-3C4D-4E5F-8A9B-0C1D2E3F4A5B",
                                             cleanAperture: (1360, 1020))
 
+    private enum ReaderEvent: Equatable, Sendable { case lanesJoined, readerCancelled }
+
     private final class MotionBarrier: @unchecked Sendable {
         private let lock = NSLock()
         private let gate = DispatchSemaphore(value: 0)
+        private let repeatedCallbacks = DispatchSemaphore(value: 0)
         private var arrival: CheckedContinuation<Bool, Never>?
         private var blocked = false
         private var returned = false
         private var completed = false
         private var joined: (AVAssetReader.Status, AVAssetWriter.Status)?
+        private var readerEvents: [ReaderEvent] = []
+        private var inFlight = 0
+        private var inFlightAtCancelReader: [Int] = []
+        private var lateCallbacks: [String: Int] = [:]
         private var lateAppends = 0
         private var prematureCompletion = false
 
         var snapshot: (returned: Bool, completed: Bool, joined: (AVAssetReader.Status, AVAssetWriter.Status)?,
-                       lateAppends: Int, prematureCompletion: Bool) {
-            lock.withLock { (returned, completed, joined, lateAppends, prematureCompletion) }
+                       readerEvents: [ReaderEvent], inFlight: Int, inFlightAtCancelReader: [Int],
+                       lateCallbacks: [String: Int], lateAppends: Int, prematureCompletion: Bool) {
+            lock.withLock {
+                (returned, completed, joined, readerEvents, inFlight, inFlightAtCancelReader,
+                 lateCallbacks, lateAppends, prematureCompletion)
+            }
+        }
+
+        func willReadSample() { lock.withLock { inFlight += 1 } }
+        func didReadSample() { lock.withLock { inFlight -= 1 } }
+
+        func lateCallback(_ mediaType: AVMediaType) {
+            let count = lock.withLock {
+                lateCallbacks[mediaType.rawValue, default: 0] += 1
+                return lateCallbacks[mediaType.rawValue]!
+            }
+            if count == 3 { repeatedCallbacks.signal() }
+            // A regressed requester must fail the assertions, not starve the test executor.
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+
+        func observeRequestsBeforeReaderCancel() {
+            _ = repeatedCallbacks.wait(timeout: .now() + .seconds(2))
         }
 
         func appended(_ mediaType: AVMediaType, pause: Bool) {
@@ -281,6 +309,15 @@ private func files(in directory: URL) throws -> [String] {
             lock.withLock {
                 if blocked && !returned { prematureCompletion = true }
                 joined = (reader, writer)
+            }
+        }
+
+        func record(_ event: ReaderEvent) {
+            lock.withLock {
+                guard blocked else { return }
+                if !returned { prematureCompletion = true }
+                if event == .readerCancelled { inFlightAtCancelReader.append(inFlight) }
+                readerEvents.append(event)
             }
         }
 
@@ -403,6 +440,50 @@ private func files(in directory: URL) throws -> [String] {
 
     enum CancellationPhase: CaseIterable, Sendable { case transfer, heldDecode, encodedDecode }
 
+    @Test func stoppedLanesStopBeingRequested() async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("out.mov")
+        var spec = Self.motion
+        spec.frames = 15
+        try await Synthetic.video(at: input, spec)
+        let barrier = MotionBarrier()
+        let observer = AVSupport.MotionObserver(willReadSample: { mediaType in
+            barrier.willReadSample()
+            if mediaType == .video { barrier.pause() }
+        }, didReadSample: { _ in barrier.didReadSample() },
+           lateCallback: { barrier.lateCallback($0) },
+           didJoinLanes: {
+               barrier.record(.lanesJoined)
+               // Hold cancelWriting off on the lifecycle queue so an unfinished input's
+               // repeated requests are observable, even when joining no longer starves.
+               barrier.observeRequestsBeforeReaderCancel()
+           },
+           didCancelReader: { barrier.record(.readerCancelled) },
+           didJoin: { barrier.didJoin($0, $1) })
+        let task = Task {
+            defer { barrier.didFinish() }
+            return try await LivePhotoMotionCompressor().compress(input: input, output: output, observer: observer)
+        }
+        defer { barrier.release() }
+        guard await barrier.waitUntilBlockedOrFinished() else {
+            _ = try await task.value
+            Issue.record("Motion completed without reaching its first video sample read")
+            return
+        }
+        task.cancel()
+        barrier.release()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        let snapshot = barrier.snapshot
+        #expect(snapshot.lateCallbacks.values.allSatisfy { $0 <= 1 }, "Late requester callbacks: \(snapshot.lateCallbacks)")
+        #expect(snapshot.readerEvents == [.lanesJoined, .readerCancelled])
+        #expect(snapshot.inFlightAtCancelReader == [0] && snapshot.inFlight == 0)
+        #expect(!snapshot.prematureCompletion)
+        let joined = try #require(snapshot.joined)
+        #expect(joined.0 == .cancelled && joined.1 == .cancelled)
+        #expect(try files(in: directory) == ["in.mov"])
+    }
+
     @Test(arguments: CancellationPhase.allCases)
     func cancellationJoinsMotionBeforeRemovingItsPartial(_ phase: CancellationPhase) async throws {
         let directory = try Synthetic.directory()
@@ -440,6 +521,56 @@ private func files(in directory: URL) throws -> [String] {
             let joined = try #require(barrier.snapshot.joined)
             #expect(joined.0 == .cancelled && joined.1 == .cancelled)
         }
+        #expect(try files(in: directory) == ["in.mov"])
+    }
+
+    @Test(arguments: CancellationPhase.allCases)
+    func cancellationJoinsReadsBeforeCancellingReader(_ phase: CancellationPhase) async throws {
+        let directory = try Synthetic.directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("in.mov"), output = directory.appendingPathComponent("out.mov")
+        var spec = Self.motion
+        spec.frames = 15
+        if phase == .heldDecode { spec.transfer = AVVideoTransferFunction_ITU_R_2100_HLG }
+        try await Synthetic.video(at: input, spec)
+        let barrier = MotionBarrier()
+        let observer = AVSupport.MotionObserver(willReadSample: { mediaType in
+            barrier.willReadSample()
+            // Stop after the cancellation check, immediately before a real sample read.
+            // Encoded verification starts only after the transfer's final join.
+            if mediaType == .video, phase != .encodedDecode || barrier.snapshot.joined != nil {
+                barrier.pause()
+            }
+        }, didReadSample: { _ in barrier.didReadSample() },
+           didAppend: { barrier.appended($0, pause: false) },
+           lateCallback: { barrier.lateCallback($0) },
+           didJoinLanes: { barrier.record(.lanesJoined) },
+           didCancelReader: { barrier.record(.readerCancelled) },
+           didJoin: { barrier.didJoin($0, $1) })
+        let task = Task {
+            defer { barrier.didFinish() }
+            return try await LivePhotoMotionCompressor().compress(input: input, output: output, observer: observer)
+        }
+        defer { barrier.release() }
+        guard await barrier.waitUntilBlockedOrFinished() else {
+            _ = try await task.value
+            Issue.record("Motion completed without reaching the controlled sample-read barrier")
+            return
+        }
+        // Stop is requested before the blocked read can return, fixing teardown order without sleeps.
+        #expect(barrier.snapshot.inFlight > 0)
+        task.cancel()
+        #expect(!barrier.snapshot.completed && barrier.snapshot.readerEvents.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: output.path))
+        barrier.release()
+        await #expect(throws: CancellationError.self) { _ = try await task.value }
+        #expect(barrier.snapshot.readerEvents == [.lanesJoined, .readerCancelled],
+                "Reader teardown must follow the last sample read and every lane callback")
+        #expect(barrier.snapshot.inFlightAtCancelReader == [0] && barrier.snapshot.inFlight == 0)
+        #expect(barrier.snapshot.lateCallbacks.values.allSatisfy { $0 <= 1 },
+                "Late requester callbacks: \(barrier.snapshot.lateCallbacks)")
+        #expect(barrier.snapshot.returned && barrier.snapshot.completed && barrier.snapshot.lateAppends == 0)
+        #expect(!barrier.snapshot.prematureCompletion)
         #expect(try files(in: directory) == ["in.mov"])
     }
 

@@ -70,6 +70,9 @@ and may not exist in other checkouts.
   `mebx`/ContentDescribes timed-metadata links. FFmpeg breaks Live Photo pairing.
   Keep the encoded size and clean aperture, or the motion looks zoomed in.
   Validate pairs with `PHLivePhoto`.
+- With `requestMediaDataWhenReady`, mark an input finished whenever its lane stops (also
+  on cancel/failure), and call `cancelReading` only after every lane's last
+  `copyNextSampleBuffer` has returned.
 - Hardware HEVC (VideoToolbox) files were about 2-3x larger than x265 at similar
   quality (VMAF). Use x265 on servers; the phone encodes only Live Photo motion (Linux server).
 - Map only audio streams the local decoder can decode. Apple spatial audio (APAC)

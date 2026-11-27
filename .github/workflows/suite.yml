@@ -146,10 +146,11 @@ jobs:
           key: macos-test-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
           restore-keys: macos-test-${{ hashFiles('Package.resolved') }}-
       - name: Package tests
+        timeout-minutes: 20
         run: swift test 2>&1 | tee package.log | grep -E "Test run with|✘|error:" | tail -20; exit ${pipestatus[1]}
         shell: zsh {0}
       - name: Keep the complete package failure log
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
           name: package-results-${{ github.run_id }}
