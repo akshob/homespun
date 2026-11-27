@@ -11,7 +11,7 @@
 
 services:
   homespun:
-    image: ghcr.io/akshob/homespun-server:latest
+    image: ghcr.io/akshob/homespun-server:latest  # the newest release; :main for unreleased changes
     container_name: homespun
     # The NAS's own network, so the app can find the server (Bonjour) and reach it.
     network_mode: host

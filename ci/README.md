@@ -10,7 +10,7 @@ pull request; the extended suite runs after the merge; everything runs every nig
 | `ci.yml` | Run workflow (any branch) | everything with UI runs `none`, `quick` or `full`; an individual UI run builds the app, runs its unit tests and that existing lane only; `copies` also checks both server platforms; `package` runs only the macOS package job |
 | `nightly.yml` | every night | everything on `main`, plus long runs (`large`: 3,000 photos). Failures: the issue "nightly is failing". |
 | `testflight.yml` | on demand, by the owner, who approves each run | only for a commit that passed the extended suite (`release-guard.py`); archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
-| `docker.yml` | `main` and version tags, when the server changes | the server's Docker image |
+| `docker.yml` | `main` when the server changes, and every version tag | the server's Docker image: `main` from main; `X.Y.Z`, `X.Y` and (newest release only) `latest` from a `vX.Y.Z` tag; pre-releases publish only their full version |
 
 Pushing a branch runs nothing: open a draft pull request for the build and unit tests, mark it ready
 for the quick checks, or use Run workflow.

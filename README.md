@@ -412,7 +412,8 @@ backups are unsupported; preserve the newer catalog and originals rather than re
 - **Docker/NAS:** use `ghcr.io/akshob/homespun-server:latest` (or a release tag containing
   the 1.1 server's `/api/v2` support), then run
   `docker compose pull && docker compose up -d` in the existing Compose project.
-  Keep the same mounted folders. `latest` follows main; an older pinned `0.2.0` image
+  Keep the same mounted folders. `latest` is the newest release (`main` follows the main
+  branch); an older pinned `0.2.0` image
   will not become compatible just by pulling it. See
   [Run on a NAS with Docker](#run-on-a-nas-with-docker) for Container Manager.
 
@@ -679,7 +680,8 @@ docker compose pull && docker compose up -d
 ```
 
 In Container Manager: stop the project, choose Action › Build (it pulls the new image), then
-start it. `latest` follows the main branch; version tags like `0.2.0` follow releases.
+start it. `latest` is the newest release; `1.1.0` and `1.1` pin a release;
+`main` follows the main branch, for trying unreleased changes.
 
 To build the image yourself (`docker buildx` builds both architectures; pushing needs a
 registry you can write to):
