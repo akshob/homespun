@@ -15,7 +15,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
         init(_ server: DemoServer) { self.server = Mutex(server) }
     }
     static let contexts = Mutex<[String: Context]>([:])
-    private var task: Task<Void, Never>?
+    private var loading: Task<Void, Never>?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
@@ -36,7 +36,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
             }
         }
         let payload = body
-        task = Task {
+        loading = Task {
             do {
                 let path = url.path
                 context.requests.withLock { $0.append(path) }
@@ -56,7 +56,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
-    override func stopLoading() { task?.cancel() }
+    override func stopLoading() { loading?.cancel() }
 }
 
 @MainActor @Suite(.serialized) struct LegacyCompatibilityTests {
