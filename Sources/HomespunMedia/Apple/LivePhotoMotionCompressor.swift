@@ -49,7 +49,7 @@ public struct LivePhotoMotionCompressor: Sendable {
         try await compress(input: input, output: output, observer: .init())
     }
 
-    func compress(input: URL, output: URL, observer: AVSupport.MotionObserver) async throws -> VideoCompressionResult {
+    @_spi(Testing) public func compress(input: URL, output: URL, observer: MotionObserver) async throws -> VideoCompressionResult {
         try Task.checkCancellation()
         guard try MediaFiles.size(of: input) > 0 else { throw VideoCompressionError.emptyInput }
         let asset = AVURLAsset(url: input)

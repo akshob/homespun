@@ -80,8 +80,9 @@ the pair as a Live Photo.
   duration within 0.5 s or 1%, full decode), then published. A video that does not
   get smaller keeps the original.
 - Live Photo motion held unchanged still has to decode before its byte-identical copy is
-  published. Cancellation marks motion stopped and joins every sample-reading lane before
-  cancelling its reader and writer; it never tears down a reader during a sample read.
+  published. Cancellation marks every writer input finished, joins the sample lanes after
+  their last read, then cancels the reader and writer; it never tears down a reader during a read.
+  Join and callback-fence completions run on the transfer's own serial queue.
   Held and verification decodes follow the same rule. Encoding partials are removed only
   after the writer is terminal and lane callbacks are fenced.
 

@@ -174,7 +174,9 @@ enum AVSupport {
             var stopped: @Sendable () -> Bool
             var failed: @Sendable () -> Void
             var willReadSample: @Sendable (AVMediaType) -> Void = { _ in }
+            var didReadSample: @Sendable (AVMediaType) -> Void = { _ in }
             var didAppend: @Sendable (AVMediaType) -> Void
+            var lateCallback: @Sendable (AVMediaType) -> Void = { _ in }
         }
 
         /// One reader output feeding one writer input. Its state is only touched on its own queue.
@@ -205,57 +207,65 @@ enum AVSupport {
         }
 
         /// Single-use. Ordinary video omits control and retains its existing transfer policy.
-        func start(control: Control? = nil, completion: @escaping @Sendable () -> Void) {
+        func start(control: Control? = nil, notifyQueue: DispatchQueue = .global(),
+                   completion: @escaping @Sendable () -> Void) {
             for _ in lanes { group.enter() }
             for lane in lanes {
                 lane.input.requestMediaDataWhenReady(on: lane.queue) { [weak self, weak lane] in
                     guard let self, let lane else { return }
+                    if lane.finished {
+                        control?.lateCallback(lane.input.mediaType)
+                        return
+                    }
                     while !lane.finished && lane.input.isReadyForMoreMediaData {
                         if control?.stopped() == true {
-                            self.finish(lane, markAsFinished: false)
+                            self.finish(lane)
                             return
                         }
                         control?.willReadSample(lane.input.mediaType)
-                        guard let sample = lane.output.copyNextSampleBuffer() else {
-                            self.finish(lane, markAsFinished: control?.stopped() != true)
+                        let sample = lane.output.copyNextSampleBuffer()
+                        control?.didReadSample(lane.input.mediaType)
+                        guard let sample else {
+                            self.finish(lane)
                             return
                         }
                         if control?.stopped() == true {
-                            self.finish(lane, markAsFinished: false)
+                            self.finish(lane)
                             return
                         }
                         guard lane.input.append(sample) else {
                             control?.failed()
-                            self.finish(lane, markAsFinished: control == nil)
+                            self.finish(lane)
                             return
                         }
                         control?.didAppend(lane.input.mediaType)
                     }
                 }
             }
-            group.notify(queue: .global(), execute: completion)
+            group.notify(queue: notifyQueue, execute: completion)
         }
 
-        /// Wakes even lanes whose inputs will never become ready after another lane fails.
+        /// Marks every input finished so AVFoundation stops requesting data, including inputs
+        /// that will never become ready after another lane fails.
         func stop() {
             for lane in lanes {
-                lane.queue.async { self.finish(lane, markAsFinished: false) }
+                lane.queue.async { self.finish(lane) }
             }
         }
 
-        func fence(completion: @escaping @Sendable () -> Void) {
+        func fence(queue: DispatchQueue, completion: @escaping @Sendable () -> Void) {
             let fence = DispatchGroup()
             for lane in lanes {
                 fence.enter()
                 lane.queue.async { fence.leave() }
             }
-            fence.notify(queue: .global(), execute: completion)
+            fence.notify(queue: queue, execute: completion)
         }
 
-        private func finish(_ lane: Lane, markAsFinished: Bool) {
+        private func finish(_ lane: Lane) {
             guard !lane.finished else { return }
             lane.finished = true
-            if markAsFinished { lane.input.markAsFinished() }
+            lane.input.markAsFinished()
             // Do not signal completion from inside a still-running media callback.
             lane.queue.async { self.group.leave() }
         }
@@ -345,7 +355,9 @@ enum AVSupport {
             while true {
                 if cancellable { try Task.checkCancellation() }
                 observer.willReadSample(.video)
-                guard let sample = output.copyNextSampleBuffer() else { break }
+                let sample = output.copyNextSampleBuffer()
+                observer.didReadSample(.video)
+                guard let sample else { break }
                 if CMSampleBufferGetImageBuffer(sample) != nil {
                     frames += 1
                     observer.didDecodeFrame()

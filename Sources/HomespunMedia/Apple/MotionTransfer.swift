@@ -4,16 +4,40 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-extension AVSupport {
-    /// Internal observation points let tests hold real in-flight work at deterministic barriers.
-    struct MotionObserver: Sendable {
-        var willReadSample: @Sendable (AVMediaType) -> Void = { _ in }
-        var didAppend: @Sendable (AVMediaType) -> Void = { _ in }
-        var didDecodeFrame: @Sendable () -> Void = {}
-        var didJoinLanes: @Sendable () -> Void = {}
-        var didCancelReader: @Sendable () -> Void = {}
-        var didJoin: @Sendable (AVAssetReader.Status, AVAssetWriter.Status) -> Void = { _, _ in }
+extension LivePhotoMotionCompressor {
+    /// Observation points for package and hosted app tests; not part of the compressor's public API.
+    @_spi(Testing) public struct MotionObserver: Sendable {
+        public var willReadSample: @Sendable (AVMediaType) -> Void
+        public var didReadSample: @Sendable (AVMediaType) -> Void
+        public var didAppend: @Sendable (AVMediaType) -> Void
+        public var didDecodeFrame: @Sendable () -> Void
+        public var lateCallback: @Sendable (AVMediaType) -> Void
+        public var didJoinLanes: @Sendable () -> Void
+        public var didCancelReader: @Sendable () -> Void
+        public var didJoin: @Sendable (AVAssetReader.Status, AVAssetWriter.Status) -> Void
+
+        public init(willReadSample: @escaping @Sendable (AVMediaType) -> Void = { _ in },
+                    didReadSample: @escaping @Sendable (AVMediaType) -> Void = { _ in },
+                    didAppend: @escaping @Sendable (AVMediaType) -> Void = { _ in },
+                    didDecodeFrame: @escaping @Sendable () -> Void = {},
+                    lateCallback: @escaping @Sendable (AVMediaType) -> Void = { _ in },
+                    didJoinLanes: @escaping @Sendable () -> Void = {},
+                    didCancelReader: @escaping @Sendable () -> Void = {},
+                    didJoin: @escaping @Sendable (AVAssetReader.Status, AVAssetWriter.Status) -> Void = { _, _ in }) {
+            self.willReadSample = willReadSample
+            self.didReadSample = didReadSample
+            self.didAppend = didAppend
+            self.didDecodeFrame = didDecodeFrame
+            self.lateCallback = lateCallback
+            self.didJoinLanes = didJoinLanes
+            self.didCancelReader = didCancelReader
+            self.didJoin = didJoin
+        }
     }
+}
+
+extension AVSupport {
+    typealias MotionObserver = LivePhotoMotionCompressor.MotionObserver
 
     static func transferMotion(reader: AVAssetReader, writer: AVAssetWriter,
                                pairs: [(AVAssetReaderOutput, AVAssetWriterInput)],
@@ -97,8 +121,10 @@ extension AVSupport {
                 self.pump.start(control: .init(stopped: { [weak self] in self?.stopped ?? true }, failed: { [weak self] in
                     guard let self else { return }
                     self.fail("append: \(String(describing: self.writer.error))")
-                }, willReadSample: self.observer.willReadSample, didAppend: self.observer.didAppend)) {
-                    self.queue.async { self.lanesFinished() }
+                }, willReadSample: self.observer.willReadSample, didReadSample: self.observer.didReadSample,
+                   didAppend: self.observer.didAppend, lateCallback: self.observer.lateCallback),
+                                notifyQueue: self.queue) {
+                    self.lanesFinished()
                 }
                 if self.stopped { self.stop() }
             }
@@ -106,8 +132,8 @@ extension AVSupport {
 
         private func stop() {
             guard continuation != nil, !completing else { return }
-            // Cancelling a reader during copyNextSampleBuffer tears down state under the read.
-            // Keep it alive and join every lane before stopping either reader or writer.
+            // Lanes mark their inputs finished and return from their last read before either
+            // reader or writer is cancelled. Keep the reader alive until that join.
             if pumping {
                 pump.stop()
                 return
@@ -143,18 +169,16 @@ extension AVSupport {
             writerObservation = nil
             // The writer is terminal. Fence callbacks already queued by AVFoundation too.
             // Any later callback sees its lane closed and cannot read or append.
-            pump.fence {
-                self.queue.async {
-                    self.observer.didJoin(self.reader.status, self.writer.status)
-                    let error: (any Error)? = self.lock.withLock {
-                        if self.cancelled { return CancellationError() }
-                        return self.failure
-                    }
-                    let continuation = self.continuation
-                    self.continuation = nil
-                    if let error { continuation?.resume(throwing: error) }
-                    else { continuation?.resume() }
+            pump.fence(queue: queue) {
+                self.observer.didJoin(self.reader.status, self.writer.status)
+                let error: (any Error)? = self.lock.withLock {
+                    if self.cancelled { return CancellationError() }
+                    return self.failure
                 }
+                let continuation = self.continuation
+                self.continuation = nil
+                if let error { continuation?.resume(throwing: error) }
+                else { continuation?.resume() }
             }
         }
     }
