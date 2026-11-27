@@ -160,9 +160,6 @@ final class AppSettings {
         self.identityNow = identityNow
         serverURL = defaults.url(forKey: "serverURL")
         server = defaults.data(forKey: "serverInfo").flatMap { try? ServerAPI.decoder.decode(ServerAPI.ServerInfo.self, from: $0) }
-        if defaults.string(forKey: "backupAPIURL") == serverURL?.absoluteString,
-           let data = defaults.data(forKey: "backupAPIState"),
-           let support = try? JSONDecoder().decode(BackupSupport.self, from: data) { backupAPI = support }
         // Homespun always works through the paired server; the old mode choice (server or
         // "on this iPhone") is gone, so a paired iPhone keeps working whatever it had chosen.
         defaults.removeObject(forKey: "compactMode")
@@ -182,6 +179,10 @@ final class AppSettings {
             tokens.removeToken(for: old.absoluteString)
             tokens.removePins(for: old.absoluteString)
         }
+        // Read after every stored property is initialized: it compares with serverURL.
+        if defaults.string(forKey: "backupAPIURL") == serverURL?.absoluteString,
+           let data = defaults.data(forKey: "backupAPIState"),
+           let support = try? JSONDecoder().decode(BackupSupport.self, from: data) { backupAPI = support }
     }
 
     @ObservationIgnored var backupBindingChanged: (@MainActor () -> Void)?
