@@ -247,7 +247,7 @@ struct MainTabView: View {
         case .backUpNew:
             Task {
                 let ids = await model.library.newItems()
-                if settings.needsBackupUpdate { settings.showingBackUpUpdate = true }
+                if model.settings.needsBackupUpdate { model.settings.showingBackUpUpdate = true }
                 else if ids.count > 200 { sheet = .backUp(ids) } else { model.library.backUp(ids) }
             }
         }
