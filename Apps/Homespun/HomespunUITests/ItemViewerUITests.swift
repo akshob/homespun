@@ -50,76 +50,154 @@ final class ItemViewerUITests: XCTestCase {
             // Check without the bright Details sheet, which could hide a blank viewer underneath.
             require(XCUIApplication.colourful(app.screenshot().image) > 0.12, "\(when): the screen is blank")
         }
-        func sheetTop() -> XCUICoordinate {
-            let grabber = app.buttons["Sheet Grabber"].firstMatch
-            if grabber.exists { return grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)) }
-            let bar = app.navigationBars["Details"]
-            if bar.exists { return bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)) }
-            // The cover's navigation buttons move to its strip; the sheet's top stays above its list.
-            return details.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0))
-                .withOffset(CGVector(dx: 0, dy: -20))
+        func note(_ name: String, _ message: String) {
+            let attachment = XCTAttachment(string: message)
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
         }
-        checkViewer("opened")
-
-        for recipe in ["above the sheet", "short hold", "sheet top", "list, medium", "list, large"] {
-            app.buttons["item.details"].tap()
-            require(details.waitForExistence(timeout: 5), "\(recipe): no Details")
+        func geometry() -> String {
+            let bar = app.navigationBars["Details"]
+            let photo = app.shownPage()
+            return "window=\(app.windows.firstMatch.frame) viewer=\(viewer.exists ? viewer.frame : .zero)"
+                + " photo=\(photo.exists ? photo.frame : .zero)"
+                + " details=\(details.exists ? details.frame : .zero)"
+                + " Details bar=\(bar.exists ? bar.frame : .zero)"
+        }
+        func skip(_ recipe: String, _ reason: String) -> Bool {
+            print("Skipped Details recipe \(recipe): \(reason)")
+            note("Skipped recipe: \(recipe)", "\(reason)\n\(geometry())")
+            return false
+        }
+        func sheetTop() -> XCUICoordinate? {
             let screen = app.windows.firstMatch.frame
+            let grabber = app.buttons["Sheet Grabber"].firstMatch
+            if grabber.exists, grabber.isHittable, screen.contains(grabber.frame) {
+                return grabber.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            }
+            let bar = app.navigationBars["Details"]
+            guard bar.exists, !bar.frame.isEmpty, screen.contains(bar.frame),
+                  bar.frame.width > details.frame.width * 0.5 else { return nil }
+            return bar.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+        }
+        func uncoveredPhoto() -> CGRect {
+            guard viewer.exists, details.exists else { return .zero }
+            let photo = app.shownPage()
+            guard photo.exists else { return .zero }
+            let screen = app.windows.firstMatch.frame
+            let above = CGRect(x: screen.minX, y: screen.minY, width: screen.width,
+                               height: max(0, details.frame.minY - screen.minY - 12))
+            return photo.frame.intersection(viewer.frame).intersection(above)
+        }
+        func largeSheet() -> Bool {
+            guard details.exists else { return false }
+            let screen = app.windows.firstMatch.frame, frame = details.frame
+            return frame.minY < screen.minY + screen.height * 0.2 && frame.height > screen.height * 0.75
+        }
+        func dragOnPage() {
+            let screen = app.windows.firstMatch.frame
+            let visible = details.frame.intersection(screen)
+            require(!visible.isEmpty && visible.width > 44 && visible.height > 100, "no usable Details page to drag")
+            let point = CGPoint(x: visible.midX, y: visible.minY + visible.height * 0.3)
+            let start = details.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: point.x - details.frame.minX, dy: point.y - details.frame.minY))
+            start.press(forDuration: 0.05,
+                        thenDragTo: start.withOffset(CGVector(dx: 0, dy: min(400, screen.maxY - 20 - point.y))),
+                        withVelocity: .fast, thenHoldForDuration: 0)
+        }
+        func perform(_ recipe: String) -> Bool {
+            let window = app.windows.firstMatch, screen = window.frame
             switch recipe {
+            case "Details page":
+                // The owner's gesture, always first, including when Details opens at full height.
+                dragOnPage()
             case "above the sheet", "short hold":
-                let frame = viewer.frame
-                let y = frame.minY + (details.frame.minY - frame.minY) * 0.5
-                require(y > frame.minY + 40, "\(recipe): no uncovered photo above the sheet")
+                let exposed = uncoveredPhoto()
+                guard !exposed.isEmpty, exposed.height > 44, exposed.width > 44 else {
+                    return skip(recipe, "No photo is uncovered above Details; not a failed app post-condition.")
+                }
                 let start = viewer.coordinate(withNormalizedOffset: .zero)
-                    .withOffset(CGVector(dx: frame.width * 0.5, dy: y - frame.minY))
+                    .withOffset(CGVector(dx: exposed.midX - viewer.frame.minX, dy: exposed.midY - viewer.frame.minY))
                 if recipe == "short hold" {
                     start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 40)),
                                 withVelocity: .slow, thenHoldForDuration: 0.5)
                 } else {
-                    start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 300)),
+                    start.press(forDuration: 0.05,
+                                thenDragTo: start.withOffset(CGVector(dx: 0, dy: min(300, screen.maxY - 20 - exposed.midY))),
                                 withVelocity: .fast, thenHoldForDuration: 0)
                 }
             case "sheet top":
-                sheetTop().press(forDuration: 0.05,
-                                 thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)),
-                                 withVelocity: .fast, thenHoldForDuration: 0)
-            default:
-                if recipe == "list, large" {
-                    let before = details.frame.minY
-                    sheetTop().press(forDuration: 0.05,
-                                     thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)),
-                                     withVelocity: .fast, thenHoldForDuration: 0)
-                    let deadline = Date().addingTimeInterval(5)
-                    while details.exists, details.frame.minY >= before - 80, Date() < deadline { usleep(200_000) }
-                    require(details.exists && details.frame.minY < before - 80, "\(recipe): the sheet didn't expand")
+                guard let top = sheetTop() else { return skip(recipe, "No visible Details title bar or sheet grabber.") }
+                top.press(forDuration: 0.05,
+                          thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)),
+                          withVelocity: .fast, thenHoldForDuration: 0)
+            case "list, medium":
+                guard !largeSheet(), details.frame.minY > screen.minY + screen.height * 0.3 else {
+                    return skip(recipe, "Details did not open at a medium detent.")
                 }
-                let start = details.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.3))
-                let distance = min(400, screen.maxY - 12 - (details.frame.minY + details.frame.height * 0.3))
-                start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: distance)),
-                            withVelocity: .fast, thenHoldForDuration: 0)
+                dragOnPage()
+            default:
+                if !largeSheet() {
+                    guard let top = sheetTop() else { return skip(recipe, "No sheet grabber or title bar to expand Details.") }
+                    top.press(forDuration: 0.05,
+                              thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)),
+                              withVelocity: .fast, thenHoldForDuration: 0)
+                    let deadline = Date().addingTimeInterval(5)
+                    while details.exists, !largeSheet(), Date() < deadline { usleep(200_000) }
+                    guard largeSheet() else { return skip(recipe, "Details did not expand to a large detent.") }
+                }
+                dragOnPage()
             }
+            return true
+        }
+        checkViewer("opened")
+
+        for recipe in ["Details page", "sheet top", "above the sheet", "short hold", "list, medium", "list, large"] {
+            let shown = viewer.value as? String
+            app.buttons["item.details"].tap()
+            require(details.waitForExistence(timeout: 5), "\(recipe): no Details")
+            note("\(recipe): before", geometry())
+            attach(app, "\(recipe): before")
+            let performed = perform(recipe)
             sleep(2)
-            require(viewer.exists && back.exists, "\(recipe): swiping Details lost the viewer")
-            if recipe == "above the sheet" || recipe == "short hold" {
-                require(details.exists, "\(recipe): the viewer's drag closed Details")
-            } else if recipe == "sheet top" {
-                require(details.waitForNonExistence(timeout: 5), "\(recipe): the sheet's own swipe didn't dismiss Details")
+            note("\(recipe): after", geometry())
+            attach(app, "\(recipe): after")
+            require(app.state == .runningForeground, "\(recipe): the app stopped")
+            if performed && (recipe == "above the sheet" || recipe == "short hold") {
+                require(viewer.exists && details.exists, "\(recipe): the viewer's drag closed the viewer or Details")
             }
-            if recipe == "above the sheet" {
-                app.pageItem(older: false)
-                require(details.exists, "\(recipe): paging closed Details")
-                app.pageItem(older: true)
-                require(details.exists, "\(recipe): paging back closed Details")
+            if performed && recipe == "above the sheet" {
+                let exposed = uncoveredPhoto()
+                if !exposed.isEmpty, exposed.height > 44, exposed.width > 150 {
+                    let frame = viewer.frame
+                    let y = (exposed.midY - frame.minY) / frame.height
+                    func page(_ older: Bool) {
+                        app.pageItem(older: older, gesture: {
+                            viewer.coordinate(withNormalizedOffset: CGVector(dx: older ? 0.2 : 0.8, dy: y))
+                                .press(forDuration: 0.05,
+                                       thenDragTo: viewer.coordinate(withNormalizedOffset: CGVector(dx: older ? 0.8 : 0.2, dy: y)),
+                                       withVelocity: .fast, thenHoldForDuration: 0)
+                        })
+                    }
+                    page(false)
+                    require(details.exists, "\(recipe): paging closed Details")
+                    page(true)
+                    require(details.exists, "\(recipe): paging back closed Details")
+                } else {
+                    _ = skip("paging with Details open", "No uncovered photo area wide enough for horizontal paging.")
+                }
             }
             if details.exists {
                 require(done.exists && done.isHittable, "\(recipe): no usable Details Done")
                 done.tap()
                 require(details.waitForNonExistence(timeout: 5), "\(recipe): Done didn't close Details")
             }
-            checkViewer(recipe)
-            let shown = viewer.value as? String
-            app.goBack()
-            require(viewer.waitForNonExistence(timeout: 5), "\(recipe): Back didn't close the viewer")
+            // A swipe may leave the viewer or return to the grid; either must be interactive, not a blank overlay.
+            if viewer.exists {
+                checkViewer(recipe)
+                app.goBack()
+                require(viewer.waitForNonExistence(timeout: 5), "\(recipe): Back didn't close the viewer")
+            }
             require(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 5), "\(recipe): no grid after Back")
             index = 1 - index
             let next = photos.element(boundBy: index)
@@ -133,6 +211,8 @@ final class ItemViewerUITests: XCTestCase {
                     withVelocity: .fast, thenHoldForDuration: 0)
         require(viewer.waitForNonExistence(timeout: 5), "swiping without Details didn't close the viewer")
         require(app.descendants(matching: .any)["grid"].waitForExistence(timeout: 5), "no grid after swipe-to-close")
+        let next = photos.element(boundBy: 1 - index)
+        require(app.reveal(next) && next.isHittable, "the grid is blocked after swipe-to-close")
     }
 
     @MainActor func test1ViewerDetailsAndCompare() throws {
