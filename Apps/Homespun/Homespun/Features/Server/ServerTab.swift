@@ -76,6 +76,12 @@ struct ServerTab: View {
         let unreachable: String? = if case .unreachable(let reason) = settings.serverStatus { reason } else { nil }
         return List(selection: selection) {
             if settings.isDemo { DemoCard() }
+            if let problem = model.job.queueProblem {
+                Section {
+                    InlineNotice(tone: .warning, title: "Backup queue needs attention", message: problem)
+                        .accessibilityIdentifier("server.queueProblem")
+                }
+            }
             if let problem = settings.connectionProblem {
                 Section {
                     Button { showingIdentity = true } label: {

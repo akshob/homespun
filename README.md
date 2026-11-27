@@ -376,6 +376,28 @@ Linux or ImageIO on a Mac for photos). On a Mac it also compresses Live Photo mo
 AVFoundation, so the phone only downloads and imports; on Linux the phone compresses the
 motion, because only AVFoundation keeps the still and its motion paired.
 
+### Server compatibility and updates
+
+Homespun app **1.1 needs Homespun Server 1.1** (the **0.2.x server with `/api/v2`**).
+Update the server before backing up with the new app. A 1.0-era server can also report
+version `0.2.0`, and both generations report `api_version: 1` in `/api/v1/info` and
+`/api/v1/health`; those fields alone do not mean it supports the new backup queue.
+If `/api/v2/capabilities` is missing, the app explains that the server needs updating
+in Activity, the Library notice and the Server tab. That failed check creates no backup
+binding or selection and changes no photos or server data. There is no v1 backup fallback.
+
+- **Mac or Linux, installed from source:** in the existing checkout, run
+  `git pull --ff-only`, rebuild with `swift build -c release --product homespun-server`,
+  then rerun `.build/release/homespun-server install-service` with the **same data folder
+  and settings** used when installing (see below). This replaces the installed binary
+  and restarts the service; keep the existing data, originals and TLS identity.
+- **Docker/NAS:** use `ghcr.io/akshob/homespun-server:latest` (or a release tag containing
+  the 1.1 server's `/api/v2` support), then run
+  `docker compose pull && docker compose up -d` in the existing Compose project.
+  Keep the same mounted folders. `latest` follows main; an older pinned `0.2.0` image
+  will not become compatible just by pulling it. See
+  [Run on a NAS with Docker](#run-on-a-nas-with-docker) for Container Manager.
+
 The app's first-run screens walk through setup: "Don't have a server yet? Set one up" shows
 the steps for a Mac or Linux (also at [homespun.photos/setup](https://homespun.photos/setup)).
 On a NAS, use the Docker image ([Run on a NAS with Docker](#run-on-a-nas-with-docker)).

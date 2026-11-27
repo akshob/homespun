@@ -135,7 +135,18 @@ final class AppSettings {
                 && server?.mode == mode
         }
         let remote = ServerClientV2(client)
-        let capabilities = try await remote.capabilities()
+        let capabilities: BackupAPI.Capabilities
+        do {
+            capabilities = try await remote.capabilities()
+        } catch let failure as ServerClient.Failure where failure.status == 404 {
+            guard current(), !Task.isCancelled else { throw CancellationError() }
+            throw ServerClient.Failure(status: failure.status,
+                message: "\(name) runs an older Homespun Server. Update it to back up with this version of the app. "
+                    + "Nothing on your iPhone or server has changed. "
+                    + "Mac/Linux: update the source, rebuild and rerun install-service. "
+                    + "Docker: pull ghcr.io/akshob/homespun-server:latest and recreate the container.",
+                code: failure.code)
+        }
         guard current(), !Task.isCancelled else { throw CancellationError() }
         let devices = try await client.devices().filter(\.isThisDevice)
         guard current(), devices.count == 1, let consumer = devices.first?.id, !consumer.isEmpty else {

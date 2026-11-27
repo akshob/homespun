@@ -86,6 +86,62 @@ import Testing
         #expect(deletions == 2)
     }
 
+    @Test(arguments: [404, 401, 500])
+    func capabilitiesErrorsOnlyExplainMissingV2AndNeverAdmitWork(_ status: Int) async throws {
+        let name = "server-capabilities-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        let folder = URL.applicationSupportDirectory.appendingPathComponent(name, isDirectory: true)
+        defer {
+            UserDefaults.standard.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let (settings, session) = try pairedSettings(defaults: defaults)
+        defer { session.invalidateAndCancel() }
+        let ledger = CompactLedger(url: folder.appendingPathComponent("ledger.json"))
+        let job = CompactJob(settings: settings, ledger: ledger)
+        let pins = settings.pins, server = settings.server
+        let selection = Task { await job.enqueue(["synthetic-photo"], trigger: .manual) }
+        defer { selection.cancel() }
+        do {
+            try await pendingRequest()
+            let stub = try #require(ServerCheckProtocol.pending.take())
+            let url = try #require(stub.request.url)
+            #expect(url.path == "/api/v2/capabilities" && stub.request.httpMethod == "GET")
+            #expect(stub.request.httpBody == nil)
+            let response = try #require(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            stub.client?.urlProtocol(stub, didReceive: response, cacheStoragePolicy: .notAllowed)
+            stub.client?.urlProtocolDidFinishLoading(stub)
+            #expect(await selection.value.isEmpty)
+            let message = status == 404
+                ? "Home Server runs an older Homespun Server. Update it to back up with this version of the app. "
+                    + "Nothing on your iPhone or server has changed. "
+                    + "Mac/Linux: update the source, rebuild and rerun install-service. "
+                    + "Docker: pull ghcr.io/akshob/homespun-server:latest and recreate the container."
+                : "The server returned HTTP \(status)."
+            #expect(job.queueProblem == message)
+            #expect(job.items.isEmpty && job.states.isEmpty && job.admissionSeeds.isEmpty)
+            #expect(job.bindingContext == nil && !job.hasPendingWork && !job.isRunning && !job.isPreparing)
+            #expect(try await ledger.store.bindings().isEmpty)
+            #expect(try await ledger.store.operations().isEmpty)
+            #expect(try await ledger.store.sessions().isEmpty)
+            #expect(try await ledger.store.transfers().isEmpty)
+            #expect(try await ledger.store.reservations().isEmpty)
+            #expect(try await ledger.store.effects(namespace: ledger.namespace).isEmpty)
+            #expect(try FileManager.default.contentsOfDirectory(at: ledger.store.files.staging,
+                                                              includingPropertiesForKeys: nil).isEmpty)
+            #expect(settings.pins == pins && settings.server == server && settings.serverStatus == .reachable)
+            #expect(settings.client?.token == "test-token" && ServerCheckProtocol.pending.isEmpty)
+        } catch {
+            selection.cancel()
+            _ = await selection.value
+            await job.stopAndWait()
+            try? await ledger.store.close()
+            throw error
+        }
+        await job.stopAndWait()
+        try await ledger.store.close()
+    }
+
     @Test func retryKeepsTheLastServerStatusUntilItConcludes() async throws {
         let name = "server-check-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
