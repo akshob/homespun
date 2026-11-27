@@ -59,6 +59,12 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() { loading?.cancel() }
 }
 
+private final class Counter: Sendable {
+    private let value = Mutex(0)
+    var count: Int { value.withLock { $0 } }
+    func increment() { value.withLock { $0 += 1 } }
+}
+
 @MainActor @Suite(.serialized) struct LegacyCompatibilityTests {
     @MainActor private final class Fixture {
         let id = UUID().uuidString
@@ -70,7 +76,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
         let session: URLSession
         let settings: AppSettings
         let ledger: CompactLedger
-        let asked = Mutex(0)
+        let asked = Counter()
         var client: ServerClient { settings.client! }
         var scope: String { settings.currentLegacyScope! }
 
@@ -90,7 +96,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
             try JSONEncoder().encode(samples).write(to: media.appendingPathComponent("samples.json"))
             let asked = asked
             library = DemoLibrary(folder: folder.appendingPathComponent("library"), media: media) { _ in
-                asked.withLock { $0 += 1 }
+                asked.increment()
                 return true
             }
             server = DemoServer(folder: folder.appendingPathComponent("server"), pace: 0, backupAPI: false, bundledCompact: { _ in nil })
@@ -253,7 +259,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
             let origin = BackupAPI.Origin(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
             mapping.origin = origin; mapping.entry.origin = origin
             let saved = mapping
-            try await fixture.ledger.store.mutateState { connection in
+            try await fixture.ledger.store.mutateState { @Sendable connection in
                 try connection.execute("UPDATE mappings SET body = ? WHERE id = ?",
                     [.blob(try BackupStore.encode(saved)), .text(saved.id.uuidString)])
             }
@@ -296,7 +302,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
         var remover = fixture.remover(mode: block == .immich ? .immich : .files)
         remover.current = { authorized.withLock { $0 } }
         let report = try await remover.removeEligible(limit: nil, only: nil) { _ in }
-        #expect(report.removed.isEmpty && fixture.asked.withLock { $0 } == 0)
+        #expect(report.removed.isEmpty && fixture.asked.count == 0)
         #expect(fixture.library.existing(["demo:photo-0"], includeHidden: true) == ["demo:photo-0"])
         if block != .immich && block != .modern && block != .kept { #expect(!report.blocked.isEmpty) }
         try await fixture.close()
@@ -317,7 +323,7 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
         var remover = fixture.remover()
         remover.now = { clock.withLock { $0 } }
         let report = try await remover.removeEligible(limit: nil, only: nil) { _ in }
-        #expect(report.removed.count == 1 && fixture.asked.withLock { $0 } == 1)
+        #expect(report.removed.count == 1 && fixture.asked.count == 1)
         #expect(verified.withLock { $0 } == 2)
         #expect(fixture.library.existing(["demo:photo-0"], includeHidden: true).isEmpty)
         try await fixture.close()
@@ -377,11 +383,11 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
         } }
         let restorer = LegacyOriginalRestorer(client: fixture.client, ledger: fixture.ledger, photos: fixture.library,
             scope: fixture.scope, mode: .files, current: { true })
-        let before = fixture.library.allIdentifiers(), asked = fixture.asked.withLock { $0 }
+        let before = fixture.library.allIdentifiers(), asked = fixture.asked.count
         let report = await restorer.restore([.init(key: "demo:photo-0", compact: entry.compactIdentifier,
             serverAssetID: entry.serverAssetID!, originalBytes: entry.originalBytes)]) { _ in }
         #expect(report.restored.isEmpty && !report.problems.isEmpty)
-        #expect(fixture.library.allIdentifiers() == before && fixture.asked.withLock { $0 } == asked)
+        #expect(fixture.library.allIdentifiers() == before && fixture.asked.count == asked)
         try await fixture.close()
     }
 
