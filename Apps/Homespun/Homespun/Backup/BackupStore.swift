@@ -644,6 +644,7 @@ actor BackupStore {
                 "CREATE TABLE IF NOT EXISTS mappings (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, original TEXT NOT NULL, intent TEXT UNIQUE, body BLOB NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS legacy_backed_up (namespace TEXT NOT NULL, original TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(namespace, original))",
                 "CREATE TABLE IF NOT EXISTS legacy_checks (namespace TEXT NOT NULL, item TEXT NOT NULL, scope TEXT NOT NULL, origin BLOB, asset TEXT NOT NULL, verified INTEGER NOT NULL, bytes INTEGER NOT NULL, role TEXT NOT NULL, compact TEXT, checked_at REAL NOT NULL, PRIMARY KEY(namespace, item))",
+                "CREATE TABLE IF NOT EXISTS legacy_restores (namespace TEXT NOT NULL, item TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(namespace,item))",
                 "CREATE TABLE IF NOT EXISTS decisions (namespace TEXT NOT NULL, item TEXT NOT NULL, kept INTEGER NOT NULL, PRIMARY KEY(namespace, item))",
                 "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, operation TEXT NOT NULL REFERENCES operations(id), body BLOB NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(id), identifier TEXT NOT NULL UNIQUE, draining INTEGER NOT NULL, body BLOB NOT NULL)",

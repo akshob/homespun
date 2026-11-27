@@ -305,7 +305,7 @@ final class LibraryController {
                              backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
                              pendingImports: projection.pendingImports, compactInProgress: compactInProgress,
                              legacyConfirmed: confirmed, legacyServerName: serverName,
-                             legacyActions: false,
+                             legacyActions: settings.server?.mode == .files && scope != nil,
                              checkingLegacy: checkingEarlierBackups, legacyKept: kept)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
@@ -400,10 +400,12 @@ final class LibraryController {
     /// Items backed up without a compact copy, with when automatic mode makes it (nil: a kept favorite).
     private func backedUpDue(_ all: [String: CompactLedger.BackedUp]) async -> [String: Date?] {
         let backedUp = all.filter { $0.value.origin == job.activeOrigin && $0.value.version != nil }
-        guard !backedUp.isEmpty else { return [:] }
+        var due: [String: Date?] = Dictionary(uniqueKeysWithValues: all.compactMap { id, entry in
+            entry.origin == nil && entry.kept == true ? (id, Date?.some(.distantFuture)) : nil
+        })
+        guard !backedUp.isEmpty else { return due }
         let ids = Array(backedUp.keys), photos = settings.photos
         let assets = await Task.detached(priority: .userInitiated) { photos.summaries(ids) }.value
-        var due: [String: Date?] = [:]
         for (id, summary) in assets {
             let created = summary.created, favorite = summary.favorite
             // Kept full size: never (shown as such, unlike a favorite's).
@@ -468,24 +470,38 @@ final class LibraryController {
     func refreshReady() async {
         guard !retired, !suspended else { return }
         if job.bindingContext == nil, settings.isPaired { await job.refreshQueue() }
-        guard let remover = job.remover() else {
-            ready = Ready()
-            readyChecked = !settings.isPaired
-            return
-        }
         do {
-        let candidates = try await remover.candidates()
-        readyChecked = true
-        readySizes = Dictionary(candidates.map { ($0.original, $0.entry.originalBytes) }, uniquingKeysWith: { a, _ in a })
-        ready = Ready(originals: candidates.map(\.original), bytes: candidates.reduce(0) { $0 + $1.entry.originalBytes })
-        if let finished {
-            let still = finished.originals.filter { readySizes[$0] != nil }
-            self.finished = still.isEmpty ? nil : Ready(originals: still, bytes: still.reduce(0) { $0 + (readySizes[$1] ?? 0) })
-        }
+            var candidates: [(original: String, entry: CompactLedger.Entry)] = []
+            if let remover = job.remover() { candidates += try await remover.candidates() }
+            if let remover = legacyRemover() { candidates += try await remover.candidates() }
+            readyChecked = true
+            readySizes = Dictionary(candidates.map { ($0.original, $0.entry.originalBytes) }, uniquingKeysWith: { a, _ in a })
+            ready = Ready(originals: candidates.map(\.original), bytes: candidates.reduce(0) { $0 + $1.entry.originalBytes })
+            if let finished {
+                let still = finished.originals.filter { readySizes[$0] != nil }
+                self.finished = still.isEmpty ? nil : Ready(originals: still, bytes: still.reduce(0) { $0 + (readySizes[$1] ?? 0) })
+            }
         } catch {
             readyChecked = false
             job.showQueueProblem(error)
         }
+    }
+
+    private func legacyRemover() -> LegacyOriginalRemover? {
+        guard !settings.isDemo, !retired, !suspended, settings.server?.mode == .files,
+              let client = settings.client, let scope = settings.currentLegacyScope else { return nil }
+        let settings = settings, origin = settings.legacyOrigin
+        return .init(client: client, ledger: job.ledger, photos: settings.photos, scope: scope, mode: .files,
+            origin: origin, current: { [weak self] in
+                self?.retired == false && self?.suspended == false && settings.currentLegacyScope == scope
+                    && settings.server?.mode == .files && (origin == nil || settings.legacyOrigin == origin)
+            })
+    }
+
+    private func legacyRestorer() -> LegacyOriginalRestorer? {
+        guard let remover = legacyRemover() else { return nil }
+        return .init(client: remover.client, ledger: remover.ledger, photos: remover.photos, scope: remover.scope,
+            mode: remover.mode, origin: remover.origin, current: remover.current)
     }
 
     // MARK: Backing up
@@ -598,7 +614,10 @@ final class LibraryController {
         guard admit() else { return }
         defer { finishedOperation() }
         guard !isRemoving else { return }
-        guard let remover = job.remover() else {
+        var removers: [any RemovingOriginals] = []
+        if let remover = job.remover() { removers.append(remover) }
+        if let remover = legacyRemover() { removers.append(remover) }
+        guard !removers.isEmpty else {
             removal = .done(.init(blocked: ["Reconnect the known original server before freeing up space."]))
             return
         }
@@ -609,11 +628,28 @@ final class LibraryController {
         do {
             let limit = settings.trialConfirmed ? nil : AppSettings.trialLimit
             report = try await Signposts.measure(Signposts.freeUp, "FreeUp") {
-                try await remover.removeEligible(limit: limit, only: scope) { message in
-                    Task { @MainActor [weak self] in
-                        if case .checking = self?.removal { self?.removal = .checking(message) }
+                var combined = OriginalRemover.Report()
+                var remaining = limit ?? Int.max
+                for remover in removers where remaining > 0 {
+                    do {
+                        let candidates = Array(try await remover.candidates(only: scope).prefix(remaining))
+                        remaining -= candidates.count
+                        let next = try await remover.removeEligible(limit: candidates.count, only: Set(candidates.map(\.original))) { message in
+                            Task { @MainActor [weak self] in
+                                if case .checking = self?.removal { self?.removal = .checking(message) }
+                            }
+                        }
+                        combined.removed += next.removed
+                        combined.blocked += next.blocked
+                        combined.freedBytes += next.freedBytes
+                        combined.cancelled = combined.cancelled || next.cancelled
+                        if next.cancelled { break }
+                    } catch {
+                        combined.blocked.append(error.localizedDescription)
+                        if AppSettings.isCancellation(error) { break }
                     }
                 }
+                return combined
             }
         } catch {
             report = OriginalRemover.Report(blocked: [error.localizedDescription])
@@ -656,8 +692,14 @@ final class LibraryController {
         do {
         guard settings.server?.mode != .immich else { return [] }
         let wanted = Set(compacts)
-        let entries = try await job.ledger.snapshot().filter {
-            wanted.contains($0.value.compactIdentifier) && $0.value.verifiedCompact && $0.value.origin == job.activeOrigin
+        let projection = try await job.ledger.projection()
+        let confirmed = settings.currentLegacyScope.map {
+            projection.legacyConfirmed(scope: $0, origin: settings.legacyOrigin)
+        } ?? [:]
+        let entries = projection.entries.filter {
+            wanted.contains($0.value.compactIdentifier)
+                && ($0.value.verifiedCompact && $0.value.origin == job.activeOrigin && job.restorer() != nil
+                    || $0.value.origin == nil && confirmed[$0.key] != nil && legacyRestorer() != nil)
         }
         let originals = entries.keys.filter { !$0.hasPrefix(CompactLedger.elsewhere("")) }
         let photos = settings.photos
@@ -675,15 +717,34 @@ final class LibraryController {
 
     /// Restores these originals (see `OriginalRestorer`); `restoring` follows it.
     func restore(_ items: [OriginalRestorer.Item]) {
-        guard !retired, !suspended, !isRestoring, !items.isEmpty, let restorer = job.restorer() else { return }
+        guard !retired, !suspended, !isRestoring, !items.isEmpty else { return }
         restoring = .running(.init(done: 0, total: items.count, message: "Getting ready"))
         Announce.say(items.count == 1 ? "Restoring the original." : "Restoring \(items.count) originals.")
         restoreTask = Task {
-            let report = await restorer.restore(items) { progress in
-                Task { @MainActor [weak self] in
-                    if self?.isRestoring == true { self?.restoring = .running(progress) }
+            var report = OriginalRestorer.Report()
+            do {
+                let entries = try await job.ledger.snapshot()
+                let legacy = items.filter { entries[$0.key]?.origin == nil }
+                let modern = items.filter { entries[$0.key]?.origin != nil }
+                var engines: [(any RestoringOriginals, [OriginalRestorer.Item])] = []
+                if let restorer = legacyRestorer(), !legacy.isEmpty { engines.append((restorer, legacy)) }
+                if let restorer = job.restorer(), !modern.isEmpty { engines.append((restorer, modern)) }
+                for (restorer, selected) in engines {
+                    let next = await restorer.restore(selected) { progress in
+                        Task { @MainActor [weak self] in
+                            if self?.isRestoring == true { self?.restoring = .running(progress) }
+                        }
+                    }
+                    report.restored += next.restored
+                    report.problems += next.problems
+                    report.bytes += next.bytes
+                    report.copiesKept = report.copiesKept || next.copiesKept
+                    if Task.isCancelled { break }
                 }
-            }
+                if engines.reduce(0, { $0 + $1.1.count }) != items.count {
+                    report.problems.append("Reconnect the server holding the remaining originals before restoring.")
+                }
+            } catch { report.problems.append(error.localizedDescription) }
             restoring = .done(report)
             if !report.restored.isEmpty {
                 Announce.say(report.restored.count == 1 ? "Restored the original." : "Restored \(report.restored.count) originals.")

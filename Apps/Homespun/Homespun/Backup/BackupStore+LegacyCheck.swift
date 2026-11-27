@@ -27,6 +27,7 @@ extension BackupStore {
         guard authorized() else { throw CancellationError() }
         try mutateState { connection in
             try Task.checkCancellation()
+            guard authorized() else { throw CancellationError() }
             for record in records {
                 let candidate = record.candidate
                 guard record.scope == scope else { throw Failure.invalidReceipt }

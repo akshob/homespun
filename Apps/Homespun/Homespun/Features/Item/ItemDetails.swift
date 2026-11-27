@@ -227,7 +227,8 @@ struct ItemDetailsSheet: View {
             row("iphone", cell.badge == .originalOnPhone || cell.badge == .copyLater
                 ? "Original still on this iPhone" : "Only the compact copy is on this iPhone", "")
         } else {
-            row("iphone", "Original still on this iPhone", model.settings.needsBackupUpdate
+            row("iphone", "Original still on this iPhone", cell.compactAfter == .distantFuture
+                ? "Kept full size on this iPhone." : model.settings.needsBackupUpdate
                 ? "The original is safe on \(server). Its compact copy comes after \(server) is updated."
                 : "A compact copy hasn't been linked to this backup.")
         }

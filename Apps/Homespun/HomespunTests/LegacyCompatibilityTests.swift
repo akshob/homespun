@@ -130,6 +130,19 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
                 lookup: { try await client.lookupCopies($0) }, current: { true })
         }
 
+        func remover(mode: ServerAPI.StorageMode = .files) -> LegacyOriginalRemover {
+            let settings = settings, captured = scope
+            return .init(client: client, ledger: ledger, photos: library, scope: captured, mode: mode,
+                current: { settings.currentLegacyScope == captured && settings.server?.mode == .files })
+        }
+
+        func upgrade() async {
+            await context.server.withLock { $0 }.stopAndWait()
+            let updated = DemoServer(folder: folder.appendingPathComponent("server"), pace: 0, bundledCompact: { _ in nil })
+            context.server.withLock { $0 = updated }
+            await settings.refreshServerInfo(forceBackupCheck: true)
+        }
+
         func close() async throws {
             await context.server.withLock { $0 }.stopAndWait()
             session.invalidateAndCancel()
@@ -212,6 +225,162 @@ private final class LegacyProtocol: URLProtocol, @unchecked Sendable {
             #expect(StatusWords.server(snapshot.server) == "Update polonium")
             #expect(StatusWords.headline(snapshot, now: now, watch: true) == "Update polonium")
         }
+        try await fixture.close()
+    }
+
+    enum Block: CaseIterable, Sendable {
+        case deviceHash, serverHash, trashBefore, trashAfter, compactHash, compactRole, compactAsset
+        case compactGeneration, changedScope, zeroBytes, immich, modern, kept
+    }
+
+    @Test(arguments: Block.allCases) func legacyFreeUpFailsClosed(_ block: Block) async throws {
+        let fixture = try Fixture()
+        try await fixture.pair()
+        try await fixture.seed()
+        let entry = try #require(try await fixture.ledger.entry(for: "demo:photo-0"))
+        let original = try #require(fixture.library.demoItem("demo:photo-0"))
+        let compact = try #require(fixture.library.demoItem(entry.compactIdentifier))
+        let checked = Mutex(false), authorized = Mutex(true)
+        switch block {
+        case .deviceHash:
+            var data = try Data(contentsOf: original.main); data.append(1); try data.write(to: original.main)
+        case .zeroBytes: try Data().write(to: original.main)
+        case .kept:
+            try await fixture.ledger.store.setKeptDecision(["demo:photo-0"], namespace: fixture.ledger.namespace, kept: true)
+        case .modern:
+            var mapping = try #require(try await fixture.ledger.store.mappings(namespace: fixture.ledger.namespace)["demo:photo-0"])
+            let origin = BackupAPI.Origin(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
+            mapping.origin = origin; mapping.entry.origin = origin
+            let saved = mapping
+            try await fixture.ledger.store.mutateState { connection in
+                try connection.execute("UPDATE mappings SET body = ? WHERE id = ?",
+                    [.blob(try BackupStore.encode(saved)), .text(saved.id.uuidString)])
+            }
+        default: break
+        }
+        fixture.context.transform.withLock { transform in
+            transform = { path, response in
+                if path.hasSuffix("/verify") {
+                    checked.withLock { $0 = true }
+                    if block == .changedScope { authorized.withLock { $0 = false } }
+                    if block == .serverHash {
+                        var proof = try ServerAPI.decoder.decode(ServerAPI.Verification.self, from: response.body)
+                        proof.resources[0].verified = false
+                        return try DemoServer.json(proof)
+                    }
+                }
+                if path.hasSuffix("/lookup"), [.compactHash, .compactRole, .compactAsset].contains(block) {
+                    var matches = try ServerAPI.decoder.decode(ServerAPI.CopyLookupResponse.self, from: response.body)
+                    if block == .compactHash { matches.matches.removeAll { !$0.isOriginal } }
+                    else {
+                        for index in matches.matches.indices where !matches.matches[index].isOriginal {
+                            if block == .compactRole { matches.matches[index].role = .video }
+                            else { matches.matches[index].assetID = String(repeating: "0", count: 64) }
+                        }
+                    }
+                    return try DemoServer.json(matches)
+                }
+                if path.hasSuffix("/lookup"), block == .compactGeneration {
+                    var data = try Data(contentsOf: compact.main); data.append(2); try data.write(to: compact.main)
+                }
+                if path.hasPrefix("/api/v1/assets/"), !path.hasSuffix("/verify"),
+                   block == .trashBefore || block == .trashAfter && checked.withLock({ $0 }) {
+                    var status = try ServerAPI.decoder.decode(ServerAPI.AssetStatus.self, from: response.body)
+                    status.state = .trashed
+                    return try DemoServer.json(status)
+                }
+                return response
+            }
+        }
+        var remover = fixture.remover(mode: block == .immich ? .immich : .files)
+        remover.current = { authorized.withLock { $0 } }
+        let report = try await remover.removeEligible(limit: nil, only: nil) { _ in }
+        #expect(report.removed.isEmpty && fixture.asked.withLock { $0 } == 0)
+        #expect(fixture.library.existing(["demo:photo-0"], includeHidden: true) == ["demo:photo-0"])
+        if block != .immich && block != .modern && block != .kept { #expect(!report.blocked.isEmpty) }
+        try await fixture.close()
+    }
+
+    @Test func expiredProofIsRehashedBeforeTheGenerationFencedConfirmation() async throws {
+        let fixture = try Fixture()
+        try await fixture.pair()
+        try await fixture.seed()
+        let clock = Mutex(Date()), verified = Mutex(0)
+        fixture.context.transform.withLock { $0 = { path, answer in
+            if path.hasSuffix("/verify") {
+                let count = verified.withLock { $0 += 1; return $0 }
+                if count == 1 { clock.withLock { $0 = $0.addingTimeInterval(31) } }
+            }
+            return answer
+        } }
+        var remover = fixture.remover()
+        remover.now = { clock.withLock { $0 } }
+        let report = try await remover.removeEligible(limit: nil, only: nil) { _ in }
+        #expect(report.removed.count == 1 && fixture.asked.withLock { $0 } == 1)
+        #expect(verified.withLock { $0 } == 2)
+        #expect(fixture.library.existing(["demo:photo-0"], includeHidden: true).isEmpty)
+        try await fixture.close()
+    }
+
+    @Test(arguments: [false, true])
+    func legacyRestoreVerifiesBytesAndRecordsKeptAndCrashIntentBlocksAnotherImport(_ upgraded: Bool) async throws {
+        let fixture = try Fixture()
+        try await fixture.pair()
+        try await fixture.seed()
+        let scope = fixture.scope
+        if upgraded { await fixture.upgrade() }
+        #expect(fixture.scope == scope)
+        #expect(fixture.settings.needsBackupUpdate == !upgraded)
+        _ = try await fixture.remover().removeEligible(limit: nil, only: nil) { _ in }
+        let entry = try #require(try await fixture.ledger.entry(for: "demo:photo-0"))
+        let item = OriginalRestorer.Item(key: "demo:photo-0", compact: entry.compactIdentifier,
+            serverAssetID: entry.serverAssetID!, originalBytes: entry.originalBytes)
+        let restorer = LegacyOriginalRestorer(client: fixture.client, ledger: fixture.ledger, photos: fixture.library,
+            scope: fixture.scope, mode: .files, current: { true })
+        let report = await restorer.restore([item]) { _ in }
+        #expect(report.restored.count == 1 && !report.copiesKept && report.problems.isEmpty)
+        let restored = try #require(report.restored.first)
+        #expect(try await fixture.ledger.backedUpSnapshot()[restored]?.kept == true)
+        let device = try await fixture.library.resourceFingerprints(restored)
+        let server = try await fixture.client.verify(item.serverAssetID)
+        #expect(device.allSatisfy { resource in server.resources.contains {
+            $0.role == resource.role && $0.sha256 == resource.sha256 && $0.size == resource.size && $0.verified
+        } })
+        try await fixture.ledger.store.beginLegacyRestore(.init(item: item.key, scope: fixture.scope, startedAt: Date(),
+            expected: device), namespace: fixture.ledger.namespace)
+        try await fixture.ledger.store.close()
+        let reopened = BackupStore(directory: fixture.ledger.store.files.root,
+            legacyURL: fixture.folder.appendingPathComponent("ledger.json"))
+        let retryEngine = LegacyOriginalRestorer(client: fixture.client, ledger: CompactLedger(store: reopened),
+            photos: fixture.library, scope: scope, mode: .files, current: { true })
+        let retry = await retryEngine.restore([item]) { _ in }
+        #expect(retry.restored.isEmpty && retry.problems.first?.contains("Recents") == true)
+        #expect(try await reopened.ledgerProjection(namespace: "photos").backedUp[restored]?.kept == true)
+        try await reopened.close()
+        try await fixture.close()
+    }
+
+    @Test func trashedLegacyRestoreDoesNotCreateOrDeleteAnything() async throws {
+        let fixture = try Fixture()
+        try await fixture.pair()
+        try await fixture.seed()
+        _ = try await fixture.remover().removeEligible(limit: nil, only: nil) { _ in }
+        let entry = try #require(try await fixture.ledger.entry(for: "demo:photo-0"))
+        fixture.context.transform.withLock { $0 = { path, answer in
+            if path.hasPrefix("/api/v1/assets/"), !path.hasSuffix("/verify") {
+                var status = try ServerAPI.decoder.decode(ServerAPI.AssetStatus.self, from: answer.body)
+                status.state = .trashed
+                return try DemoServer.json(status)
+            }
+            return answer
+        } }
+        let restorer = LegacyOriginalRestorer(client: fixture.client, ledger: fixture.ledger, photos: fixture.library,
+            scope: fixture.scope, mode: .files, current: { true })
+        let before = fixture.library.allIdentifiers(), asked = fixture.asked.withLock { $0 }
+        let report = await restorer.restore([.init(key: "demo:photo-0", compact: entry.compactIdentifier,
+            serverAssetID: entry.serverAssetID!, originalBytes: entry.originalBytes)]) { _ in }
+        #expect(report.restored.isEmpty && !report.problems.isEmpty)
+        #expect(fixture.library.allIdentifiers() == before && fixture.asked.withLock { $0 } == asked)
         try await fixture.close()
     }
 
