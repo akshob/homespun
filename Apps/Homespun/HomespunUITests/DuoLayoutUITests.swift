@@ -498,6 +498,11 @@ final class DuoLayoutUITests: XCTestCase {
             attach(app, "\(pose), Details drag \(startY)")
             XCTAssertTrue(usable, "\(pose): a Details column drag lost the viewer or Done")
         }
+        for older in [true, false] {
+            app.pageItem(older: older)
+            XCTAssertTrue(details.exists && details.frame.minX > screen.midX,
+                          "\(pose): paging lost the Details column")
+        }
         app.buttons["details.done"].tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5), "\(pose): Details didn't close")
         app.closeItem()

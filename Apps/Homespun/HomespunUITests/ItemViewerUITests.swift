@@ -94,6 +94,26 @@ final class ItemViewerUITests: XCTestCase {
             let screen = app.windows.firstMatch.frame, frame = details.frame
             return frame.minY < screen.minY + screen.height * 0.2 && frame.height > screen.height * 0.75
         }
+        func detailsColumn() -> Bool {
+            details.exists && details.frame.minX > app.windows.firstMatch.frame.midX
+        }
+        func mediumSheet() -> Bool {
+            guard details.exists, !detailsColumn() else { return false }
+            let screen = app.windows.firstMatch.frame, frame = details.frame
+            return frame.minY > screen.minY + screen.height * 0.3 && frame.height < screen.height * 0.75
+        }
+        func expandSheet() {
+            guard !largeSheet() else { return }
+            guard let top = sheetTop() else {
+                return require(false, "no sheet grabber or title bar to expand Details")
+            }
+            top.press(forDuration: 0.05,
+                      thenDragTo: app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)),
+                      withVelocity: .fast, thenHoldForDuration: 0)
+            let deadline = Date().addingTimeInterval(5)
+            while details.exists, !largeSheet(), Date() < deadline { usleep(200_000) }
+            require(largeSheet(), "Details didn't expand to a large detent")
+        }
         func dragOnPage() {
             let screen = app.windows.firstMatch.frame
             let visible = details.frame.intersection(screen)
@@ -107,15 +127,17 @@ final class ItemViewerUITests: XCTestCase {
         }
         func perform(_ recipe: String) -> Bool {
             let window = app.windows.firstMatch, screen = window.frame
+            if recipe != "Details page", detailsColumn() {
+                return skip(recipe, "Details is an inspector column, not a sheet.")
+            }
             switch recipe {
             case "Details page":
-                // The owner's gesture, always first, including when Details opens at full height.
+                // The owner's list drag, bounded by the screen at the medium detent.
                 dragOnPage()
             case "above the sheet", "short hold":
                 let exposed = uncoveredPhoto()
-                guard !exposed.isEmpty, exposed.height > 44, exposed.width > 44 else {
-                    return skip(recipe, "No photo is uncovered above Details; not a failed app post-condition.")
-                }
+                require(!exposed.isEmpty && exposed.height > 44 && exposed.width > 44,
+                        "\(recipe): no photo uncovered above medium Details")
                 let start = viewer.coordinate(withNormalizedOffset: .zero)
                     .withOffset(CGVector(dx: exposed.midX - viewer.frame.minX, dy: exposed.midY - viewer.frame.minY))
                 if recipe == "short hold" {
@@ -127,35 +149,45 @@ final class ItemViewerUITests: XCTestCase {
                                 withVelocity: .fast, thenHoldForDuration: 0)
                 }
             case "sheet top":
-                guard let top = sheetTop() else { return skip(recipe, "No visible Details title bar or sheet grabber.") }
+                guard let top = sheetTop() else {
+                    require(false, "\(recipe): no visible Details title bar or sheet grabber")
+                    return false
+                }
                 top.press(forDuration: 0.05,
                           thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)),
                           withVelocity: .fast, thenHoldForDuration: 0)
             case "list, medium":
-                guard !largeSheet(), details.frame.minY > screen.minY + screen.height * 0.3 else {
-                    return skip(recipe, "Details did not open at a medium detent.")
-                }
+                require(mediumSheet(), "\(recipe): Details didn't open at a medium detent")
                 dragOnPage()
+            case "list, large":
+                expandSheet()
+                dragOnPage()
+            case "let go, medium", "let go, large":
+                if recipe == "let go, large" { expandSheet() } else {
+                    require(mediumSheet(), "\(recipe): Details didn't open at a medium detent")
+                }
+                guard let top = sheetTop() else {
+                    require(false, "\(recipe): no visible Details title bar or sheet grabber")
+                    return false
+                }
+                top.press(forDuration: 0.05, thenDragTo: top.withOffset(CGVector(dx: 0, dy: 120)),
+                          withVelocity: .slow, thenHoldForDuration: 0.3)
             default:
-                if !largeSheet() {
-                    guard let top = sheetTop() else { return skip(recipe, "No sheet grabber or title bar to expand Details.") }
-                    top.press(forDuration: 0.05,
-                              thenDragTo: window.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)),
-                              withVelocity: .fast, thenHoldForDuration: 0)
-                    let deadline = Date().addingTimeInterval(5)
-                    while details.exists, !largeSheet(), Date() < deadline { usleep(200_000) }
-                    guard largeSheet() else { return skip(recipe, "Details did not expand to a large detent.") }
-                }
-                dragOnPage()
+                require(false, "unknown Details recipe: \(recipe)")
+                return false
             }
             return true
         }
         checkViewer("opened")
 
-        for recipe in ["Details page", "sheet top", "above the sheet", "short hold", "list, medium", "list, large"] {
+        for recipe in ["Details page", "sheet top", "above the sheet", "short hold",
+                       "list, medium", "list, large", "let go, medium", "let go, large"] {
             let shown = viewer.value as? String
             app.buttons["item.details"].tap()
             require(details.waitForExistence(timeout: 5), "\(recipe): no Details")
+            let deadline = Date().addingTimeInterval(5)
+            while details.exists, !detailsColumn(), !mediumSheet(), Date() < deadline { usleep(200_000) }
+            require(detailsColumn() || mediumSheet(), "\(recipe): Details didn't open at medium or in a column")
             note("\(recipe): before", geometry())
             attach(app, "\(recipe): before")
             let performed = perform(recipe)
@@ -165,6 +197,9 @@ final class ItemViewerUITests: XCTestCase {
             require(app.state == .runningForeground, "\(recipe): the app stopped")
             if performed && (recipe == "above the sheet" || recipe == "short hold") {
                 require(viewer.exists && details.exists, "\(recipe): the viewer's drag closed the viewer or Details")
+            }
+            if performed && recipe.hasPrefix("let go") {
+                require(viewer.exists, "\(recipe): letting go of Details closed the viewer")
             }
             if performed && recipe == "above the sheet" {
                 let exposed = uncoveredPhoto()
@@ -183,9 +218,7 @@ final class ItemViewerUITests: XCTestCase {
                     require(details.exists, "\(recipe): paging closed Details")
                     page(true)
                     require(details.exists, "\(recipe): paging back closed Details")
-                } else {
-                    _ = skip("paging with Details open", "No uncovered photo area wide enough for horizontal paging.")
-                }
+                } else { require(false, "\(recipe): no uncovered photo area wide enough for horizontal paging") }
             }
             if details.exists {
                 require(done.exists && done.isHittable, "\(recipe): no usable Details Done")
@@ -241,7 +274,7 @@ final class ItemViewerUITests: XCTestCase {
         XCTAssertTrue(row(app, "Original still on this iPhone").waitForExistence(timeout: 10))
         XCTAssertTrue(row(app, "Compact copy in Photos").exists)
         XCTAssertTrue(row(app, "Original on ").exists)
-        // The sizes may be below the fold of a smaller sheet (the iPhone Duo cover).
+        // Details opens at half height on phones; sizes may be below the fold.
         XCTAssertTrue(row(app, "Original, ").waitForExistence(timeout: 10) || app.scrollTo(row(app, "Original, ")), "no sizes")
         attach(app, "Details")
         app.buttons["details.done"].tap()
@@ -294,7 +327,7 @@ final class ItemViewerUITests: XCTestCase {
         item.press(forDuration: 0.7)
         app.buttons["Show Details"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["details.list"].waitForExistence(timeout: 5),
-                      "Show Details didn't open the viewer's inspector")
+                      "Show Details didn't open the viewer's Details")
         app.buttons["details.done"].tap()
         app.goBack()
         XCTAssertTrue(library.waitForExistence(timeout: 0.2), "the tabs disappeared after Show Details")
