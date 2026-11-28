@@ -127,6 +127,35 @@ struct GridChangeTests {
         #expect(library.state.cell(id)?.canFree == false)
     }
 
+    @Test @MainActor func equalCellsStillReplayAgainstNewBackingFacts() async throws {
+        let catalog = try await badgeCatalog()
+        let id = try #require(catalog.contents().ids.first)
+        let library = LibraryModel(catalog: catalog)
+        defer { library.stopObserving() }
+        await library.reload()
+        library.apply(job: [id: .backedUp(originalBytes: 100)])
+        _ = library.takeChangedIDs()
+        let backed: [String: Date?] = [id: nil]
+        let gate = BadgeBuildGate()
+        library.badgeBuildGate = { await gate.pause() }
+        let rebuild = Task {
+            await library.update(ledger: [:], job: [id: .backedUp(originalBytes: 100)], backedUp: backed)
+        }
+        await gate.waitUntilEntered()
+        library.apply(job: [id: nil])
+        #expect(library.state.cell(id)?.badge == Badge.none)
+        let liveVersion = library.state.version
+        _ = library.takeChangedIDs()
+        await gate.release()
+        await rebuild.value
+        library.badgeBuildGate = nil
+        let contents = catalog.contents()
+        let expected = LibraryState(library: contents.ids, ledger: [:], album: contents.album, job: [:], backedUp: backed)
+        #expect(library.state == expected && library.state.cell(id)?.badge == .copyLater)
+        #expect(library.loaded && library.state.version > liveVersion)
+        #expect(library.takeChangedIDs()?.contains(id) == true)
+    }
+
     @Test @MainActor func cellConfigurationTracksDirectSelectionAndReuseWithoutRepeatingUnchangedWork() {
         let cell = GridCell(frame: .zero), state = gridCell("original", badge: .working)
         #expect(!cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))

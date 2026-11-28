@@ -276,8 +276,10 @@ struct LibraryState: Equatable, Sendable {
         return changed
     }
 
-    /// Takes the version of the state it replaces plus one, so a view keyed on it always updates.
-    mutating func follow(_ previous: LibraryState) { version = previous.version &+ 1 }
+    /// Keeps the version for equal cells; otherwise advances it so views keyed on it update.
+    mutating func follow(_ previous: LibraryState, changed: Bool = true) {
+        version = changed ? previous.version &+ 1 : previous.version
+    }
 
     func cells(_ filter: Filter) -> [Cell] {
         filter == .all ? cells : cells.filter { $0.matches(filter) }
@@ -736,15 +738,15 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         let signpost = PerfMonitor.signposter.beginInterval("BuildState", id: PerfMonitor.signposter.makeSignpostID())
         defer { PerfMonitor.signposter.endInterval("BuildState", signpost) }
         RenderProbe.count("library.buildState")
-        let built = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?)? in
+        let result = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?, Bool) in
             await gate?()
             let new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
                                    backedUp: inputs.backedUp, origin: inputs.origin, recovering: inputs.recovering,
                                    pendingImports: inputs.pendingImports, compactInProgress: inputs.compactInProgress,
                                    legacyConfirmed: inputs.legacyConfirmed, legacyServerName: inputs.legacyServerName,
                                    legacyActions: inputs.legacyActions, checkingLegacy: inputs.checkingLegacy, legacyKept: inputs.legacyKept)
-            guard new != previous else { return nil }
-            return (new, new.changedIDs(from: previous))
+            let changed = new != previous
+            return (new, changed ? new.changedIDs(from: previous) : [], changed)
         }.value
         guard mine == generation else {
             let milliseconds = PerfMonitor.milliseconds(since: started)
@@ -754,17 +756,23 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         }
         let updates = lateJob ?? []
         lateJob = nil
-        if var (built, diff) = built {
-            for update in updates {
-                let merged = built.apply(job: update.changes, compactInProgress: update.compactInProgress)
-                diff?.formUnion(merged)
-            }
-            let old = state
-            built.follow(old)
-            if let diff { changedIDs?.formUnion(diff) } else { changedIDs = nil }
-            state = built
-            releaseInBackground(old)
+        var (built, diff, changed) = result
+        for update in updates {
+            let merged = built.apply(job: update.changes, compactInProgress: update.compactInProgress)
+            diff?.formUnion(merged)
         }
+        let old = state
+        // Equal cells can still carry newer backing facts used by the replay.
+        var replayed = Set<String>()
+        for update in updates {
+            for id in update.changes.keys where built.cell(id) != old.cell(id) { replayed.insert(id) }
+        }
+        changed = changed || !replayed.isEmpty
+        diff?.formUnion(replayed)
+        built.follow(old, changed: changed)
+        if let diff { changedIDs?.formUnion(diff) } else { changedIDs = nil }
+        state = built
+        releaseInBackground(old)
         if !updates.isEmpty {
             PerfMonitor.signposter.emitEvent("BadgeBuildMerged")
             let changes = updates.reduce(0) { $0 + $1.changes.count }
