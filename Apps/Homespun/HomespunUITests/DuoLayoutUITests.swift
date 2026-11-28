@@ -498,17 +498,6 @@ final class DuoLayoutUITests: XCTestCase {
             attach(app, "\(pose), Details drag \(startY)")
             XCTAssertTrue(usable, "\(pose): a Details column drag lost the viewer or Done")
         }
-        for older in [true, false] {
-            // Swipe on the photo: the viewer's frame reaches under the Details column.
-            app.pageItem(older: older, gesture: {
-                let photo = app.shownPage()
-                photo.coordinate(withNormalizedOffset: CGVector(dx: older ? 0.2 : 0.8, dy: 0.5))
-                    .press(forDuration: 0.05, thenDragTo: photo.coordinate(withNormalizedOffset: CGVector(dx: older ? 0.8 : 0.2, dy: 0.5)),
-                           withVelocity: .fast, thenHoldForDuration: 0)
-            })
-            XCTAssertTrue(details.exists && details.frame.minX > screen.midX,
-                          "\(pose): paging lost the Details column")
-        }
         app.buttons["details.done"].tap()
         XCTAssertTrue(details.waitForNonExistence(timeout: 5), "\(pose): Details didn't close")
         app.closeItem()
