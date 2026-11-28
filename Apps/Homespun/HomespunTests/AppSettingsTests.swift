@@ -6,6 +6,23 @@ import Testing
 @testable import Homespun
 
 @MainActor @Suite(.serialized) struct AppSettingsTests {
+    @Test func repeatedOldServerChecksKeepTheFirstUpdateNoticeDateUntilSupportChanges() throws {
+        let name = "backup-support-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let settings = AppSettings(defaults: defaults, tokens: DemoTokens(defaults: defaults))
+        let first = Date(timeIntervalSince1970: 1_800_000_000), later = first.addingTimeInterval(600)
+        let origin = BackupAPI.Origin(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
+        settings.rememberBackupSupport(.needsUpdate(first))
+        settings.rememberBackupSupport(.needsUpdate(later), origin: origin)
+        #expect(settings.backupAPI == .needsUpdate(first) && settings.legacyOrigin == origin)
+        let reloaded = AppSettings(defaults: defaults, tokens: DemoTokens(defaults: defaults))
+        #expect(reloaded.backupAPI == .needsUpdate(first))
+        settings.rememberBackupSupport(.current)
+        settings.rememberBackupSupport(.needsUpdate(later))
+        #expect(settings.backupAPI == .needsUpdate(later))
+    }
+
     @Test func workspaceConfigurationRejectsCoercionInsteadOfUsingMeasuredDefaults() {
         let invalid: [Any] = [
             NSNumber(value: true), NSNumber(value: false), NSNumber(value: 1.5), NSNumber(value: Float(-2.5)),
@@ -86,6 +103,65 @@ import Testing
         #expect(deletions == 2)
     }
 
+    @Test(arguments: [404, 405, 401, 500])
+    func capabilitiesErrorsOnlyExplainMissingV2AndNeverAdmitWork(_ status: Int) async throws {
+        let name = "server-capabilities-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        let folder = URL.applicationSupportDirectory.appendingPathComponent(name, isDirectory: true)
+        defer {
+            UserDefaults.standard.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let (settings, session) = try pairedSettings(defaults: defaults)
+        defer { session.invalidateAndCancel() }
+        let ledger = CompactLedger(url: folder.appendingPathComponent("ledger.json"))
+        let job = CompactJob(settings: settings, ledger: ledger)
+        let pins = settings.pins, server = settings.server
+        let selection = Task { await job.enqueue(["synthetic-photo"], trigger: .manual) }
+        defer { selection.cancel() }
+        do {
+            try await pendingRequest()
+            let stub = try #require(ServerCheckProtocol.pending.take())
+            let url = try #require(stub.request.url)
+            #expect(url.path == "/api/v2/capabilities" && stub.request.httpMethod == "GET")
+            #expect(stub.request.httpBody == nil)
+            let response = try #require(HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil))
+            stub.client?.urlProtocol(stub, didReceive: response, cacheStoragePolicy: .notAllowed)
+            stub.client?.urlProtocolDidFinishLoading(stub)
+            #expect(await selection.value.isEmpty)
+            let missing = status == 404 || status == 405
+            let message = missing
+                ? "Home Server runs an older Homespun Server. Update it to back up with this version of the app. "
+                    + "Nothing on your iPhone or server has changed. "
+                    + "Mac/Linux: update the source, rebuild and rerun install-service. "
+                    + "Docker: pull ghcr.io/akshob/homespun-server:latest and recreate the container."
+                : "The server returned HTTP \(status)."
+            #expect(job.queueProblem == (missing ? nil : message))
+            #expect(settings.needsBackupUpdate == missing)
+            #expect(settings.connectionProblem == nil)
+            #expect(job.items.isEmpty && job.states.isEmpty && job.admissionSeeds.isEmpty)
+            #expect(job.bindingContext == nil && !job.hasPendingWork && !job.isRunning && !job.isPreparing)
+            #expect(try await ledger.store.bindings().isEmpty)
+            #expect(try await ledger.store.operations().isEmpty)
+            #expect(try await ledger.store.sessions().isEmpty)
+            #expect(try await ledger.store.transfers().isEmpty)
+            #expect(try await ledger.store.reservations().isEmpty)
+            #expect(try await ledger.store.effects(namespace: ledger.namespace).isEmpty)
+            #expect(try FileManager.default.contentsOfDirectory(at: ledger.store.files.staging,
+                                                              includingPropertiesForKeys: nil).isEmpty)
+            #expect(settings.pins == pins && settings.server == server && settings.serverStatus == .reachable)
+            #expect(settings.client?.token == "test-token" && ServerCheckProtocol.pending.isEmpty)
+        } catch {
+            selection.cancel()
+            _ = await selection.value
+            await job.stopAndWait()
+            try? await ledger.store.close()
+            throw error
+        }
+        await job.stopAndWait()
+        try await ledger.store.close()
+    }
+
     @Test func retryKeepsTheLastServerStatusUntilItConcludes() async throws {
         let name = "server-check-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
@@ -104,6 +180,7 @@ import Testing
             Issue.record("the failed check wasn't reported")
             return
         }
+
         let unreachable = settings.serverStatus
         let checkedAt = settings.serverCheckedAt
         let retry = Task { await settings.refreshServerInfo() }
@@ -113,6 +190,38 @@ import Testing
         ServerCheckProtocol.fail()
         await retry.value
         #expect(settings.serverStatus == unreachable)
+    }
+
+    @Test func missingCapabilitiesBackstopPreservesTheServerUpdateExplanation() async throws {
+        let name = "server-update-backstop-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        let folder = URL.applicationSupportDirectory.appendingPathComponent(name)
+        defer {
+            UserDefaults.standard.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let (settings, session) = try pairedSettings(defaults: defaults)
+        defer { session.invalidateAndCancel() }
+        let store = BackupStore(directory: folder, legacyURL: nil)
+        let request = Task { try await settings.backupContext(store: store, namespace: "photos") }
+        defer { request.cancel() }
+        try await pendingRequest()
+        let stub = try #require(ServerCheckProtocol.pending.take())
+        let response = try #require(HTTPURLResponse(url: stub.request.url!, statusCode: 404, httpVersion: nil, headerFields: nil))
+        stub.client?.urlProtocol(stub, didReceive: response, cacheStoragePolicy: .notAllowed)
+        stub.client?.urlProtocolDidFinishLoading(stub)
+        do {
+            _ = try await request.value
+            Issue.record("A missing v2 API must not create a context")
+        } catch let failure as ServerClient.Failure {
+            #expect(failure.message == "Home Server runs an older Homespun Server. Update it to back up with this version of the app. "
+                + "Nothing on your iPhone or server has changed. "
+                + "Mac/Linux: update the source, rebuild and rerun install-service. "
+                + "Docker: pull ghcr.io/akshob/homespun-server:latest and recreate the container.")
+        }
+        #expect(settings.needsBackupUpdate && settings.connectionProblem == nil)
+        #expect(try await store.bindings().isEmpty)
+        try await store.close()
     }
 
     @Test(arguments: [false, true])
@@ -276,7 +385,7 @@ private final class ServerCheckProtocol: URLProtocol, @unchecked Sendable {
     static let pending = Requests()
     static let key = ServerKeyFingerprint(base64url: "IlypPJ-wE200U-L1DoKMtMQyrDczNQMel-ae_YH5OgU")!
     static let info = ServerAPI.ServerInfo(name: "Home Server", version: "0.2.0", mode: .files, profile: .standard,
-                                          tls: .init(fingerprint: key, notAfter: .distantFuture))
+                                          tls: .init(fingerprint: key, notAfter: .distantFuture), backupAPI: 2)
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }

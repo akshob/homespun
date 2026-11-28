@@ -8,6 +8,14 @@ extension BackupStore {
         var backedUp: [String: CompactLedger.BackedUp]
         var kept: Set<String>
         var pendingImports: Set<String>
+        var legacyChecks: [String: LegacyCheck.Record] = [:]
+
+        /// Filter at use time, not cache-build time: a cached projection must still expire.
+        func legacyConfirmed(scope: String, origin: BackupAPI.Origin?, now: Date = Date()) -> [String: LegacyCheck.Record] {
+            legacyChecks.filter {
+                $0.value.verified && $0.value.isCurrent(scope: scope, origin: origin, now: now) && $0.value.candidate.matches(self)
+            }
+        }
     }
 
     struct ProjectionRevision: Equatable, Sendable {
@@ -290,7 +298,8 @@ extension BackupStore {
                       intent.operationEpoch == operation.epoch, let identifier = intent.createdIdentifier else { continue }
                 pendingImports.insert(identifier)
             }
-            return LedgerProjection(entries: entries, backedUp: backed, kept: kept, pendingImports: pendingImports)
+            return LedgerProjection(entries: entries, backedUp: backed, kept: kept, pendingImports: pendingImports,
+                                    legacyChecks: try Self.legacyChecks(namespace: namespace, connection))
         }
     }
 
@@ -298,6 +307,8 @@ extension BackupStore {
     func recordLegacy(_ records: [String: CompactLedger.Entry], removing: [String], namespace: String) throws {
         try mutateState { connection in
             for id in Set(removing).union(records.keys) {
+                try connection.execute("DELETE FROM legacy_checks WHERE namespace = ? AND item = ?",
+                                       [.text(namespace), .text(id)])
                 if let row = try connection.rows("""
                     SELECT m.body FROM mappings m JOIN lineages l ON l.current_mapping = m.id
                     WHERE l.namespace = ? AND l.item = ?
@@ -328,6 +339,10 @@ extension BackupStore {
     func recordLegacyBackedUp(_ records: [String: CompactLedger.BackedUp], namespace: String,
                              removingMappings: [String] = []) throws {
         try mutateState { connection in
+            for id in Set(removingMappings).union(records.keys) {
+                try connection.execute("DELETE FROM legacy_checks WHERE namespace = ? AND item = ?",
+                                       [.text(namespace), .text(id)])
+            }
             for original in removingMappings {
                 if let row = try connection.rows("""
                     SELECT m.body FROM mappings m JOIN lineages l ON l.current_mapping = m.id
@@ -351,6 +366,8 @@ extension BackupStore {
     func forgetLegacyBackedUp(_ ids: [String], namespace: String) throws {
         try mutateState { connection in
             for id in ids {
+                try connection.execute("DELETE FROM legacy_checks WHERE namespace = ? AND item = ?",
+                                       [.text(namespace), .text(id)])
                 try connection.execute("DELETE FROM legacy_backed_up WHERE namespace = ? AND original = ?",
                                        [.text(namespace), .text(id)])
             }

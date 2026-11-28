@@ -31,7 +31,7 @@ enum Badge: Equatable, Sendable {
         case .failed: "Needs attention"
         case .copyLater: "Backed up"
         case .processing: "Compact copy in progress"
-        case .recovery: "Backup needs recovery"
+        case .recovery: "Backup not confirmed"
         }
     }
 
@@ -46,7 +46,7 @@ enum Badge: Equatable, Sendable {
         case .kept: "Kept as is: the original stays on this iPhone. See Details for why."
         case .failed: "Something needs your attention. See Activity."
         case .processing: "The original is backed up. Its compact copy is being made on your server or saved to this iPhone."
-        case .recovery: "Reconnect the known original server or recover the earlier mapping. This item is not ready to remove."
+        case .recovery: "The current server hasn't confirmed this backup. Run Find Compact Copies in Server › Existing Library before restoring or freeing up space."
         case .copyLater: "The original is safe at home. Its compact copy comes once it's older, so photos you delete "
             + "before then never come back."
         }
@@ -99,6 +99,10 @@ struct LibraryState: Equatable, Sendable {
         var compactAfter: Date? = nil
         var serverName: String? = nil
         var serverOrigin: BackupAPI.Origin? = nil
+        var legacyCheckedAt: Date? = nil
+        var legacy: Bool { legacyCheckedAt != nil }
+        var legacyActions = false
+        var checkingLegacy = false
     }
 
     /// The Filter menu's states (DESIGN 02·1.2); its symbols match the badges.
@@ -168,7 +172,9 @@ struct LibraryState: Equatable, Sendable {
     /// `backedUp`: items backed up without a compact copy yet, with when it's due (nil: never, a kept favorite).
     init(library: [String], ledger: [String: CompactLedger.Entry], album: Set<String>, job: [String: CompactJob.State],
          backedUp: [String: Date?] = [:], origin: BackupAPI.Origin? = nil, recovering: Set<String> = [],
-         pendingImports: Set<String> = [], compactInProgress: Set<String> = []) {
+         pendingImports: Set<String> = [], compactInProgress: Set<String> = [],
+         legacyConfirmed: [String: LegacyCheck.Record] = [:], legacyServerName: String? = nil,
+         legacyActions: Bool = false, checkingLegacy: Bool = false, legacyKept: Set<String> = []) {
         let present = Set(library)
         var originalOf: [String: String] = [:]
         var records: [String: CompactLedger.Entry] = [:]
@@ -190,16 +196,26 @@ struct LibraryState: Equatable, Sendable {
             if let original = originalOf[id] {
                 let entry = records[id]!
                 let accessible = entry.verifiedCompact && origin != nil && entry.origin == origin
-                cells.append(Cell(id: id, badge: accessible ? (present.contains(original) ? .originalOnPhone : .backedUp) : .recovery,
-                                  original: original, canFree: accessible && present.contains(original),
-                                  serverName: entry.serverName, serverOrigin: entry.origin))
+                let legacy = entry.origin == nil ? legacyConfirmed[original] : nil
+                let legacyFree = legacyActions && !legacyKept.contains(original)
+                let badge: Badge = accessible ? (present.contains(original) ? .originalOnPhone : .backedUp)
+                    : legacy != nil ? (present.contains(original) ? (legacyFree ? .originalOnPhone : .copyLater) : .backedUp) : .recovery
+                cells.append(Cell(id: id, badge: badge,
+                                  original: original, canFree: (accessible || legacy != nil && legacyFree) && present.contains(original),
+                                  serverName: legacy != nil ? legacyServerName : entry.serverName, serverOrigin: entry.origin,
+                                  legacyCheckedAt: legacy?.checkedAt, legacyActions: legacyActions,
+                                  checkingLegacy: checkingLegacy && entry.origin == nil && legacy == nil))
             } else if album.contains(id) || unbackedCopies.contains(id) {
                 cells.append(Cell(id: id, badge: .compactCopy, original: nil, canFree: false))
             } else {
-                let badge = recovering.contains(id) && job[id]?.isOpen != true ? Badge.recovery
+                let legacy = legacyConfirmed[id]
+                let badge = legacy != nil ? Badge.copyLater
+                    : recovering.contains(id) && job[id]?.isOpen != true ? Badge.recovery
                     : Self.badge(job: job[id], backedUp: backedUp[id] != nil, inProgress: compactInProgress.contains(id))
                 cells.append(Cell(id: id, badge: badge, original: nil,
-                                  canFree: false, compactAfter: backedUp[id] ?? nil))
+                                  canFree: false, compactAfter: backedUp[id] ?? nil,
+                                  serverName: legacy != nil ? legacyServerName : nil, legacyCheckedAt: legacy?.checkedAt,
+                                  checkingLegacy: checkingLegacy && recovering.contains(id) && legacy == nil))
             }
         }
         self.cells = cells
@@ -233,7 +249,7 @@ struct LibraryState: Equatable, Sendable {
             if case .saved? = state { continue }
             guard let index = positions[id] else { continue }
             let cell = cells[index]
-            guard cell.original == nil, cell.badge != .compactCopy else { continue }
+            guard cell.original == nil, cell.badge != .compactCopy, !cell.legacy else { continue }
             let badge = Self.badge(job: state, backedUp: backedUp[id] != nil, inProgress: self.compactInProgress.contains(id))
             guard badge != cell.badge else { continue }
             for filter in Filter.allCases where filter != .all && cell.matches(filter) { counts[filter, default: 0] -= 1 }
@@ -272,7 +288,7 @@ struct LibraryState: Equatable, Sendable {
 
 extension LibraryState.Cell {
     /// A compact copy whose original is at home and not on this iPhone: Restore Original brings it back.
-    var canRestore: Bool { badge == .backedUp }
+    var canRestore: Bool { badge == .backedUp && (!legacy || legacyActions) }
 
     /// Has no copy on the server yet (including items being worked on).
     var isNotBackedUp: Bool {
@@ -284,7 +300,9 @@ extension LibraryState.Cell {
     }
 
     /// Can be selected to back up (for an item backed up without a compact copy: to make it now).
-    var canCompact: Bool { [.none, .kept, .failed, .copyLater].contains(badge) || badge == .recovery && original == nil }
+    var canCompact: Bool {
+        !legacy && ([.none, .kept, .failed, .copyLater].contains(badge) || badge == .recovery && original == nil)
+    }
 
     func matches(_ filter: LibraryState.Filter) -> Bool {
         switch filter {
@@ -292,7 +310,7 @@ extension LibraryState.Cell {
         case .notBackedUp: isNotBackedUp && badge != .failed
         case .readyToFree: canFree
         case .atHome: badge == .backedUp
-        case .needsAttention: badge == .failed || badge == .recovery
+        case .needsAttention: badge == .failed || badge == .recovery && !checkingLegacy
         case .copyLater: badge == .copyLater
         }
     }
@@ -492,6 +510,11 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         var recovering: Set<String> = []
         var pendingImports: Set<String> = []
         var compactInProgress: Set<String> = []
+        var legacyConfirmed: [String: LegacyCheck.Record] = [:]
+        var legacyServerName: String?
+        var legacyActions = false
+        var checkingLegacy = false
+        var legacyKept: Set<String> = []
     }
 
     /// Set by the screen to recompute badges after the library changed.
@@ -687,9 +710,13 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// Works out the badges again (after the ledger or the job changed), in the background.
     func update(ledger: [String: CompactLedger.Entry], job: [String: CompactJob.State], backedUp: [String: Date?] = [:],
                 origin: BackupAPI.Origin? = nil, recovering: Set<String> = [], pendingImports: Set<String> = [],
-                compactInProgress: Set<String> = []) async {
+                compactInProgress: Set<String> = [], legacyConfirmed: [String: LegacyCheck.Record] = [:],
+                legacyServerName: String? = nil, legacyActions: Bool = false, checkingLegacy: Bool = false,
+                legacyKept: Set<String> = []) async {
         inputs = Inputs(ledger: ledger, job: job, backedUp: backedUp, origin: origin, recovering: recovering,
-                        pendingImports: pendingImports, compactInProgress: compactInProgress)
+                        pendingImports: pendingImports, compactInProgress: compactInProgress,
+                        legacyConfirmed: legacyConfirmed, legacyServerName: legacyServerName,
+                        legacyActions: legacyActions, checkingLegacy: checkingLegacy, legacyKept: legacyKept)
         await rebuild()
     }
 
@@ -703,7 +730,9 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
         let built = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?)? in
             var new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
                                    backedUp: inputs.backedUp, origin: inputs.origin, recovering: inputs.recovering,
-                                   pendingImports: inputs.pendingImports, compactInProgress: inputs.compactInProgress)
+                                   pendingImports: inputs.pendingImports, compactInProgress: inputs.compactInProgress,
+                                   legacyConfirmed: inputs.legacyConfirmed, legacyServerName: inputs.legacyServerName,
+                                   legacyActions: inputs.legacyActions, checkingLegacy: inputs.checkingLegacy, legacyKept: inputs.legacyKept)
             guard new != previous else { return nil }
             new.follow(previous)
             return (new, new.changedIDs(from: previous))
@@ -1056,11 +1085,12 @@ struct BadgeView: View {
 
 extension Badge {
     /// The cell's VoiceOver value: the badge plus where the original is (DESIGN §10.2).
-    func spoken(server: String, compactAfter: Date? = nil) -> String {
+    func spoken(server: String, compactAfter: Date? = nil, legacy: Bool = false) -> String {
         switch self {
-        case .originalOnPhone: "Ready to free up. Original on \(server)."
-        case .backedUp: "Original at home on \(server)."
-        case .copyLater: "Backed up. Original on \(server); " + Self.compactLater(compactAfter) + "."
+        case .originalOnPhone: "Ready to free up. Original on \(server)." + (legacy ? " Homespun 1.0." : "")
+        case .backedUp: "Original at home on \(server)." + (legacy ? " Homespun 1.0." : "")
+        case .copyLater: legacy ? "Backed up with Homespun 1.0. Original on \(server)."
+            : "Backed up. Original on \(server); " + Self.compactLater(compactAfter) + "."
         default: label
         }
     }

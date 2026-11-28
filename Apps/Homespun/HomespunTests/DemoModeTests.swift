@@ -1696,6 +1696,58 @@ import UIKit
         }
     }
 
+    @Test func legacyCatalogChecksNeverAuthorizePhotoActionsAndDoNotRunAutomaticallyInTheDemo() async throws {
+        let fixture = try await Fixture.make()
+        let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))
+        let client = try await fixture.pairedClient()
+        try model.settings.finishPairing(serverURL: DemoServer.baseURL,
+            response: .init(deviceID: "demo", token: client.token!, server: DemoServer.info),
+            pins: .init(pins: [DemoServer.fingerprint], source: "demo"))
+        let ids = Array(fixture.session.library.allIdentifiers().prefix(6))
+        try #require(ids.count == 6)
+        var records: [String: CompactLedger.Entry] = [:]
+        for index in 0..<3 {
+            let original = index == 2 ? CompactLedger.elsewhere(ids[index + 3]) : ids[index]
+            records[original] = .init(compactIdentifier: ids[index + 3], originalBytes: 100, compactBytes: 10,
+                savedAt: Date(), serverAssetID: Fingerprint.sha256(of: Data("legacy-\(index)".utf8)))
+        }
+        try await model.job.ledger.record(records)
+        await model.library.refresh()
+        #expect(model.library.loaded && model.library.ready.count == 0 && model.library.freeUpOffer == nil)
+        #expect(try await model.job.ledger.projection().legacyChecks.isEmpty)
+        let context = try #require(model.job.bindingContext)
+        let candidates = LegacyCheck.candidates(try await model.job.ledger.projection()) { _ in .photo }
+        let matches = candidates.map {
+            ServerAPI.CopyLookupResponse.Match(sha256: $0.asset, assetID: $0.asset, role: .photo,
+                isOriginal: true, originalsVerified: true, originalBytes: $0.bytes)
+        }
+        // Stand in for a catalog answer to exercise the action gates, not the demo scheduler.
+        try await LegacyCheck.run(candidates.filter { $0.item != ids[1] }, ledger: model.job.ledger,
+            scope: context.binding.id.uuidString, origin: context.binding.origin,
+            lookup: { _ in matches }, current: { true }, serverOrigin: { context.binding.origin })
+        let checked = try await model.job.ledger.projection()
+        #expect(checked.legacyConfirmed(scope: context.binding.id.uuidString, origin: context.binding.origin).count == 2)
+        let remover = try #require(model.job.remover())
+        #expect(try await remover.candidates().isEmpty, "Neither confirmed nor unconfirmed legacy pairs are candidates")
+        let removal = try await remover.removeEligible(limit: nil, only: nil, progress: { _ in })
+        #expect(removal.removed.isEmpty)
+        let restorer = try #require(model.job.restorer())
+        let items = records.map { key, entry in
+            OriginalRestorer.Item(key: key, compact: entry.compactIdentifier,
+                                 serverAssetID: entry.serverAssetID!, originalBytes: entry.originalBytes)
+        }
+        let report = await restorer.restore(items, progress: { _ in })
+        #expect(report.restored.isEmpty && report.problems.count == 3)
+        #expect(report.problems.allSatisfy { $0.contains("Server › Existing Library › Find Compact Copies") })
+        #expect(fixture.asked.all.isEmpty, "A catalog observation must not reach a Photos mutation")
+        await model.library.refreshGrid()
+        #expect(model.library.legacyNotice == nil)
+        #expect(model.library.library.state.cells.allSatisfy { !$0.legacy }, "Demo presentation is unchanged")
+        #expect(try await model.job.ledger.store.operations().isEmpty)
+        await model.library.stopAndWait()
+        try await model.closeDemoStore()
+    }
+
     @Test func copyFinderRevalidatesThroughTheRealV2WireContractWithoutUploadingOrInventingHistoricalProvenance() async throws {
         let fixture = try await Fixture.make()
         let model = AppModel(demo: fixture.session, premium: Premium(ownBuild: false, listens: false))

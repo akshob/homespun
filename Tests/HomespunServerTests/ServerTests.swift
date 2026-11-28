@@ -172,6 +172,7 @@ struct Fixture {
         #expect(try await client.call("/api/v1/info", token: "hs1_wrong").status == .unauthorized)
         let info = try await client.call("/api/v1/info", token: token).decode(ServerAPI.ServerInfo.self)
         #expect(info.mode == .files && info.name == "test")
+        #expect(info.version == "1.1.0" && info.backupAPI == BackupAPI.version)
 
         let code = try await fixture.server.newPairingCode()
         let request = ServerAPI.PairRequest(code: code, deviceName: "Second")

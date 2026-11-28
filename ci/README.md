@@ -6,11 +6,11 @@ pull request; the extended suite runs after the merge; everything runs every nig
 | Workflow | When | What |
 |---|---|---|
 | `pr.yml` | pull request to `main` | quick checks of what it changes (about 20–25 minutes): the server on Linux, the telemetry Worker, the website, the app's build and unit tests (PhotoKit ones included), and two short UI runs side by side: `quick` (iPhone: pair, back up, compare, Keep Original, free up, the viewer, Select All, rename) and `quick-duo` (iPhone Duo open in every pose). Watch, widget, shared-status or project changes also run `watch`. A draft gets the build and unit tests only. `PR / Result` sums it up; `main` requires it. |
-| `ci.yml` | after a merge to `main` | the extended suite: what changed, with every UI run, one per machine: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`, `resume`) and iPhone Duo (`duo-cover`, `duo-grid`, `duo-open`), Try the Demo on both (`demo`, no server), and the server's package tests on macOS; the website goes live when it changed (environment `website`). One run at a time; only the newest waiting merge runs next. A failure opens or updates the issue "main is failing"; a pass closes it. |
+| `ci.yml` | after a merge to `main` | the extended suite: what changed, with every UI run, one per machine: iPhone (`iphone`, `library`, `later`, `copies`, `onboarding`, `telemetry`, `resume`, `oldserver`, `oldapp`, `oldapp-copies`, `oldapp-upgrade`), iPhone Duo (`duo-cover`, `duo-grid`, `duo-open`), Try the Demo on both (`demo`, no server), Apple Watch (`watch`), and the server's package tests on macOS; the website goes live when it changed (environment `website`). One run at a time; only the newest waiting merge runs next. A failure opens or updates the issue "main is failing"; a pass closes it. |
 | `ci.yml` | Run workflow (any branch) | everything with UI runs `none`, `quick` or `full`; an individual UI run builds the app, runs its unit tests and that existing lane only; `copies` also checks both server platforms; `package` runs only the macOS package job |
 | `nightly.yml` | every night | everything on `main`, plus long runs (`large`: 3,000 photos). Failures: the issue "nightly is failing". |
 | `testflight.yml` | on demand, by the owner, who approves each run | only for a commit that passed the extended suite (`release-guard.py`); archive, sign in Apple's cloud, upload, wait until the build is ready; the symbols stay as the run's `dsyms-<build>` artifact |
-| `docker.yml` | `main` and version tags, when the server changes | the server's Docker image |
+| `docker.yml` | `main` when the server changes, and every version tag | the server's Docker image: `main` from main; `X.Y.Z`, `X.Y` and (newest release only) `latest` from a `vX.Y.Z` tag; pre-releases publish only their full version |
 
 Pushing a branch runs nothing: open a draft pull request for the build and unit tests, mark it ready
 for the quick checks, or use Run workflow.
@@ -48,6 +48,56 @@ normal install path; the optional download cache is deferred. The watch job stil
 its own watchOS test bundle, then runs its own `.xctestrun` without resolving the graph a
 second time.
 
+The extended `oldserver` run (port 8804, never in the quick PR lanes) uses the immutable
+`b35fc1901551ea1b01807a26f6a73cbbf68d8058` server. The build job checks out that commit separately,
+caches its release binary by commit and macOS/Xcode image, and includes it in the build archive.
+`OldServerUITests` seeds three real v1 backups with a Debug-only use of the retained 1.0 compactor,
+checks badges and the update alert, frees/restores through iOS confirmation, then asks the host
+watcher to restart the current server on the same data folder and port. It checks unchanged
+legacy display/actions and new v2 admission without duplicate grid items. Both servers use
+the existing key-pinned HTTPS readiness probe and are stopped before the disposable data and
+simulator are removed. The nightly run list includes this lane; its remotely disabled state
+is not changed or enabled by this compatibility work.
+
+The extended `oldapp`, `oldapp-copies` and `oldapp-upgrade` runs (ports 8805, 8806 and 8807;
+three separate matrix jobs, never in quick PR lanes) use the immutable `b35fc19` **1.0.0 app
+and its own UI tests**, not the current app's tests. The build job uses 1.0's
+`generate-project.sh --testing` and Debug configuration, as 1.0's CI did. Debug is needed for
+the tests' launch hooks; signing and App Group entitlements remain unchanged, with no team
+or `CODE_SIGNING_ALLOWED=NO` override. The fixture must have bundle ID
+`photos.homespun.app.dev`, version `1.0.0`, build `1` and `HomespunReleaseFeatures=NO`,
+exactly one simulator manifest and its UI test runner. Those checks run on cache hits too.
+Tests can opt into runtime features, just as 1.0's CI did; the shipping switch stays off.
+
+The fixture's complete `Build/Products` and `BUILD-INFO` travel in the build archive.
+The cache key (`app-b35fc19-<OS>-<arch>-xcode-27.2-v1`) pins the commit, runner platform,
+Xcode and recipe revision; change the Xcode pin and key together, and bump `v1` for recipe
+or product-layout changes. The immutable source's `Package.resolved` is copied into the
+generated workspace, sharing `$CI_STATE/spm` with the current build. `BUILD-INFO` records
+the commit, Xcode and XcodeGen; only a generation/build failure retries with checksum-pinned
+XcodeGen 2.46.0. The log prints fixture and archive sizes. On the first hosted runs, check
+both cache-miss and cache-hit paths and the Timing table; if the archive exceeds about
+150 MB, split the fixture into a dedicated artifact rather than trimming coverage.
+
+`oldapp` explicitly selects 1.0's ItemViewer, ServerMode and ServerTab server tests against
+the current server. `oldapp-copies` runs its one CopyFinder test against imported originals.
+`oldapp-upgrade` backs up with 1.0's ItemViewer test1 on the b35fc19 server, then asks the
+host to upgrade the server binary on the **same data folder, port and TLS identity**.
+Only after pinned HTTPS readiness and the upgrade acknowledgement (within 120 seconds)
+does it run ItemViewer test2 (Free Up/Compare download) and ServerMode test3 (Restore),
+with the same 1.0 app, simulator and pairing. Pre- and post-upgrade logs/result bundles
+are separate; timing stamps cover both test invocations and the server upgrade.
+
+Selection is strict: any runtime skip or missing selected method fails the lane, even if
+Xcode exits successfully. `quarantine-oldapp.txt` starts empty and is separate from the
+current app's quarantine: an exclusion needs the intended server-change PR/commit, why it
+is intended and what a 1.0 user sees. Pairing, Free Up/verify, Restore, Find Compact Copies
+and data-safety failures are regressions, never exclusions. Premium, Compact Later
+(Automatic Mode was not shipped in 1.0) and serverless tests are outside these lanes.
+ServerMode test2's Debug-only Automatic Mode remains selected to preserve the sequence
+1.0's CI validated; only an intended change to that unshipped feature can justify an
+exclusion, and Restore must still pass. Nightly includes all three runs but stays disabled.
+
 Performance budgets (`perf.sh`) need a Mac with a large iPhone Duo library (`setup-perf-sim.sh`,
 35,000 photos) and steady timings, which shared cloud machines don't give; the owner runs them
 nightly on a Mac of their own, from a separate private repository, so no self-hosted runner is ever
@@ -78,7 +128,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `ui.sh <name> <device> <tests> <port> [open]` | UI tests on a fresh simulator against a temporary server (`EXTRA=`, `DATED=`, `DUO_POSES=1`, `STUB_PORT=`; `SERVERLESS=1`: no server and no Photos access, for the demo) |
 | `dated-photos.swift` | small synthetic photos taken over the past months (EXIF dates) for `DATED=`: month headers, scrolling across months |
 | `later.sh`, `copies.sh` | the compact-later and copy-finder end-to-end runs |
-| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `resume`, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `--first-device <run\|group>` selects the device for background boot; `RETRY_UI=1` retries a failed run once |
+| `lane.sh <run\|group> ...` | UI runs by name (`quick`, `quick-duo`, `iphone`, `library`, …, `resume`, `oldserver`, `oldapp`, `oldapp-copies`, `oldapp-upgrade`, `large`) or group (`pr`, `iphone-all`, `duo-all`, `full`); `--first-device <run\|group>` selects the device for background boot; `RETRY_UI=1` retries a failed run once |
 | `tools/duoctl/` | folds, turns and screenshots the iPhone Duo simulator |
 | `perf.sh`, `setup-perf-sim.sh` | performance budgets; the performance simulator (once) |
 | `tls-bench.zsh` | opt-in HTTPS upload measurement: a 1 GiB synthetic file, its own data folder and port 18787; never an installed server |
@@ -88,6 +138,7 @@ All of them work on any Mac with Xcode 27.2, XcodeGen, ffmpeg and the iPhone Duo
 | `summary.py <results>` | the Markdown report each job adds to its summary (failures, flaky tests, known failures skipped) |
 | `timing.py <results> <destination>` | collect phase stamps, logs and each result bundle's SQLite metadata, without its large image/video payloads |
 | `quarantine.txt` | known UI test failures, each with its issue, skipped until fixed |
+| `quarantine-oldapp.txt` | 1.0 app exclusions only for documented, intended server changes; never for data safety or core compatibility |
 
 Results (`*.xcresult`, logs, Duo screenshots) are in `ci-results/`, uploaded when a job fails.
 The app build also archives a `HomespunReleaseScope` test manifest. `unit.sh` runs it with features

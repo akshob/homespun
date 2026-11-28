@@ -51,6 +51,7 @@ final class LibraryController {
     var choosePending = false
     /// Free space on this iPhone, for "almost full" (T15).
     private(set) var phoneFreeBytes: Int?
+    @ObservationIgnored private var phoneSpaceCheckedAt: Date?
     /// Not backed up and created since the last backup, with the days since (T19).
     private(set) var newSinceBackup: (count: Int, days: Int)?
     /// Originals from the current Back Up; offered as each item's compact copy is verified.
@@ -63,6 +64,28 @@ final class LibraryController {
     private var operations = 0
     private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
     private var localRetirements: [UUID: @MainActor () async -> Void] = [:]
+    @ObservationIgnored private var legacyCheckTask: Task<Void, Never>?
+    private var legacyCheckAttempt: Date?
+    private var legacyCount = 0
+    private var dismissedLegacyNotice: String?
+    @ObservationIgnored private var legacyChecksInvalidated = false
+    private(set) var legacyCheckFinished = false
+    var checkingEarlierBackups: Bool { !legacyCheckFinished && settings.isPaired && !settings.isDemo }
+
+    var legacyNotice: String? {
+        guard legacyCount > 0, let scope = settings.currentLegacyScope,
+              dismissedLegacyNotice != scope, !settings.needsBackupUpdate else { return nil }
+        return "\(legacyCount.formatted()) earlier backups are confirmed on \(serverName). "
+            + "Homespun checks them again before freeing up or restoring."
+    }
+
+    func dismissLegacyNotice() { dismissedLegacyNotice = settings.currentLegacyScope }
+    var updateMessage: String {
+        let earlier = legacyCount > 0
+            ? "Your \(legacyCount.formatted()) earlier backups are safe there and work as before."
+            : "Homespun checks your earlier backups with it; originals and compact copies stay as they are."
+        return "\(serverName) runs an earlier Homespun Server. \(earlier) New photos wait here until \(serverName) is updated."
+    }
 
     func observeRetirement(_ retire: @escaping @MainActor () async -> Void) -> CatalogObservation? {
         guard !retired else { return nil }
@@ -96,6 +119,7 @@ final class LibraryController {
         library.onChange = nil
         library.stopObserving()
         pendingRebuild?.cancel()
+        legacyCheckTask?.cancel()
         restoreTask?.cancel()
         job.retire()
         copyFinder.retire()
@@ -109,6 +133,7 @@ final class LibraryController {
         await job.stopAndWait()
         await restoreTask?.value
         await copyFinder.stopAndWait()
+        await legacyCheckTask?.value
         await pendingRebuild?.value
         if operations > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
         await job.history?.load()
@@ -118,10 +143,12 @@ final class LibraryController {
     func suspendAndWait() async {
         suspended = true
         pendingRebuild?.cancel()
+        legacyCheckTask?.cancel()
         restoreTask?.cancel()
         await job.suspendAndWait()
         await restoreTask?.value
         await copyFinder.suspendAndWait()
+        await legacyCheckTask?.value
         await pendingRebuild?.value
         if operations > 0 { await withCheckedContinuation { retirementWaiters.append($0) } }
         await job.history?.flush()
@@ -151,6 +178,9 @@ final class LibraryController {
             self.ready = Ready()
             self.readyChecked = false
             self.finished = nil
+            self.legacyCheckTask?.cancel()
+            self.legacyCheckAttempt = nil
+            self.legacyCount = 0
             self.scheduleRefreshGrid()
         }
         job.onRunFinished = { [weak self] in
@@ -161,6 +191,24 @@ final class LibraryController {
                 await self.jobFinished()
                 self.finishingBackups -= 1
                 if !self.settings.isDemo { await Telemetry.shared.flush() }
+            }
+        }
+        observeLegacyTrust()
+    }
+
+    private func observeLegacyTrust() {
+        guard !retired, !settings.isDemo else { return }
+        withObservationTracking {
+            if case .blocked = settings.connectionTrust { legacyChecksInvalidated = true }
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, !self.retired else { return }
+                self.observeLegacyTrust()
+                guard self.admit() else { return }
+                defer { self.finishedOperation() }
+                self.legacyCheckTask?.cancel()
+                self.legacyCheckAttempt = nil
+                await self.refreshGrid()
             }
         }
     }
@@ -207,6 +255,7 @@ final class LibraryController {
     func refresh() async {
         guard admit() else { return }
         defer { finishedOperation() }
+        legacyCheckAttempt = nil
         let now = settings.photos.authorization()
         // The whole library is read at launch and when access changes; after that Photos' change
         // observer keeps it current (re-reading 35,000 items on every return to the app is slow).
@@ -217,10 +266,14 @@ final class LibraryController {
             // home) updates it after.
             await refreshGrid()
         }
-        if settings.isPaired { await settings.refreshServerInfo() }
+        if settings.isPaired { await settings.refreshServerInfo(forceBackupCheck: true) }
         await job.refreshQueue()
+        await refreshLegacyBinding()
         await refreshReady()
         await refreshGrid()
+        #if DEBUG
+        await seedLegacyBackupsForTesting()
+        #endif
     }
 
     func requestAccess() async {
@@ -234,19 +287,35 @@ final class LibraryController {
     func refreshGrid() async {
         guard !retired, !suspended else { return }
         do {
+        let blocked: Bool = if case .blocked = settings.connectionTrust { true } else { false }
+        if !settings.isDemo && (blocked || legacyChecksInvalidated) {
+            try await job.ledger.store.discardLegacyChecks()
+            legacyChecksInvalidated = false
+        }
         let projection = try await job.ledger.projection()
         let kept = projection.kept, backed = projection.backedUp
+        let scope = settings.currentLegacyScope
+        if let scope { try await job.ledger.store.discardLegacyChecks(exceptScope: scope) }
+        let confirmed = !settings.isDemo ? scope.map {
+            projection.legacyConfirmed(scope: $0, origin: settings.legacyOrigin)
+        } ?? [:] : [:]
         let recovering = Set(backed.filter { $0.value.origin == nil || $0.value.version == nil || $0.value.origin != job.activeOrigin }.keys)
+            .subtracting(confirmed.keys)
         automatic.useCanonicalDecisions(kept)
         var states = job.states
         let compactInProgress = job.compactInProgress
         for id in kept where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
         await library.update(ledger: projection.entries, job: states,
                              backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
-                             pendingImports: projection.pendingImports, compactInProgress: compactInProgress)
+                             pendingImports: projection.pendingImports, compactInProgress: compactInProgress,
+                             legacyConfirmed: confirmed, legacyServerName: serverName,
+                             legacyActions: settings.server?.mode == .files && scope != nil,
+                             checkingLegacy: checkingEarlierBackups, legacyKept: kept)
         // Only once the library itself has been read (this also runs when a backup changes things).
         if library.loaded { loaded = true }
         let state = library.state
+        legacyCount = state.cells.reduce(0) { $0 + ($1.legacy ? 1 : 0) }
+        scheduleLegacyCheck(projection)
         if !settings.isDemo {
             TipState.notBackedUp = state.count(.notBackedUp)
             TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
@@ -257,13 +326,90 @@ final class LibraryController {
         } catch { job.showQueueProblem(error) }
     }
 
+    private func rejectLegacyBinding(_ binding: BackupStore.Binding) async {
+        try? await job.ledger.store.discardLegacyChecks(origin: binding.origin)
+        if job.bindingContext?.binding.id == binding.id { job.invalidateBinding() }
+    }
+
+    /// A cached engine context may predate a server history restore. Learn its current epoch even
+    /// when every legacy observation is still within its seven-day display lifetime.
+    private func refreshLegacyBinding() async {
+        guard !settings.isDemo, settings.backupAPI == .current,
+              let context = job.bindingContext, settings.matchesBackupBinding(context.binding),
+              var client = settings.client else { return }
+        client.timeout = 6
+        do {
+            let projection = try await job.ledger.projection()
+            guard projection.entries.values.contains(where: { $0.origin == nil && $0.serverAssetID != nil })
+                || projection.backedUp.values.contains(where: { $0.origin == nil }) else { return }
+            let origin = try await ServerClientV2(client).capabilities().origin
+            guard !retired, !suspended, !Task.isCancelled, settings.matchesBackupBinding(context.binding),
+                  job.bindingContext?.binding == context.binding else { return }
+            if origin != context.binding.origin { await rejectLegacyBinding(context.binding) }
+            settings.rememberBackupSupport(.current, origin: origin)
+        } catch {
+            // Offline observations remain displayable until expiry, but cannot authorize actions.
+        }
+    }
+
+    private func scheduleLegacyCheck(_ projection: BackupStore.LedgerProjection) {
+        guard !settings.isDemo, !retired, !suspended, !Task.isCancelled, legacyCheckTask == nil,
+              settings.isPaired,
+              var client = settings.client,
+              legacyCheckAttempt.map({ Date().timeIntervalSince($0) >= 60 }) ?? true else { return }
+        client.timeout = 6
+        let lookupClient = client
+        let candidates = LegacyCheck.candidates(projection) { id in
+            guard let kind = library.info(id)?.kind else { return nil }
+            return kind == .video ? .video : .photo
+        }
+        if case .blocked = settings.connectionTrust { return }
+        let initialScope = settings.currentLegacyScope
+        let origin = settings.legacyOrigin
+        let pending = initialScope.map {
+            LegacyCheck.pending(candidates, projection: projection, scope: $0, origin: origin, now: Date())
+        } ?? candidates
+        guard !pending.isEmpty else { legacyCheckFinished = true; return }
+        legacyCheckAttempt = Date()
+        legacyCheckTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.legacyCheckTask = nil
+                self.legacyCheckFinished = true
+                self.scheduleRefreshGrid()
+            }
+            do {
+                let scope = try await self.settings.legacyScope()
+                guard initialScope == nil || scope == initialScope else { throw CancellationError() }
+                let authorization = self.settings.legacyCheckAuthorization(scope: scope)
+                try await LegacyCheck.run(pending, ledger: self.job.ledger, scope: scope, origin: origin,
+                    lookup: { try await lookupClient.lookupCopies($0) }, current: { [weak self] in
+                        guard let self else { return false }
+                        return !self.retired && !self.suspended && self.settings.currentLegacyScope == scope
+                            && self.settings.legacyOrigin == origin
+                    }, authorized: authorization, serverOrigin: {
+                        origin == nil ? nil : try await ServerClientV2(lookupClient).capabilities().origin
+                    })
+                self.legacyCheckAttempt = nil
+                await self.refreshReady()
+            } catch LegacyCheck.Failure.serverChanged {
+                if let binding = self.job.bindingContext?.binding { await self.rejectLegacyBinding(binding) }
+            } catch {
+                // This display check is best effort. Missing/expired observations remain recovery;
+                // transport errors are retried on a later refresh, never recorded as a catalog answer.
+            }
+        }
+    }
+
     /// Items backed up without a compact copy, with when automatic mode makes it (nil: a kept favorite).
     private func backedUpDue(_ all: [String: CompactLedger.BackedUp]) async -> [String: Date?] {
         let backedUp = all.filter { $0.value.origin == job.activeOrigin && $0.value.version != nil }
-        guard !backedUp.isEmpty else { return [:] }
+        var due: [String: Date?] = Dictionary(uniqueKeysWithValues: all.compactMap { id, entry in
+            entry.origin == nil && entry.kept == true ? (id, Date?.some(.distantFuture)) : nil
+        })
+        guard !backedUp.isEmpty else { return due }
         let ids = Array(backedUp.keys), photos = settings.photos
         let assets = await Task.detached(priority: .userInitiated) { photos.summaries(ids) }.value
-        var due: [String: Date?] = [:]
         for (id, summary) in assets {
             let created = summary.created, favorite = summary.favorite
             // Kept full size: never (shown as such, unlike a favorite's).
@@ -304,10 +450,13 @@ final class LibraryController {
     }
 
     private func refreshNewSinceBackup() async {
-        phoneFreeBytes = await Task.detached(priority: .utility) {
-            (try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-                .volumeAvailableCapacityForImportantUsage.map(Int.init)
-        }.value
+        if phoneSpaceCheckedAt.map({ Date().timeIntervalSince($0) >= 30 }) ?? true {
+            phoneSpaceCheckedAt = Date()
+            phoneFreeBytes = await PhotoKitReads.run {
+                (try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+                    .volumeAvailableCapacityForImportantUsage.map(Int.init)
+            }
+        }
         guard let last = journey.lastBackup else {
             newSinceBackup = nil
             return
@@ -328,24 +477,38 @@ final class LibraryController {
     func refreshReady() async {
         guard !retired, !suspended else { return }
         if job.bindingContext == nil, settings.isPaired { await job.refreshQueue() }
-        guard let remover = job.remover() else {
-            ready = Ready()
-            readyChecked = !settings.isPaired
-            return
-        }
         do {
-        let candidates = try await remover.candidates()
-        readyChecked = true
-        readySizes = Dictionary(candidates.map { ($0.original, $0.entry.originalBytes) }, uniquingKeysWith: { a, _ in a })
-        ready = Ready(originals: candidates.map(\.original), bytes: candidates.reduce(0) { $0 + $1.entry.originalBytes })
-        if let finished {
-            let still = finished.originals.filter { readySizes[$0] != nil }
-            self.finished = still.isEmpty ? nil : Ready(originals: still, bytes: still.reduce(0) { $0 + (readySizes[$1] ?? 0) })
-        }
+            var candidates: [(original: String, entry: CompactLedger.Entry)] = []
+            if let remover = job.remover() { candidates += try await remover.candidates() }
+            if let remover = legacyRemover() { candidates += try await remover.candidates() }
+            readyChecked = true
+            readySizes = Dictionary(candidates.map { ($0.original, $0.entry.originalBytes) }, uniquingKeysWith: { a, _ in a })
+            ready = Ready(originals: candidates.map(\.original), bytes: candidates.reduce(0) { $0 + $1.entry.originalBytes })
+            if let finished {
+                let still = finished.originals.filter { readySizes[$0] != nil }
+                self.finished = still.isEmpty ? nil : Ready(originals: still, bytes: still.reduce(0) { $0 + (readySizes[$1] ?? 0) })
+            }
         } catch {
             readyChecked = false
             job.showQueueProblem(error)
         }
+    }
+
+    private func legacyRemover() -> LegacyOriginalRemover? {
+        guard !settings.isDemo, !retired, !suspended, settings.server?.mode == .files,
+              let client = settings.client, let scope = settings.currentLegacyScope else { return nil }
+        let settings = settings, origin = settings.legacyOrigin
+        return .init(client: client, ledger: job.ledger, photos: settings.photos, scope: scope, mode: .files,
+            origin: origin, current: { [weak self] in
+                self?.retired == false && self?.suspended == false && settings.currentLegacyScope == scope
+                    && settings.server?.mode == .files && (origin == nil || settings.legacyOrigin == origin)
+            })
+    }
+
+    private func legacyRestorer() -> LegacyOriginalRestorer? {
+        guard let remover = legacyRemover() else { return nil }
+        return .init(client: remover.client, ledger: remover.ledger, photos: remover.photos, scope: remover.scope,
+            mode: remover.mode, origin: remover.origin, current: remover.current)
     }
 
     // MARK: Backing up
@@ -354,6 +517,7 @@ final class LibraryController {
     /// copy comes back to Photos.
     func backUp(_ identifiers: [String]) {
         guard !retired, !identifiers.isEmpty else { return }
+        guard !settings.needsBackupUpdate else { settings.showingBackUpUpdate = true; return }
         finished = nil
         if case .done = removal { removal = .idle }
         Announce.say("Saving your backup selection.")
@@ -457,7 +621,10 @@ final class LibraryController {
         guard admit() else { return }
         defer { finishedOperation() }
         guard !isRemoving else { return }
-        guard let remover = job.remover() else {
+        var removers: [any RemovingOriginals] = []
+        if let remover = job.remover() { removers.append(remover) }
+        if let remover = legacyRemover() { removers.append(remover) }
+        guard !removers.isEmpty else {
             removal = .done(.init(blocked: ["Reconnect the known original server before freeing up space."]))
             return
         }
@@ -468,11 +635,28 @@ final class LibraryController {
         do {
             let limit = settings.trialConfirmed ? nil : AppSettings.trialLimit
             report = try await Signposts.measure(Signposts.freeUp, "FreeUp") {
-                try await remover.removeEligible(limit: limit, only: scope) { message in
-                    Task { @MainActor [weak self] in
-                        if case .checking = self?.removal { self?.removal = .checking(message) }
+                var combined = OriginalRemover.Report()
+                var remaining = limit ?? Int.max
+                for remover in removers where remaining > 0 {
+                    do {
+                        let candidates = Array(try await remover.candidates(only: scope).prefix(remaining))
+                        remaining -= candidates.count
+                        let next = try await remover.removeEligible(limit: candidates.count, only: Set(candidates.map(\.original))) { message in
+                            Task { @MainActor [weak self] in
+                                if case .checking = self?.removal { self?.removal = .checking(message) }
+                            }
+                        }
+                        combined.removed += next.removed
+                        combined.blocked += next.blocked
+                        combined.freedBytes += next.freedBytes
+                        combined.cancelled = combined.cancelled || next.cancelled
+                        if next.cancelled { break }
+                    } catch {
+                        combined.blocked.append(error.localizedDescription)
+                        if AppSettings.isCancellation(error) { break }
                     }
                 }
+                return combined
             }
         } catch {
             report = OriginalRemover.Report(blocked: [error.localizedDescription])
@@ -512,19 +696,35 @@ final class LibraryController {
     /// Which of these compact copies can have their originals restored: known to this iPhone, with the
     /// original on Homespun Server (not in Immich) and not on this iPhone.
     func restorable(_ compacts: [String]) async -> [OriginalRestorer.Item] {
+        let started = Date()
+        var count = 0
+        AppLog.job.info("restorable: start \(compacts.count, privacy: .public)")
+        defer {
+            AppLog.job.info("restorable: end \(count, privacy: .public) items after \(Date().timeIntervalSince(started), privacy: .public)s")
+        }
         do {
         guard settings.server?.mode != .immich else { return [] }
         let wanted = Set(compacts)
-        let entries = try await job.ledger.snapshot().filter {
-            wanted.contains($0.value.compactIdentifier) && $0.value.verifiedCompact && $0.value.origin == job.activeOrigin
+        AppLog.job.debug("restorable: projection")
+        let projection = try await job.ledger.projection()
+        let confirmed = settings.currentLegacyScope.map {
+            projection.legacyConfirmed(scope: $0, origin: settings.legacyOrigin)
+        } ?? [:]
+        let entries = projection.entries.filter {
+            wanted.contains($0.value.compactIdentifier)
+                && ($0.value.verifiedCompact && $0.value.origin == job.activeOrigin && job.restorer() != nil
+                    || $0.value.origin == nil && confirmed[$0.key] != nil && legacyRestorer() != nil)
         }
         let originals = entries.keys.filter { !$0.hasPrefix(CompactLedger.elsewhere("")) }
         let photos = settings.photos
-        let present = await Task.detached { photos.existing(Array(originals), includeHidden: true) }.value
-        return entries.filter { !present.contains($0.key) }
+        AppLog.job.debug("restorable: existing")
+        let present = await PhotoKitReads.run { photos.existing(Array(originals), includeHidden: true) }
+        let result = entries.filter { !present.contains($0.key) }
             .map { OriginalRestorer.Item(key: $0.key, compact: $0.value.compactIdentifier, serverAssetID: $0.value.serverAssetID!,
                                          originalBytes: $0.value.originalBytes) }
             .sorted { $0.compact < $1.compact }
+        count = result.count
+        return result
         } catch {
             job.showQueueProblem(error)
             restoring = .done(.init(problems: [error.localizedDescription]))
@@ -534,15 +734,34 @@ final class LibraryController {
 
     /// Restores these originals (see `OriginalRestorer`); `restoring` follows it.
     func restore(_ items: [OriginalRestorer.Item]) {
-        guard !retired, !suspended, !isRestoring, !items.isEmpty, let restorer = job.restorer() else { return }
+        guard !retired, !suspended, !isRestoring, !items.isEmpty else { return }
         restoring = .running(.init(done: 0, total: items.count, message: "Getting ready"))
         Announce.say(items.count == 1 ? "Restoring the original." : "Restoring \(items.count) originals.")
         restoreTask = Task {
-            let report = await restorer.restore(items) { progress in
-                Task { @MainActor [weak self] in
-                    if self?.isRestoring == true { self?.restoring = .running(progress) }
+            var report = OriginalRestorer.Report()
+            do {
+                let entries = try await job.ledger.snapshot()
+                let legacy = items.filter { entries[$0.key]?.origin == nil }
+                let modern = items.filter { entries[$0.key]?.origin != nil }
+                var engines: [(any RestoringOriginals, [OriginalRestorer.Item])] = []
+                if let restorer = legacyRestorer(), !legacy.isEmpty { engines.append((restorer, legacy)) }
+                if let restorer = job.restorer(), !modern.isEmpty { engines.append((restorer, modern)) }
+                for (restorer, selected) in engines {
+                    let next = await restorer.restore(selected) { progress in
+                        Task { @MainActor [weak self] in
+                            if self?.isRestoring == true { self?.restoring = .running(progress) }
+                        }
+                    }
+                    report.restored += next.restored
+                    report.problems += next.problems
+                    report.bytes += next.bytes
+                    report.copiesKept = report.copiesKept || next.copiesKept
+                    if Task.isCancelled { break }
                 }
-            }
+                if engines.reduce(0, { $0 + $1.1.count }) != items.count {
+                    report.problems.append("Reconnect the server holding the remaining originals before restoring.")
+                }
+            } catch { report.problems.append(error.localizedDescription) }
             restoring = .done(report)
             if !report.restored.isEmpty {
                 Announce.say(report.restored.count == 1 ? "Restored the original." : "Restored \(report.restored.count) originals.")
@@ -586,6 +805,33 @@ final class LibraryController {
     static func bytes(_ count: Int) -> String { count.formatted(.byteCount(style: .file)) }
 
     #if DEBUG
+    @ObservationIgnored private var seedingLegacy = false
+
+    private func seedLegacyBackupsForTesting() async {
+        let count = settings.defaults.integer(forKey: "legacyBackUp")
+        guard count > 0, !seedingLegacy, !settings.isDemo, settings.needsBackupUpdate,
+              settings.defaults.string(forKey: "legacyBackUpSeeded") != settings.currentLegacyScope,
+              let compactor = settings.compactor(ledger: job.ledger) else { return }
+        seedingLegacy = true
+        defer { seedingLegacy = false }
+        let summaries = settings.photos.summaries(settings.photos.allIdentifiers())
+        let identifiers = summaries.keys.filter {
+            settings.photos.describe($0)?.name.hasPrefix("IMG_200") == true
+        }.sorted {
+            let lhs = summaries[$0]?.created ?? .distantPast, rhs = summaries[$1]?.created ?? .distantPast
+            return lhs == rhs ? $0 < $1 : lhs > rhs
+        }.prefix(min(count, 3))
+        do {
+            for id in identifiers {
+                _ = try await compactor.compact(id, compactNow: true) { _ in }
+            }
+            settings.defaults.set(settings.currentLegacyScope, forKey: "legacyBackUpSeeded")
+            legacyCheckAttempt = nil
+            legacyCheckFinished = false
+            await refreshGrid()
+        } catch { AppLog.job.error("Legacy fixture setup failed: \(error.localizedDescription)") }
+    }
+
     @ObservationIgnored private var testingDeletionStarted = false
 
     /// UI tests: deletes the newest item backed up without a compact copy, as a person cleaning up

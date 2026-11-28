@@ -1,5 +1,6 @@
 # Builds the Homespun Server image for amd64 and arm64 and pushes it to GitHub's container
-# registry: `latest` and `main` from the main branch, `1.2.3` and `1.2` from a v1.2.3 tag.
+# registry: `main` from the main branch; `1.2.3`, `1.2` and (newest release only) `latest`
+# from a v1.2.3 tag. Pre-release tags publish only their full version, e.g. `1.2.3-rc.1`.
 # Each architecture builds on its own GitHub-hosted runner (no emulation), then one manifest
 # list joins them.
 name: Docker image
@@ -135,6 +136,25 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      - name: Is this the newest release?
+        id: release
+        env:
+          REF: ${{ github.ref }}
+          NAME: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest=false
+          if [[ $REF == refs/tags/v* && $NAME =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            newest=$(git ls-remote --tags --refs "https://github.com/$REPOSITORY" 'v*' \
+              | sed 's#.*refs/tags/##' \
+              | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+              | sort -V | tail -1)
+            [[ $NAME == "$newest" ]] && latest=true
+          fi
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+
       - name: Tags
         id: meta
         uses: docker/metadata-action@v6
@@ -142,7 +162,7 @@ jobs:
           images: ${{ env.IMAGE }}
           flavor: latest=false
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ steps.release.outputs.latest == 'true' }}
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

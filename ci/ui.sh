@@ -10,6 +10,8 @@
 # Duo (it writes a pose to TEST_RUNNER_DUO_POSE_FILE; screenshots go to $RESULTS/<name>-shots);
 # STUB_PORT=p sends telemetry to a local stub and checks what arrived. SERVERLESS=1 (Try the Demo): no
 # temporary server, and no Photos access, so iOS would ask if anything needed it.
+# UPGRADE_THEN=ids: after the selected tests pass on OLD_SERVER_FIXTURE, upgrade that server
+# in place and run these tests with the same app and simulator. STRICT_SELECTION=1 rejects skips.
 set -uo pipefail
 source ${0:A:h}/env.sh
 NAME=$1 TYPE=$2 ONLY=$3 PORT=$4 POSE=${5:-}
@@ -72,6 +74,11 @@ if [[ -n ${DATED:-} ]]; then
 fi
 CODE="" LINK=""
 if [[ -z ${SERVERLESS:-} ]]; then
+    CURRENT_SERVER_BIN=$SERVER_BIN
+    if [[ -n ${OLD_SERVER_FIXTURE:-} ]]; then
+        [[ -x $OLD_SERVER_BIN ]] || { echo "the immutable b35fc19 server fixture is missing"; exit 1; }
+        SERVER_BIN=$OLD_SERVER_BIN
+    fi
     export HOMESPUN_DATA=$DATA HOMESPUN_ORIGINALS=$DATA/originals HOMESPUN_HOST=127.0.0.1 HOMESPUN_PORT=$PORT \
            HOMESPUN_NAME="Home Mac (test)" HOMESPUN_PUBLIC_URL=127.0.0.1:$PORT
     timed server.port wait_port_free $PORT || exit 1
@@ -80,7 +87,7 @@ if [[ -z ${SERVERLESS:-} ]]; then
     ACTIONFILE=$DATA/host-action
     print online > $CONTROL
     (
-        child="" currentData=$DATA currentPort=$PORT currentLog=$DATA.log
+        child="" currentData=$DATA currentPort=$PORT currentLog=$DATA.log activeBinary=$SERVER_BIN
         stop_server() {
             [[ -z $child ]] && return
             kill $child 2>/dev/null
@@ -94,7 +101,7 @@ if [[ -z ${SERVERLESS:-} ]]; then
             mkdir -p $currentData/originals
             HOMESPUN_DATA=$currentData HOMESPUN_ORIGINALS=$currentData/originals \
                 HOMESPUN_PORT=$currentPort HOMESPUN_PUBLIC_URL=127.0.0.1:$currentPort \
-                $SERVER_BIN serve >> $currentLog 2>&1 & child=$!
+                $activeBinary serve >> $currentLog 2>&1 & child=$!
             print -r -- $child > $PIDFILE
             HOMESPUN_DATA=$currentData wait_for_server $currentPort
         }
@@ -110,6 +117,15 @@ if [[ -z ${SERVERLESS:-} ]]; then
                 print online > $CONTROL.ack
                 if [[ -f $ACTIONFILE ]]; then
                     case $(cat $ACTIONFILE) in
+                        upgrade-server)
+                            [[ -n ${OLD_SERVER_FIXTURE:-} ]] || exit 1
+                            stamp server.upgrade.start
+                            stop_server
+                            wait_port_free $currentPort || exit 1
+                            activeBinary=$CURRENT_SERVER_BIN
+                            start_server || exit 1
+                            print upgraded > $DATA/server-upgraded
+                            stamp server.upgrade.end;;
                         rotate-key)
                             HOMESPUN_DATA=$currentData $SERVER_BIN certificate --new-key \
                                 >> $RESULTS/$NAME-host-actions.log 2>&1;;
@@ -154,6 +170,7 @@ if [[ -z ${SERVERLESS:-} ]]; then
     OUT=$(timed server.pair pairing_output) || { echo "no pairing code"; exit 1; }
     CODE=$(echo "$OUT" | sed -n "s/^Pairing code: \([A-Z0-9-]*\).*/\1/p"); LINK=$(echo "$OUT" | grep -o "homespun://pair[^ ]*" | head -1)
     export TEST_RUNNER_HOMESPUN_HOST_ACTION_FILE=$ACTIONFILE
+    export TEST_RUNNER_HOMESPUN_SERVER_UPGRADED_FILE=$DATA/server-upgraded
     export TEST_RUNNER_HOMESPUN_MOVED_SERVER=127.0.0.1:$MOVEPORT
     export TEST_RUNNER_HOMESPUN_ROGUE_LOG=$RESULTS/$NAME-rogue-server.log
     export TEST_RUNNER_HOMESPUN_PAIRING_OUTPUT_FILE=$DATA/pairing-again
@@ -180,30 +197,57 @@ if [[ -n ${DUO_POSES:-} ]]; then
     export TEST_RUNNER_DUO_POSE_FILE=$POSEFILE
 fi
 RESULT=$RESULTS/$NAME.xcresult
-SKIP=($(quarantined $ONLY $RESULTS/$NAME-quarantined.txt))
+LOG=$RESULTS/$NAME.log
+QUARANTINED=$RESULTS/$NAME-quarantined.txt
+SKIP=($(quarantined $ONLY $QUARANTINED)) || exit 1
 run_tests() {
     rm -rf $RESULT
     stamp xcodebuild.start
     TEST_RUNNER_HOMESPUN_SERVER=127.0.0.1:$PORT TEST_RUNNER_HOMESPUN_PAIRING_CODE=$CODE TEST_RUNNER_HOMESPUN_PAIR_LINK="$LINK" \
     TEST_RUNNER_HOMESPUN_REMOVE=1 \
       test_without_building $RESULT ${(@)${(s:,:)ONLY}/#/-only-testing:} $SKIP $(test_retries) \
-      2>&1 | tee $RESULTS/$NAME.log | filter
+      2>&1 | tee $LOG | filter
     local code=${pipestatus[1]}
     stamp xcodebuild.end
     return $code
 }
 run_tests; STATUS=$?
 # Now and then the simulator can't start or reach the test runner, and no test runs: once more, rebooted.
-if (( STATUS != 0 )) && ! grep -q "^Test Case" $RESULTS/$NAME.log \
-    && grep -qE "failed to launch|Failed to establish communication|Channel disconnected|crashed while preparing" $RESULTS/$NAME.log; then
+if (( STATUS != 0 )) && ! grep -q "^Test Case" $LOG \
+    && grep -qE "failed to launch|Failed to establish communication|Channel disconnected|crashed while preparing" $LOG; then
     echo "the test runner didn't start; rebooting the simulator and trying once more"
     stamp simulator.reboot.start
     xcrun simctl shutdown $SIM; xcrun simctl boot $SIM && xcrun simctl bootstatus $SIM -b >/dev/null
     stamp simulator.reboot.end
     run_tests; STATUS=$?
 fi
-if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests|BackupResumeUITests)* ]]; then
-    require_test_environment $RESULTS/$NAME.log || STATUS=1
+if [[ -z ${SERVERLESS:-} && $ONLY == *HomespunUITests/(ItemViewerUITests|ServerModeUITests|ServerTabUITests|PremiumUITests|DuoLayoutUITests|TelemetryUITests|GridRedrawUITests|BackupResumeUITests|OldServerUITests)* ]]; then
+    require_test_environment $LOG || STATUS=1
+fi
+if [[ -n ${STRICT_SELECTION:-} ]]; then
+    require_selected_tests_ran $LOG $ONLY $QUARANTINED || STATUS=1
+fi
+if [[ -n ${UPGRADE_THEN:-} ]] && (( STATUS == 0 )); then
+    [[ -n ${OLD_SERVER_FIXTURE:-} && -z ${SERVERLESS:-} ]] \
+      || { echo "error: UPGRADE_THEN requires the isolated old server fixture" >&2; exit 1; }
+    rm -f $DATA/server-upgraded
+    print upgrade-server > $ACTIONFILE
+    upgraded=""
+    for attempt in {1..120}; do
+        if [[ -f $DATA/server-upgraded ]]; then upgraded=1; break; fi
+        kill -0 $SERVER 2>/dev/null || break
+        sleep 1
+    done
+    [[ -n $upgraded ]] || { echo "error: test server did not upgrade within 120 seconds" >&2; exit 1; }
+    ONLY=$UPGRADE_THEN
+    RESULT=$RESULTS/$NAME-upgraded.xcresult LOG=$RESULTS/$NAME-upgraded.log
+    QUARANTINED=$RESULTS/$NAME-upgraded-quarantined.txt
+    SKIP=($(quarantined $ONLY $QUARANTINED)) || exit 1
+    run_tests; STATUS=$?
+    require_test_environment $LOG || STATUS=1
+    if [[ -n ${STRICT_SELECTION:-} ]]; then
+        require_selected_tests_ran $LOG $ONLY $QUARANTINED || STATUS=1
+    fi
 fi
 if [[ -n ${STUB_PORT:-} ]]; then
     timed telemetry.check python3 ${0:A:h}/telemetry-check.py $STUBLOG "Home Mac" "127.0.0.1:$PORT" "IMG_200" || STATUS=1

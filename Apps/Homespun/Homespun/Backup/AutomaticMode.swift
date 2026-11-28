@@ -297,6 +297,19 @@ final class AutomaticMode {
         snapshot.keptAsIs = kept
         snapshot.settled.formUnion(try await job.ledger.store.automaticExclusions(namespace: job.ledger.namespace))
         guard authorized() else { return summary }
+        if settings.needsBackupUpdate {
+            let pending = await Task.detached(priority: .utility) {
+                let assets = photos.candidates(since: snapshot.since, also: Array(snapshot.pending))
+                return Self.pick(assets.map { ($0.id, $0.created) }, since: snapshot.since, added: snapshot.pending,
+                    ledger: planLedger, album: photos.albumMembers(), attempts: [:],
+                    settled: snapshot.settled.union(kept).union(planBackedUp.keys), limit: .max)
+            }.value
+            guard authorized() else { return summary }
+            state.pending = Set(pending)
+            if inserted.read { state.token = token }
+            summary.skipped = "Waiting for \(settings.server?.name ?? "your server") to be updated · \(state.pending.count) new photos"
+            return finish(summary)
+        }
         let backsUp = settings.server?.mode != .immich
         let plan = await Task.detached(priority: .utility) {
             Self.plan(snapshot, ledger: planLedger, backedUp: planBackedUp, added: snapshot.pending, backsUp: backsUp, photos: photos)
@@ -342,7 +355,7 @@ final class AutomaticMode {
     }
 
     nonisolated static func describe(_ summary: Summary) -> String {
-        if let skipped = summary.skipped { return "Skipped: \(skipped)" }
+        if let skipped = summary.skipped { return skipped.hasPrefix("Waiting for ") ? skipped : "Skipped: \(skipped)" }
         var parts: [String] = []
         if summary.queued > 0 { parts.append("\(summary.queued) queued durably; compact copies are discovered independently") }
         if summary.compacted > 0 { parts.append("\(summary.compacted) backed up and compacted") }

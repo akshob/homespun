@@ -309,7 +309,7 @@ struct DurableOriginalRestorer: RestoringOriginals {
               let operationID = entry.operationID, let operation = try await ledger.store.operation(operationID),
               let manifest = operation.manifest, mapping.proof?.version == version,
               try await ledger.store.binding(context.binding.id)?.retired == false else {
-            throw BackupStageFailure.blocked("Reconnect the known original server and recover its versioned mapping before restoring.")
+            throw BackupStageFailure.blocked("Before restoring this earlier backup, run Server › Existing Library › Find Compact Copies on the server holding its original. Homespun needs a versioned backup record and a fresh check; a Homespun 1.0 catalog check isn't enough.")
         }
         mapping.entry = entry
         for old in try await ledger.store.effects(namespace: ledger.namespace) where old.kind == .restore && old.originals.contains(item.key) {

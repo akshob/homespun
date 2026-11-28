@@ -30,6 +30,14 @@ struct RootView: View {
         }
         .overlay(alignment: .topLeading) { PerfMonitorLabel() }
         .modifier(QuitUnexpectedly(model: model))
+        .modifier(ServerUpdatePresentation(settings: settings))
+        .onChange(of: settings.isPaired) { _, paired in
+            if paired { Task { await model.library.refresh() } }
+        }
+        .onChange(of: settings.backupAPI) { _, _ in
+            if settings.needsBackupUpdate { model.job.invalidateBinding() }
+            Task { await model.library.refreshReady(); await model.library.refreshGrid() }
+        }
         .task {
             #if DEBUG
             guard ProcessInfo.processInfo.arguments.contains("-probeServerStatus") else { return }
@@ -44,7 +52,7 @@ struct RootView: View {
             // From the first moment on screen (onChange alone misses the launch).
             if phase == .active {
                 SessionMarker.shared.active()
-                Task { await settings.refreshServerInfo() }
+                Task { await settings.refreshServerInfo(forceBackupCheck: true) }
             }
         }
         .onOpenURL { url in
@@ -81,6 +89,7 @@ struct RootView: View {
             case .active:
                 if wasBackground {
                     wasBackground = false
+                    settings.updateNoticeDismissed = false
                     model.library.journey.sessionStarted()
                 }
                 Task {
@@ -238,7 +247,8 @@ struct MainTabView: View {
         case .backUpNew:
             Task {
                 let ids = await model.library.newItems()
-                if ids.count > 200 { sheet = .backUp(ids) } else { model.library.backUp(ids) }
+                if model.settings.needsBackupUpdate { model.settings.showingBackUpUpdate = true }
+                else if ids.count > 200 { sheet = .backUp(ids) } else { model.library.backUp(ids) }
             }
         }
     }

@@ -21,7 +21,8 @@ Nightly (nightly.yml) runs everything and needs no plan.
 import json, os, subprocess, sys
 
 QUICK = ["quick", "quick-duo"]
-FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "resume", "duo-cover", "duo-grid", "duo-open", "demo", "watch"]
+FULL = ["iphone", "library", "later", "copies", "onboarding", "telemetry", "resume", "oldserver",
+        "oldapp", "oldapp-copies", "oldapp-upgrade", "duo-cover", "duo-grid", "duo-open", "demo", "watch"]
 WATCH_PATHS = ("Apps/Homespun/HomespunWatch/", "Apps/Homespun/HomespunWatchUITests/",
                "Apps/Homespun/Widgets/", "Apps/Homespun/Shared/")
 ZERO = "0" * 40

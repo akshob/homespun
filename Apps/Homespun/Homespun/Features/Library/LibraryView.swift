@@ -217,7 +217,8 @@ struct LibraryView: View, Equatable {
             : filter == .notBackedUp && media == .all
                 ? "done.\(controller.serverName).\(controller.library.state.count(.needsAttention))" : "nothing.\(filter.rawValue)"
         return [notice, empty, controller.job.queueProblem ?? "",
-                controller.showsRemoteNotice ? "remote" : ""]
+                settings.needsBackupUpdate && !settings.updateNoticeDismissed ? controller.updateMessage : "",
+                controller.showsRemoteNotice ? "remote" : "", controller.legacyNotice ?? ""]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
 
@@ -233,7 +234,17 @@ struct LibraryView: View, Equatable {
     }
 
     @ViewBuilder private var notice: some View {
-        if let problem = controller.job.queueProblem {
+        ServerUpdateNotice(controller: controller).padding(.horizontal)
+        if let message = controller.legacyNotice {
+            HStack(alignment: .top) {
+                Text(message).font(.footnote).foregroundStyle(Theme.secondaryLabel)
+                Button("Dismiss", systemImage: "xmark", action: controller.dismissLegacyNotice)
+                    .labelStyle(.iconOnly)
+            }
+            .padding(.horizontal)
+            .accessibilityIdentifier("library.legacy")
+        }
+        if let problem = controller.job.queueProblem, !settings.needsBackupUpdate {
             InlineNotice(tone: .warning, title: "Backup queue needs attention", message: problem) {
                 Button("Try Again") { Task { await controller.job.refreshQueue(); await controller.refreshGrid() } }
                     .accessibilityIdentifier("queue.retry")
@@ -316,11 +327,15 @@ struct LibraryView: View, Equatable {
         }
         guard settings.isPaired else { return demo + "\(state.cells.count.formatted()) items · not connected" }
         if case .unreachable = settings.serverStatus { return demo + "Can't reach \(controller.serverName)" }
+        if state.cells.contains(where: \.checkingLegacy) { return "Checking with \(controller.serverName)…" }
+        return demo + Self.backupSubtitle(state: state, server: controller.serverName)
+    }
+
+    static func backupSubtitle(state: LibraryState, server: String) -> String {
         let attention = state.count(.needsAttention)
-        if attention > 0 { return demo + "\(attention.formatted()) need attention · \(controller.serverName)" }
+        if attention > 0 { return "\(attention.formatted()) need attention · \(server)" }
         let open = state.count(.notBackedUp)
-        return demo + (open == 0 ? "All backed up · \(controller.serverName)"
-            : "\(open.formatted()) not backed up · \(controller.serverName)")
+        return open == 0 ? "All backed up · \(server)" : "\(open.formatted()) not backed up · \(server)"
     }
 
     private var selectionTitle: String {
@@ -553,7 +568,8 @@ struct LibraryView: View, Equatable {
     private func backUp(_ ids: [String]) {
         guard !ids.isEmpty else { return }
         let bytes = selectionBytes?.bytes ?? 0
-        if ids.count > 200 || bytes > 5_000_000_000 {
+        if settings.needsBackupUpdate { settings.showingBackUpUpdate = true }
+        else if ids.count > 200 || bytes > 5_000_000_000 {
             sheet = .backUp(ids)
         } else {
             controller.backUp(ids)

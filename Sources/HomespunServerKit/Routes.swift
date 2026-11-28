@@ -90,7 +90,8 @@ struct Routes: Sendable {
         return .init(name: configuration.name, version: ServerConfiguration.version, mode: await immichState.mode,
               profile: configuration.profile, platform: HostPlatform.current(), hardware: HostPlatform.hardware,
               freeBytes: OriginalsStore.space(at: await originals.root.path).free,
-              tls: .init(fingerprint: identity.current.fingerprint, notAfter: identity.current.notAfter), deviceName: deviceName)
+              tls: .init(fingerprint: identity.current.fingerprint, notAfter: identity.current.notAfter),
+              deviceName: deviceName, backupAPI: BackupAPI.version)
     }
 
     func add(to router: Router<HomespunRequestContext>) {

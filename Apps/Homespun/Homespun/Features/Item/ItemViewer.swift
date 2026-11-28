@@ -98,7 +98,7 @@ struct ItemViewer: View {
         let head = [kind, date].compactMap(\.self).joined(separator: ", ")
         guard let cell = cell(id) else { return head }
         return head + ". " + ItemText.spoken(ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell),
-                                                             compactAfter: cell.compactAfter))
+                                                             compactAfter: cell.compactAfter, legacy: cell.legacy))
     }
 
     // MARK: State line
@@ -118,7 +118,7 @@ struct ItemViewer: View {
             VStack(alignment: .leading, spacing: 0) {
                 ItemStateLine(badge: cell.badge,
                               sentence: ItemText.sentence(cell.badge, server: server, immich: immich, job: jobState(cell),
-                                                          compactAfter: cell.compactAfter),
+                                                          compactAfter: cell.compactAfter, legacy: cell.legacy),
                               blocked: action == .backUp || action == .tryAgain ? model.library.backUpBlockedReason : nil,
                               scrim: top < below)
                     .padding(.top, top)

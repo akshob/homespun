@@ -8,6 +8,67 @@ import UIKit
 /// Where compact copies are made, the paired server, and first-run progress.
 @MainActor @Observable
 final class AppSettings {
+    enum BackupSupport: Codable, Equatable, Sendable {
+        case unknown, current, needsUpdate(Date)
+    }
+
+    private(set) var backupAPI: BackupSupport = .unknown
+    private var backupCheckedAt: Date?
+    private(set) var legacyOrigin: BackupAPI.Origin?
+    @ObservationIgnored private let legacyScopeGeneration = LegacyCheck.Generation()
+
+    private func invalidateLegacyScope() { legacyScopeGeneration.invalidate() }
+
+    func legacyCheckAuthorization(scope: String) -> @Sendable () -> Bool {
+        guard currentLegacyScope == scope else { return { false } }
+        return legacyScopeGeneration.authorization()
+    }
+    var showingServerUpdate = false
+    var showingBackUpUpdate = false
+    var updateNoticeDismissed = false
+    var needsBackupUpdate: Bool {
+        if case .needsUpdate = backupAPI { return true }
+        return false
+    }
+    var updateTitle: String { "Update \(server?.name ?? "your server") to back up new photos" }
+
+    func rememberBackupSupport(_ support: BackupSupport, origin: BackupAPI.Origin? = nil) {
+        if let previous = legacyOrigin, let origin, previous != origin { invalidateLegacyScope() }
+        // Keep the first notice date; backupCheckedAt still advances on every check.
+        switch (backupAPI, support) {
+        case (.needsUpdate, .needsUpdate): break
+        default: backupAPI = support
+        }
+        backupCheckedAt = Date()
+        legacyOrigin = origin
+        if !needsBackupUpdate { updateNoticeDismissed = false }
+        defaults.set(serverURL?.absoluteString, forKey: "backupAPIURL")
+        defaults.set(try? JSONEncoder().encode(backupAPI), forKey: "backupAPIState")
+    }
+
+    var currentLegacyScope: String? {
+        guard !isRetired, isPaired, let url = serverURL, let token = client?.token,
+              let pins, let consumer = defaults.string(forKey: "serverDeviceID"), !consumer.isEmpty else { return nil }
+        if case .blocked = connectionTrust { return nil }
+        return LegacyCheck.scope(url: url, pins: pins.pins, token: token, consumer: consumer)
+    }
+
+    func legacyScope() async throws -> String {
+        guard var client, let token = client.token, pins != nil else { throw CancellationError() }
+        if case .blocked = client.trust { throw CancellationError() }
+        let url = client.baseURL, trust = client.trust
+        client.timeout = 6
+        let devices = try await client.devices().filter(\.isThisDevice)
+        guard !isRetired, serverURL == url, self.client?.token == token, connectionTrust == trust,
+              devices.count == 1, let id = devices.first?.id, !id.isEmpty else {
+            throw CancellationError()
+        }
+        if defaults.string(forKey: "serverDeviceID") != id { invalidateLegacyScope() }
+        defaults.set(id, forKey: "serverDeviceID")
+        guard let scope = currentLegacyScope else { throw CancellationError() }
+        return scope
+    }
+
     enum ServerStatus: Equatable {
         case unknown, checking, reachable
         case unreachable(String)
@@ -55,7 +116,13 @@ final class AppSettings {
     private(set) var serverURL: URL?
     private(set) var server: ServerAPI.ServerInfo?
     private(set) var serverStatus: ServerStatus = .unknown {
-        didSet { if serverStatus != .checking, serverStatus != .unknown { serverCheckedAt = Date() } }
+        didSet {
+            if serverStatus != .checking, serverStatus != .unknown { serverCheckedAt = Date() }
+            switch serverStatus {
+            case .identityProblem, .securing, .needsServerUpdate: invalidateLegacyScope()
+            default: break
+            }
+        }
     }
     /// When the server last answered, or didn't (for the widgets).
     private(set) var serverCheckedAt: Date?
@@ -116,6 +183,10 @@ final class AppSettings {
             tokens.removeToken(for: old.absoluteString)
             tokens.removePins(for: old.absoluteString)
         }
+        // Read after every stored property is initialized: it compares with serverURL.
+        if defaults.string(forKey: "backupAPIURL") == serverURL?.absoluteString,
+           let data = defaults.data(forKey: "backupAPIState"),
+           let support = try? JSONDecoder().decode(BackupSupport.self, from: data) { backupAPI = support }
     }
 
     @ObservationIgnored var backupBindingChanged: (@MainActor () -> Void)?
@@ -135,8 +206,21 @@ final class AppSettings {
                 && server?.mode == mode
         }
         let remote = ServerClientV2(client)
-        let capabilities = try await remote.capabilities()
+        let capabilities: BackupAPI.Capabilities
+        do {
+            capabilities = try await remote.capabilities()
+        } catch let failure as ServerClient.Failure where failure.status == 404 || failure.status == 405 {
+            guard current(), !Task.isCancelled else { throw CancellationError() }
+            rememberBackupSupport(.needsUpdate(Date()))
+            throw ServerClient.Failure(status: failure.status,
+                message: "\(name) runs an older Homespun Server. Update it to back up with this version of the app. "
+                    + "Nothing on your iPhone or server has changed. "
+                    + "Mac/Linux: update the source, rebuild and rerun install-service. "
+                    + "Docker: pull ghcr.io/akshob/homespun-server:latest and recreate the container.",
+                code: failure.code)
+        }
         guard current(), !Task.isCancelled else { throw CancellationError() }
+        rememberBackupSupport(.current, origin: capabilities.origin)
         let devices = try await client.devices().filter(\.isThisDevice)
         guard current(), devices.count == 1, let consumer = devices.first?.id, !consumer.isEmpty else {
             throw BackupStore.Failure.invalidReceipt
@@ -189,6 +273,7 @@ final class AppSettings {
     }
 
     func cachedBackupContext(store: BackupStore, namespace: String) async throws -> BackupBindingContext? {
+        guard !needsBackupUpdate else { return nil }
         let bindings = try await store.bindings()
         for binding in bindings.reversed() where matchesBackupBinding(binding) && binding.consumerID?.isEmpty == false {
             guard let information = try await store.bindingInformation(binding.id), information.namespace == namespace,
@@ -294,6 +379,7 @@ final class AppSettings {
     }
 
     func retire() {
+        invalidateLegacyScope()
         isRetired = true
         infoWork?.task.cancel()
         securityWork?.task.cancel()
@@ -389,6 +475,7 @@ final class AppSettings {
         guard newURL.scheme == "https" else { throw ServerPairing.IdentityFailure() }
         infoWork?.task.cancel()
         var pins = pins
+        invalidateLegacyScope()
         pins.serviceName = serviceName ?? pins.serviceName ?? response.server.name
         try tokens.setPins(pins, for: newURL.absoluteString)
         try tokens.setToken(response.token, for: newURL.absoluteString)
@@ -397,6 +484,8 @@ final class AppSettings {
             tokens.removePins(for: serverURL.absoluteString)
         }
         serverURL = newURL
+        rememberBackupSupport(.unknown)
+        updateNoticeDismissed = false
         defaults.set(newURL, forKey: "serverURL")
         defaults.set(response.deviceID, forKey: "serverDeviceID")
         defaults.set(pins.serviceName, forKey: "serverBonjourName")
@@ -418,6 +507,7 @@ final class AppSettings {
     }
 
     func unpair() {
+        invalidateLegacyScope()
         backupBindingChanged?()
         infoWork?.task.cancel()
         revokeCurrentDevice()
@@ -443,6 +533,7 @@ final class AppSettings {
         locationWork = nil
         addressSearchFailed = false
         serverURL = nil
+        rememberBackupSupport(.unknown)
         server = nil
         serverStatus = .unknown
         defaults.removeObject(forKey: "serverURL")
@@ -476,6 +567,7 @@ final class AppSettings {
     }
 
     private func store(_ info: ServerAPI.ServerInfo) {
+        if let mode = server?.mode, mode != info.mode { invalidateLegacyScope() }
         server = info
         defaults.set(try? ServerAPI.encoder.encode(info), forKey: "serverInfo")
         if let name = info.deviceName { confirmDeviceName(name) }
@@ -520,6 +612,7 @@ final class AppSettings {
                   pins?.pins == saved.pins else { return false }
             let url = found.candidate.url
             var pins = saved
+            invalidateLegacyScope()
             pins.serviceName = found.candidate.serviceName
             try tokens.setPins(pins, for: url.absoluteString)
             try tokens.setToken(token, for: url.absoluteString)
@@ -542,11 +635,11 @@ final class AppSettings {
     }
 
     /// Checks the server answers and picks up changes (for example Immich being connected).
-    func refreshServerInfo() async {
+    func refreshServerInfo(forceBackupCheck: Bool = false) async {
         guard !isRetired else { return }
         if let infoWork { await infoWork.task.value; return }
         let id = UUID()
-        let task = Task { await checkServerInfo() }
+        let task = Task { await checkServerInfo(forceBackupCheck: forceBackupCheck) }
         infoWork = VerificationWork(id: id, task: task)
         await withTaskCancellationHandler {
             await task.value
@@ -556,7 +649,7 @@ final class AppSettings {
         if infoWork?.id == id { infoWork = nil }
     }
 
-    private func checkServerInfo() async {
+    private func checkServerInfo(forceBackupCheck: Bool) async {
         await secureLegacyPairing()
         if case .identityProblem = serverStatus, identityObserved != nil, let url = serverURL,
            let token = tokens.token(for: url.absoluteString) {
@@ -600,6 +693,7 @@ final class AppSettings {
             }
             store(info)
             serverStatus = .reachable
+            await checkBackupSupport(info: info, force: forceBackupCheck)
             Telemetry.shared.recordServerInfoDaily(info)
         } catch let mismatch as ServerClient.IdentityMismatch {
             guard current(), !Task.isCancelled else { return }
@@ -616,6 +710,29 @@ final class AppSettings {
             guard current(), !Task.isCancelled else { return }
             AppLog.server.notice("server unreachable: \(Telemetry.Event.code(error), privacy: .public)")
             serverStatus = .unreachable("Can't reach \(server?.name ?? "the server"). Make sure this iPhone is on your home network.")
+        }
+    }
+
+    private func checkBackupSupport(info: ServerAPI.ServerInfo, force: Bool) async {
+        guard let client else { return }
+        if info.backupAPI == BackupAPI.version {
+            if backupAPI != .current { rememberBackupSupport(.current) }
+            return
+        }
+        guard force || (backupCheckedAt.map({ Date().timeIntervalSince($0) >= 600 }) ?? true) else { return }
+        let url = client.baseURL, token = client.token, trust = client.trust
+        func current() -> Bool {
+            !isRetired && serverURL == url && self.client?.token == token && connectionTrust == trust
+        }
+        do {
+            let capabilities = try await ServerClientV2(client).capabilities()
+            guard current(), !Task.isCancelled else { return }
+            rememberBackupSupport(.current, origin: capabilities.origin)
+        } catch let failure as ServerClient.Failure where failure.status == 404 || failure.status == 405 {
+            guard current(), !Task.isCancelled else { return }
+            rememberBackupSupport(.needsUpdate(Date()))
+        } catch {
+            // Reachability and TLS remain independent of backup protocol support.
         }
     }
 
@@ -705,6 +822,7 @@ final class AppSettings {
             guard serverURL == oldURL, tokens.token(for: oldURL.absoluteString) == token else { return }
             guard !verified.systemTrusted || allowSystemTrust else { throw ServerPairing.IdentityFailure(observed: verified.fingerprint) }
             var pins = ServerPins(pins: verified.systemTrusted ? [] : [verified.fingerprint], source: reverify ? "reverify" : "upgrade")
+            if previous?.pins != pins.pins || oldURL != verified.url { invalidateLegacyScope() }
             pins.serviceName = verified.serviceName ?? previous?.serviceName ?? bonjourServiceName
             if reverify, let before = previous?.pins.first, before != verified.fingerprint {
                 pins.previous = before

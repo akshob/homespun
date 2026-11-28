@@ -118,6 +118,7 @@ actor DemoServer {
     private var admitted = 0
     private var retirementWaiters: [CheckedContinuation<Void, Never>] = []
     private let backup: DemoBackupServer
+    let backupAPIEnabled: Bool
     /// How long its answers take, as a share of a server's on the Wi‑Fi (0 in tests).
     let pace: Double
     private var state: State
@@ -127,12 +128,14 @@ actor DemoServer {
     private let bundledCompact: @Sendable (String) -> [ServerAPI.ResourceRole: URL]?
 
     init(folder: URL, pace: Double = 1, processingDelay: (@Sendable (ServerAPI.AssetKind) -> TimeInterval)? = nil,
+         backupAPI: Bool = true,
          bundledCompact: @escaping @Sendable (String) -> [ServerAPI.ResourceRole: URL]?) {
         self.folder = folder
         let generation = UUID().uuidString
         self.generation = generation
         clientSession = Self.makeSession(generation: generation)
         self.pace = pace
+        backupAPIEnabled = backupAPI
         self.bundledCompact = bundledCompact
         backup = DemoBackupServer(folder: folder.appendingPathComponent("v2"), pace: pace,
                                   processingDelay: processingDelay, bundled: bundledCompact)
@@ -172,6 +175,7 @@ actor DemoServer {
         guard !retired, !Task.isCancelled else { return Self.error(503, "This demo has ended.") }
         let parts = url.path.split(separator: "/").map(String.init)
         if parts.count >= 3, parts[0] == "api", parts[1] == "v2" {
+            guard backupAPIEnabled else { return Self.error(404, "Not found.") }
             guard let token, let device = state.devices.first(where: { $0.token == token }) else {
                 return Self.error(401, "Pair this device with the demo first.")
             }
@@ -344,6 +348,7 @@ actor DemoServer {
         if on("GET", "info") != nil {
             var info = Self.info
             info.deviceName = device.name
+            info.backupAPI = backupAPIEnabled ? BackupAPI.version : nil
             return try Self.json(info)
         }
         if on("POST", "pairing-codes") != nil {
@@ -726,7 +731,7 @@ actor DemoServer {
     private func lookup(_ hashes: [String]) -> [ServerAPI.CopyLookupResponse.Match] {
         let wanted = Set(hashes.map { $0.lowercased() })
         var matches: [ServerAPI.CopyLookupResponse.Match] = []
-        for asset in state.assets.values where asset.state != .trashed {
+        for asset in state.assets.values where !backupAPIEnabled || asset.state != .trashed {
             let verified = asset.resources.allSatisfy { $0.state == .verified }
             let bytes = asset.resources.reduce(0) { $0 + $1.size }
             for resource in asset.resources where wanted.contains(resource.sha256) && CopyMatching.roles.contains(resource.role) {

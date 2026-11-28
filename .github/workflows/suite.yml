@@ -93,10 +93,12 @@ jobs:
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      LANES: ${{ inputs.ui }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 0
       - name: Tools
         run: brew install --quiet xcodegen ffmpeg
       - name: Verify the optional notification build scope
@@ -111,6 +113,16 @@ jobs:
           path: .build
           key: macos-build-${{ hashFiles('Package.resolved') }}-${{ inputs.ref }}
           restore-keys: macos-build-${{ hashFiles('Package.resolved') }}-
+      - uses: actions/cache@v4
+        if: contains(inputs.ui, 'oldserver') || contains(inputs.ui, 'oldapp-upgrade')
+        with:
+          path: ~/ci/fixtures/server-b35fc19
+          key: server-b35fc19-${{ runner.os }}-${{ runner.arch }}-xcode-27.2
+      - uses: actions/cache@v4
+        if: contains(inputs.ui, 'oldapp')
+        with:
+          path: ~/ci/fixtures/app-b35fc19
+          key: app-b35fc19-${{ runner.os }}-${{ runner.arch }}-xcode-27.2-v1
       - name: Build (server and app)
         run: BUILD_ARCHIVE=${{ runner.temp }}/build.tgz zsh ci/build.sh
       - uses: actions/upload-artifact@v4

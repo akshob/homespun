@@ -503,6 +503,8 @@ actor BackupStore {
             try Self.enqueue(.init(id: id, operationID: operation.id, bindingID: operation.bindingID,
                                    kind: .deliveryAcknowledgement, payload: ServerAPI.encoder.encode(acknowledgement)), connection)
             if current {
+                try connection.execute("DELETE FROM legacy_checks WHERE namespace = ? AND item = ?",
+                                       [.text(operation.namespace), .text(operation.itemID)])
                 try connection.execute("DELETE FROM legacy_backed_up WHERE namespace = ? AND original = ?",
                                        [.text(operation.namespace), .text(operation.itemID)])
             }
@@ -641,6 +643,8 @@ actor BackupStore {
                 "CREATE TABLE IF NOT EXISTS imports (id TEXT PRIMARY KEY, operation TEXT NOT NULL UNIQUE REFERENCES operations(id), body BLOB NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS mappings (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, original TEXT NOT NULL, intent TEXT UNIQUE, body BLOB NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS legacy_backed_up (namespace TEXT NOT NULL, original TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(namespace, original))",
+                "CREATE TABLE IF NOT EXISTS legacy_checks (namespace TEXT NOT NULL, item TEXT NOT NULL, scope TEXT NOT NULL, origin BLOB, asset TEXT NOT NULL, verified INTEGER NOT NULL, bytes INTEGER NOT NULL, role TEXT NOT NULL, compact TEXT, checked_at REAL NOT NULL, PRIMARY KEY(namespace, item))",
+                "CREATE TABLE IF NOT EXISTS legacy_restores (namespace TEXT NOT NULL, item TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(namespace,item))",
                 "CREATE TABLE IF NOT EXISTS decisions (namespace TEXT NOT NULL, item TEXT NOT NULL, kept INTEGER NOT NULL, PRIMARY KEY(namespace, item))",
                 "CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, operation TEXT NOT NULL REFERENCES operations(id), body BLOB NOT NULL)",
                 "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(id), identifier TEXT NOT NULL UNIQUE, draining INTEGER NOT NULL, body BLOB NOT NULL)",
@@ -653,6 +657,10 @@ actor BackupStore {
                 "CREATE TABLE IF NOT EXISTS snapshot_receipts (snapshot TEXT NOT NULL REFERENCES snapshot_runs(id), request TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(snapshot, request))",
                 "CREATE TABLE IF NOT EXISTS orphan_receipts (binding TEXT NOT NULL REFERENCES bindings(id), request TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(binding, request))",
             ] { try connection.execute(sql) }
+            if try connection.rows("PRAGMA table_info(legacy_checks)").contains(where: { try $0.text("name") == "binding" }) {
+                try connection.execute("DROP TABLE legacy_checks")
+                try connection.execute("CREATE TABLE legacy_checks (namespace TEXT NOT NULL, item TEXT NOT NULL, scope TEXT NOT NULL, origin BLOB, asset TEXT NOT NULL, verified INTEGER NOT NULL, bytes INTEGER NOT NULL, role TEXT NOT NULL, compact TEXT, checked_at REAL NOT NULL, PRIMARY KEY(namespace,item))")
+            }
             try connection.execute("PRAGMA application_id = \(applicationID)")
             try connection.execute("PRAGMA user_version = 1")
         }

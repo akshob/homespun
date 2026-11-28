@@ -22,6 +22,7 @@ struct StatusSnapshot: Codable, Equatable, Sendable {
         var reachable: Bool
         /// When the iPhone last heard from it (or tried to).
         var checkedAt: Date?
+        var needsUpdate: Bool? = nil
     }
 
     struct Automatic: Codable, Equatable, Sendable {
