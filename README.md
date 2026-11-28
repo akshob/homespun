@@ -375,7 +375,7 @@ uncached `LedgerProjection`, `FirstRefreshGrid`, `RefreshQueue` and the asynchro
 `QueueReload` and `GridShown`, plus each `BadgeBuildDiscarded` or `BadgeBuildMerged`. Instruments shows
 the matching intervals and badge-build events in `Interactions`. These local logs contain
 only timings and counts. Job updates are replayed into an in-progress badge build; earlier-backup
-scanning starts after the first grid frame. Neither change bypasses Free Up's readiness or proof checks.
+scanning starts after the first grid frame (or two seconds after launch on another tab). Neither change bypasses Free Up's readiness or proof checks.
 
 ## Homespun Server
 

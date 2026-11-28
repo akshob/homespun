@@ -341,7 +341,14 @@ final class LibraryController {
         let state = library.state
         legacyCount = state.cells.reduce(0) { $0 + ($1.legacy ? 1 : 0) }
         if firstGridShown { scheduleLegacyCheck(projection) }
-        else { deferredLegacyProjection = projection }
+        else {
+            deferredLegacyProjection = projection
+            // Launched on another tab, the grid may not appear: scan soon anyway.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                self?.gridDidAppear()
+            }
+        }
         if !settings.isDemo {
             TipState.notBackedUp = state.count(.notBackedUp)
             TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
