@@ -34,12 +34,16 @@ final class AppSettings {
 
     func rememberBackupSupport(_ support: BackupSupport, origin: BackupAPI.Origin? = nil) {
         if let previous = legacyOrigin, let origin, previous != origin { invalidateLegacyScope() }
-        backupAPI = support
+        // Keep the first notice date; backupCheckedAt still advances on every check.
+        switch (backupAPI, support) {
+        case (.needsUpdate, .needsUpdate): break
+        default: backupAPI = support
+        }
         backupCheckedAt = Date()
         legacyOrigin = origin
         if !needsBackupUpdate { updateNoticeDismissed = false }
         defaults.set(serverURL?.absoluteString, forKey: "backupAPIURL")
-        defaults.set(try? JSONEncoder().encode(support), forKey: "backupAPIState")
+        defaults.set(try? JSONEncoder().encode(backupAPI), forKey: "backupAPIState")
     }
 
     var currentLegacyScope: String? {

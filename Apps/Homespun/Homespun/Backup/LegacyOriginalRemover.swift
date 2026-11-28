@@ -90,8 +90,11 @@ struct LegacyOriginalRemover: RemovingOriginals {
         guard mode == .files, await current(), photos.authorization().allowsReading else { return [] }
         let projection = try await ledger.projection()
         let confirmed = projection.legacyConfirmed(scope: scope, origin: origin, now: now())
-        let originals = photos.existing(Array(projection.entries.keys), includeHidden: false)
-        let compacts = photos.existing(projection.entries.values.map(\.compactIdentifier), includeHidden: true)
+        let photos = photos
+        let (originals, compacts) = await PhotoKitReads.run {
+            (photos.existing(Array(projection.entries.keys), includeHidden: false),
+             photos.existing(projection.entries.values.map(\.compactIdentifier), includeHidden: true))
+        }
         return projection.entries.compactMap { id, entry in
             guard entry.origin == nil, entry.serverAssetID != nil, confirmed[id] != nil,
                   originals.contains(id), compacts.contains(entry.compactIdentifier),

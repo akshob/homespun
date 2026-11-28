@@ -6,6 +6,23 @@ import Testing
 @testable import Homespun
 
 @MainActor @Suite(.serialized) struct AppSettingsTests {
+    @Test func repeatedOldServerChecksKeepTheFirstUpdateNoticeDateUntilSupportChanges() throws {
+        let name = "backup-support-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let settings = AppSettings(defaults: defaults, tokens: DemoTokens(defaults: defaults))
+        let first = Date(timeIntervalSince1970: 1_800_000_000), later = first.addingTimeInterval(600)
+        let origin = BackupAPI.Origin(serverID: UUID().uuidString, historyEpoch: UUID().uuidString)
+        settings.rememberBackupSupport(.needsUpdate(first))
+        settings.rememberBackupSupport(.needsUpdate(later), origin: origin)
+        #expect(settings.backupAPI == .needsUpdate(first) && settings.legacyOrigin == origin)
+        let reloaded = AppSettings(defaults: defaults, tokens: DemoTokens(defaults: defaults))
+        #expect(reloaded.backupAPI == .needsUpdate(first))
+        settings.rememberBackupSupport(.current)
+        settings.rememberBackupSupport(.needsUpdate(later))
+        #expect(settings.backupAPI == .needsUpdate(later))
+    }
+
     @Test func workspaceConfigurationRejectsCoercionInsteadOfUsingMeasuredDefaults() {
         let invalid: [Any] = [
             NSNumber(value: true), NSNumber(value: false), NSNumber(value: 1.5), NSNumber(value: Float(-2.5)),

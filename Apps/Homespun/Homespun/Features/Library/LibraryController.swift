@@ -51,6 +51,7 @@ final class LibraryController {
     var choosePending = false
     /// Free space on this iPhone, for "almost full" (T15).
     private(set) var phoneFreeBytes: Int?
+    @ObservationIgnored private var phoneSpaceCheckedAt: Date?
     /// Not backed up and created since the last backup, with the days since (T19).
     private(set) var newSinceBackup: (count: Int, days: Int)?
     /// Originals from the current Back Up; offered as each item's compact copy is verified.
@@ -449,10 +450,13 @@ final class LibraryController {
     }
 
     private func refreshNewSinceBackup() async {
-        phoneFreeBytes = await Task.detached(priority: .utility) {
-            (try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
-                .volumeAvailableCapacityForImportantUsage.map(Int.init)
-        }.value
+        if phoneSpaceCheckedAt.map({ Date().timeIntervalSince($0) >= 30 }) ?? true {
+            phoneSpaceCheckedAt = Date()
+            phoneFreeBytes = await PhotoKitReads.run {
+                (try? URL.homeDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+                    .volumeAvailableCapacityForImportantUsage.map(Int.init)
+            }
+        }
         guard let last = journey.lastBackup else {
             newSinceBackup = nil
             return
@@ -692,9 +696,16 @@ final class LibraryController {
     /// Which of these compact copies can have their originals restored: known to this iPhone, with the
     /// original on Homespun Server (not in Immich) and not on this iPhone.
     func restorable(_ compacts: [String]) async -> [OriginalRestorer.Item] {
+        let started = Date()
+        var count = 0
+        AppLog.job.info("restorable: start \(compacts.count, privacy: .public)")
+        defer {
+            AppLog.job.info("restorable: end \(count, privacy: .public) items after \(Date().timeIntervalSince(started), privacy: .public)s")
+        }
         do {
         guard settings.server?.mode != .immich else { return [] }
         let wanted = Set(compacts)
+        AppLog.job.debug("restorable: projection")
         let projection = try await job.ledger.projection()
         let confirmed = settings.currentLegacyScope.map {
             projection.legacyConfirmed(scope: $0, origin: settings.legacyOrigin)
@@ -706,11 +717,14 @@ final class LibraryController {
         }
         let originals = entries.keys.filter { !$0.hasPrefix(CompactLedger.elsewhere("")) }
         let photos = settings.photos
-        let present = await Task.detached { photos.existing(Array(originals), includeHidden: true) }.value
-        return entries.filter { !present.contains($0.key) }
+        AppLog.job.debug("restorable: existing")
+        let present = await PhotoKitReads.run { photos.existing(Array(originals), includeHidden: true) }
+        let result = entries.filter { !present.contains($0.key) }
             .map { OriginalRestorer.Item(key: $0.key, compact: $0.value.compactIdentifier, serverAssetID: $0.value.serverAssetID!,
                                          originalBytes: $0.value.originalBytes) }
             .sorted { $0.compact < $1.compact }
+        count = result.count
+        return result
         } catch {
             job.showQueueProblem(error)
             restoring = .done(.init(problems: [error.localizedDescription]))

@@ -12,6 +12,7 @@ struct RestoreOriginalSheet: View {
     var finished: (Bool) -> Void = { _ in }
     @State private var items: [OriginalRestorer.Item]?
     @State private var edited = 0
+    @State private var room: (enough: Bool, free: Int)?
     @Environment(\.dismiss) private var dismiss
 
     private var server: String { controller.serverName }
@@ -47,7 +48,15 @@ struct RestoreOriginalSheet: View {
         .interactiveDismissDisabled(controller.isRestoring)
         .task {
             let found = await controller.restorable(compacts)
-            edited = found.filter { item in controller.settings.photos.item(item.compact)?.isEdited ?? false }.count
+            let photos = controller.settings.photos
+            let total = found.reduce(0) { $0 + $1.originalBytes }
+            let (edits, available) = await PhotoKitReads.run {
+                (found.filter { photos.item($0.compact)?.isEdited ?? false }.count,
+                 OriginalRestorer.room(for: total))
+            }
+            guard !Task.isCancelled else { return }
+            edited = edits
+            room = available
             items = found
         }
     }
@@ -62,7 +71,6 @@ struct RestoreOriginalSheet: View {
                                                          ? "These originals are in Immich. Restore them from Immich."
                                                          : "These originals are on this iPhone already, or \(server) doesn't have them."))
             } else {
-                let room = OriginalRestorer.room(for: bytes)
                 Text(LibraryController.bytes(bytes)).font(.system(size: 44, weight: .semibold, design: .rounded))
                     .monospacedDigit().foregroundStyle(Theme.label)
                     .accessibilityIdentifier("restore.bytes")
@@ -83,7 +91,7 @@ struct RestoreOriginalSheet: View {
                                  message: "Those edits don't carry over to the original.")
                         .accessibilityIdentifier("restore.edited")
                 }
-                if !room.enough {
+                if let room, !room.enough {
                     InlineNotice(tone: .error, title: "Not enough room on this iPhone",
                                  message: "It needs \(LibraryController.bytes(bytes + (1 << 30))) free (with 1 GB to spare); "
                                     + "\(LibraryController.bytes(room.free)) is free.")
@@ -152,7 +160,7 @@ struct RestoreOriginalSheet: View {
                     Text(items.count == 1 ? "Restore Original" : "Restore \(items.count) Originals").frame(maxWidth: .infinity)
                 }
                 .primaryAction()
-                .disabled(!OriginalRestorer.room(for: bytes).enough)
+                .disabled(room?.enough != true)
                 .accessibilityIdentifier("restore.confirm")
             }
         case .running:

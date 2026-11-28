@@ -46,6 +46,8 @@ final class OldServerUITests: XCTestCase {
         app.openTab("Library")
         let ready = app.gridItems("Ready to free up").firstMatch
         XCTAssertTrue(ready.waitForExistence(timeout: 20))
+        let readyBefore = app.gridItems("Ready to free up").count
+        let backedBefore = app.gridItems("Backed up").count
         app.reveal(ready)
         ready.tap()
         XCTAssertTrue(app.buttons["item.action"].waitForExistence(timeout: 10))
@@ -59,17 +61,12 @@ final class OldServerUITests: XCTestCase {
             app.staticTexts["item.state"].label.hasPrefix("Original at home")
         }
         XCTAssertTrue(app.buttons["item.action"].label.contains("Restore Original"))
-        app.buttons["item.action"].tap()
-        XCTAssertTrue(app.buttons["restore.confirm"].waitForExistence(timeout: 20))
-        app.buttons["restore.confirm"].tap()
-        try confirmDeletion(app)
-        let summary = app.descendants(matching: .any)["restore.summary"]
-        XCTAssertTrue(summary.waitForExistence(timeout: 60))
-        XCTAssertTrue(summary.label.hasPrefix("Restored"), summary.label)
-        app.buttons["restore.done"].tap()
+        try restoreOriginal(app)
         // Restore keeps the original full size after its fresh server/device hash check.
-        XCTAssertTrue(app.gridItems("Backed up").firstMatch.waitForExistence(timeout: 20))
-        XCTAssertEqual(app.gridItems("Ready to free up").count, 2)
+        try wait("Restoring must keep one more original full size") {
+            app.gridItems("Backed up").count == backedBefore + 1
+                && app.gridItems("Ready to free up").count == readyBefore - 1
+        }
         XCTAssertEqual(app.gridItems("Backup not confirmed").count, 0)
     }
 
@@ -81,18 +78,28 @@ final class OldServerUITests: XCTestCase {
         }
         let app = launch()
         app.openTab("Library")
-        XCTAssertTrue(app.gridItems("Ready to free up").firstMatch.waitForExistence(timeout: 20))
+        let legacyFilter = NSPredicate(format: "value CONTAINS 'Homespun 1.0'")
+        try wait("An earlier backup must remain available") {
+            app.gridItems("Ready to free up").matching(legacyFilter).count
+                + app.gridItems("Original at home").matching(legacyFilter).count > 0
+        }
         let before = app.gridItems().count
+        let readyBefore = app.gridItems("Ready to free up").count
+        let homeBefore = app.gridItems("Original at home").count
+        let keptBefore = app.gridItems("Kept as is").count
         app.terminate()
-        try Data("upgrade-server".utf8).write(to: URL(fileURLWithPath: action), options: .atomic)
-        try wait("The 1.1 server must start on the same catalog and port") {
-            FileManager.default.fileExists(atPath: upgraded)
+        if !FileManager.default.fileExists(atPath: upgraded) {
+            try Data("upgrade-server".utf8).write(to: URL(fileURLWithPath: action), options: .atomic)
+            try wait("The 1.1 server must start on the same catalog and port") {
+                FileManager.default.fileExists(atPath: upgraded)
+            }
         }
         let offset = (try Data(contentsOf: URL(fileURLWithPath: log))).count
         app.launch()
         app.openTab("Library")
         try wait("The existing grid must remain unchanged after the server upgrade") {
-            app.gridItems().count == before && app.gridItems("Ready to free up").count == 2
+            app.gridItems().count == before && app.gridItems("Ready to free up").count == readyBefore
+                && app.gridItems("Original at home").count == homeBefore
         }
         XCTAssertEqual(app.gridItems("Backup not confirmed").count, 0)
         app.openTab("Activity")
@@ -101,12 +108,23 @@ final class OldServerUITests: XCTestCase {
         XCTAssertEqual(app.startCompacting(1), 1)
         try wait("New work must use v2, without duplicating the earlier copies") {
             let text = String(decoding: try Data(contentsOf: URL(fileURLWithPath: log)).dropFirst(offset), as: UTF8.self)
-            return text.contains("/api/v2/backup-requests") && (app.gridItems("Ready to free up").count == 3
-                || app.gridItems("Kept as is").count > 0)
+            return text.contains("/api/v2/backup-requests") && (app.gridItems("Ready to free up").count == readyBefore + 1
+                || app.gridItems("Kept as is").count > keptBefore)
         }
         XCTAssertEqual(app.gridItems().count, before)
         // A still-legacy mapping continues through the v1 fresh-proof path on the updated server.
-        let legacy = app.gridItems("Ready to free up").matching(NSPredicate(format: "value CONTAINS 'Homespun 1.0'")).firstMatch
+        let legacy = app.gridItems("Ready to free up").matching(legacyFilter).firstMatch
+        if !legacy.exists {
+            // A previous attempt may already have freed the last legacy original.
+            let freed = app.gridItems("Original at home").matching(legacyFilter).firstMatch
+            XCTAssertTrue(freed.exists)
+            app.reveal(freed)
+            freed.tap()
+            XCTAssertTrue(app.buttons["item.action"].waitForExistence(timeout: 10))
+            XCTAssertTrue(app.buttons["item.action"].label.contains("Restore Original"))
+            try restoreOriginal(app)
+            return
+        }
         app.reveal(legacy)
         legacy.tap()
         app.buttons["item.action"].tap()
@@ -118,6 +136,17 @@ final class OldServerUITests: XCTestCase {
         try wait("Legacy Free Up must still work after updating") {
             app.staticTexts["item.state"].label.hasPrefix("Original at home")
         }
+    }
+
+    @MainActor private func restoreOriginal(_ app: XCUIApplication) throws {
+        app.buttons["item.action"].tap()
+        XCTAssertTrue(app.buttons["restore.confirm"].waitForExistence(timeout: 60))
+        app.buttons["restore.confirm"].tap()
+        try confirmDeletion(app)
+        let summary = app.descendants(matching: .any)["restore.summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 60))
+        XCTAssertTrue(summary.label.hasPrefix("Restored"), summary.label)
+        app.buttons["restore.done"].tap()
     }
 
     @MainActor private func confirmDeletion(_ app: XCUIApplication) throws {
