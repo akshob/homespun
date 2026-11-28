@@ -608,6 +608,13 @@ actor BackupStore {
     private func db() throws -> BackupDatabase {
         guard !closed else { throw Failure.storageClosed }
         if let database { return database }
+        let started = ContinuousClock.now
+        let signpost = PerfMonitor.signposter.beginInterval("StoreOpen", id: PerfMonitor.signposter.makeSignpostID())
+        defer {
+            PerfMonitor.signposter.endInterval("StoreOpen", signpost)
+            let milliseconds = PerfMonitor.milliseconds(since: started)
+            AppLog.app.info("launch StoreOpen: \(milliseconds, privacy: .public) ms")
+        }
         try files.prepare()
         try files.protectDatabase()
         let opened = try BackupDatabase(url: files.database)

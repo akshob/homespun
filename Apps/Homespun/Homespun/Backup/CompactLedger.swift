@@ -65,9 +65,24 @@ actor CompactLedger {
     }
 
     func projection() async throws -> BackupStore.LedgerProjection {
+        let started = ContinuousClock.now
+        let signpost = PerfMonitor.signposter.beginInterval("LedgerProjection", id: PerfMonitor.signposter.makeSignpostID())
+        var cacheHit = false
+        var entries = 0
+        defer {
+            PerfMonitor.signposter.endInterval("LedgerProjection", signpost)
+            if !cacheHit {
+                let milliseconds = PerfMonitor.milliseconds(since: started)
+                AppLog.app.info("launch LedgerProjection: \(milliseconds, privacy: .public) ms, \(entries, privacy: .public) entries")
+            }
+        }
         let revision = try await store.projectionRevision()
-        if let cached, cached.revision == revision { return cached.projection }
+        if let cached, cached.revision == revision {
+            cacheHit = true
+            return cached.projection
+        }
         let result = try await store.ledgerProjection(namespace: namespace)
+        entries = result.entries.count
         cached = (revision, result)
         return result
     }

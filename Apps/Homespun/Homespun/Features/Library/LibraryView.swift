@@ -170,6 +170,8 @@ struct LibraryView: View, Equatable {
         guard !launchRecorded else { return }
         launchRecorded = true
         PerfMonitor.signposter.emitEvent("GridShown")
+        let milliseconds = Int((CACurrentMediaTime() - PerfMonitor.mainStarted) * 1000)
+        AppLog.app.info("launch GridShown: \(milliseconds, privacy: .public) ms from main")
         PerfMonitor.shared.record("launch", milliseconds: PerfMonitor.sinceProcessStart)
         PerfMonitor.shared.record("launchFromMain", milliseconds: (CACurrentMediaTime() - PerfMonitor.mainStarted) * 1000)
         PerfMonitor.shared.startAutoscrollIfAsked()
@@ -182,7 +184,10 @@ struct LibraryView: View, Equatable {
                      actions: gridActions)
         }
             .ignoresSafeArea()
-            .onAppear { Self.recordLaunch() }
+            .onAppear {
+                Self.recordLaunch()
+                controller.gridDidAppear()
+            }
     }
 
     private var gridInput: GridInput {
