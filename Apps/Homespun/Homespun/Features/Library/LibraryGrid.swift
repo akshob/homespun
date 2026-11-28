@@ -489,6 +489,10 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     @ObservationIgnored private var inputs = Inputs()
     @ObservationIgnored private var building: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
+    /// Replay in order: a saved job leaves its preceding badge until the verified ledger swap.
+    @ObservationIgnored private var lateJob: [(changes: [String: CompactJob.State?], compactInProgress: Set<String>)]?
+    /// Tests can hold a captured badge build while job changes arrive.
+    @ObservationIgnored var badgeBuildGate: (@Sendable () async -> Void)?
     /// The library has been read at least once and its badges worked out (or access isn't granted).
     /// The grid waits for this: shown empty first, it would open at the top instead of the newest.
     private(set) var loaded = false
@@ -636,6 +640,7 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     func stopObserving() {
         retired = true
         generation &+= 1
+        lateJob = nil
         building?.cancel()
         catalogObservation?.cancel()
         catalogObservation = nil
@@ -724,26 +729,47 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     private func rebuild() async {
         generation &+= 1
         let mine = generation
+        lateJob = []
         let library = library, album = album, inputs = inputs, previous = state, read = libraryRead
-        let signpost = PerfMonitor.signposter.beginInterval("BuildState")
+        let gate = badgeBuildGate
+        let started = ContinuousClock.now
+        let signpost = PerfMonitor.signposter.beginInterval("BuildState", id: PerfMonitor.signposter.makeSignpostID())
+        defer { PerfMonitor.signposter.endInterval("BuildState", signpost) }
         RenderProbe.count("library.buildState")
         let built = await Task.detached(priority: .userInitiated) { () -> (LibraryState, Set<String>?)? in
-            var new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
+            await gate?()
+            let new = LibraryState(library: library, ledger: inputs.ledger, album: album, job: inputs.job,
                                    backedUp: inputs.backedUp, origin: inputs.origin, recovering: inputs.recovering,
                                    pendingImports: inputs.pendingImports, compactInProgress: inputs.compactInProgress,
                                    legacyConfirmed: inputs.legacyConfirmed, legacyServerName: inputs.legacyServerName,
                                    legacyActions: inputs.legacyActions, checkingLegacy: inputs.checkingLegacy, legacyKept: inputs.legacyKept)
             guard new != previous else { return nil }
-            new.follow(previous)
             return (new, new.changedIDs(from: previous))
         }.value
-        PerfMonitor.signposter.endInterval("BuildState", signpost)
-        guard mine == generation else { return }
-        if let (built, diff) = built {
+        guard mine == generation else {
+            let milliseconds = PerfMonitor.milliseconds(since: started)
+            PerfMonitor.signposter.emitEvent("BadgeBuildDiscarded")
+            AppLog.app.info("launch BadgeBuildDiscarded: \(milliseconds, privacy: .public) ms")
+            return
+        }
+        let updates = lateJob ?? []
+        lateJob = nil
+        if var (built, diff) = built {
+            for update in updates {
+                let merged = built.apply(job: update.changes, compactInProgress: update.compactInProgress)
+                diff?.formUnion(merged)
+            }
             let old = state
+            built.follow(old)
             if let diff { changedIDs?.formUnion(diff) } else { changedIDs = nil }
             state = built
             releaseInBackground(old)
+        }
+        if !updates.isEmpty {
+            PerfMonitor.signposter.emitEvent("BadgeBuildMerged")
+            let changes = updates.reduce(0) { $0 + $1.changes.count }
+            let milliseconds = PerfMonitor.milliseconds(since: started)
+            AppLog.app.info("launch BadgeBuildMerged: \(milliseconds, privacy: .public) ms, \(changes, privacy: .public) job changes")
         }
         if read, !loaded { loaded = true }
     }
@@ -752,9 +778,9 @@ final class LibraryModel: NSObject, PHPhotoLibraryChangeObserver {
     /// (a finished item's compact copy) follows in a rebuild.
     func apply(job changes: [String: CompactJob.State?], compactInProgress: Set<String> = []) {
         guard !changes.isEmpty else { return }
-        generation &+= 1
         for (id, value) in changes { inputs.job[id] = value }
         inputs.compactInProgress = compactInProgress
+        lateJob?.append((changes, compactInProgress))
         let changed = state.apply(job: changes, compactInProgress: compactInProgress)
         changedIDs?.formUnion(changed)
     }

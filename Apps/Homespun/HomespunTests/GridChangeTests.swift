@@ -12,7 +12,121 @@ private func gridData(_ cells: [LibraryState.Cell], months: [String: Int] = [:])
     GridData(state: LibraryState(cells: cells), filter: .all, media: nil, months: months)
 }
 
+private func badgeCatalog() async throws -> DemoLibrary {
+    let media = try await DemoTestMedia.ready.value
+    return DemoLibrary(folder: URL.cachesDirectory.appendingPathComponent("badge-build-\(UUID().uuidString)"),
+                       media: media, ask: { _ in true })
+}
+
 struct GridChangeTests {
+    private actor BadgeBuildGate {
+        private var entered = false
+        private var arrivals: [CheckedContinuation<Void, Never>] = []
+        private var held: CheckedContinuation<Void, Never>?
+
+        func pause() async {
+            entered = true
+            let arrivals = arrivals
+            self.arrivals = []
+            arrivals.forEach { $0.resume() }
+            await withCheckedContinuation { held = $0 }
+        }
+
+        func waitUntilEntered() async {
+            if entered { return }
+            await withCheckedContinuation { arrivals.append($0) }
+        }
+
+        func release() {
+            held?.resume()
+            held = nil
+        }
+    }
+
+    @Test @MainActor func firstBadgeBuildLoadsWithTheLatestJobPages() async throws {
+        let catalog = try await badgeCatalog()
+        let ids = Array(catalog.contents().ids.prefix(3))
+        try #require(ids.count == 3)
+        let library = LibraryModel(catalog: catalog)
+        defer { library.stopObserving() }
+        library.apply(job: [ids[0]: .working("Uploading"), ids[1]: .waiting])
+        let gate = BadgeBuildGate()
+        library.badgeBuildGate = { await gate.pause() }
+        let reload = Task { await library.reload() }
+        await gate.waitUntilEntered()
+        #expect(!library.loaded)
+        library.apply(job: [ids[0]: .waiting, ids[1]: .failed("Earlier page")])
+        library.apply(job: [ids[0]: .working("Later page"), ids[2]: .working("Downloading")],
+                      compactInProgress: [ids[2]])
+        library.apply(job: [ids[0]: .failed("Latest page"), ids[1]: nil], compactInProgress: [ids[2]])
+        await gate.release()
+        await reload.value
+        library.badgeBuildGate = nil
+
+        #expect(library.loaded)
+        let contents = catalog.contents()
+        let expected = LibraryState(library: contents.ids, ledger: [:], album: contents.album,
+            job: [ids[0]: .failed("Latest page"), ids[2]: .working("Downloading")], compactInProgress: [ids[2]])
+        #expect(library.state == expected)
+        #expect(library.state.cell(ids[0])?.badge == .failed)
+        #expect(library.state.cell(ids[1])?.badge == Badge.none)
+        #expect(library.state.cell(ids[2])?.badge == .processing)
+        #expect(library.state.cells.allSatisfy { !$0.canFree && !$0.canRestore })
+        #expect(LibraryState.Filter.allCases.map { library.state.count($0) }
+            == LibraryState.Filter.allCases.map { expected.count($0) })
+        await library.reload()
+        #expect(library.state == expected, "Removed job states must also leave the rebuild inputs")
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func badgeRebuildPreservesLiveUpdatesAndVersions(changesLedger: Bool) async throws {
+        let catalog = try await badgeCatalog()
+        let ids = Array(catalog.contents().ids.prefix(2))
+        try #require(ids.count == 2)
+        let library = LibraryModel(catalog: catalog)
+        defer { library.stopObserving() }
+        await library.reload()
+        let initial: [String: CompactJob.State] = [ids[0]: .working("Uploading"), ids[1]: .waiting]
+        library.apply(job: initial.mapValues { Optional($0) })
+        let backed: [String: Date?] = changesLedger ? [ids[0]: Date(timeIntervalSince1970: 2_000_000_000)] : [:]
+        let gate = BadgeBuildGate()
+        library.badgeBuildGate = { await gate.pause() }
+        let rebuild = Task { await library.update(ledger: [:], job: initial, backedUp: backed) }
+        await gate.waitUntilEntered()
+        library.apply(job: [ids[0]: .waiting, ids[1]: .failed("Earlier page")])
+        library.apply(job: [ids[0]: .working("Saving compact copy"), ids[1]: nil], compactInProgress: [ids[0]])
+        let liveVersion = library.state.version
+        await gate.release()
+        await rebuild.value
+        library.badgeBuildGate = nil
+
+        let contents = catalog.contents()
+        let expected = LibraryState(library: contents.ids, ledger: [:], album: contents.album,
+            job: [ids[0]: .working("Saving compact copy")], backedUp: backed, compactInProgress: [ids[0]])
+        #expect(library.loaded && library.state == expected)
+        #expect(changesLedger ? library.state.version > liveVersion : library.state.version == liveVersion)
+        #expect(LibraryState.Filter.allCases.map { library.state.count($0) }
+            == LibraryState.Filter.allCases.map { expected.count($0) })
+    }
+
+    @Test @MainActor func inFlightBuildReplaysTheBadgeBeforeSavedRatherThanSkippingIt() async throws {
+        let catalog = try await badgeCatalog()
+        let id = try #require(catalog.contents().ids.first)
+        let library = LibraryModel(catalog: catalog)
+        defer { library.stopObserving() }
+        let gate = BadgeBuildGate()
+        library.badgeBuildGate = { await gate.pause() }
+        let reload = Task { await library.reload() }
+        await gate.waitUntilEntered()
+        library.apply(job: [id: .working("Saving compact copy")], compactInProgress: [id])
+        library.apply(job: [id: .saved(originalBytes: 100, compactBytes: 10)])
+        await gate.release()
+        await reload.value
+        library.badgeBuildGate = nil
+        #expect(library.loaded && library.state.cell(id)?.badge == .processing)
+        #expect(library.state.cell(id)?.canFree == false)
+    }
+
     @Test @MainActor func cellConfigurationTracksDirectSelectionAndReuseWithoutRepeatingUnchangedWork() {
         let cell = GridCell(frame: .zero), state = gridCell("original", badge: .working)
         #expect(!cell.isConfigured(for: state, selecting: true, selected: false, serverName: "Home"))
