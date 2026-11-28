@@ -209,12 +209,23 @@ final class CompactJob {
                 repeat {
                     guard !retired, !Task.isCancelled else { return }
                     if reloadProjection || !queueLoaded {
+                        let started = ContinuousClock.now
+                        let signpost = PerfMonitor.signposter.beginInterval("QueueReload",
+                            id: PerfMonitor.signposter.makeSignpostID())
+                        var operationCount = 0, pages = 0
+                        defer {
+                            PerfMonitor.signposter.endInterval("QueueReload", signpost)
+                            let milliseconds = PerfMonitor.milliseconds(since: started)
+                            AppLog.job.info("launch QueueReload: \(milliseconds, privacy: .public) ms, \(operationCount, privacy: .public) operations, \(pages, privacy: .public) pages")
+                        }
                         let covered = admissionSeeds
                         reloadProjection = false
                         pendingProjection = []
                         var cursor: Int64 = 0
                         repeat {
                             let page = try await ledger.store.operationPage(namespace: ledger.namespace, after: cursor)
+                            operationCount += page.operations.count
+                            pages += 1
                             cursor = page.cursor
                             try await applyProjection(page.operations)
                             guard !retired else { return }
@@ -426,6 +437,13 @@ final class CompactJob {
     func refreshQueue() async {
         guard !retired, !suspended, suppliedCompactor == nil else { return }
         guard !settings.needsBackupUpdate else { queueProblem = nil; return }
+        let started = ContinuousClock.now
+        let signpost = PerfMonitor.signposter.beginInterval("RefreshQueue", id: PerfMonitor.signposter.makeSignpostID())
+        defer {
+            PerfMonitor.signposter.endInterval("RefreshQueue", signpost)
+            let milliseconds = PerfMonitor.milliseconds(since: started)
+            AppLog.job.info("launch RefreshQueue: \(milliseconds, privacy: .public) ms")
+        }
         do {
             try await ensureContext()
             try await coordinator.reconcile()

@@ -51,6 +51,10 @@ final class PerfMonitor {
     static let shared = PerfMonitor()
     nonisolated static let signposter = OSSignposter(subsystem: "photos.homespun.app", category: "Interactions")
 
+    nonisolated static func milliseconds(since started: ContinuousClock.Instant) -> Int {
+        Int(started.duration(to: .now) / .milliseconds(1))
+    }
+
     let enabled = ProcessInfo.processInfo.arguments.contains("-perfMonitor")
         || UserDefaults.standard.bool(forKey: "perfMonitor")
 

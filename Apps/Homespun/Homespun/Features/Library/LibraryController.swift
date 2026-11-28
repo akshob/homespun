@@ -69,6 +69,9 @@ final class LibraryController {
     private var legacyCount = 0
     private var dismissedLegacyNotice: String?
     @ObservationIgnored private var legacyChecksInvalidated = false
+    @ObservationIgnored private var firstGridShown = false
+    @ObservationIgnored private var deferredLegacyProjection: BackupStore.LedgerProjection?
+    @ObservationIgnored private var firstGridRefreshStarted = false
     private(set) var legacyCheckFinished = false
     var checkingEarlierBackups: Bool { !legacyCheckFinished && settings.isPaired && !settings.isDemo }
 
@@ -120,6 +123,7 @@ final class LibraryController {
         library.stopObserving()
         pendingRebuild?.cancel()
         legacyCheckTask?.cancel()
+        deferredLegacyProjection = nil
         restoreTask?.cancel()
         job.retire()
         copyFinder.retire()
@@ -261,10 +265,14 @@ final class LibraryController {
         // observer keeps it current (re-reading 35,000 items on every return to the app is slow).
         if !library.loaded || now != access {
             access = now
+            let ledger = job.ledger
+            let blocked: Bool = if case .blocked = settings.connectionTrust { true } else { false }
+            let prefetch = settings.isDemo || !blocked && !legacyChecksInvalidated
+            async let early: BackupStore.LedgerProjection? = prefetch ? try? ledger.projection() : nil
             await library.reload()
             // The grid shows now, from what's on this iPhone; the server's answer (slow away from
             // home) updates it after.
-            await refreshGrid()
+            await refreshGrid(prefetched: await early)
         }
         if settings.isPaired { await settings.refreshServerInfo(forceBackupCheck: true) }
         await job.refreshQueue()
@@ -284,15 +292,31 @@ final class LibraryController {
         await refresh()
     }
 
-    func refreshGrid() async {
+    func refreshGrid(prefetched: BackupStore.LedgerProjection? = nil) async {
         guard !retired, !suspended else { return }
+        let first = !firstGridRefreshStarted
+        firstGridRefreshStarted = true
+        let started = ContinuousClock.now
+        let signpost = first ? PerfMonitor.signposter.beginInterval("FirstRefreshGrid",
+            id: PerfMonitor.signposter.makeSignpostID()) : nil
+        defer {
+            if let signpost {
+                PerfMonitor.signposter.endInterval("FirstRefreshGrid", signpost)
+                let milliseconds = PerfMonitor.milliseconds(since: started)
+                AppLog.app.info("launch FirstRefreshGrid: \(milliseconds, privacy: .public) ms")
+            }
+        }
         do {
+        var prefetched = prefetched
         let blocked: Bool = if case .blocked = settings.connectionTrust { true } else { false }
         if !settings.isDemo && (blocked || legacyChecksInvalidated) {
             try await job.ledger.store.discardLegacyChecks()
             legacyChecksInvalidated = false
+            prefetched = nil
         }
-        let projection = try await job.ledger.projection()
+        let projection: BackupStore.LedgerProjection
+        if let prefetched { projection = prefetched }
+        else { projection = try await job.ledger.projection() }
         let kept = projection.kept, backed = projection.backedUp
         let scope = settings.currentLegacyScope
         if let scope { try await job.ledger.store.discardLegacyChecks(exceptScope: scope) }
@@ -302,11 +326,12 @@ final class LibraryController {
         let recovering = Set(backed.filter { $0.value.origin == nil || $0.value.version == nil || $0.value.origin != job.activeOrigin }.keys)
             .subtracting(confirmed.keys)
         automatic.useCanonicalDecisions(kept)
+        let due = await backedUpDue(backed)
         var states = job.states
         let compactInProgress = job.compactInProgress
         for id in kept where states[id] == nil { states[id] = .unchanged(Self.keptAsIsReason) }
         await library.update(ledger: projection.entries, job: states,
-                             backedUp: await backedUpDue(backed), origin: job.activeOrigin, recovering: recovering,
+                             backedUp: due, origin: job.activeOrigin, recovering: recovering,
                              pendingImports: projection.pendingImports, compactInProgress: compactInProgress,
                              legacyConfirmed: confirmed, legacyServerName: serverName,
                              legacyActions: settings.server?.mode == .files && scope != nil,
@@ -315,7 +340,15 @@ final class LibraryController {
         if library.loaded { loaded = true }
         let state = library.state
         legacyCount = state.cells.reduce(0) { $0 + ($1.legacy ? 1 : 0) }
-        scheduleLegacyCheck(projection)
+        if firstGridShown { scheduleLegacyCheck(projection) }
+        else {
+            deferredLegacyProjection = projection
+            // Launched on another tab, the grid may not appear: scan soon anyway.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                self?.gridDidAppear()
+            }
+        }
         if !settings.isDemo {
             TipState.notBackedUp = state.count(.notBackedUp)
             TipState.bothBadgesShown = state.count(.readyToFree) > 0 && state.count(.atHome) > 0
@@ -324,6 +357,21 @@ final class LibraryController {
         }
         await refreshNewSinceBackup()
         } catch { job.showQueueProblem(error) }
+    }
+
+    /// Keep the all-item legacy scan out of the run-loop turn that commits the first grid frame.
+    func gridDidAppear() {
+        guard !firstGridShown else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, !self.retired, !self.firstGridShown else { return }
+                self.firstGridShown = true
+                if let projection = self.deferredLegacyProjection {
+                    self.deferredLegacyProjection = nil
+                    self.scheduleLegacyCheck(projection)
+                }
+            }
+        }
     }
 
     private func rejectLegacyBinding(_ binding: BackupStore.Binding) async {
