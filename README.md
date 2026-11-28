@@ -145,7 +145,7 @@ The viewer zooms over the whole app from the tapped thumbnail, without changing 
 the Library's layout. Back or a downward swipe returns it to the thumbnail of the item shown.
 Close Details or any other sheet first to swipe the viewer closed. On iPhone, Details opens
 at half height: page the photo above it, expand the sheet, or swipe it down to close.
-On the open iPhone Duo, Details is a column beside the photo and follows it while paging.
+On the open iPhone Duo, Details is a column beside the photo.
 Connection and backup messages also float above the content: appearing or disappearing changes
 the scroll range, not the visible cells, tabs or title.
 Autoplay follows the iPhone's accessibility setting. On the open iPhone Duo, Compare can show
