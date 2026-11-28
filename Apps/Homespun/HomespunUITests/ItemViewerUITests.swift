@@ -195,8 +195,17 @@ final class ItemViewerUITests: XCTestCase {
             note("\(recipe): after", geometry())
             attach(app, "\(recipe): after")
             require(app.state == .runningForeground, "\(recipe): the app stopped")
-            if performed && (recipe == "above the sheet" || recipe == "short hold") {
+            if performed && recipe == "short hold" {
                 require(viewer.exists && details.exists, "\(recipe): the viewer's drag closed the viewer or Details")
+            }
+            if performed && recipe == "above the sheet" {
+                // Swiping the photo down may close Details (as in Photos), never the viewer.
+                require(viewer.exists, "\(recipe): the viewer's drag closed the viewer")
+                if !details.exists {
+                    checkViewer("\(recipe), Details closed")
+                    app.buttons["item.details"].tap()
+                    require(details.waitForExistence(timeout: 5), "\(recipe): Details didn't open again")
+                }
             }
             if performed && recipe.hasPrefix("let go") {
                 require(viewer.exists, "\(recipe): letting go of Details closed the viewer")
