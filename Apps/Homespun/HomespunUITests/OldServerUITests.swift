@@ -80,8 +80,9 @@ final class OldServerUITests: XCTestCase {
         app.openTab("Library")
         let legacyFilter = NSPredicate(format: "value CONTAINS 'Homespun 1.0'")
         try wait("An earlier backup must remain available") {
-            app.gridItems("Ready to free up").matching(legacyFilter).count
-                + app.gridItems("Original at home").matching(legacyFilter).count > 0
+            app.gridItems("Backup not confirmed").count == 0
+                && (app.gridItems("Ready to free up").matching(legacyFilter).count
+                    + app.gridItems("Original at home").matching(legacyFilter).count > 0)
         }
         let before = app.gridItems().count
         let readyBefore = app.gridItems("Ready to free up").count
