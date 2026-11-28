@@ -249,8 +249,8 @@ struct ItemViewer: View {
     #endif
 }
 
-/// Details in the viewer's inspector: beside the photo on the open iPhone Duo (the
-/// photo narrows to make room), a sheet on a phone. Its own view, so job progress redraws only it.
+/// Details beside the photo on the open iPhone Duo (the photo narrows to make room), a
+/// half-height sheet on a phone. Its own view, so job progress redraws only it.
 struct ItemDetailsPanel: View {
     let model: AppModel
     let id: String

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import UIKit
 import XCTest
 
 /// Steps shared by the workflow tests: pair, select in the Library, back up, and check Activity.
@@ -437,5 +438,22 @@ extension XCUIApplication {
     @MainActor func shownPage() -> XCUIElement {
         let pages = descendants(matching: .any).matching(identifier: "item.page")
         return pages.allElementsBoundByIndex.first { isOnScreen($0) } ?? pages.firstMatch
+    }
+
+    /// The share of the screen that isn't near black (the viewer's background).
+    static func colourful(_ image: UIImage) -> Double {
+        guard let cgImage = image.cgImage else { return 0 }
+        let width = 60, height = 120
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                                          bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return 0 }
+        let bright = stride(from: 0, to: pixels.count, by: 4).filter { max(pixels[$0], pixels[$0 + 1], pixels[$0 + 2]) > 48 }
+        return Double(bright.count) / Double(width * height)
     }
 }

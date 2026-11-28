@@ -797,7 +797,9 @@ final class GridController: UIViewController, UICollectionViewDataSource, UIColl
         }
         let options = UIViewController.Transition.ZoomOptions()
         options.interactiveDismissShouldBegin = { [weak viewer] context in
-            guard let viewer, !viewer.state.zoomed else { return false }
+            // Details is a non-modal sheet on a phone and a column on the open Duo; neither starts a viewer dismissal.
+            guard let viewer, !viewer.state.zoomed, viewer.state.details == nil,
+                  viewer.presentedViewController == nil else { return false }
             return context.velocity.dy > 0 && context.velocity.dy > abs(context.velocity.dx) * 1.2
         }
         options.dimmingColor = .clear
